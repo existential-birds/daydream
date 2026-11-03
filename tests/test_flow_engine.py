@@ -40,9 +40,7 @@ def _break_after(tag: str, times: int) -> Callable[[FlowContext], Awaitable[Stop
         nonlocal calls
         ctx.data.setdefault("trace", []).append(tag)
         calls += 1
-        if calls >= times:
-            return BreakLoop()
-        return None
+        return BreakLoop() if calls >= times else None
 
     return run
 
@@ -56,15 +54,17 @@ def _ctx(reg: Registry, *, repo: Path = Path("."), config: RunConfig | None = No
     return FlowContext(config=config if config is not None else RunConfig(), work=work, registry=reg)
 
 async def test_order_gating_stop_and_loop() -> None:
+    """Steps run in order, disabled steps are skipped, BreakLoop ends the loop, and Stop's code is returned."""
     reg = Registry()
     reg.register_phase(FlowStep("a", run=_trace("a")))
     reg.register_phase(FlowStep("off", run=_trace("x"), enabled=lambda ctx: False))
     reg.register_phase(FlowStep("b", run=_break_after("b", times=2)))
     reg.register_phase(FlowStep("end", run=_stop(7)))
     reg.set_flow("t", ["a", "off", LoopGroup("it", ("b",), max_iterations=lambda ctx: 5), "end"])
-    ctx = _ctx(reg)  # minimal FlowContext factory in this test file
+    ctx = _ctx(reg)
     assert await run_flow(reg, "t", ctx) == 7
     assert ctx.data["trace"] == ["a", "b", "b"]
+
 
 async def test_missing_step_fails_before_any_step_runs() -> None:
     reg = Registry()

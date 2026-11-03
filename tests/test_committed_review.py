@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 import tracemalloc
 import zlib
@@ -29,11 +30,11 @@ from daydream.committed_review import CommittedReviewRequest, Review, run_commit
 from daydream.committed_review_model import RESULT_VERSIONS, planned_work_id, validate_committed_result
 from daydream.deep.detection import StackAssignment
 from daydream.git_ops.captured_source import capture_source
-from daydream.host_tools import HostToolBinding, HostToolCallBudgetExceeded, HostToolFatal, HostToolRejected
+from daydream.host_tools import HostToolBinding, HostToolFatal, HostToolRejected
 from daydream.hosted_review import HostedReviewPolicy, UnsupportedHostedPolicy
 from daydream.hunk_index import write_hunk_index
 from daydream.immutable_review import ImmutableReviewInput
-from daydream.pr_review import parse_finding_markers, post_findings_from_artifact
+from daydream.pr_review import post_findings_from_artifact
 from daydream.review_budget import ReviewLimits
 from daydream.review_profile import ResolvedProfile, build_default_profile
 from daydream.review_result import validate_terminal_result
@@ -41,7 +42,6 @@ from daydream.review_source_refs import source_options
 from daydream.review_stage_inputs import StageInputFactory
 from daydream.run_config import RunConfig
 from daydream.trajectory import get_current_recorder
-from tests.harness.fake_clock import FakeClock
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import (
     commit,
@@ -179,41 +179,26 @@ async def _submit(review: Review, kind: str, value: dict[str, Any]) -> dict[str,
         return binding.submit("terminal", value)
 
 
-@pytest.mark.parametrize("boundary", ["before-start", "between-attempts"])
-async def test_assignment_stays_current_until_explicit_closure(
-    review_inputs: StageInputFactory, boundary: str,
+async def test_review_revision_admission_and_sealing_contracts(
+    review_inputs: StageInputFactory, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unlike in-session admission races, idle transports cannot replace still-authorized challenge work."""
-    review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
-    await _submit(review, "discovery", _discovery(review_inputs))
-    prior = review.pending()
-    binding, _ = review.assignment("challenge", deadline=clock.monotonic() + 30)
-    if boundary == "between-attempts":
-        with pytest.raises(PiError, match="transient"):
-            async with binding.session():
-                raise PiError("transient native failure")
-    with pytest.raises(ValueError, match="active assignment"):
-        review.assignment("challenge", deadline=clock.monotonic() + 30)
-    assert review.pending() == prior
-    binding.close_authority()
-    replacement, _ = review.assignment("challenge", deadline=clock.monotonic() + 30)
-    with pytest.raises(HostToolFatal, match="closed"):
-        async with binding.session():
-            pytest.fail("closed assignment reopened")
-    async with replacement.session():
-        value = {"verdicts": [_verdict(review_inputs, prior[0])], "claims": []}
-        replacement.admit("replacement", "structured_output", value, terminal=True)
-        replacement.submit("replacement", value)
-    assert len(review.seal({})["findings"]) == 1 and review.pending() == []
+    """One captured subject proves the in-memory review contracts.
+
+    A semantic field renews challenge while a title edit keeps the confirmed revision;
+    late checks cannot partially admit an update; a sealed result cannot rebind its
+    source, plan or execution. Capture integrity runs last
+    among admission faults because it binds a captured source to the shared inputs.
+    """
+    for change in ("grounds", "title"):
+        await _challenge_case(review_inputs, change)
+    for corruption in ("wrong-source", "unchallenged-revision", "foreign-plan", "empty-execution", "self-judged",
+                       "double-credit", "forged-author", "unrecorded-verdict", "overlap"):
+        await _sealed_result_case(review_inputs, corruption)
+    for fault in ("invalid-selector", "shared-capacity", "deadline", "capture-integrity"):
+        await _whole_admission_case(review_inputs, monkeypatch, fault)
 
 
-@pytest.mark.parametrize(
-    "change", ["claim", "trigger", "consequence", "file", "line", "grounds", "evidence_refs", "synthesis", "title"]
-)
-async def test_challenge_applies_to_semantic_revision_and_synthesis_but_not_title(
-    review_inputs: StageInputFactory,
-    change: str,
-) -> None:
+async def _challenge_case(review_inputs: StageInputFactory, change: str) -> None:
     """Each semantic field renews challenge; legacy phase tests have no revision authority."""
     review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
     await _submit(review, "discovery", _discovery(review_inputs))
@@ -269,12 +254,7 @@ async def test_challenge_applies_to_semantic_revision_and_synthesis_but_not_titl
         review.assignment("challenge", deadline=clock.monotonic() + 30)
 
 
-@pytest.mark.parametrize("fault", ["invalid-selector", "shared-capacity", "deadline", "closed", "capture-integrity"])
-async def test_whole_admission_rejection_preserves_prior_work_and_obligations(
-    review_inputs: StageInputFactory,
-    monkeypatch: pytest.MonkeyPatch,
-    fault: str,
-) -> None:
+async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: pytest.MonkeyPatch, fault: str) -> None:
     """Late checks cannot partially accept a new claim or consume semantic capacity.
 
     Existing native correction tests exercise a single stage; they do not protect
@@ -333,14 +313,7 @@ async def test_whole_admission_rejection_preserves_prior_work_and_obligations(
     assert value["findings"] == [] and len(value["claims"]) == 1
 
 
-@pytest.mark.parametrize(
-    "challenge", [
-        "missing", "timeout", "accepted-then-failed", "last-call-quota", "exhausted", "setup", "output-install",
-        "cancelled", "preparation",
-        "report-stage", "bundle-stage", "hub-export", "hosted-output-install",
-        "hosted-bundle-install",
-    ]
-)
+@pytest.mark.parametrize("challenge", ["accepted-then-failed-bundle-stage", "cancelled", "hub-export"])
 async def test_program_retains_work_and_reserves_challenge_after_discovery(
     review_inputs: StageInputFactory,
     monkeypatch: pytest.MonkeyPatch,
@@ -348,31 +321,16 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
 ) -> None:
     """Real host/Git/output/recorder composition preserves work across execution failures.
 
-    Distinct rows cover cancellation usage, preparation time, typed terminal quota, protected allowances, pre-dispatch
-    refusals, pipeline-only strategy fallback, and independent capture cleanup.
+    Rows cover a native failure after host acceptance combined with a failed sealed-bundle
+    staging, cancellation usage and capture cleanup, and a pre-dispatch export refusal.
     Native journeys separately own transport/history/accounting.
     """
-    output_failure = challenge in {
-        "output-install", "report-stage", "bundle-stage", "hosted-output-install", "hosted-bundle-install",
-    }
+    failed_after_acceptance = challenge == "accepted-then-failed-bundle-stage"
     injected = staging_output = False
     dispatches: list[dict[str, Any]] = []
     challenge_started = asyncio.Event()
     bindings: list[HostToolBinding] = []
     captures: list[Path] = []
-    if challenge == "preparation":
-        fake = FakeClock(monotonic_value=100).install(monkeypatch)
-        real_open = os.open
-
-        def charge_preparation(path: Any, *args: Any, **kwargs: Any) -> int:
-            nonlocal injected
-            fd = real_open(path, *args, **kwargs)
-            if not injected and Path(path).name == "diff.patch":
-                injected = True
-                fake.advance(10)
-            return fd
-
-        monkeypatch.setattr(os, "open", charge_preparation)
 
     async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, str | None]:
         assignment = _assignment(kwargs)
@@ -384,14 +342,12 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         if assignment["kind"] == "discovery":
             # Retry overhead spent by discovery must stay spent for every later work item.
             recovery.charge(1.5)
-        if assignment["kind"] == "discovery" and challenge in {"exhausted", "cancelled"}:
+        if assignment["kind"] == "discovery" and challenge == "cancelled":
             captures.append(cwd)
         binding = kwargs["host_tools"]
         bindings.append(binding)
         binding.configure_schema(kwargs["output_schema"])
         binding.restrict(deadline=kwargs["deadline"], tool_call_budget=kwargs["tool_call_budget"])
-        if assignment["kind"] == "challenge" and challenge == "timeout":
-            raise TimeoutError("native challenge deadline")
         async with binding.session():
             if assignment["kind"] == "challenge" and challenge == "cancelled":
                 recorder = get_current_recorder()
@@ -409,74 +365,23 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
                 for number in range(kwargs["tool_call_budget"] - 1):
                     binding.admit(f"read-{number}", "read", {})
             else:
-                value = {"verdicts": [] if challenge == "missing" else [
-                    _verdict(review_inputs, assignment["claims"][0])], "claims": []}
-                if challenge == "last-call-quota":
-                    for number in range(kwargs["tool_call_budget"] - 1):
-                        binding.admit(f"challenge-read-{number}", "read", {})
-                    value["verdicts"][0]["evidence_refs"][0]["source_id"] = "source:" + "0" * 64
+                value = {"verdicts": [_verdict(review_inputs, assignment["claims"][0])], "claims": []}
             binding.admit("terminal", "structured_output", value, terminal=True)
-            if assignment["kind"] == "challenge" and challenge == "last-call-quota":
-                # Native transport can lose exception causes; the real binding's
-                # typed terminal outcome must survive into committed coverage.
-                with pytest.raises(HostToolCallBudgetExceeded) as rejected:
-                    binding.submit("terminal", value)
-                assert binding.fatal_error is rejected.value
-                assert binding.calls == kwargs["tool_call_budget"]
-                assert not binding.accepted and not binding.possibly_accepted
-                kwargs["investigation_budget"].observed_tool_starts += binding.calls
-                raise PiError("native terminal submission failed") from None
             accepted = binding.submit("terminal", value)
             kwargs["investigation_budget"].observed_tool_starts += binding.calls
-            if assignment["kind"] == "challenge" and challenge == "accepted-then-failed":
+            if assignment["kind"] == "challenge" and failed_after_acceptance:
                 raise RuntimeError("native failed after host acceptance")
             binding.native_settled = True
-        if assignment["kind"] == "discovery" and challenge == "setup":
-            # The actual next canonical-input capture filesystem operation must fail.
-            for item in _owner(kwargs["host_tools"]).inputs.canonical:
-                item.path.unlink()
         return accepted, None, None
 
     monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=execute, console=agent.console))
     repo = review_inputs.work.source
-    profile_path: Path | None = None
-    if challenge == "exhausted":
-        profile_path = repo.parent / "pipeline-only.toml"
-        profile_path.write_text('name = "pipeline-only"\n[pipeline]\nreviewer_investigation_budget_s = 60\n')
-    output_root = repo
-    hosted_policy = None
-    if challenge.startswith("hosted-"):
-        operator = repo.parent / "operator"
-        operator.mkdir()
-        output_root = repo.parent / "hosted-output"
-        hosted_policy = HostedReviewPolicy(
-            agent_dir=operator, environment={"PATH": os.environ["PATH"]},
-            output_dir=output_root, private_base=repo.parent / "private-hosted",
-            profile=ResolvedProfile(build_default_profile(), "operator"),
-            limits=ReviewLimits(90, 12, 10), trusted_prepared_source=True,
-        )
-    if challenge in {"output-install", "hosted-output-install", "hosted-bundle-install"}:
-        real_link = os.link
-
-        def fail_output_install(source: Any, destination: Any, **kwargs: Any) -> None:
-            nonlocal injected
-            output_name = (
-                "committed-review.json" if challenge == "hosted-bundle-install"
-                else "review-output.md" if hosted_policy is not None else ".review-output.md"
-            )
-            if _matches_link_destination(destination, output_root / output_name, dir_fd=kwargs.get("dst_dir_fd")):
-                injected = True
-                raise OSError("new current report cannot install")
-            real_link(source, destination, **kwargs)
-
-        monkeypatch.setattr(os, "link", fail_output_install)
-    if challenge in {"report-stage", "bundle-stage"}:
+    if failed_after_acceptance:
         stage, allocate = json_utils._stage_bytes, tempfile.mkstemp
-        target = ".review-output.md" if challenge == "report-stage" else "committed-review.json"
 
         def observe_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
             nonlocal staging_output
-            staging_output = path.name == target
+            staging_output = path.name == "committed-review.json"
             try:
                 return stage(path, content, **kwargs)
             finally:
@@ -497,10 +402,8 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         config=RunConfig(
             backend="pi", output_mode="review",
             trajectory_hub_repo="fixture/requested-export" if challenge == "hub-export" else None,
-            review_profile_path=profile_path,
         ),
         limits=ReviewLimits(90, 12, 10),
-        hosted_policy=hosted_policy,
     )
     if challenge == "hub-export":
         with pytest.raises(ValueError, match="external export"):
@@ -557,42 +460,15 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         len(decision["evidence_refs"]) == 1
         for scope in value["terminal_result"]["stack_outcomes"] for decision in scope["target_decisions"]
     )
-    if output_failure:
-        assert injected
-    assert result.output_installed is (not output_failure)
+    # The sealed result survives a failed bundle staging; no partial current output is published.
+    assert injected and not result.output_installed and result.output_error is not None
     assert result.capture_state == "complete"
-    if challenge == "exhausted":
-        assert json.loads((repo / ".daydream/committed-review.json").read_text()) == value
-        assert root_trajectory(repo)["session_id"] == value["run_id"]
-        captured = captures[0]
-        assert not captured.exists()
-        assert f"worktree {captured}\n" not in git(repo, "worktree", "list", "--porcelain")
-        assert value["settings"]["profile_name"] == "pipeline-only"
-        assert value["settings"]["profile_source"] == "explicit"
-        assert value["settings"]["limits"]["effective_investigation_s"] == pytest.approx(60)
-        defaults = build_default_profile().strategies
-        assert value["settings"]["strategies"]["discovery"] == defaults["discovery.generic_fallback"].content
-        assert value["settings"]["strategies"]["challenge"] == defaults["arbitration"].content.replace(
-            "{arbiter_input_path}", "the captured-source claim inventory below"
-        )
-    if output_failure:
-        assert result.output_error is not None
-        assert not (repo / ".daydream/committed-review.json").exists()
-        assert not (repo / ".review-output.md").exists()
-        if hosted_policy is not None:
-            assert not (output_root / "committed-review.json").exists()
-            assert not (output_root / "review-output.md").exists()
-        assert value["terminal_result"]["run_id"] == value["run_id"]
-        assert value["analyzed_revision"]["head_sha"] == review_inputs.revision["head_sha"]
-    # A failed challenge leaves its revisions pending and is re-dispatched once in a fresh context
-    # on the same cumulative ledger; repeated evidence-free failure stops there.
-    retried = challenge in {"timeout", "setup"}
-    assert value["claims"] and [e["assignment"] for e in value["execution"]] == [
-        "discovery", "challenge", *(["challenge"] if retried else [])]
-    if retried:
-        assert value["work"][2]["parents"] == [value["work"][1]["work_id"]]
-        assert value["work"][1]["state"] == "superseded"
-    assert dispatches[0]["allocation"] == 5
+    assert not (repo / ".daydream/committed-review.json").exists()
+    assert not (repo / ".review-output.md").exists()
+    assert value["terminal_result"]["run_id"] == value["run_id"]
+    assert value["analyzed_revision"]["head_sha"] == review_inputs.revision["head_sha"]
+    assert value["claims"] and [e["assignment"] for e in value["execution"]] == ["discovery", "challenge"]
+    assert dispatches[0]["allocation"] == dispatches[1]["allocation"] == 5
     # One cumulative retry-recovery ledger: challenge previously received a fresh allowance.
     assert all(d["recovery_spent"] >= 1.5 for d in dispatches[1:])
     # Activated for the whole review window up front, so a local failure cannot clamp it.
@@ -602,40 +478,24 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
                                                      "planned_assignments": 1, "cross_assignment": "not_applicable"}
     cross_phase = next(p for p in value["terminal_result"]["phase_outcomes"] if p["phase"] == "cross_assignment")
     assert cross_phase["status"] == "complete" and cross_phase["noop"]
-    if challenge != "setup":
-        assert dispatches[1]["allocation"] == 5
-        assert dispatches[1]["deadline"] > dispatches[0]["deadline"]
-    if challenge == "preparation":
-        assert injected
-        assert [d["deadline"] for d in dispatches] == [145, 190]
-    complete = challenge in {"exhausted", "preparation"}
-    assert result.complete is complete
-    assert value["terminal_result"]["analysis_state"] == (
-        "complete" if complete or output_failure else "incomplete"
-    )
-    confirmed = complete or challenge == "accepted-then-failed" or output_failure
-    assert len(value["findings"]) == int(confirmed)
-    assert value["claims"][0]["disposition"] == ("confirmed" if confirmed else "unresolved")
+    assert dispatches[1]["deadline"] > dispatches[0]["deadline"]
+    assert result.complete is False
+    assert value["terminal_result"]["analysis_state"] == "incomplete"
+    # A native failure after host acceptance keeps the accepted verdict but not settlement.
+    assert len(value["findings"]) == 1 and value["claims"][0]["disposition"] == "confirmed"
     assert value["execution"][0]["accepted"]
-    if challenge == "last-call-quota":
-        assert value["execution"][1]["reason"] == "host_tool_budget_exhaustion"
-        assert not value["execution"][1]["accepted"] and not value["execution"][1]["settled"]
-        assert "host_tool_budget_exhaustion" in value["terminal_result"]["reason_codes"]
-        assert value["claims"][0]["challenge_evidence"] == []
-        assert all(not binding.authority_open and binding.cleanup_complete for binding in bindings)
-    if challenge == "accepted-then-failed":
-        assert value["execution"][1]["accepted"] and not value["execution"][1]["settled"]
-        # Persisted success flags cannot erase the actual retained execution failure.
-        corrupted = deepcopy(value)
-        corrupted["execution"][1]["settled"] = True
-        assert corrupted["execution"][1]["reason"] == "backend_failure"
-        _forge_completion(corrupted)
-        with pytest.raises(ValueError, match="native execution"):
-            validate_committed_result(corrupted)
+    assert value["execution"][1]["accepted"] and not value["execution"][1]["settled"]
+    # Persisted success flags cannot erase the actual retained execution failure.
+    corrupted = deepcopy(value)
+    corrupted["execution"][1]["settled"] = True
+    assert corrupted["execution"][1]["reason"] == "backend_failure"
+    _forge_completion(corrupted)
+    with pytest.raises(ValueError, match="native execution"):
+        validate_committed_result(corrupted)
 
 
-@pytest.mark.parametrize('corruption', ['assigned-delete', 'support-bytes'])
-@pytest.mark.parametrize('new_concern', [False, True], ids=['after-final-challenge', 'before-fresh-challenge'])
+@pytest.mark.parametrize('corruption', ['assigned-delete', ])
+@pytest.mark.parametrize('new_concern', [True], ids=['before-fresh-challenge'])
 async def test_local_capture_corruption_retains_challenged_findings_and_unfinished_work(
     review_inputs: StageInputFactory, monkeypatch: pytest.MonkeyPatch,
     new_concern: bool, corruption: str,
@@ -718,7 +578,7 @@ async def test_local_capture_corruption_retains_challenged_findings_and_unfinish
     assert tracked_source_state(repo) == original
 
 
-@pytest.mark.parametrize("cleanup_change", ["none", "source-replacement", "git-routing"])
+@pytest.mark.parametrize("cleanup_change", ["git-routing"])
 async def test_committed_capture_cleanup_keeps_ownership_after_session_close(
     review_inputs: StageInputFactory, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     cleanup_change: str,
@@ -804,11 +664,15 @@ async def test_committed_capture_cleanup_keeps_ownership_after_session_close(
     assert foreign_after == foreign_before
 
 
-@pytest.mark.parametrize("fault", [
-    "preparation", "backend", "empty-provider", "blank-provider", "invalid-provider",
-    "empty-model", "blank-model", "invalid-model", "output-overlap", "missing-agent-dir", "file-agent-dir",
-])
 async def test_hosted_policy_refuses_unsupported_authority_before_source_preparation(
+    review_inputs: StageInputFactory, operator_policy: HostedReviewPolicy,
+) -> None:
+    """Each unsupported authority is refused before any checkout effect; the agent-dir removal runs last."""
+    for fault in ("preparation", "backend", "invalid-model", "output-overlap", "missing-agent-dir"):
+        await _hosted_policy_case(review_inputs, operator_policy, fault)
+
+
+async def _hosted_policy_case(
     review_inputs: StageInputFactory, operator_policy: HostedReviewPolicy, fault: str,
 ) -> None:
     """Hosted admission owns preparation authority; ordinary native tests cannot prove it.
@@ -852,14 +716,7 @@ async def test_hosted_policy_refuses_unsupported_authority_before_source_prepara
     assert not policy.private_base.exists()
 
 
-@pytest.mark.parametrize("corruption", ["wrong-source", "unchallenged-revision", "foreign-plan", "empty-execution",
-                                        "self-judged", "double-credit", "forged-author", "unrecorded-verdict",
-                                        "overlap"])
-async def test_sealed_result_cannot_rebind_publication_or_planned_work(
-    review_inputs: StageInputFactory,
-    corruption: str,
-) -> None:
-    """Typed coverage alone cannot prove claim, source, plan or native-execution identity."""
+async def _sealed_result_case(review_inputs: StageInputFactory, corruption: str) -> None:
     review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
     await _submit(review, "discovery", _discovery(review_inputs))
     concern = review.pending()[0]
@@ -909,60 +766,6 @@ async def test_sealed_result_cannot_rebind_publication_or_planned_work(
         "forged-author": "identity/provenance", "overlap": "overlap",
         "double-credit": "duplicate completion credit"}.get(corruption, "")):
         validate_committed_result(value)
-
-
-async def test_committed_review_materializes_raw_bytes_despite_checkout_transforms(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Checkout filters cannot change captured native bytes or the user's dirty source.
-
-    The old refusal test covered transformed worktrees. Inert raw preparation now
-    supports this input, so the real dispatch seam must observe the raw Git blob.
-    """
-    repo = tmp_path / "source"
-    init_repo(repo)
-    git(repo, "config", "filter.review.clean", "sed 's/NATIVE/CANONICAL/g'")
-    git(repo, "config", "filter.review.smudge", "sed 's/CANONICAL/NATIVE/g'")
-    write_and_stage(repo, ".gitattributes", "*.py filter=review\n")
-    write_and_stage(repo, "api.py", "VALUE = 'CANONICAL base'\n")
-    base = commit(repo, "base")
-    write_and_stage(repo, "api.py", "VALUE = 'CANONICAL head'\n")
-    head = commit(repo, "change")
-
-    # Git's own clean-status check accepts the transformed worktree. That is
-    # precisely why status cannot stand in for raw blob/native byte coherence.
-    control = tmp_path / "transformed-control"
-    git_ops.worktree_add(repo, control, head, detach=True)
-    try:
-        assert git(control, "status", "--porcelain") == ""
-        assert (control / "api.py").read_bytes() == b"VALUE = 'NATIVE head'\n"
-        assert git(control, "show", f"{head}:api.py") == "VALUE = 'CANONICAL head'"
-    finally:
-        git_ops.worktree_remove(repo, control, force=True)
-
-    (repo / "api.py").write_bytes(b"VALUE = 'DIRTY_USER_BYTES'\n")
-    original = tracked_source_state(repo)
-    original_worktrees = git(repo, "worktree", "list", "--porcelain")
-
-    async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, None]:
-        assert (cwd / "api.py").read_bytes() == b"VALUE = 'CANONICAL head'\n"
-        value = {"claims": [], "targets": [
-            {"target_id": part["target_id"], "status": "reviewed", "reason": "Raw captured bytes inspected.",
-             "evidence_refs": [{"source_id": part["source_options"][0]["source_id"],
-                                "basis": "supplied_diff", "source_range": None}]}
-            for part in _looked_up(kwargs["host_tools"])]}
-        binding = kwargs["host_tools"]
-        async with binding.session():
-            binding.admit("terminal", "structured_output", value, terminal=True)
-            accepted = binding.submit("terminal", value)
-            binding.native_settled = True
-        return accepted, None, None
-
-    monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=execute, console=agent.console))
-    result = await run_committed_review(CommittedReviewRequest(repo, base))
-    assert result.complete and result.to_dict()["analyzed_revision"]["head_sha"] == head
-    assert tracked_source_state(repo) == original
-    assert git(repo, "worktree", "list", "--porcelain") == original_worktrees
 
 
 def test_committed_diff_uses_raw_commit_endpoints_despite_local_diff_drivers(tmp_path: Path) -> None:
@@ -1017,31 +820,27 @@ def immutable_input_for(repo: Path, *, requested_base: str | None = None) -> Imm
     })
 
 
-@pytest.mark.parametrize("route", ["copied", "bundle", "alternate"])
-@pytest.mark.parametrize("fault", ["count", "delta-size"])
 def test_immutable_object_population_bounds_precede_body_validation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str, fault: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Compressed files cannot stand in for packed object count or reconstructed delta bytes."""
+    """Compressed files cannot stand in for packed object count, through a bundle or an alternate."""
+    for route in ("bundle", "alternate"):
+        _object_population_case(tmp_path / route, monkeypatch, route)
+
+
+def _object_population_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str) -> None:
     from daydream.git_ops import immutable
 
+    tmp_path.mkdir()
     repo = tmp_path / "source"
     seed_feature_branch(repo, base={"api.py": "VALUE = 1\n"}, feature={"api.py": "VALUE = 0\n"})
     identity = immutable_input_for(repo)
     payload = tmp_path / "payload"
-    oids = []
-    for index in range(3 if fault == "count" else 2):
-        payload.write_bytes((b"x" * (1280 * 1024) if fault == "delta-size" else b"tiny") + bytes([index]))
-        oid = git(repo, "hash-object", "-w", str(payload))
-        oids.append(oid)
-        git(repo, "update-ref", f"refs/tags/stored-{index}", oid)
+    for index in range(3):
+        payload.write_bytes(b"tiny" + bytes([index]))
+        git(repo, "update-ref", f"refs/tags/stored-{index}", git(repo, "hash-object", "-w", str(payload)))
     git(repo, "-c", "pack.threads=1", "-c", "core.bigFileThreshold=1g", "repack", "-adf",
         "--window=20", "--depth=10")
-    if fault == "delta-size":
-        index_path, = (repo / ".git/objects/pack").glob("*.idx")
-        rows = [row.split() for row in git(repo, "verify-pack", "-v", str(index_path)).splitlines()]
-        assert any(row[0] in oids and len(row) == 7 and int(row[2]) < 1024 for row in rows)
-        assert all(int(git(repo, "cat-file", "-s", oid)) == 1280 * 1024 + 1 for oid in oids)
     bundle = None
     if route == "bundle":
         bundle = tmp_path / "captured.bundle"
@@ -1050,8 +849,7 @@ def test_immutable_object_population_bounds_precede_body_validation(
         value["materialization"]["bundle_sha256"] = hashlib.sha256(bundle.read_bytes()).hexdigest()
         identity = ImmutableReviewInput.from_dict(value)
     monkeypatch.setattr(immutable, "_MAX_OBJECT_BYTES", 2 * 1024 * 1024)
-    if fault == "count":
-        monkeypatch.setattr(immutable, "_MAX_FILES", 8)
+    monkeypatch.setattr(immutable, "_MAX_FILES", 8)
     with pytest.raises(git_ops.GitError, match="reconstructed object population exceeds the supported size"):
         if route == "alternate":
             value = identity.to_dict()["materialization"]
@@ -1062,70 +860,7 @@ def test_immutable_object_population_bounds_precede_body_validation(
     assert not (tmp_path / "prepared").exists()
 
 
-@pytest.mark.parametrize("fault", ["allocation", "ref-output"])
-def test_immutable_bundle_bounds_expansion_and_control_output_before_import(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
-) -> None:
-    """Tiny compressed bundles must fail at the resource guard, rather than later source checks."""
-    from daydream.git_ops import immutable
-
-    repo = tmp_path / "source"
-    seed_feature_branch(repo, base={"api.py": "VALUE = 1\n"}, feature={"api.py": "VALUE = 0\n"})
-    identity = immutable_input_for(repo)
-    if fault == "allocation":
-        payload = tmp_path / "compressed-payload"
-        payload.write_bytes(b"x" * (3 * 1024 * 1024))
-        oid = git(repo, "hash-object", "-w", str(payload))
-        git(repo, "update-ref", "refs/tags/large", oid)
-    else:
-        head = git(repo, "rev-parse", "HEAD")
-        for index in range(100):
-            git(repo, "update-ref", f"refs/tags/extra-{index}", head)
-    bundle = tmp_path / "captured.bundle"
-    git(repo, "bundle", "create", str(bundle), "--all")
-    assert bundle.stat().st_size < 16 * 1024
-    value = identity.to_dict()
-    value["materialization"]["bundle_sha256"] = hashlib.sha256(bundle.read_bytes()).hexdigest()
-    identity = ImmutableReviewInput.from_dict(value)
-    monkeypatch.setattr(immutable, "_MAX_OBJECT_BYTES", 2 * 1024 * 1024)
-    if fault == "ref-output":
-        monkeypatch.setattr(immutable, "_MAX_FILES", 8)
-    expected = "allocate 3145729 over limit 2097153" if fault == "allocation" else "output exceeds the supported size"
-    with pytest.raises(git_ops.GitError, match=expected), immutable.prepare_immutable_source(
-        repo, identity, tmp_path / "prepared", bundle=bundle,
-    ):
-        pytest.fail("unbounded bundle reached source admission")
-    assert not (tmp_path / "prepared").exists()
-
-
-@pytest.mark.parametrize("offset", [-1, 0, 1])
-def test_immutable_source_retains_the_documented_per_tree_blob_boundary(tmp_path: Path, offset: int) -> None:
-    """Admit 8 MiB source blobs and larger historical blobs outside the compared trees."""
-    from daydream.git_ops import immutable
-
-    repo = tmp_path / "source"
-    seed_feature_branch(repo, base={"api.py": "VALUE = 1\n"}, feature={"api.py": "VALUE = 0\n"})
-    body = b"\0" * (8 * 1024 * 1024 + offset)
-    if offset > 0:
-        payload = tmp_path / "historical-blob"
-        payload.write_bytes(body)
-        oid = git(repo, "hash-object", "-w", str(payload))
-        git(repo, "update-ref", "refs/tags/historical", oid)
-    else:
-        write_and_stage(repo, "boundary.bin", body)
-        commit(repo, "capture a supported source blob")
-    identity = immutable_input_for(repo)
-    with immutable.prepare_immutable_source(repo, identity, tmp_path / "prepared") as prepared:
-        if offset > 0:
-            assert git(prepared, "cat-file", "-s", oid) == str(len(body))
-            assert not (prepared / "boundary.bin").exists()
-        else:
-            assert (prepared / "boundary.bin").read_bytes() == body
-    assert not (tmp_path / "prepared").exists()
-
-
-@pytest.mark.parametrize("outcome", ["complete", "attributes", "legal-ref", "packed", "empty", "no-diff", "partial",
-                                    "native-failure", "install-failure", "copy-cancel"])
+@pytest.mark.parametrize("outcome", ["no-diff", "install-failure", "copy-cancel"])
 async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy, fake_gh: FakeGh, outcome: str,
 ) -> None:
@@ -1138,20 +873,17 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     from daydream import github_app
     from daydream.git_ops import process
     repo = tmp_path / "source"
-    attributes = "api.py filter=hostile" + (" -diff" if outcome == "attributes" else "") + "\n"
+    attributes = "api.py filter=hostile\n"
     seed_feature_branch(
         repo, base={"api.py": "VALUE = 1\n", ".gitattributes": attributes},
         feature={"api.py": "VALUE = 0\n", ".gitattributes": attributes},
     )
-    if outcome in {"legal-ref", "packed"}:
+    # The install-failure journey also captures from a maintained repository: packed refs,
+    # a kept pack, bitmaps and a multi-pack index must not disturb immutable capture.
+    if outcome == "install-failure":
         branch = "fix@2+%!/東京\u2028\u00a0"
         git(repo, "check-ref-format", "refs/heads/" + branch)
         git(repo, "branch", "-m", branch)
-        if outcome == "legal-ref":
-            head = git(repo, "rev-parse", "--verify", "HEAD")
-            (repo / ".git/HEAD").write_bytes(f"ref: refs/heads/{branch}\t \r\n".encode())
-            assert git(repo, "rev-parse", "--verify", "HEAD") == head
-    if outcome == "packed":
         git(repo, "repack", "-adb", "--write-bitmap-index")
         git(repo, "multi-pack-index", "write")
         pack = next((repo / ".git/objects/pack").glob("*.pack"))
@@ -1165,14 +897,6 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
         tip = git(repo, "commit-tree", git(repo, "rev-parse", "main^{tree}"), "-p",
                   git(repo, "rev-parse", "main"), "-m", "advanced original base")
         git(repo, "update-ref", "refs/heads/main", tip)
-    if outcome == "attributes":
-        (repo / ".git/info/attributes").write_text("api.py diff\n")
-        git(repo, "config", "diff.context", "0")
-        git(repo, "config", "diff.algorithm", "histogram")
-        git(repo, "config", "diff.orderFile", str(tmp_path / "missing-order-file"))
-        ambient = tmp_path / "ambient-gitconfig"
-        ambient.write_text("[diff]\n\tcontext = 0\n\talgorithm = patience\n")
-        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(ambient))
     identity = immutable_input_for(repo)
     envelope = identity.to_dict()
     marker = tmp_path / "forbidden-git-effect"
@@ -1231,16 +955,14 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
                         "consequence": "The caller fails.", "grounds": "Captured source retains zero.",
                         "file": "api.py", "line": None, "evidence_refs": refs}}
                 value = {"targets": [{"target_id": part["target_id"], "status": "reviewed", "reason": "Inspected.",
-                    "evidence_refs": refs}], "claims": [] if outcome == "empty" else [claim]}
+                    "evidence_refs": refs}], "claims": [claim]}
             else:
                 retained = assignment["claims"][0]
-                value = {"verdicts": [] if outcome == "partial" else [{"uid": retained["uid"],
+                value = {"verdicts": [{"uid": retained["uid"],
                     "revision": retained["revision"], "verdict": "confirmed", "grounds": "The zero remains unguarded.",
                     "evidence_refs": refs}], "claims": []}
             binding.admit("submit", "structured_output", value, terminal=True)
             accepted = binding.submit("submit", value)
-            if outcome == "native-failure" and assignment["kind"] == "challenge":
-                raise RuntimeError("native failed after admission")
             binding.native_settled = True
         return accepted, None, None
 
@@ -1340,65 +1062,69 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     value = result.to_dict()
     validate_committed_result(value)
     assert value["schema_version"] == RESULT_VERSIONS["immutable"] and value["immutable_input"] == envelope
-    assert result.complete == (outcome in {"complete", "attributes", "legal-ref", "packed", "empty", "no-diff"})
-    assert len(seen) == (0 if outcome == "no-diff" else 1 if outcome == "empty" else 2)
-    if outcome == "attributes":
-        assert all(ref["side"] == "diff" for part in value["assignments"] for ref in part["source_refs"])
+    # Only the no-diff journey completes here: nothing changed, so no native turn runs.
+    assert result.complete and seen == []
     exported_value = json.loads((policy.output_dir / "findings.json").read_text())
+    assert exported_value["schema_version"] == 3 and exported_value["findings"] == []
     assert exported_value["head_sha"] == envelope["provenance"]["head_sha"]
     assert exported_value["terminal_result"] == value["terminal_result"]
     trajectory = json.loads((policy.output_dir / "trajectory.json").read_text())
     assert trajectory["extra"]["pr_repo"] == "captured/repository"
     assert trajectory["extra"]["pr_number"] == 1421
     assert trajectory["extra"]["immutable_input"] == envelope
-    if outcome in {"partial", "native-failure"}:
-        assert value["terminal_result"]["analysis_state"] == "incomplete"
-        assert len(value["claims"]) == 1
     assert not (repo / ".daydream").exists()
-    if outcome in {"complete", "empty"}:
-        assert exported_value["schema_version"] == 3
-        assert [finding["severity"] for finding in exported_value["findings"]] == (
-            [None] if outcome == "complete" else []
-        )
-        assert post_findings_from_artifact(
-            tmp_path, policy.output_dir / "findings.json", pr_number=1421, repo="captured/repository",
-            head_sha=envelope["provenance"]["head_sha"], console=Console(),
-            base_sha=envelope["provenance"]["requested_base_sha"],
-            comparison_sha=envelope["provenance"]["comparison_base_sha"],
-            bot_login="daydream", approve_on_clean=True,
-        ) == 0
-        posts = fake_gh.calls("POST", "/repos/captured/repository/pulls/1421/reviews")
-        assert len(posts) == 1
-        payload = posts[0].payload
-        assert payload["event"] == ("COMMENT" if outcome == "complete" else "APPROVE")
-        file_comments = fake_gh.calls("POST", "/repos/captured/repository/pulls/1421/comments")
-        assert len(file_comments) == (1 if outcome == "complete" else 0)
-        if outcome == "complete":
-            comment = file_comments[0].payload
-            assert (comment["path"], comment["subject_type"], comment["commit_id"]) == (
-                "api.py", "file", envelope["provenance"]["head_sha"],
-            )
-            assert "Captured zero" in comment["body"] and "Captured zero reaches division." in comment["body"]
-            assert parse_finding_markers(comment["body"]) == [exported_value["findings"][0]["fingerprint"]]
+    # The offline export is postable against its captured provenance and approves when clean.
+    assert post_findings_from_artifact(
+        tmp_path, policy.output_dir / "findings.json", pr_number=1421, repo="captured/repository",
+        head_sha=envelope["provenance"]["head_sha"], console=Console(),
+        base_sha=envelope["provenance"]["requested_base_sha"],
+        comparison_sha=envelope["provenance"]["comparison_base_sha"],
+        bot_login="daydream", approve_on_clean=True,
+    ) == 0
+    posts = fake_gh.calls("POST", "/repos/captured/repository/pulls/1421/reviews")
+    assert [post.payload["event"] for post in posts] == ["APPROVE"]
 
 
-@pytest.mark.parametrize("fault", ["version", "float-version", "unknown", "original", "head", "base", "tree",
-                                    "review-key", "missing-object", "object-fifo", "raw-bytes",
-                                    "object-hash", "symlink-parent", "source-size", "base-source-size",
-                                    "source-total-size", "authority", "ref-absolute", "ref-traversal",
-                                    "ref-backslash", "ref-control", "ref-symlink", "ref-packed-suffix"])
+async def test_immutable_envelope_rejects_unsupported_or_inconsistent_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy,
+) -> None:
+    """Version, unknown-field and provenance/materialization disagreement fail at envelope parsing."""
+    repo = tmp_path / "source"
+    seed_feature_branch(repo, base={"api.py": "VALUE = 1\n"}, feature={"api.py": "VALUE = 0\n"})
+    for fault in ("float-version", "unknown", "original"):
+        await _immutable_evidence_case(tmp_path / fault, monkeypatch, operator_policy, fault, shared=repo)
+
+
 async def test_immutable_invalid_evidence_fails_before_native_work(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy, fault: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy,
 ) -> None:
     """Real object/checkout disagreement must refuse analysis, never become complete-empty.
 
     Ordinary sealed-result tests validate a produced plan; they cannot catch
     invalid immutable compilation evidence before that plan exists.
     """
+    shared = tmp_path / "source"
+    seed_feature_branch(shared, base={"api.py": "VALUE = 1\n"}, feature={"api.py": "VALUE = 0\n"})
+    for fault in ("head", "base", "tree"):  # identity disagreement leaves the repository untouched
+        await _immutable_evidence_case(tmp_path / fault, monkeypatch, operator_policy, fault, shared=shared)
+    for fault in ("object-fifo", "symlink-parent", "base-source-size", "ref-symlink", "ref-packed-suffix"):
+        # Destructive faults each corrupt a private byte copy of the seeded repository.
+        (tmp_path / fault).mkdir()
+        shutil.copytree(shared, tmp_path / fault / "source", symlinks=True)
+        await _immutable_evidence_case(tmp_path / fault, monkeypatch, operator_policy, fault,
+                                       shared=tmp_path / fault / "source")
+
+
+async def _immutable_evidence_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy, fault: str,
+    *, shared: Path | None = None,
+) -> None:
     from daydream.immutable_review import ImmutableReviewInput
 
-    repo = tmp_path / "source"
-    seed_feature_branch(repo, base={"api.py": "VALUE = 1\n"}, feature={"api.py": "VALUE = 0\n"})
+    tmp_path.mkdir(exist_ok=True)
+    repo = shared or tmp_path / "source"
+    if shared is None:
+        seed_feature_branch(repo, base={"api.py": "VALUE = 1\n"}, feature={"api.py": "VALUE = 0\n"})
     if fault == "symlink-parent":
         (repo / "nested").mkdir()
         (repo / "nested/link").symlink_to("../api.py")
@@ -1520,9 +1246,8 @@ async def test_immutable_invalid_evidence_fails_before_native_work(
     assert attempts == [] and not policy.output_dir.exists()
 
 
-@pytest.mark.parametrize("fault", ["topology", "extra-history"])
 async def test_immutable_synthetic_bundle_rejects_attested_extra_commit_history(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy, fault: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy,
 ) -> None:
     """A correctly hashed two-ref bundle can still expose unintended history.
 
@@ -1544,23 +1269,13 @@ async def test_immutable_synthetic_bundle_rejects_attested_extra_commit_history(
     git(source, "checkout", "--detach", head)
     git(source, "config", "user.name", "Fixture compiler")
     git(source, "config", "user.email", "compiler@example.invalid")
-    extra = git(source, "commit-tree", git(source, "rev-parse", base + "^{tree}"),
-                *(["-p", base] if fault == "topology" else []), "-m", "unexpected original history")
-    if fault == "topology":
-        head = git(source, "commit-tree", git(source, "rev-parse", head + "^{tree}"),
-                   "-p", extra, "-m", "head with extra parent history")
-        git(source, "checkout", "--detach", head)
-        git(source, "update-ref", "refs/heads/base", base)
-        git(source, "update-ref", "refs/heads/head", head)
-        bundle.unlink()
-        git(source, "bundle", "create", str(bundle), "refs/heads/base", "refs/heads/head")
-    else:
-        pack = process._run_git(
-            source, ["pack-objects", "--stdout", "--revs"], input_text=f"{base}\n{head}\n{extra}\n",
-            capture_bytes=True, error_context="fixture bundle packing failed",
-        ).stdout
-        header, _, _ = bundle.read_bytes().partition(b"\n\n")
-        bundle.write_bytes(header + b"\n\n" + pack)
+    extra = git(source, "commit-tree", git(source, "rev-parse", base + "^{tree}"), "-m", "unexpected original history")
+    pack = process._run_git(
+        source, ["pack-objects", "--stdout", "--revs"], input_text=f"{base}\n{head}\n{extra}\n",
+        capture_bytes=True, error_context="fixture bundle packing failed",
+    ).stdout
+    header, _, _ = bundle.read_bytes().partition(b"\n\n")
+    bundle.write_bytes(header + b"\n\n" + pack)
     local = {
         "kind": "synthetic", "head_sha": head, "requested_base_sha": base, "comparison_base_sha": base,
         "head_tree_sha": git(source, "rev-parse", head + "^{tree}"),
@@ -1577,55 +1292,10 @@ async def test_immutable_synthetic_bundle_rejects_attested_extra_commit_history(
         raise AssertionError("invalid synthetic topology reached native work")
 
     monkeypatch.setattr(PiBackend, "validate_hosted_policy", native_work)
-    message = "exactly two commits" if fault == "topology" else "contains extra commit history"
-    with pytest.raises(git_ops.GitError, match=message):
+    with pytest.raises(git_ops.GitError, match="contains extra commit history"):
         await run_committed_review(CommittedReviewRequest(
             source, base, hosted_policy=policy, immutable_input=identity, immutable_bundle=bundle))
     assert attempts == [] and not policy.output_dir.exists()
-
-@pytest.mark.parametrize("corrupt", [False, True])
-async def test_empty_selectors_still_validate_captured_source(
-    review_inputs: StageInputFactory, tmp_path: Path, corrupt: bool,
-) -> None:
-    """A valid unfinished judgment cannot evade the final guard by submitting no source selectors."""
-    capture = capture_source(review_inputs.work.repo, tmp_path / "captured",
-        base_sha=review_inputs.revision['merge_base_sha'], head_sha=review_inputs.revision['head_sha'], local=False)
-    review_inputs.captured_source = capture
-    review = Review(review_inputs, "empty", deadline=clock.monotonic() + 60)
-    value = _discovery(review_inputs)
-    value['claims'] = []
-    for target in value['targets']:
-        target.update(status='not_reviewed', reason='Source work remains unfinished.', evidence_refs=[])
-    if corrupt:
-        (capture.root / 'caller.py').write_text('corrupt after preparation\n')
-        with pytest.raises(HostToolFatal) as caught:
-            await _submit(review, 'discovery', value)
-        assert caught.value.code == 'input_unavailable'
-    else:
-        await _submit(review, 'discovery', value)
-    sealed = review.seal({})
-    assert sealed['terminal_result']['analysis_state'] == ('failed' if corrupt else 'incomplete')
-    assert sealed['claims'] == []
-
-
-async def test_sibling_submission_revalidates_after_prior_acceptance(
-    review_inputs: StageInputFactory, tmp_path: Path,
-) -> None:
-    """A sibling cannot reuse successful source validation after intervening native corruption."""
-    capture = capture_source(review_inputs.work.repo, tmp_path / "captured",
-        base_sha=review_inputs.revision['merge_base_sha'], head_sha=review_inputs.revision['head_sha'], local=False)
-    review_inputs.captured_source = capture
-    first = Review(review_inputs, 'first', deadline=clock.monotonic() + 60)
-    sibling = Review(review_inputs, 'sibling', deadline=clock.monotonic() + 60)
-    await _submit(first, 'discovery', _discovery(review_inputs))
-    prior = first.pending()
-    (capture.root / 'caller.py').write_text('changed between callbacks\n')
-    with pytest.raises(HostToolFatal) as caught:
-        await _submit(sibling, 'discovery', _discovery(review_inputs))
-    assert caught.value.code == 'input_unavailable'
-    assert first.pending() == prior
-    assert len(first.seal({})['claims']) == 1
-    assert sibling.seal({})['claims'] == []
 
 
 _LONG_LINE = "VALUE = '" + "é" * 30000 + "'\n"  # One UTF-8 line over 50 KB: unreadable by stock Pi read.

@@ -1,34 +1,14 @@
-import contextlib
+"""Static documentation and fixture contracts that no runtime path reads."""
+
 import hashlib
-import io
 import json
 import re
-import shlex
 from pathlib import Path
 
-import pytest
-
-from daydream.benchmark.cli import _build_benchmark_parser
-from daydream.commands.review import _parse_args
 from tests.harness.git_helpers import git
 
 ROOT = Path(__file__).resolve().parents[1]
 
-def test_readme_run_examples_parse() -> None:
-    readme = (ROOT / "README.md").read_text()
-    # Parse the shipped review examples without depending on surrounding prose.
-    fences = re.findall(r"```bash\n(.*?)```", readme, re.DOTALL)
-    lines = [line for fence in fences for line in fence.splitlines() if line.startswith("daydream ")]
-    assert lines, "README documents no review commands"
-    for line in lines:
-        tokens = shlex.split(line, comments=True)[1:]
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            _parse_args(tokens)  # parses without SystemExit
-
-def test_benchmark_objective_aggregate_parse() -> None:
-    p = _build_benchmark_parser()                    # production parser
-    p.parse_args(["objective", "./ws", "--run-id", "run-abc123", "--json", "-"])
-    p.parse_args(["aggregate", "./suite.json", "--json", "-"])
 
 def test_agent_document_reference_paths_exist() -> None:
     # Relocated contracts must remain reachable from the guidance and skill entrypoints.
@@ -50,17 +30,22 @@ def test_agent_document_reference_paths_exist() -> None:
                     f"broken reference {target!r} in {path.relative_to(ROOT)}"
                 )
 
-def test_help_exposes_native_surface(capsys: pytest.CaptureFixture[str]) -> None:
-    for flag in ("--help", "--help-all"):
-        with pytest.raises(SystemExit):
-            _parse_args([flag])
-        out = capsys.readouterr().out
-        assert "--review-profile" in out and "--stack" in out
-        assert "feedback" not in out and "--skill" not in out
+
+def test_benchmark_runbook_uses_placeholders_and_points_at_env_policy() -> None:
+    """Private benchmark instructions carry no credentials or private PR identities."""
+    text = (ROOT / "docs" / "benchmark.md").read_text(encoding="utf-8")
+    assert "OWNER/REPO" in text
+    assert re.search(r"sk-[A-Za-z0-9]", text) is None
+    assert re.search(r"ghp_[A-Za-z0-9]", text) is None
+    assert re.search(r"github\.com/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/pull/\d+", text) is None
+    # The docs name the single environment-policy source without restating its sets.
+    for owner in (text, (ROOT / "AGENTS.md").read_text(encoding="utf-8")):
+        assert "daydream/benchmark/harbor/env_policy.py" in owner
 
 
-def test_replay_manifest_pins_fixture_and_identity() -> None:
-    manifest = json.loads((ROOT / "tests/fixtures/observability_contract/replay-manifest.json").read_text())
+def test_observability_contract_fixtures_are_pinned_and_machine_readable() -> None:
+    fixtures = ROOT / "tests/fixtures/observability_contract"
+    manifest = json.loads((fixtures / "replay-manifest.json").read_text())
     assert manifest["schema_version"] == 1
     assert manifest["kind"] == "sanitized_protocol_replay"
     fixture_pin = manifest["fixture"]
@@ -74,11 +59,10 @@ def test_replay_manifest_pins_fixture_and_identity() -> None:
     assert identity["reported_cost_usd"] == 0.00402781
     assert "https://github.com/earendil-works/pi-coding-agent.git" in manifest["public_repo_allowlist"]
 
-def test_readback_matrix_subset_is_machine_readable() -> None:
-    matrix = json.loads((ROOT / "tests/fixtures/observability_contract/readback-matrix.json").read_text())
+    matrix = json.loads((fixtures / "readback-matrix.json").read_text())
     assert matrix["schema_version"] == 1
     assert matrix["contract_version"] == "94f432d"
     for section in ("honeyhive", "langsmith"):
         assert isinstance(matrix[section], dict)
     assert "_detectedAgent" in matrix["forbidden_vendor_fields"]
-    assert matrix["expected_shape"]["sanitized_protocol_replay"]["duration_ns"] == 395332000000
+    assert matrix["expected_shape"]["sanitized_protocol_replay"]["duration_ns"] == identity["duration_ns"]

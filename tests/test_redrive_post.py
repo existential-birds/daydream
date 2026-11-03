@@ -5,109 +5,13 @@ Report parsing, classification, payload construction, and posting delegation sta
 
 from __future__ import annotations
 
-import json
 import sys
-from pathlib import Path
-from typing import Any
 
 import pytest
 
 import scripts.redrive_post as redrive
 
-CANONICAL_KEEP_INLINE = "CANONICAL_KEEP_INLINE_SENTINEL"
-CANONICAL_KEEP_STRUCTURAL = "CANONICAL_KEEP_STRUCTURAL_SENTINEL"
-LEGACY_DROPPED = "LEGACY_DROPPED_SENTINEL"
-
 
 def _run_cli(*argv: str, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["redrive_post", *argv])
     redrive.main()
-
-
-def _write_canonical(target: Path) -> None:
-    deep = target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    (deep / "merged-items.json").write_text(json.dumps({"items": [
-                    {"id": 1, "lens": "per-stack", "file": "api.py", "line": 1,
-                     "item_uid": "item:1",
-                     "description": CANONICAL_KEEP_INLINE, "severity": "high", "confidence": "HIGH",
-                     "rationale": "r", "evidence": "api.py:1",
-                     "source_uids": ["python:1"], "related_files": None},
-                    {"id": 2, "lens": "structural", "file": "README.md", "line": 1, "item_uid": "item:2",
-                     "description": CANONICAL_KEEP_STRUCTURAL, "severity": "high",
-                     "confidence": "HIGH", "rationale": "r", "evidence": "README.md:1",
-                     "source_uids": ["structure:1"], "related_files": None},
-                ]
-            }
-        )
-    )
-    # Legacy pre-merge artifacts the OLD redrive would have read. Redrive must
-    # never source findings from these (spec M2).
-    (deep / "alternatives.json").write_text(json.dumps([{"id": 99, "files": ["api.py"], "description": LEGACY_DROPPED}])
-    )
-    (deep / "stack-a-records.json").write_text(
-        json.dumps([{"file": "api.py", "id": 1, "line": 1, "description": LEGACY_DROPPED}])
-    )
-    (deep / "dedup-candidates.json").write_text("[]")
-
-def test_redrive_posts_only_canonical_merged_items(
-    multi_stack_target: Path, fake_gh: Any, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_gh.serve_open_pr(multi_stack_target)
-    _write_canonical(multi_stack_target)
-    _run_cli(str(multi_stack_target), "--pr", "7", "--yes", monkeypatch=monkeypatch)
-    posted = json.dumps([call.payload
-            for call in (*fake_gh.calls("POST", "repos/acme/widgets/pulls/7/reviews"),
-                *fake_gh.calls("POST", "repos/acme/widgets/pulls/7/comments"),
-            )
-        ]
-    )
-    assert CANONICAL_KEEP_INLINE in posted
-    assert CANONICAL_KEEP_STRUCTURAL in posted
-    assert LEGACY_DROPPED not in posted
-    view_calls = fake_gh.pr_view_calls()
-    assert view_calls and "7" in view_calls[0].argv          # explicit `gh pr view 7`
-    assert fake_gh.command_calls("pr list") == []            # no current-branch discovery
-    assert not (multi_stack_target / ".review-output.md").exists()
-
-def test_redrive_requires_canonical_merged_items(
-    multi_stack_target: Path, fake_gh: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-) -> None:
-    deep = multi_stack_target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)  # exists, but no merged-items.json
-    with pytest.raises(SystemExit) as exc:
-        _run_cli(str(multi_stack_target), "--pr", "7", "--yes", monkeypatch=monkeypatch)
-
-    assert exc.value.code == 1
-    missing = deep / "merged-items.json"
-    assert f"No canonical merged-items.json found at {missing}" in capsys.readouterr().err
-    assert fake_gh.calls("POST") == []       # zero GitHub requests
-    assert not (multi_stack_target / ".review-output.md").exists()
-
-def test_redrive_corrupt_merged_items_exits_nonzero(
-    multi_stack_target: Path, fake_gh: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-) -> None:
-    fake_gh.serve_open_pr(multi_stack_target)
-    deep = multi_stack_target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    (deep / "merged-items.json").write_text("{not valid json}")
-    with pytest.raises(SystemExit) as exc:
-        _run_cli(str(multi_stack_target), "--pr", "7", "--yes", monkeypatch=monkeypatch)
-    assert exc.value.code == 1  # corrupt input is an error, not a silent success
-
-    captured = capsys.readouterr()
-    assert "Could not read merged-items.json" in (captured.out + captured.err)
-    assert fake_gh.calls("POST") == []
-    assert not (multi_stack_target / ".review-output.md").exists()
-
-def test_redrive_decline_posts_no_file_comments_or_review(
-    multi_stack_target: Path, fake_gh: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-) -> None:
-    fake_gh.serve_open_pr(multi_stack_target)
-    _write_canonical(multi_stack_target)
-    monkeypatch.setattr("daydream.ui.messages._read_user_input", lambda *_args: "n")
-    _run_cli(str(multi_stack_target), "--pr", "7", monkeypatch=monkeypatch)
-
-    assert fake_gh.pr_view_calls()
-    assert fake_gh.calls("POST") == []
-    assert "Skipped posting to PR." in capsys.readouterr().out

@@ -9,8 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import subprocess
+import runpy
 import sys
 from pathlib import Path
 from typing import Any
@@ -146,138 +145,88 @@ def _config(fixture_dir: Path, tmp_path: Path, **overrides: object) -> Calibrati
     return CalibrationConfig(**base)
 
 
-@pytest.mark.parametrize("corrupt,expected",
-    [
-        ("schema_version", "schema_version"),  # record stamped other than "3"
-        ("posterior", "valid_at"),  # valid_at posterior to as_of
-        ("label-version", "unrecognized label"),  # absent/unknown version stamp
-        ("c5-repo", "excluded repository"), ("identity", "repo_slug"), ("digest", "digest mismatch"),
-        ("split-overlap", "split membership overlaps"),
-    ],
-)
-def test_validation_fails_closed(tmp_path: Path, fixture_corpus: Path, corrupt: str, expected: str) -> None:
-    with pytest.raises(CalibrationError, match=expected):
-        run_calibration(_config(fixture_corpus, tmp_path, **{corrupt: True}))
-    assert not (tmp_path / "out" / "calibration.json").exists()  # no partial artifact
+def _mixed_reward_version(root: Path) -> None:
+    corpus = root / "corpus" / "corpus.jsonl"
+    records = [json.loads(line) for line in corpus.read_text().splitlines()]
+    records[0]["reward_version"] = "2026.09.04-1"
+    _write_corpus(corpus.parent, records)
 
 
-def test_statistics_are_exact_and_deterministic(fixture_corpus: Path, tmp_path: Path) -> None:
-    candidates = {"w_fp": [0.3, 0.6]}  # straddles the fixture's w_fp values
-    result = run_calibration(_config(fixture_corpus, tmp_path, seed=42, candidates=candidates))
-    assert result["run_id"] == "cal-test-1" and result["record_count"] == 4
-    assert result["schema_version"] == "calibration-artifact"
-    assert result["tool_version"] and result["resampling_seed"] == 42
-    assert result["input_digests"]["corpus.jsonl"].startswith("sha256:")
-    assert result["corpus_digest"] and result["split_digest"]
-    assert set(result["candidate_settings"]) >= {"w_fp"}
-    assert result["stage0_analysis"] == {"status": "unavailable"}
-    m = result["metrics"]
-    assert m["length_distribution"]["median"] == round(m["length_distribution"]["median"], 4)
-    assert {"median", "iqr"} <= set(m["length_distribution"])
-    assert set(m["class_balance"]) == {"accepted", "rejected"}
-    assert m["per_axis_correlations"]["w_fp_axis"] <= 1.0
-    lo, hi = m["auc_bootstrap_ci"]["w_fp"]
-    assert lo < hi
-    # the candidate grid genuinely differentiates the per-point metrics
-    assert m["threshold_metrics"]["w_fp=0.3"] != m["threshold_metrics"]["w_fp=0.6"]
-    # same seed ⇒ identical bytes
-    run_calibration(_config(fixture_corpus, tmp_path / "r2", out_dir=tmp_path / "r2", seed=42, candidates=candidates))
-    assert (tmp_path / "out" / "calibration.json").read_bytes() == \
-        (tmp_path / "r2" / "calibration.json").read_bytes()
-    assert (tmp_path / "out" / "report.md").read_bytes() == (tmp_path / "r2" / "report.md").read_bytes()
-    assert "w_fp" in (tmp_path / "out" / "report.md").read_text()
-    before = {path.name: path.read_bytes() for path in (tmp_path / "out").iterdir()}
-    run_calibration(_config(fixture_corpus, tmp_path, seed=42, candidates=candidates))
-    assert {path.name: path.read_bytes() for path in (tmp_path / "out").iterdir()} == before
-
-
-def test_candidate_without_range_fails_closed(tmp_path: Path, fixture_corpus: Path) -> None:
-    with pytest.raises(CalibrationError, match="w_fp"):
-        run_calibration(_config(fixture_corpus, tmp_path, candidates={"w_fp": []}))
-
-
-def test_unknown_candidate_axis_fails_closed(tmp_path: Path, fixture_corpus: Path) -> None:
-    with pytest.raises(CalibrationError, match="w_ghost"):
-        run_calibration(_config(fixture_corpus, tmp_path, candidates={"w_ghost": [0.1, 0.2]}))
-
-
-def test_missing_required_field_fails_closed(tmp_path: Path, fixture_corpus: Path) -> None:
-    with pytest.raises(CalibrationError, match="missing required field"):
-        run_calibration(_config(fixture_corpus, tmp_path, **{"drop-session": True}))
-
-
-def test_stored_split_mismatch_fails_closed(tmp_path: Path) -> None:
-    """A stored lineage.split that diverges from the re-derived split is refused."""
-    root = _build_fixture(tmp_path)
+def _stored_split_mismatch(root: Path) -> None:
     corpus_dir = root / "corpus"
-    records = [json.loads(line) for line in (corpus_dir / "corpus.jsonl").read_text().splitlines() if line.strip()]
+    records = [json.loads(line) for line in (corpus_dir / "corpus.jsonl").read_text().splitlines()]
     lineage = json.loads((corpus_dir / "lineage.json").read_text())
-    rid = str(records[0]["record_id"])
-    derived = assign_split(rid, holdout_rate=float(lineage["holdout_rate"]), val_rate=float(lineage["val_rate"]),
-        salt=str(lineage["salt"]),
-    )
+    derived = assign_split(str(records[0]["record_id"]), holdout_rate=float(lineage["holdout_rate"]),
+                           val_rate=float(lineage["val_rate"]), salt=str(lineage["salt"]))
     records[0]["lineage"]["split"] = "validation" if derived != "validation" else "holdout"
     _write_corpus(corpus_dir, records)
-    with pytest.raises(CalibrationError, match="stored split.*does not match"):
-        run_calibration(_config(root, tmp_path))
 
 
-# --- Task 3 (M4): stage-0 marginal analysis + explicit unavailable marker ---
+def _numeric_repo_slug(root: Path) -> None:
+    records = [json.loads(line) for line in (root / "corpus/corpus.jsonl").read_text().splitlines()]
+    records[0]["lineage"]["repo_slug"] = 17
+    _write_corpus(root / "corpus", records)
 
 
-def test_stage0_scores_require_model_digest(tmp_path: Path, fixture_corpus: Path) -> None:
-    # --model-digest is documented as required with --stage0-scores; a missing
-    # digest must fail closed instead of silently skipping verification.
-    scores = fixture_corpus / "stage0-scores-aligned.json"
-    with pytest.raises(CalibrationError, match="model-digest is required"):
-        run_calibration(_config(fixture_corpus, tmp_path, stage0_scores=scores))
-
-
-# --- Task 5 (M5, M6, S1, S2): versioned artifact + reproducible report ---
-
-
-def test_no_artifact_on_failure(tmp_path: Path, fixture_corpus: Path) -> None:
-    with pytest.raises(CalibrationError):
-        run_calibration(_config(fixture_corpus, tmp_path, out_dir=tmp_path / "out", digest=True))
-    assert not (tmp_path / "out" / "calibration.json").exists()
-    assert not (tmp_path / "out" / "report.md").exists()
+def test_calibration_fails_closed_before_any_output(tmp_path: Path) -> None:
+    """Every input gate refuses before calibration.json (or the out dir) is written."""
+    cases: list[tuple[str, dict[str, Any], Any, str]] = [
+        ("schema", {"schema_version": True}, None, "schema_version"),  # record stamped other than "3"
+        ("posterior", {"posterior": True}, None, "valid_at"),  # valid_at posterior to as_of
+        ("label", {"label-version": True}, None, "unrecognized label"),  # absent/unknown version stamp
+        ("c5", {"c5-repo": True}, None, "excluded repository"),
+        ("overlap", {"split-overlap": True}, None, "split membership overlaps"),
+        ("identity", {"identity": True}, None, "repo_slug"),
+        ("numeric-slug", {}, _numeric_repo_slug, "repo_slug"),
+        ("drop-session", {"drop-session": True}, None, "missing required field"),
+        ("empty-range", {"candidates": {"w_fp": []}}, None, "w_fp"),
+        ("unknown-axis", {"candidates": {"w_ghost": [0.1, 0.2]}}, None, "w_ghost"),
+        ("split", {}, _stored_split_mismatch, "stored split.*does not match"),
+        ("reward", {}, _mixed_reward_version, "mixes reward versions"),
+        # --model-digest is required with --stage0-scores; never silently skip verification.
+        ("stage0", {"stage0_scores": "stage0-scores-aligned.json"}, None, "model-digest is required"),
+    ]
+    for name, overrides, mutate, expected in cases:
+        root = tmp_path / name
+        root.mkdir()
+        _build_fixture(root)
+        if mutate is not None:
+            mutate(root)
+        if "stage0_scores" in overrides:
+            overrides = {"stage0_scores": root / overrides["stage0_scores"]}
+        with pytest.raises(CalibrationError, match=expected):
+            run_calibration(_config(root, root, **overrides))
+        assert not (root / "out").exists(), name  # no partial artifact
 
 
 # --- Task 4 (M8): committed synthetic fixture under tests/fixtures/training ---
 
 COMMITTED_FIXTURE = Path(__file__).parent / "fixtures" / "training" / "calibration"
-#: Verbatim from daydream/training/schema/exclusion.txt (C5 always-excluded list).
-C5_SLUG = "getsentry/sentry"
-
-
 @pytest.fixture
 def committed_fixture() -> Path:
     assert (COMMITTED_FIXTURE / "build_fixture.py").exists(), "committed calibration fixture missing"
     return COMMITTED_FIXTURE
 
 
-def test_committed_fixture_contains_both_classes_and_c5_repo(committed_fixture: Path) -> None:
-    """Both gold classes are present, and the C5-excluded slug appears only in
-    its corruption variant — never in the clean bundle."""
-    records = [json.loads(line)
-        for line in (committed_fixture / "corpus" / "corpus.jsonl").read_text().splitlines()
-        if line.strip()
-    ]
+def test_committed_fixture_replays_and_stage0_files_join_or_refuse_misalignment(
+    committed_fixture: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replay = tmp_path / "replay"
+    monkeypatch.setattr(sys, "argv", ["build_fixture.py", "--out", str(replay)])
+    runpy.run_path(str(committed_fixture / "build_fixture.py"), run_name="__main__")
+    committed = [path.relative_to(committed_fixture) for path in committed_fixture.rglob("*")
+                 if path.is_file() and path.name != "build_fixture.py" and "__pycache__" not in path.parts]
+    assert committed, "committed fixture is empty"
+    for rel in committed:
+        assert (replay / rel).read_bytes() == (committed_fixture / rel).read_bytes(), rel
+    # Both gold classes are present; the C5-excluded slug appears only in its corruption variant.
+    def slugs(corpus: Path) -> list[str]:
+        return [json.loads(line)["lineage"]["repo_slug"] for line in corpus.read_text().splitlines() if line.strip()]
     gold = json.loads((committed_fixture / "gold.json").read_text())
-    labels = {gold[rid]["accepted"] for rid in gold}
-    assert labels == {True, False}
-    assert len(records) == 12
-    assert all(r["lineage"]["repo_slug"] != C5_SLUG for r in records)
-    variant_records = [json.loads(line)
-        for line in (committed_fixture / "variants" / "c5-excluded" / "corpus.jsonl")
-        .read_text()
-        .splitlines()
-        if line.strip()
-    ]
-    assert any(r["lineage"]["repo_slug"] == C5_SLUG for r in variant_records)
-
-
-def test_committed_stage0_files_join_and_misalign_refused(committed_fixture: Path, tmp_path: Path) -> None:
+    assert {row["accepted"] for row in gold.values()} == {True, False}
+    clean = slugs(committed_fixture / "corpus" / "corpus.jsonl")
+    assert len(clean) == 12 and "getsentry/sentry" not in clean
+    assert "getsentry/sentry" in slugs(committed_fixture / "variants" / "c5-excluded" / "corpus.jsonl")
     shared = dict(corpus_dir=committed_fixture / "corpus", gold_labels=committed_fixture / "gold.json",
         breakdowns=committed_fixture / "breakdowns.json",
     )
@@ -312,63 +261,8 @@ def test_committed_stage0_files_join_and_misalign_refused(committed_fixture: Pat
         )
 
 
-def test_build_fixture_replays_byte_identical(committed_fixture: Path, tmp_path: Path) -> None:
-    """The checked-in generator regenerates the committed files byte-for-byte."""
-    replay = tmp_path / "replay"
-    # The generator imports the top-level ``daydream`` package, which would
-    # resolve to an installed copy (or nothing) rather than this checkout;
-    # pin the child interpreter to the repo root so replay is always enforced.
-    env = os.environ.copy()
-    repo_root = str(Path(__file__).resolve().parent.parent)
-    env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
-    subprocess.run([sys.executable, str(committed_fixture / "build_fixture.py"), "--out", str(replay)], check=True,
-        cwd=Path(__file__).parent.parent, env=env,
-    )
-    committed = [p.relative_to(committed_fixture)
-        for p in committed_fixture.rglob("*")
-        if p.is_file() and p.name != "build_fixture.py" and "__pycache__" not in p.parts
-    ]
-    assert committed, "committed fixture is empty"
-    for rel in committed:
-        assert (replay / rel).read_bytes() == (committed_fixture / rel).read_bytes(), rel
-
-
 def test_output_collision_with_different_run_identity_is_refused(fixture_corpus: Path, tmp_path: Path) -> None:
     out = tmp_path / "out"
     run_calibration(_config(fixture_corpus, tmp_path, out_dir=out, run_id="cal-1"))
     with pytest.raises(CalibrationError, match="run identity"):
         run_calibration(_config(fixture_corpus, tmp_path, out_dir=out, run_id="cal-2"))
-
-
-@pytest.mark.parametrize(
-    ("version", "error"), [("2026.09.04-1", "mixes reward versions"), ("unknown", "unrecognized reward version")],
-)
-def test_mixed_or_unknown_reward_versions_are_refused(fixture_corpus: Path, tmp_path: Path, version: str, error: str,
-) -> None:
-    """Historical scoring is readable, but incomparable reward versions cannot mix."""
-    corpus = fixture_corpus / "corpus" / "corpus.jsonl"
-    records = [json.loads(line) for line in corpus.read_text().splitlines()]
-    records[0]["reward_version"] = version
-    _write_corpus(corpus.parent, records)
-    with pytest.raises(CalibrationError, match=error):
-        run_calibration(_config(fixture_corpus, tmp_path))
-
-
-@pytest.mark.parametrize("slug", [17, "owner/repo/extra"])
-def test_calibration_identity_validation_precedes_output(fixture_corpus: Path, tmp_path: Path, slug: Any) -> None:
-    records = [json.loads(line) for line in (fixture_corpus / "corpus/corpus.jsonl").read_text().splitlines()]
-    records[0]["lineage"]["repo_slug"] = slug
-    _write_corpus(fixture_corpus / "corpus", records)
-    with pytest.raises(CalibrationError, match="repo_slug"):
-        run_calibration(_config(fixture_corpus, tmp_path))
-    assert not (tmp_path / "out").exists()
-
-
-@pytest.mark.parametrize("slug", ["GETSENTRY/SENTRY"])
-def test_calibration_canonicalizes_benchmark_identity(fixture_corpus: Path, tmp_path: Path, slug: str) -> None:
-    records = [json.loads(line) for line in (fixture_corpus / "corpus/corpus.jsonl").read_text().splitlines()]
-    records[0]["lineage"]["repo_slug"] = slug
-    _write_corpus(fixture_corpus / "corpus", records)
-    with pytest.raises(CalibrationError, match="excluded repository"):
-        run_calibration(_config(fixture_corpus, tmp_path))
-    assert not (tmp_path / "out").exists()

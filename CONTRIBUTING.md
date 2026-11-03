@@ -16,7 +16,7 @@ Verify these prerequisites before running the local gate:
 
 - **Python ≥ 3.14**
 - **[`uv`](https://docs.astral.sh/uv/)** — installs and manages the virtualenv and runs every gate tool
-- **Claude Code CLI** ([claude.ai/code](https://claude.ai/code)) — the default review backend; the test suite exercises it
+- **Claude Code CLI** ([claude.ai/code](https://claude.ai/code)) — the default review backend for running Daydream; the gate does not need it
 - **Node.js 24.18.1 and official Pi CLI 1.4.0** — required by the installed-native contract tests in every full gate; these match [CI provisioning](.github/workflows/ci.yml)
 
 Pi's native tests use an isolated offline provider; `make install` only provisions
@@ -84,7 +84,7 @@ The focused targets, all run from the repo root:
 |---|---|
 | `make lint` | Ruff over `daydream tests scripts/ci_*.py` (120 cols, `E F I W`, py314; `daydream/atif/**` is lint-exempt as vendored code) |
 | `make typecheck` | mypy over `daydream tests scripts/ci_*.py` |
-| `make test` | `pytest -n auto` with coverage; the branch-coverage floor (`fail_under` in `pyproject.toml`) is enforced here, not in global addopts — a bare or targeted `pytest` run stays plain |
+| `make test` | `pytest -n logical` (one worker per logical CPU) with coverage; the branch-coverage floor (`fail_under` in `pyproject.toml`) is enforced here, not in global addopts — a bare or targeted `pytest` run stays plain |
 | `make deadcode` | vulture dead-code scan over the root project and the RL package |
 | `make coverage-report` | checks that `coverage.xml` exists after `make test`; the measurement + ratchet procedure is in [docs/coverage.md](docs/coverage.md) |
 | `make actionlint` | actionlint over `.github/workflows/*.yml` plus the packaged workflow templates |
@@ -102,8 +102,11 @@ make check
 which runs, in order:
 
 ```text
-lockcheck install lint deadcode typecheck package-check test actionlint coverage-report check-naming
+lockcheck install static test coverage-report
 ```
+
+`static` runs `lint deadcode typecheck package-check actionlint check-naming test-scripts` in
+parallel (the Makefile's `STATIC_CHECKS`), so the gate pays for the slowest of them.
 
 This is the same set of steps a full `check` job in `.github/workflows/ci.yml` runs —
 `rl-check` is the only CI job the gate deliberately omits. One scope difference:

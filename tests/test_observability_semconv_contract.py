@@ -14,7 +14,6 @@ CONTRACT_DIR = TESTS_DIR / "fixtures" / "observability_contract"
 SEMCONV_COMMIT = "94f432d7126f5884d30a2cdde6f4e89908ebb6fd"
 
 
-
 # Manifest byte verification
 
 

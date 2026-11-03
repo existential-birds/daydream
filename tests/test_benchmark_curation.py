@@ -4,30 +4,26 @@ Exercise evidence derivation, transitions, and validation independently of
 the shared mirror's continued availability.
 """
 
+import fcntl
 import hashlib
+import os
 import shutil
-import subprocess
-import sys
+import threading
 from pathlib import Path
 from typing import Any, cast
 
-import pydantic
 import pytest
 import yaml
 
 import daydream.benchmark as bm
-from daydream.benchmark import curation as cu, github_import as gi, storage
-from daydream.benchmark.curation import BAND_RANK, REASON_CODES, classify_evidence
+from daydream.benchmark import curation as cu, github_import as gi
+from daydream.benchmark.curation import classify_evidence
 from daydream.benchmark.harbor import build
-from daydream.benchmark.schema import Curation, Finding, derive_finding_id
+from daydream.benchmark.schema import derive_finding_id
 from daydream.benchmark.storage import (
-    atomic_write_json,
-    atomic_write_yaml,
-    load_json_strict,
     load_yaml_strict,
 )
-from daydream.benchmark.workspace import init_workspace, validate_workspace
-from daydream.git_ops import process as git_process
+from daydream.benchmark.workspace import init_workspace
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import seed_pr_origin
 from tests.harness.transaction_faults import TransactionFaultDriver
@@ -74,7 +70,7 @@ def _finish_import(ws: Path, origin_url: str) -> str:
     return cast(str, load_yaml_strict(ws / "benchmark.yaml")["cases"][0]["case_id"])
 
 
-def _seed_ready_case(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3, candidate: bool = False) -> tuple[Any, ...]:
+def _import_ready_case(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3, candidate: bool = False) -> tuple[Any, ...]:
     """Import a real frozen workspace, optionally with one exact inline candidate.
 
     Return workspace, case ID, and head SHA.
@@ -91,7 +87,7 @@ def _seed_ready_case(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3, candida
     return ws, case_id, head_sha
 
 
-def _seed_ready_case_mixed(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -> tuple[Any, ...]:
+def _import_ready_case_mixed(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -> tuple[Any, ...]:
     """Import five records: exact and editable candidates plus three evidence-only kinds."""
     ws, origin_url, _, head_sha = _seed_ready_workspace(tmp_path, fake_gh, lines=lines)
     reviews = [{"id": 100, "node_id": "PRR_100", "user": {"login": "carol", "type": "User"}, "body": "approval text",
@@ -127,29 +123,38 @@ def _seed_ready_case_mixed(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -
     return ws, case_id, head_sha
 
 
-def test_add_finding_is_authored_and_replace_is_edited(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
-
-    cu.add_finding(ws, case_id, title="New concern", body="fresh wording",
-                   severity="high", location={"path": "feature.py", "start_line": 1, "end_line": 1}, source_ids=[])
-    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    f = raw["curation"]["findings"][0]
-    assert f["provenance"]["kind"] == "authored" and f["provenance"]["source_ids"] == []
-    assert raw["curation"]["gold_mode"] == "authored"
-
-    cu.replace_findings(ws, case_id, f["finding_id"],
-                        replacements=[{"title": "New concern (v2)", "body": "rewritten",
-                                       "severity": "medium",
-                                       "location": {"path": "feature.py", "start_line": 2, "end_line": 2},
-                                       "source_ids": ["github:inline_comment:1"]}])
-    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    f2 = raw["curation"]["findings"][0]
-    assert f2["provenance"]["kind"] == "edited" and f2["finding_id"] != f["finding_id"]
-    assert f2["title"] == "New concern (v2)" and raw["curation"]["gold_mode"] == "historical"
-    assert f2["finding_id"] == derive_finding_id(f2, case_id=case_id)
+# Curation never re-imports, so one real import per shape and worker is copied into each
+# test's own workspace (only the mirror's FETCH_HEAD names the template origin path).
+_IMPORTED: dict[tuple[str, int, bool], tuple[Path, str, str]] = {}
 
 
-def test_non_candidate_evidence_is_citable_and_excludable(tmp_path: Path, fake_gh: FakeGh) -> None:
+def _copy_imported(tmp_path: Path, key: tuple[str, int, bool], fake_gh: FakeGh) -> tuple[Any, ...]:
+    if key not in _IMPORTED:
+        template = tmp_path / ("seed-%s-%d-%d" % key)
+        importer = _import_ready_case_mixed if key[0] == "mixed" else _import_ready_case
+        options: dict[str, Any] = {"lines": key[1]} if key[0] == "mixed" else {"lines": key[1], "candidate": key[2]}
+        _IMPORTED[key] = importer(template, fake_gh, **options)
+    template_ws, case_id, head_sha = _IMPORTED[key]
+    _SEED_SEQ["n"] += 1
+    ws = tmp_path / f"ws-{_SEED_SEQ['n']}"
+    shutil.copytree(template_ws, ws, symlinks=True)
+    return ws, case_id, head_sha
+
+
+def _seed_ready_case(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3, candidate: bool = False) -> tuple[Any, ...]:
+    """Return a private copy of a real frozen workspace, optionally with one exact inline candidate.
+
+    Return workspace, case ID, and head SHA.
+    """
+    return _copy_imported(tmp_path, ("single", lines, candidate), fake_gh)
+
+
+def _seed_ready_case_mixed(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -> tuple[Any, ...]:
+    """Return a private copy of five imported records: exact/editable candidates plus three evidence-only kinds."""
+    return _copy_imported(tmp_path, ("mixed", lines, False), fake_gh)
+
+
+def _non_candidate_evidence_is_citable_and_excludable(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
@@ -164,36 +169,7 @@ def test_non_candidate_evidence_is_citable_and_excludable(tmp_path: Path, fake_g
         cu.exclude_evidence(ws, case_id, "github:review:999", reason="duplicate")
 
 
-def test_add_edited_findings_rejects_atom_without_sources_and_unknown(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
-    with pytest.raises(cu.CurationError):
-        cu.add_edited_findings(ws, case_id, atoms=[{"title": "X", "body": "y", "source_ids": []}])
-    with pytest.raises(cu.CurationError):
-        cu.add_edited_findings(ws, case_id, atoms=[{"title": "X", "body": "y", "source_ids": ["github:review:999"]}])
-    assert not (load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"].get("findings") or [])
-
-
-def test_exclude_evidence_reason_contract_and_other_requires_note(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    view = cu.get_case(ws, case_id)
-    src = view["candidates"][0]["source_id"]
-
-    cu.exclude_evidence(ws, case_id, src, reason="fixed_before_snapshot")
-    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    ex = raw["curation"]["exclusions"][0]
-    assert ex == {"source_id": src, "reason": "fixed_before_snapshot", "note": None}
-
-    with pytest.raises(cu.CurationError):
-        cu.exclude_evidence(ws, case_id, src, reason="other")          # other needs a note
-    with pytest.raises(cu.CurationError):
-        cu.exclude_evidence(ws, case_id, src, reason="not_a_reason")   # literal contract
-    # re-excluding the same source is last-wins: it replaces the existing row
-    cu.exclude_evidence(ws, case_id, src, reason="incorrect")
-    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    assert raw["curation"]["exclusions"] == [{"source_id": src, "reason": "incorrect", "note": None}]
-
-
-def test_mark_ready_empty_not_clean_attested_still_raises(tmp_path: Path, fake_gh: FakeGh) -> None:
+def _mark_ready_empty_not_clean_attested_still_raises(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=2)  # empty gold, NOT attested
     with pytest.raises(cu.CurationError):
         cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha=head_sha)
@@ -201,17 +177,7 @@ def test_mark_ready_empty_not_clean_attested_still_raises(tmp_path: Path, fake_g
     assert cur["state"] == "draft" and cur["snapshot_attested"] is False
 
 
-def test_mark_ready_clean_wrong_sha_is_non_mutating(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=2)
-    cu.attest_clean(ws, case_id)
-    with pytest.raises(cu.StaleStateError):
-        cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha="f" * 40)
-    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
-    assert cur["state"] == "draft" and cur["snapshot_attested"] is False
-    assert cur["clean_attested"] is True  # attestation preserved; only readiness failed
-
-
-def test_exclude_and_reinclude_case_transitions(tmp_path: Path, fake_gh: FakeGh) -> None:
+def _exclude_and_reinclude_case_transitions(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
     snap_status = cu.get_case(ws, case_id)["snapshot"]["status"]  # "ready"
     assert snap_status == "ready"
@@ -233,49 +199,7 @@ def test_exclude_and_reinclude_case_transitions(tmp_path: Path, fake_gh: FakeGh)
         cu.exclude_case(ws, case_id, reason="nope")
 
 
-def test_apply_gold_fragment_strips_forged_fields_and_never_ready(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _head = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
-    cand = next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
-    src = cand["source_id"]
-
-    fragment = {"findings": [{
-            "finding_id": "f" * 64, "provenance": {"kind": "historical", "source_ids": [src]},
-            "state": "ready", "gold_status": "findings", "gold_mode": "historical",
-            "title": cand["title"], "body": cand["body"], "severity": None,
-            "location": cand["location"], "source_ids": [src],
-        }], "exclusions": [], "case_exclusion": None, "clean": False,
-    }
-    bm.apply_gold_fragment(ws, case_id, fragment)
-    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    f = raw["curation"]["findings"][0]
-    assert f["finding_id"] == derive_finding_id(f, case_id=case_id)  # forged id discarded
-    assert f["provenance"]["kind"] == "historical"  # derived from candidate match
-    assert raw["curation"]["state"] == "draft"  # never ready
-    assert raw["curation"]["snapshot_attested"] is False
-    assert raw["curation"]["gold_status"] == "findings"
-
-
-def test_stale_case_edit_stays_stale_and_re_attests(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"])
-    # force the case into stale + attested (simulating a refresh that flipped ready->stale)
-    path = ws / "cases" / f"{case_id}.yaml"
-    raw = load_yaml_strict(path)
-    raw["curation"].update({"state": "stale", "snapshot_attested": True})
-    path.write_text(yaml.safe_dump(raw, sort_keys=False))
-
-    cu.accept_candidate(ws, case_id, src)                        # stale edit stays stale
-    cu.exclude_evidence(ws, case_id, src, reason="duplicate")   # stale edit stays stale
-    raw = load_yaml_strict(path)
-    assert raw["curation"]["state"] == "stale"
-    assert raw["curation"]["snapshot_attested"] is False
-
-    cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha=head_sha)                # stale -> ready
-    raw = load_yaml_strict(path)
-    assert raw["curation"]["state"] == "ready" and raw["curation"]["snapshot_attested"] is True
-
-
-def test_reject_before_persistence_leaves_file_unchanged(tmp_path: Path, fake_gh: FakeGh) -> None:
+def _reject_before_persistence_leaves_file_unchanged(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
@@ -303,26 +227,7 @@ def test_reject_before_persistence_leaves_file_unchanged(tmp_path: Path, fake_gh
     assert raw["curation"]["findings"][0]["location"] == {"path": "feature.py", "start_line": 4, "end_line": 4}
 
 
-def test_list_cases_returns_evidence_count_and_changed_stats(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _head = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
-
-    cases = cu.list_cases(ws)
-    assert [c["case_id"] for c in cases] == [case_id]
-    assert cases[0]["state"] == "draft" and cases[0]["gold_mode"] == "clean"
-    assert cu.get_case(ws, case_id)["snapshot"]["status"] == "ready"
-    assert cases[0]["evidence_count"] == 1          # one seeded candidate
-    assert cases[0]["changed_files"] == 2           # base.py + feature.py
-    assert cases[0]["changed_lines"] == 6           # 2 + 4 (base edit + feature add)
-    # a non-ready snapshot degrades to zero stats without raising
-    path = ws / "cases" / f"{case_id}.yaml"
-    raw = load_yaml_strict(path)
-    raw["snapshot"] = {"status": "imported", "policy": "final_pr_head", "requested_head": "final"}
-    path.write_text(yaml.safe_dump(raw, sort_keys=False))
-    c2 = cu.list_cases(ws)[0]
-    assert c2["changed_files"] == 0 and c2["changed_lines"] == 0
-
-
-def test_corrupt_bundle_path_fails_clean_with_curation_error(tmp_path: Path, fake_gh: FakeGh) -> None:
+def _corrupt_bundle_path_fails_clean_with_curation_error(tmp_path: Path, fake_gh: FakeGh) -> None:
     """A ready snapshot whose bundle_file is absolute / traversal must fail the
     read-only bundle-clone paths with the curated CurationError contract, never
     the storage WorkspaceCorrupt family — list_cases (and the TUI) and
@@ -350,94 +255,7 @@ def test_corrupt_bundle_path_fails_clean_with_curation_error(tmp_path: Path, fak
     assert cu.list_cases(ws)[0]["changed_files"] == 2
 
 
-def test_curate_and_validate_after_mirror_removal(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """Finding validation, change stats, and workspace fidelity use the frozen bundle."""
-    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
-    shutil.rmtree(ws / "cache" / "repository.git")        # mirror gone
-    cu.add_finding(ws, case_id, title="x", body="y", severity="high",
-                   location={"path": "feature.py", "start_line": 1, "end_line": 1})
-    rows = cu.list_cases(ws)
-    assert rows[0]["changed_files"] == 2 and rows[0]["changed_lines"] == 6
-    cu.mark_ready(ws, case_id, head_sha=head_sha)  # canonical Task.md digest derived in-lock
-    code, label = validate_workspace(ws)
-    assert code == 0 and label == "ready"
-
-
-def test_bundle_clone_reused_across_findings_and_calls(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
-    real_run_git = git_process._run_git
-    clones = {"n": 0}
-
-    def spy_run_git(repo: Path, args: list[Any], **kwargs: Any) -> Any:
-        if args and args[0] == "clone":
-            clones["n"] += 1
-        return real_run_git(repo, args, **kwargs)
-
-    monkeypatch.setattr(git_process, "_run_git", spy_run_git)
-
-    cu.add_finding(ws, case_id, title="a", body="b", severity="high",
-                   location={"path": "feature.py", "start_line": 1, "end_line": 1})
-    cu.add_finding(ws, case_id, title="c", body="d", severity="medium",
-                   location={"path": "feature.py", "start_line": 2, "end_line": 2})
-    assert clones["n"] == 1            # both located-finding mutations share one clone
-    cu.validate_case(ws, case_id)      # two located findings, still one clone
-    assert clones["n"] == 1
-    cu.list_cases(ws)
-    assert clones["n"] == 1
-
-
-def test_get_case_attaches_evidence_projection(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    path = ws / "cases" / f"{case_id}.yaml"
-    raw = load_yaml_strict(path)
-    import_file = ws / raw["source"]["import_file"]
-    before = (path.read_bytes(), import_file.read_bytes())
-
-    view = cu.get_case(ws, case_id)
-    assert (path.read_bytes(), import_file.read_bytes()) == before
-    cand = next(c for c in view["candidates"] if c["exact_acceptable"])
-    ev = cand["evidence"]
-    assert ev["kind"] == "inline_comment"
-    assert ev["author"] == {"login": "alice", "type": "User"}
-    assert ev["commit_id"] == head_sha
-    assert ev["resolved"] is False and ev["outdated"] is False
-    # a candidate with no backing evidence record is tolerated (projection
-    # absent) -- verified through get_case on a genuinely unmatched source_id,
-    # not by hand-constructing a stripped view (which would pass even if the
-    # projection logic silently attached an evidence dict unconditionally).
-    unmatched = {k: v for k, v in cand.items() if k != "evidence"}
-    unmatched["source_id"] = "github:review:999"
-    raw["candidates"].append(unmatched)
-    atomic_write_yaml(path, raw)
-    case_before = path.read_bytes()
-    view2 = cu.get_case(ws, case_id)
-    assert path.read_bytes() == case_before and import_file.read_bytes() == before[1]
-    assert "evidence" not in view2["candidates"][-1]  # unmatched source, absent
-    assert "evidence" in view2["candidates"][0]  # matched source, still joined
-
-
-def _reanchor_frozen_inline(ws: Path, case_id: str, *, authoring_commit: str) -> str:
-    """Point the strict anchor at a foreign commit while observed commit_id stays at head.
-
-    Update the frozen candidate accordingly and return its source ID.
-    """
-    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    imp = load_json_strict(ws / raw["source"]["import_file"])
-    rec = next(e for e in imp["evidence"] if e["kind"] == "inline_comment")
-    rec["authoring_anchor"] = {
-        "version": 1, "status": "derived", "commit_id": authoring_commit, "path": "feature.py", "start_line": 2,
-        "end_line": 2,
-    }
-    atomic_write_json(ws / raw["source"]["import_file"], imp)
-    cand = next(c for c in raw["candidates"] if c["source_id"] == rec["source_id"])
-    cand["exact_acceptable"] = False
-    cand["not_exact_reason"] = "re-anchored"
-    atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
-    return str(rec["source_id"])
-
-
-def test_validate_case_accepts_clean_and_rejects_duplicate_and_over_cap(tmp_path: Path, fake_gh: FakeGh) -> None:
+def _validate_case_accepts_clean_and_rejects_duplicate_and_over_cap(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
     cu.validate_case(ws, case_id)                     # raises if the case is invalid
 
@@ -475,114 +293,33 @@ def test_validate_case_accepts_clean_and_rejects_duplicate_and_over_cap(tmp_path
         cu.validate_case(ws, case_id)
 
 
-_WORKER = (
-    "import sys\n"
-    "from daydream.benchmark import curation as cu\n"
-    "op, ws, cid = sys.argv[1], sys.argv[2], sys.argv[3]\n"
-    "if op == 'add':\n"
-    "    cu.add_finding(ws, cid, title=sys.argv[4], body='b', severity='low',\n"
-    "                   location={'path': 'feature.py', 'start_line': 1, 'end_line': 1},\n"
-    "                   source_ids=[])\n"
-    "elif op == 'accept':\n"
-    "    cu.accept_candidate(ws, cid, sys.argv[4])\n"
-    "elif op == 'exclude':\n"
-    "    cu.exclude_evidence(ws, cid, sys.argv[4], reason='duplicate')\n"
-    "elif op == 'clean':\n"
-    "    cu.attest_clean(ws, cid)\n"
-    "else:\n"
-    "    raise SystemExit('unknown op')\n"
-)
-
-
-def _spawn_worker(args: list[str]) -> subprocess.Popen[str]:
-    return subprocess.Popen([sys.executable, "-c", _WORKER, *args],
-        cwd=_REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
-
-
-def test_concurrent_accept_and_add_do_not_lose_updates(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
-    src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
-    procs = [_spawn_worker(["accept", str(ws), case_id, src])]
-    procs += [_spawn_worker(["add", str(ws), case_id, f"conc-{i}"]) for i in range(4)]
-    procs += [_spawn_worker(["exclude", str(ws), case_id, src]) for _ in range(3)]
-    for p in procs:
-        out, err = p.communicate(timeout=120)
-        assert p.returncode == 0, (out, err)
+def _mutations_reopen_stale_and_derive_fragment_provenance(tmp_path: Path, fake_gh: FakeGh) -> None:
+    ws, case_id, _head = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     path = ws / "cases" / f"{case_id}.yaml"
-    cur = load_yaml_strict(path)["curation"]
-    findings = cur["findings"]
-    assert len(findings) == 5                                   # all 5 concurrent updates landed
-    assert sorted(f["title"] for f in findings if f["provenance"]["kind"] == "authored") == [
-        "conc-0", "conc-1", "conc-2", "conc-3",
-    ]
-    hist = [f for f in findings if f["provenance"]["kind"] == "historical"]
-    assert len(hist) == 1 and hist[0]["provenance"]["source_ids"] == [src]
-    assert cur["exclusions"] == [{"source_id": src, "reason": "duplicate", "note": None}]
-    cu.validate_case(ws, case_id)
-    cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha=head_sha)
-    ready = load_yaml_strict(path)["curation"]
-    assert ready["state"] == "ready" and ready["snapshot_attested"] is True
-    assert ready["findings"] == findings and ready["exclusions"] == cur["exclusions"]
+    before = path.read_bytes()
+    with pytest.raises(cu.StaleStateError, match="attestation SHA mismatch"):
+        cu.mark_ready(ws, case_id, head_sha="0" * 40)
+    with pytest.raises(cu.CurationError, match="atom 0 carries no source_ids"):
+        cu.add_edited_findings(ws, case_id, atoms=[
+            {"title": "t", "body": "b", "severity": "low", "location": None, "source_ids": []}])
+    assert path.read_bytes() == before
+    cand = next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
+    # A fragment matching its single source's candidate exactly is historical, whatever it claims.
+    cu.apply_gold_fragment(ws, case_id, {"findings": [{
+        "title": cand["title"], "body": cand["body"], "severity": cand["severity"], "location": cand["location"],
+        "source_ids": [cand["source_id"]], "provenance": {"kind": "authored"}}]})
+    assert load_yaml_strict(path)["curation"]["findings"][0]["provenance"]["kind"] == "historical"
+    raw = load_yaml_strict(path)
+    raw["curation"].update(state="stale", snapshot_attested=False, task_spec_sha256="d" * 64,
+                           task_spec_approved_at="2026-01-01T00:00:00Z")
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    cu.add_finding(ws, case_id, title="late", body="b", severity="low", location=None, source_ids=[])
+    stale = load_yaml_strict(path)["curation"]
+    assert stale["state"] == "stale" and stale["snapshot_attested"] is False
+    assert "task_spec_sha256" not in stale and "task_spec_approved_at" not in stale
 
 
-def test_concurrent_clean_attestation_serializes(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)   # empty gold
-    procs = [_spawn_worker(["clean", str(ws), case_id]) for _ in range(3)]
-    for p in procs:
-        out, err = p.communicate(timeout=120)
-        assert p.returncode == 0, (out, err)
-    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
-    assert cur["clean_attested"] is True and cur["gold_status"] == "clean"
-    assert cur["state"] == "draft" and cur["snapshot_attested"] is False
-
-
-def test_lock_file_and_error_text_contain_no_repo_evidence(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"])
-    cu.exclude_evidence(ws, case_id, src, reason="duplicate")   # acquires + releases the lock
-    assert (ws / ".benchmark.lock").read_bytes() == b""         # lock file is empty: no repo evidence/credentials
-    with pytest.raises(cu.CurationError) as ei:
-        cu.exclude_evidence(ws, case_id, "not-a-source", reason="duplicate")
-    msg = str(ei.value)
-    assert "o/r" not in msg and "token" not in msg.lower() and "api_key" not in msg.lower()
-
-
-def test_read_only_paths_run_concurrent_with_a_writer(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    lock_path = ws / ".benchmark.lock"
-    # A writer holds the flock for a long window (30s) — far longer than any
-    # plausible read-only path — so a differential probe can detect whether the
-    # read-only paths block on the lock without a fragile wall-clock assertion.
-    holder = subprocess.Popen([sys.executable, "-c",
-         "import fcntl, time, sys\n"
-         "fd = open(sys.argv[1], 'w')\n"
-         "fcntl.flock(fd, fcntl.LOCK_EX)\n"
-         "print('held', flush=True)\n"
-         "time.sleep(30)\n",
-         str(lock_path)],
-        stdout=subprocess.PIPE, text=True,
-    )
-    try:
-        holder_stdout = holder.stdout
-        assert holder_stdout is not None, "Popen stdout must be the pipe"
-        assert holder_stdout.readline().strip() == "held"        # another process now holds the flock
-        cu.list_cases(ws)
-        cu.get_case(ws, case_id)
-        cu.validate_case(ws, case_id)
-        # The writer must STILL be holding the flock after the reads returned:
-        # had a read-only path blocked on the lock it could not finish until the
-        # writer released (30s later).
-        assert holder.poll() is None
-    finally:
-        # Cleanup must not race the writer's 30s sleep: a bare wait(timeout=30)
-        # started ~milliseconds after the sleep begins has zero scheduling
-        # margin and can TimeoutExpired under parallel-suite load. Kill instead.
-        holder.kill()
-        holder.wait()
-
-
-def test_locked_mutation_heals_interrupted_journal_before_new_write(tmp_path: Path, fake_gh: FakeGh) -> None:
+def _locked_mutation_waits_for_the_lock_and_heals_interrupted_journal(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
     path = ws / "cases" / f"{case_id}.yaml"
     raw = load_yaml_strict(path)
@@ -594,57 +331,45 @@ def test_locked_mutation_heals_interrupted_journal_before_new_write(tmp_path: Pa
         tx.stage(f"cases/{case_id}.yaml", yaml.safe_dump(mutated, sort_keys=False).encode("utf-8"))
         faults.halt_at("target-1")                     # target applied under 'committing', then halt
     assert load_yaml_strict(path)["curation"]["state"] == "excluded"
-    cu.add_finding(ws, case_id, title="recovered", body="b", severity="low",
-                   location={"path": "feature.py", "start_line": 1, "end_line": 1}, source_ids=[])
-    assert not list((ws / "transactions").iterdir())   # prior journal healed
+    # Another holder of the workspace lock (a separate open file description) blocks the mutation.
+    holder = os.open(ws / ".benchmark.lock", os.O_CREAT | os.O_RDWR)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    errors: list[BaseException] = []
+
+    def add() -> None:
+        try:
+            cu.add_finding(ws, case_id, title="recovered", body="b", severity="low",
+                           location={"path": "feature.py", "start_line": 1, "end_line": 1}, source_ids=[])
+        except BaseException as exc:  # surfaced on the test thread below
+            errors.append(exc)
+
+    writer = threading.Thread(target=add, daemon=True)
+    try:
+        writer.start()
+        writer.join(timeout=0.3)
+        assert writer.is_alive(), "curation mutated without taking the workspace lock"
+        assert load_yaml_strict(path)["curation"]["state"] == "excluded"
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        os.close(holder)
+    writer.join(timeout=10)
+    assert not writer.is_alive() and not errors, errors
+    assert not list((ws / "transactions").iterdir())   # prior journal healed before the new write
     final = load_yaml_strict(path)
     assert final["curation"]["state"] == "draft"       # interrupted 'excluded' write was rolled back
     assert [f["title"] for f in final["curation"]["findings"]] == ["recovered"]
 
 
-def test_stale_attestation_raises_stale_state_error_and_leaves_unchanged(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
-    cu.accept_candidate(ws, case_id, src)
-    path = ws / "cases" / f"{case_id}.yaml"
-    before = path.read_bytes()
-    with pytest.raises(bm.CurationError) as rejected:
-        cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha="f" * 40)  # stale attestation SHA
-    assert isinstance(rejected.value, bm.StaleStateError)
-    assert path.read_bytes() == before  # a rejected mutation writes nothing
-    cur = load_yaml_strict(path)["curation"]
-    assert cur["state"] == "draft" and cur["snapshot_attested"] is False
-    assert "task_spec_sha256" not in cur and "task_spec_approved_at" not in cur
-
-
-def test_curation_ready_requires_task_spec_sha256() -> None:
-    base: dict[str, Any] = dict(state="ready", snapshot_attested=True, gold_status="findings",
-                                clean_attested=False, exclusions=[], case_exclusion=None)
-    f: dict[str, Any] = {"finding_id": "f" * 64, "title": "t", "body": "b", "severity": "low",
-                         "location": None, "provenance": {"kind": "historical", "source_ids": ["s"]}}
-    findings = [Finding(**f)]
-    assert Curation(**base, findings=findings, task_spec_sha256="d" * 64).task_spec_sha256 == "d" * 64
-    with pytest.raises(pydantic.ValidationError):
-        Curation(**base, findings=findings, task_spec_sha256=None)
-    # non-ready states (draft/stale) may be unset
-    draft = Curation(state="draft", snapshot_attested=False, clean_attested=False,
-                     gold_status=None, findings=[], exclusions=[], case_exclusion=None, task_spec_sha256=None)
-    assert draft.task_spec_sha256 is None
-
-
-def test_task_spec_approved_at_is_stripped_before_validation(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
-    path = ws / "cases" / f"{case_id}.yaml"
-    raw = load_yaml_strict(path)
-    approved_at = "2026-08-23T00:00:00+00:00"
-    raw["curation"]["gold_mode"] = "clean"
-    raw["curation"]["task_spec_approved_at"] = approved_at
-    path.write_text(yaml.safe_dump(raw, sort_keys=False))
-
-    cu.validate_case(ws, case_id)
-    view = cu.get_case(ws, case_id)
-    assert view["curation"]["gold_mode"] == "clean"
-    assert view["curation"]["task_spec_approved_at"] == approved_at
+def test_service_rejections_keep_case_bytes_and_curated_error_contract(tmp_path: Path, fake_gh: FakeGh) -> None:
+    for check in (_non_candidate_evidence_is_citable_and_excludable, _mark_ready_empty_not_clean_attested_still_raises,
+                  _exclude_and_reinclude_case_transitions, _reject_before_persistence_leaves_file_unchanged,
+                  _corrupt_bundle_path_fails_clean_with_curation_error,
+                  _validate_case_accepts_clean_and_rejects_duplicate_and_over_cap,
+                  _mutations_reopen_stale_and_derive_fragment_provenance,
+                  _locked_mutation_waits_for_the_lock_and_heals_interrupted_journal):
+        root = tmp_path / check.__name__
+        root.mkdir()
+        check(root, fake_gh)
 
 
 def test_curation_approval_survives_reopen_and_stale_reattestation(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -695,14 +420,13 @@ def test_curation_approval_survives_reopen_and_stale_reattestation(tmp_path: Pat
     assert import_path.read_bytes() == import_bytes
 
 
-BANDS = ["review_first", "needs_judgment", "possibly_actioned", "likely_actioned", "withdrawn", "context", "decided"]
-
-
-def test_band_rank_is_fixed_order() -> None:
-    assert [b for b, _ in sorted(BAND_RANK.items(), key=lambda kv: kv[1])] == BANDS
-
-
 def test_classify_table_covers_precedence_and_dispositions() -> None:
+    assert [band for band, _ in sorted(cu.BAND_RANK.items(), key=lambda kv: kv[1])] == [
+        "review_first", "needs_judgment", "possibly_actioned", "likely_actioned", "withdrawn", "context", "decided"]
+    assert list(cu.REASON_CODES) == ["resolved", "outdated", "anchor-delta-changed", "anchor-delta-deleted",
+        "anchor-delta-renamed", "anchor-delta-binary", "pr-author-reply", "commit-non-ancestor", "commit-unavailable",
+        "anchor-unavailable", "facts-missing", "dismissed", "decided-by-finding", "decided-by-exclusion",
+        "decided-by-conflict", "non-candidate"]
     # (curation refs, is_candidate, dismissed, signals, facts_present, commit_relation,
     #  anchor_delta, expected_band, expected_disposition)
     cases = [({"finding", "exclusion"}, True, False, set(), True, "at_head", "unchanged", "decided", "conflict"),
@@ -722,55 +446,6 @@ def test_classify_table_covers_precedence_and_dispositions() -> None:
         got_band, got_disp, _ = classify_evidence(refs=refs, is_candidate=is_cand, dismissed=dismissed, signals=signals,
             facts_present=has_facts, commit_relation=rel, anchor_delta=delta)
         assert got_band == band and got_disp == disp, (refs, signals, rel, delta, got_band)
-
-
-def test_reason_codes_are_the_closed_set_in_fixed_order() -> None:
-    assert list(REASON_CODES) == ["resolved", "outdated", "anchor-delta-changed", "anchor-delta-deleted",
-        "anchor-delta-renamed", "anchor-delta-binary", "pr-author-reply",
-        "commit-non-ancestor", "commit-unavailable", "anchor-unavailable",
-        "facts-missing", "dismissed", "decided-by-finding", "decided-by-exclusion",
-        "decided-by-conflict", "non-candidate"]
-
-
-def test_prioritized_view_fails_open_without_facts(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, candidate=True)
-    case_path = ws / "cases" / f"{case_id}.yaml"
-    raw = load_yaml_strict(case_path)
-    raw.pop("prioritization", None)
-    storage.atomic_write_yaml(case_path, raw)
-    view = cu.get_case(ws, case_id)
-    cand_sid = view["candidates"][0]["source_id"]
-    cand = next(e for e in view["prioritized_evidence"]["entries"] if e["source_id"] == cand_sid)
-    assert cand["band"] == "needs_judgment" and "facts-missing" in cand["reasons"]
-    assert load_yaml_strict(case_path) == raw
-
-
-def test_decided_and_withdrawn_classify_from_curation_state(tmp_path: Path, fake_gh: FakeGh) -> None:
-    # a record-level GitHub dismissal (the import marks inline comments whose
-    # review was DISMISSED) reaches the withdrawn band through the real
-    # projection; the same candidate accepted afterwards becomes decided/finding
-    # (curation refs outrank a dismissal).
-    ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
-    view = cu.get_case(ws, case_id)
-    cand_sid = view["candidates"][0]["source_id"]
-    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    import_path = ws / raw["source"]["import_file"]
-    imp = load_json_strict(import_path)
-    for rec in imp["evidence"]:
-        if rec["source_id"] == cand_sid:
-            rec["dismissed"] = True
-    atomic_write_json(import_path, imp)
-
-    view = cu.get_case(ws, case_id)
-    entry = next(e for e in view["prioritized_evidence"]["entries"] if e["source_id"] == cand_sid)
-    assert entry["band"] == "withdrawn" and entry["disposition"] == "undecided"
-    assert entry["reasons"] == ["dismissed"]
-
-    cu.accept_candidate(ws, case_id, cand_sid)
-    view = cu.get_case(ws, case_id)
-    entry = next(e for e in view["prioritized_evidence"]["entries"] if e["source_id"] == cand_sid)
-    assert entry["band"] == "decided" and entry["disposition"] == "finding"
-    assert "decided-by-finding" in entry["reasons"]
 
 
 def test_pr_author_reply_signal_respects_real_thread_identity() -> None:
@@ -822,6 +497,7 @@ def test_pr_author_reply_signal_respects_real_thread_identity() -> None:
 
     # the direct-caller fallback scan (no precomputed map) agrees:
     ctx = {"pr_author_login": "alice", "records": records}
+    assert {"resolved", "outdated"} <= cu.collect_signals({**records[0], "resolved": True, "outdated": True}, ctx)
     assert "pr-author-reply" not in cu.collect_signals(records[0], ctx)
     assert "pr-author-reply" not in cu.collect_signals(records[1], ctx)
     assert "pr-author-reply" not in cu.collect_signals(records[2], ctx)

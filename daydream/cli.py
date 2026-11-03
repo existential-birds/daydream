@@ -190,19 +190,10 @@ def main(argv: list[str] | None = None) -> None:
             f"{e}. Check the finding's file ref.",
         )
     except Exception as e:
-        if verbose_mode:
-            try:
-                diagnostic = format_verbose_exception(e)
-            except Exception:
-                diagnostic = "[VERBOSE_DIAGNOSTIC_UNAVAILABLE]"
-        else:
-            diagnostic = None
+        # format_verbose_exception fails closed to its unavailable marker itself.
+        diagnostic = format_verbose_exception(e) if verbose_mode else None
         # The panel message is redacted and control-neutralized exactly like the
         # verbose diagnostic, so a hostile exception message can never paint
         # the operator's terminal even when verbose diagnostics are off.
         safe_message = sanitize_verbose_message(e)
         _shutdown_and_exit(console, "Fatal Error", safe_message, verbose_diagnostic=diagnostic)
-
-
-if __name__ == "__main__":
-    main()

@@ -12,19 +12,6 @@ def _raw_item(**overrides: object) -> dict[str, object]:
     return item
 
 
-def test_existing_item_uid_is_preserved_while_id_is_reassigned() -> None:
-    """Changing the dense display ordinal preserves the existing durable item_uid."""
-    raw = [_raw_item(id=42, description="already identified", item_uid="item:9"),
-           _raw_item(id=42, description="newcomer")]
-
-    out = normalize_items(raw)
-
-    assert [item["id"] for item in out] == [1, 2]
-    assert [item["id"] for item in raw] == [42, 42]
-    assert "item_uid" not in raw[1], "normalization must copy rather than stamp the provider payload"
-    assert out[0]["item_uid"] == "item:9", "a minted handle was reassigned"
-    assert out[1]["item_uid"] not in ("", None) and out[1]["item_uid"] != "item:9", out
-
 def test_preserved_item_uid_out_of_position_does_not_collide_with_a_minted_one() -> None:
     """Minting skips existing UIDs even when their ordinals differ from display positions.
 

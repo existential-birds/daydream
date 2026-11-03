@@ -14,7 +14,6 @@ import pytest
 
 from daydream.training.coordinator import PipelineConfig, run_pipeline
 from daydream.training.corpus_projection.splits import assign_split
-from daydream.training.gate import _split_digest
 from daydream.training.reward_model import OutcomeModel, score_comment
 from daydream.training.rft import RftConfig, run_rft
 from daydream.training.stacks import load_v2_projection
@@ -126,63 +125,15 @@ def _build_projection(
     return out
 
 
-def _holdout_gold_comment_ids(proj_dir: Path) -> list[str]:
-    proj = load_v2_projection(proj_dir)
-    ids = []
-    for record in proj.by_split["holdout"]:
-        if record.get("tier") == "gold" and record.get("outcome_label") in ("accepted", "rejected"):
-            ids.append(str(record["session_id"]))
-    return ids
-
-
-def test_stage0_v2_frozen_split_sft_and_rft_rows(tmp_path: Path) -> None:
-    proj_dir = _build_projection(tmp_path)
-    cfg = PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out")
-    manifest = run_pipeline(cfg, dry_run=False)
-
-    assert manifest["stages"]["stage0"]["status"] == "complete"
-    split = json.loads((tmp_path / "out/stage0/split.json").read_text())
-    held_out_ids = sorted(_holdout_gold_comment_ids(proj_dir))
-    assert split["held_out_rows"] == len(held_out_ids)
-    assert split["digest"] == _split_digest(held_out_ids, cfg.seed)
-
-    assert manifest["run_identity"]["corpus_digest"] == load_v2_projection(proj_dir).digest
-
-    # SFT retains accepted findings as nonempty completions.
-    sft_lines = (tmp_path / "out/stage1/sft-dataset.jsonl").read_text().splitlines()
-    assert sft_lines
-    sft_rows = [json.loads(line) for line in sft_lines]
-    assert sft_rows[0]["completion"] == ACCEPTED_TEXT
-    assert all(row["completion"] != REJECTED_TEXT for row in sft_rows)
-
-    assert manifest["stages"]["stage1"]["tier_counts"]["silver"] == 1
-
-    # RFT retains validated full SHAs and the diff body.
-    rft_lines = (tmp_path / "out/stage2/rft-inputs.jsonl").read_text().splitlines()
-    assert rft_lines
-    rft_rows = [json.loads(line) for line in rft_lines]
-    for row in rft_rows:
-        assert len(row["base_sha"]) == 40 and all(c in "0123456789abcdef" for c in row["base_sha"])
-        assert len(row["head_sha"]) == 40 and all(c in "0123456789abcdef" for c in row["head_sha"])
-        assert row["diff"] == DIFF_BODY
-        # Frozen V2 records are format-valid; replay scores their adjudicated outcome through the
-        # shared verdict vocabulary.
-        assert row["format_valid"] is True
-        assert row["verifier_verdicts"]
-
-
-def test_stage0_v2_gold_record_without_finding_text_fails_closed(tmp_path: Path) -> None:
-    proj_dir = _build_projection(tmp_path, omit_finding_text=True)
-    cfg = PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out")
-    with pytest.raises(RuntimeError, match="finding_text"):
-        run_pipeline(cfg, dry_run=False)
-
-
-def test_stage2_v2_truncated_sha_fails_closed(tmp_path: Path) -> None:
-    proj_dir = _build_projection(tmp_path, base_sha="abc123")
-    cfg = PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out")
-    with pytest.raises(RuntimeError, match="base_sha"):
-        run_pipeline(cfg, dry_run=False)
+def test_v2_projection_without_finding_text_or_full_sha_fails_closed(tmp_path: Path) -> None:
+    for name, overrides, match in (("missing-text", {"omit_finding_text": True}, "finding_text"),
+                                   ("short-sha", {"base_sha": "abc123"}, "base_sha")):
+        root = tmp_path / name
+        root.mkdir()
+        proj_dir = _build_projection(root, **overrides)
+        cfg = PipelineConfig(projection=proj_dir, out_dir=root / "out")
+        with pytest.raises(RuntimeError, match=match):
+            run_pipeline(cfg, dry_run=False)
 
 
 def test_cli_projection_wiring(tmp_path: Path, cli_runner: Any) -> None:

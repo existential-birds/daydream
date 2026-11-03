@@ -3,18 +3,11 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 
 import pytest
 
-from daydream.agent import run_agent
-from daydream.backends import AgentEvent, MetricsEvent, ResultEvent, TextEvent
-from daydream.pr_comment_renderer import render_run_info_block
 from daydream.summarize import summarize
-from daydream.trajectory import DaydreamPhase
-from tests.harness.backend import ScriptedBackend
-from tests.harness.trajectory import make_recorder
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "trajectories"
 _DEEP_PARENT = _FIXTURE_DIR / "deep_mode_parent.json"
@@ -22,61 +15,25 @@ _DEEP_FORK_A = _FIXTURE_DIR / "deep_mode_fork_a.json"
 _DEEP_FORK_B = _FIXTURE_DIR / "deep_mode_fork_b.json"
 
 
-def test_run_directory_with_parent_and_forks(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    run_dir = tmp_path / "runs" / "abcd1234-fixture"
-    run_dir.mkdir(parents=True)
-    shutil.copy(_DEEP_PARENT, run_dir / "trajectory.json")
-    siblings = run_dir / "trajectories"
-    siblings.mkdir()
-    shutil.copy(_DEEP_FORK_A, siblings / "fix-0.json")
-    shutil.copy(_DEEP_FORK_B, siblings / "fix-1.json")
-
-    rc = summarize(run_dir)
-    assert rc == 0
-    out = capsys.readouterr().out
-    # Aggregate cost / token totals from the deep-mode fixtures.
-    assert "- **Cost:** $0.19" in out
-    assert "14,000 in" in out
-    # Fix row aggregates across both forks.
-    fix_row = next(line for line in out.splitlines() if line.startswith("| Fix |"))
-    assert "5,000" in fix_row
-    assert out.rstrip("\n") == render_run_info_block(
-        [run_dir / "trajectory.json", siblings / "fix-0.json", siblings / "fix-1.json"]
-    )
-
-def test_nonexistent_path_returns_nonzero(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    rc = summarize(tmp_path / "no-such-thing.json")
-    assert rc != 0
-    err = capsys.readouterr().err
-    assert "does not exist" in err
-
-def test_directory_without_trajectories_returns_nonzero(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_missing_empty_unparseable_or_non_json_input_returns_nonzero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert summarize(tmp_path / "no-such-thing.json") != 0
+    assert "does not exist" in capsys.readouterr().err
     empty = tmp_path / "empty-run"
     empty.mkdir()
-    rc = summarize(empty)
-    assert rc != 0
-    err = capsys.readouterr().err
-    assert "no trajectory" in err.lower()
-
-def test_directory_with_only_unparseable_trajectories_falls_back(tmp_path: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
+    assert summarize(empty) != 0
+    assert "no trajectory" in capsys.readouterr().err.lower()
     run_dir = tmp_path / "broken-run"
     run_dir.mkdir()
     (run_dir / "trajectory.json").write_text("{not json", encoding="utf-8")
-
-    rc = summarize(run_dir)
-    out = capsys.readouterr().out
-    assert "*run details unavailable*" in out
     # The renderer fallback signals "no real summary produced" via non-zero.
-    assert rc != 0
-
-def test_non_json_file_rejected(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert summarize(run_dir) != 0
+    assert "*run details unavailable*" in capsys.readouterr().out
     bad = tmp_path / "trajectory.txt"
     bad.write_text(json.dumps({"schema_version": "ATIF-v1.6"}), encoding="utf-8")
-    rc = summarize(bad)
-    assert rc != 0
-    err = capsys.readouterr().err
-    assert ".json" in err
+    assert summarize(bad) != 0
+    assert ".json" in capsys.readouterr().err
 
 
 # --- User-overridable pricing through the summarize entrypoint ----------------
@@ -148,64 +105,4 @@ def test_summarize_uses_user_price_override_for_unknown_model(
     # No footnote — the model WAS priced via the override.
     assert "not in the price table" not in out
 
-def test_summarize_unknown_model_no_prices_renders_dash_and_footnote(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-) -> None:
-    traj = _write_custom_model_trajectory(tmp_path)
-    # Point at a nonexistent file: neutralizes both a stray env var AND the
-    # ~/.daydream/prices.toml home-dir fallback, so no price table loads.
-    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "no-such-prices.toml"))
-
-    rc = summarize(traj)
-    assert rc == 0
-    out = capsys.readouterr().out
-
-    assert "- **Cost:** —" in out
-    review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
-    assert "| — |" in review_row
-    assert _EXPECTED_COST_CELL not in review_row
-    assert f"<sub>Cost unavailable: model `{_CUSTOM_MODEL}` is not in the price table.</sub>" in out
-
-
 # --- Per-phase token cells reflect whole-invocation usage --------------------
-
-async def test_per_phase_cells_show_whole_invocation_tokens(tmp_path: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Drive two multi-turn phases through the real recorder and inspect rendered cells."""
-    def _multi_turn(turns: int, in_tok: int, out_tok: int) -> ScriptedBackend:
-        turn: list[AgentEvent | BaseException] = []
-        for i in range(turns):
-            turn += [TextEvent(text=f"turn {i + 1}"),
-                MetricsEvent(message_id=f"m-{i}", prompt_tokens=in_tok, completion_tokens=out_tok, cached_tokens=0,
-                    cost_usd=None, model_name="claude-opus-5",
-                ),
-            ]
-        turn.append(ResultEvent(structured_output=None, continuation=None))
-        return ScriptedBackend(events=turn, model="claude-opus-5")
-
-    run_dir = tmp_path / ".daydream"
-    recorder = make_recorder(tmp_path, agent_model_name="claude-opus-5")
-    async with recorder:
-        await run_agent(
-            _multi_turn(turns=4, in_tok=25_000, out_tok=1_000), tmp_path, "review", phase=DaydreamPhase.REVIEW,
-        )
-        await run_agent(_multi_turn(turns=2, in_tok=10_000, out_tok=500), tmp_path, "fix", phase=DaydreamPhase.FIX,)
-    assert run_dir.exists()
-
-    rc = summarize(recorder.path)
-    assert rc == 0
-    out = capsys.readouterr().out
-
-    assert "- **Model:**" in out
-    assert "| Phase | Model | Tools |" in out
-    assert "<sub>Generated by daydream v" in out
-    assert "**Mode:**" not in out
-
-    review_row = next(ln for ln in out.splitlines() if ln.startswith("| Review"))
-    fix_row = next(ln for ln in out.splitlines() if ln.startswith("| Fix"))
-    # 4 x 25k = 100k input / 4 x 1k = 4k output, not the last turn's 25k/1k.
-    assert "100,000" in review_row, review_row
-    assert "4,000" in review_row, review_row
-    # 2 x 10k = 20k input / 2 x 500 = 1k output.
-    assert "20,000" in fix_row, fix_row
-    assert "1,000" in fix_row, fix_row

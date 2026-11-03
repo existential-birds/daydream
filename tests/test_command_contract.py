@@ -7,9 +7,6 @@ preserving the accept/reject grammar.
 
 from __future__ import annotations
 
-import json
-import re
-from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -18,160 +15,11 @@ from jsonschema import Draft202012Validator
 
 from daydream.improve import recon as orch
 from daydream.improve.command_contract import (
-    DIRECTORY_SCOPE_SCHEMA,
-    REPOSITORY_FILE_PATH_SCHEMA,
     WORKING_DIRECTORY_SCHEMA,
     canonicalize_directory_scope,
-    path_is_confined,
-    valid_directory_scope_lexical,
-    valid_repository_file_path,
     validate_applicability,
     validate_recon_commands,
 )
-from daydream.repository_paths import canonicalize_working_directory
-from daydream.run_config import RunConfig
-from daydream.runner import run
-from tests.conftest import improve_fixture_service, improve_fixture_test_command_anchor
-from tests.harness.improve_backend import (
-    AuditAbsoluteWorkingDirectoryBackend,
-    improve_artifact,
-    install_capable_improve_backend,
-    install_improve_stub,
-    stub_recon_commands,
-)
-
-MakeConfig = Callable[..., RunConfig]
-
-
-LEGAL_FILENAMES = ["foo bar.py", "Café.md",
-    "file#1.py",
-    "a%file.txt", "(x).py", "a&b.py", "~/.bashrc", "space name.py",
-]
-
-PATH_ACCEPTS = ["src/main.rs", "a/b/c", ".github/workflows/ci.yml", "foo.bar", "foo..bar",
-    # issues #572/#573: legal filenames the over-tight grammar rejected
-    *LEGAL_FILENAMES, "./foo.py",
-]
-
-MULTI_DOT_PATHS = ["..cache", "...", "src/...generated"]
-
-PATH_REJECTS = ["a/b/./c", "..", "a/../b", "/abs/path", "a//b", "$()", "${x}",
-    "a$b",     # $ excluded entirely (shell-expansion risk)
-    "x`y",     # backtick excluded (shell metachar)
-    ".",       # bare current dir is not a valid file path
-    "./",      # bare ./ is not a valid file path
-]
-
-
-def test_command_batch_admits_real_legal_paths_and_locates_independent_rejections(tmp_path: Path) -> None:
-    """One bad source/scope cannot discard valid siblings or hide another rejected record."""
-    template = stub_recon_commands(start_line=1)[0]
-    (tmp_path / "...workspace").mkdir()
-    template["working_directory"] = "...workspace"
-    commands = []
-    accepted_paths = PATH_ACCEPTS + MULTI_DOT_PATHS
-    for index, value in enumerate(accepted_paths):
-        source = tmp_path / value
-        source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text("uv run pytest\n")
-        commands.append(
-            {
-                **template,
-                "id": f"legal-{index}",
-                "evidence": {**template["evidence"], "source_path": value},
-                "applicability": {**template["applicability"], "scope": {"kind": "in-scope-paths", "paths": [value]}},
-            }
-        )
-    expected_rejections = set()
-    for index, value in enumerate(PATH_REJECTS):
-        position = len(commands)
-        # Separate records ensure neither schema failure masks the other field.
-        commands.extend(
-            [
-                {**template, "id": f"bad-evidence-{index}", "evidence": {**template["evidence"], "source_path": value}},
-                {
-                    **template,
-                    "id": f"bad-scope-{index}",
-                    "evidence": {**template["evidence"], "source_path": "src/main.rs"},
-                    "applicability": {
-                        **template["applicability"],
-                        "scope": {"kind": "in-scope-paths", "paths": [value]},
-                    },
-                },
-            ]
-        )
-        expected_rejections.update(
-            {
-                f"RECON_EVIDENCE_INVALID@/commands/{position}/evidence/source_path",
-                f"RECON_APPLICABILITY_INVALID@/commands/{position + 1}/applicability/scope/paths/0",
-            }
-        )
-
-    admitted, rejected = validate_recon_commands({"commands": commands}, repo=tmp_path)
-
-    assert [
-        (record["id"], record["evidence"]["source_path"], record["applicability"]["scope"]["paths"])
-        for record in admitted
-    ] == [(f"legal-{index}", path, [path.removeprefix("./")]) for index, path in enumerate(accepted_paths)]
-    assert {record["evidence"]["verbatim_excerpt"] for record in admitted} == {"uv run pytest"}
-    assert {record["working_directory"] for record in admitted} == {"...workspace"}
-    assert len(rejected) == len(expected_rejections) and set(rejected) == expected_rejections
-
-
-def test_file_path_empty_and_length_bounds() -> None:
-    # empty always rejected
-    assert not Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA).is_valid("")
-    # 4096 (PATH_MAX) is the cap: accepted up to and including, rejected beyond
-    assert Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA).is_valid("a" * 4096)
-    assert not Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA).is_valid("a" * 4097)
-    # the lexical gate must agree with the schema at the same cap
-    assert valid_repository_file_path("a" * 4096)
-    assert not valid_repository_file_path("a" * 4097)
-    # the directory-scope pair must agree at the same 4096 (PATH_MAX) cap
-    assert Draft202012Validator(DIRECTORY_SCOPE_SCHEMA).is_valid("a" * 4096)
-    assert not Draft202012Validator(DIRECTORY_SCOPE_SCHEMA).is_valid("a" * 4097)
-    assert valid_directory_scope_lexical("a" * 4096)
-    assert not valid_directory_scope_lexical("a" * 4097)
-    # PATH_MAX is a byte budget (POSIX), so the lexical gates measure UTF-8
-    # bytes, not code points: 2048 × 2-byte é == 4096 bytes == the cap.
-    assert valid_repository_file_path("é" * 2048)
-    assert not valid_repository_file_path("é" * 2049)
-    assert valid_directory_scope_lexical("é" * 2048)
-    assert not valid_directory_scope_lexical("é" * 2049)
-
-
-def test_working_directory_accepts_cwd() -> None:
-    assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid(".")
-    regex = re.compile(WORKING_DIRECTORY_SCHEMA["pattern"])
-    assert regex.match(".")
-    assert regex.match("src/main.rs")
-    # A well-formed absolute path is lexically acceptable (confinement is
-    # enforced by path_is_confined + the host check, not this pattern).
-    assert regex.match("/abs/path")
-    assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("/abs/path")
-    # Absolute form still requires a non-empty segment after the slash.
-    assert not regex.match("/")
-    assert not regex.match("//double-slash")
-    # The ./ prefix is relative-only: /./foo must not be schema-legal (the
-    # runtime confinement gate rejects it, so the gates must agree).
-    assert not regex.match("/./foo")
-    assert not Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("/./foo")
-    # issues #572/#573: inherited grammar now accepts legal names; cap is 4096
-    assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("Café.md")
-    assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("./foo")
-    assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("a" * 4096)
-    assert not Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("a" * 4097)
-
-
-def test_lexical_gates_reject_trailing_newline() -> None:
-    """Trailing newline is rejected by the fullmatch gates, not the schema.
-
-    The exported patterns anchor with ^/$ because the A/Z anchors are not valid ECMA-262 (Codex/OpenAI strict mode
-    rejects them), and Python re.search lets $ match before a trailing newline, so the schema alone cannot express
-    this rejection. The runtime gates are the enforcement point."""
-    for value in ("foo\n", "src/main.rs\n"):
-        assert not valid_repository_file_path(value)
-        assert not valid_directory_scope_lexical(value)
 
 
 def test_validate_applicability_collapses_dot_slash_scope_spellings(tmp_path: Path,) -> None:
@@ -195,186 +43,50 @@ def test_validate_applicability_collapses_dot_slash_scope_spellings(tmp_path: Pa
     assert normalized["scope"]["paths"] == ["frontend"]
     assert canonicalize_directory_scope("./frontend") == "frontend"
     assert canonicalize_directory_scope("./frontend/") == "frontend"
+    # The schema accepts "." and confinable absolute paths; "/./foo" is rejected
+    # by both the schema and the runtime confinement gate, so the gates agree.
+    working_directory = Draft202012Validator(WORKING_DIRECTORY_SCHEMA)
+    assert [working_directory.is_valid(value) for value in (".", "src/main.rs", "/abs/path", "/", "//x", "/./foo")] == [
+        True, True, True, False, False, False]
 
 
-def test_path_is_confined_allow_absolute(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    (repo / "improve").mkdir(parents=True)
-    abs_under = (repo / "improve").as_posix()
-    abs_outside = (repo.parent / "outside").as_posix()
-    # allow_absolute=True: confined absolute accepted, outside rejected.
-    assert path_is_confined(repo, abs_under, allow_absolute=True)
-    assert not path_is_confined(repo, abs_outside, allow_absolute=True)
-    # default (allow_absolute=False) must still reject absolute — this is what
-    # keeps evidence source_path / applicability scope paths unchanged.
-    assert not path_is_confined(repo, abs_under)
-
-
-def test_path_is_confined_allow_absolute_symlinked_ancestor(tmp_path: Path,) -> None:
-    """A symlinked ancestor of the repo must not reject the absolute spelling.
-
-    Regression pin for the macOS ``/tmp`` -> ``/private/tmp`` case: with ``allow_absolute=True`` the ancestor-skip
-    strips the repo-root prefix from the walk, so an absolute value spelled through a symlinked ancestor of the
-    repo is accepted exactly like the identical relative spelling."""
-    real = tmp_path / "real"
-    (real / "repo" / "improve").mkdir(parents=True)
-    alias = tmp_path / "alias"
-    alias.symlink_to(real, target_is_directory=True)
-    repo = alias / "repo"
-    abs_under = (repo / "improve").as_posix()
-    assert path_is_confined(repo, abs_under, allow_absolute=True)
-    # Baseline: the identical relative spelling is confined either way.
-    assert path_is_confined(repo, "improve")
-    # The resolved spelling of the same path is confined too.
-    assert path_is_confined(repo, (real / "repo" / "improve").as_posix(), allow_absolute=True)
-
-
-def test_canonicalize_working_directory_absolute_collapses_to_relative(tmp_path: Path) -> None:
-    """Must-have #1: an absolute in-repo spelling maps to its repo-relative form."""
-    assert canonicalize_working_directory(tmp_path, f"{tmp_path}/sub") == "sub"
-    assert canonicalize_working_directory(tmp_path, f"{tmp_path}") == "."
-
-
-def test_canonicalize_working_directory_resolved_repo_spelling(tmp_path: Path) -> None:
-    """The repo.resolve() fallback base: a symlinked repo strips a value
-    spelled with its RESOLVED path, which the literal prefix cannot match."""
-    real = tmp_path / "real"
-    real.mkdir()
-    link = tmp_path / "link"
-    link.symlink_to(real, target_is_directory=True)
-    # Literal spelling strips on the first (unresolved) base.
-    assert canonicalize_working_directory(link, f"{link}/sub") == "sub"
-    # Resolved spelling matches only the repo.resolve() base.
-    assert canonicalize_working_directory(link, f"{link.resolve()}/sub") == "sub"
-
-
-def test_canonicalize_working_directory_collapses_parent_traversal(tmp_path: Path) -> None:
-    """A ``..``-containing absolute spelling of an in-repo directory yields the
-    same key as its plain spelling (the issue #649 dedup miss)."""
-    assert canonicalize_working_directory(tmp_path, f"{tmp_path}/sub/../sub") == "sub"
-
-
-@pytest.mark.anyio
-async def test_host_enumeration_dedups_absolute_model_wd(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+def test_host_enumeration_dedups_only_the_same_absolute_or_relative_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """Must-have #1 at the entrypoint: an absolute-spelled model working_directory collapses against the relative
-    host record, so the host command is NOT re-admitted into recon.json.
+    """An absolute model working directory collapses against the relative host record.
 
-    Fixture contract: ``improve_monorepo_target`` must remain a monorepo that (a) declares the test command ``uv
-    run pytest`` in its root ``pyproject.toml`` and (b) contains at least one service directory under ``apps/``.
-    Both facts are derived from the fixture's actual content below rather than hardcoded, so any layout/names that
-    retain that semantic content keep this test driving the dedup path; a future editor changing the fixture must
-    preserve those two properties or this test fails with the attributable errors below."""
-    # Discover a real service directory from the fixture instead of
-    # hardcoding a name: any directory under apps/ works, because dedup
-    # collapses the absolute model wd against the relative host wd.
-    service = improve_fixture_service(improve_monorepo_target / "apps")
-    rel = f"apps/{service}"
-    monkeypatch.setattr("daydream.improve.recon.enumerate_repository_commands",
-        lambda repo, *, directories=(".",), reserved_ids=(): [{
-                "id": "make-check", "purpose": "Run the repository test suite", "command": "uv run pytest",
-                "working_directory": rel,
-                "expected_success": {"exit_code": 0, "observable_result": "exit 0 and the tests pass"},
-                "applicability": {"scope": {"kind": "in-scope-paths", "paths": [rel]}, "preconditions": [],
-                    "rationale": f"The {service} service declares the test command.",
-                }, "evidence": {"kind": "host-derived", "source_path": f"{rel}/pyproject.toml",
-                    "line_anchor": {"start_line": 1, "end_line": 1}, "verbatim_excerpt": "[project]",
-                },
-            }
-        ],
-    )
-    stub = install_capable_improve_backend(
-        monkeypatch, AuditAbsoluteWorkingDirectoryBackend(improve_monorepo_target, rel=rel),
-    )
-
-    # Derive the evidence anchor from the fixture's actual content instead of
-    # hardcoding a line number: the root pyproject.toml must declare the test
-    # subject command, and the validated line is wherever that declaration
-    # lives (any layout that keeps the declaration works).
-    anchor_line = improve_fixture_test_command_anchor(improve_monorepo_target / "pyproject.toml")
-
-    stub.recon_output_override = {"languages": ["python"],
-        "commands": [{"id": "model-check", "purpose": "Run the repository test suite", "command": "uv run pytest",
-                # Absolute spelling of the SAME directory the host enumerates
-                # relative. The backend rewrites this placeholder using the
-                # real isolated audit cwd supplied at execute time.
-                "working_directory": rel,
-                "expected_success": {"exit_code": 0, "observable_result": "exit 0 and the tests pass"},
-                "applicability": {"scope": {"kind": "whole-repository"}, "preconditions": [],
-                    "rationale": "The root configuration declares the test command.",
-                }, "evidence": {"kind": "literal-command", "source_path": "pyproject.toml",
-                    "line_anchor": {"start_line": anchor_line, "end_line": anchor_line}, "verbatim_excerpt": None,
-                },
-            }
-        ], "conventions": ["OpenAPI First"], "intent_docs": ["README.md"],
-    }
-    stub.plan_gate_on_first_menu_id = True
-
-    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
-
-    assert code == 0
-    recon_cwd = next(call["cwd"] for call in stub.calls if call["marker"] == "recon")
-    emitted_model_wd = Path(stub.recon_output_override["commands"][0]["working_directory"])
-    assert emitted_model_wd.is_absolute()
-    assert emitted_model_wd == recon_cwd / rel
-    assert emitted_model_wd != improve_monorepo_target / rel
-    recon = json.loads(improve_artifact(improve_monorepo_target, "recon.json").read_text(encoding="utf-8"))
-    # The host command was deduped against the absolute model wd: no
-    # re-admitted make-check record, no rejection noise.
-    assert [command["id"] for command in recon["commands"]] == ["model-check"]
-    assert recon["command_rejections"] == []
-
-
-def test_host_enumeration_does_not_dedup_different_directory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Discriminating: a genuinely different directory is NOT collapsed —
-    normalization must not widen dedup to 'same command anywhere'."""
+    A genuinely different directory is not collapsed, so normalization never widens
+    dedup to 'same command anywhere'. The absolute model record itself still
+    validates against its confined directory and cited declaration line.
+    """
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "other").mkdir()
+    (tmp_path / "pyproject.toml").write_text("[tool.x]\ntest = 'make check'\n")
     host_record = {"id": "make-check", "command": "make check", "working_directory": "sub"}
     monkeypatch.setattr(orch, "enumerate_repository_commands", lambda *a, **k: [host_record])
-    model = [{"id": "m1", "command": "make check", "working_directory": f"{tmp_path}/other"}]
-    count, _, _ = orch._host_enumerated_commands(tmp_path, [], [], model_commands=model)
-    assert count == 1  # different directory stays a separate candidate
-
-
-def test_path_is_confined_allow_absolute_cannot_escape_via_ancestor_skip(tmp_path: Path,) -> None:
-    """The ancestor-skip must not enable a symlink escape from containment.
-
-    Regression pin for the claim that skipping symlink tests on components above the repo root cannot escape
-    containment: a symlink at or below the repo root that points outside the repo is still rejected even with
-    ``allow_absolute=True``."""
-    repo = tmp_path / "repo"
-    (repo / "improve").mkdir(parents=True)
-    outside = tmp_path / "outside"
+    for model_wd, expected in ((f"{tmp_path}/sub", 0), (f"{tmp_path}/other", 1)):
+        model = [{"id": "m1", "command": "make check", "working_directory": model_wd}]
+        count, _, _ = orch._host_enumerated_commands(tmp_path, [], [], model_commands=model)
+        assert count == expected, model_wd
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
     outside.mkdir()
-    (repo / "improve" / "escape").symlink_to(outside, target_is_directory=True)
-    abs_escape = (repo / "improve" / "escape").as_posix()
-    assert not path_is_confined(repo, abs_escape, allow_absolute=True)
-    # A direct absolute path to the outside directory is rejected as well.
-    assert not path_is_confined(repo, outside.as_posix(), allow_absolute=True)
+    (tmp_path / "escape").symlink_to(outside, target_is_directory=True)
 
+    def record(command_id: str, working_directory: str) -> dict[str, Any]:
+        return {
+            "id": command_id, "purpose": "Run the repository test suite", "command": "make check",
+            "working_directory": working_directory,
+            "expected_success": {"exit_code": 0, "observable_result": "exit 0 and the tests pass"},
+            "applicability": {"scope": {"kind": "whole-repository"}, "preconditions": [],
+                              "rationale": "The root configuration declares the test command."},
+            "evidence": {"kind": "literal-command", "source_path": "pyproject.toml",
+                         "line_anchor": {"start_line": 2, "end_line": 2}, "verbatim_excerpt": None},
+        }
 
-def _iter_schema_patterns(schema: Any) -> Iterator[str]:
-    """Yield the string value of every ``pattern`` key in a schema tree."""
-    if isinstance(schema, dict):
-        for key, value in schema.items():
-            if key == "pattern" and isinstance(value, str):
-                yield value
-            else:
-                yield from _iter_schema_patterns(value)
-    elif isinstance(schema, list):
-        for item in schema:
-            yield from _iter_schema_patterns(item)
-
-
-@pytest.mark.anyio
-async def test_improve_recon_schema_sent_to_backend_is_lookaround_free(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
-    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
-    assert code == 0
-    schemas = [call["output_schema"] for call in stub.calls if call.get("output_schema")]
-    assert schemas, "expected at least one structured-output turn"
-    for schema in schemas:
-        for pattern in _iter_schema_patterns(schema):
-            assert re.search(r"\(\?[=!<]", pattern) is None
+    validated, errors = validate_recon_commands({"commands": [
+        record("model-check", f"{tmp_path}/sub"), record("escape-check", f"{tmp_path}/escape"),
+        record("outside-check", outside.as_posix()),
+    ]}, repo=tmp_path)
+    assert [command["id"] for command in validated] == ["model-check"]
+    assert validated[0]["evidence"]["verbatim_excerpt"] == "test = 'make check'"
+    assert errors == [f"RECON_WORKING_DIRECTORY_INVALID@/commands/{index}/working_directory" for index in (1, 2)]

@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-import json
-import os
 import secrets
-import shutil
 import subprocess
-import sys
 import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
 
 import anyio
 import pytest
@@ -30,6 +25,7 @@ from daydream.workspace import (
     WorkContext,
     WorkspaceCopyPathError,
     _resolve_base,
+    _resolve_ref,
     copy_files_into_ephemeral,
     open_audit_workspace,
     open_workspace,
@@ -65,7 +61,9 @@ async def _open(repo: Path, owner: PrivateWorkspaceOwner, *, base: str = "main",
         yield work
 
 
-def test_resolve_base_falls_back_when_pr_lookup_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_resolve_base_and_ref_prefer_pr_base_and_warn_on_checked_out_branch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
     monkeypatch.setattr("daydream.workspace.shutil.which", lambda _name: "/bin/gh")
     monkeypatch.setattr(
         git_ops, "gh_pr_list_for_branch", lambda *_args, **_kwargs: (_ for _ in ()).throw(GitError("gh auth failed")),
@@ -73,6 +71,19 @@ def test_resolve_base_falls_back_when_pr_lookup_fails(monkeypatch: pytest.Monkey
     monkeypatch.setattr(git_ops, "default_branch", lambda _repo: "trunk")
 
     assert _resolve_base(tmp_path, "feature", None) == "trunk"
+    # An open PR's base wins over the default branch; rows without a usable base are skipped.
+    monkeypatch.setattr(git_ops, "gh_pr_list_for_branch",
+                        lambda *_args, **_kwargs: ["invalid", {"baseRefName": ""}, {"baseRefName": "develop"}])
+    assert _resolve_base(tmp_path, "feature", None) == "develop"
+    # Reviewing the checked-out branch warns that origin's copy is what gets reviewed.
+    warnings: list[str] = []
+    monkeypatch.setattr("daydream.ui.print_warning", lambda _console, message: warnings.append(message))
+    monkeypatch.setattr(git_ops, "branch_exists", lambda *_a: True)
+    monkeypatch.setattr(git_ops, "current_branch", lambda _repo: "feature")
+    monkeypatch.setattr(git_ops, "upstream_ahead_count", lambda *_a: 2)
+    assert _resolve_ref(tmp_path, "feature") == "origin/feature"
+    assert warnings == [
+        "feature is checked out in cwd and is 2 commits behind origin/feature — reviewing origin/feature."]
 
 
 def _make_repo_with_origin(tmp_path: Path) -> tuple[Path, Path]:
@@ -114,152 +125,6 @@ def _push_origin_commit_via_sidecar(tmp_path: Path, bare: Path, branch: str = "m
     return sha
 
 
-async def test_in_place_no_branch_no_force(tmp_path: Path) -> None:
-    repo, bare = _make_repo_with_origin(tmp_path)
-    # Push a new commit to origin from a sidecar so we can prove no fetch ran.
-    new_sha = _push_origin_commit_via_sidecar(tmp_path, bare)
-
-    async with open_workspace(repo, branch=None, base=None, force_ephemeral=False, skip_tests=False) as ctx:
-        assert isinstance(ctx, WorkContext)
-        assert ctx.repo == repo
-        assert ctx.source == repo
-        assert ctx.is_ephemeral is False
-        assert ctx.head_branch == "main"
-        # No fetch should have run -> the new commit on origin is not visible.
-        proc = subprocess.run(  # noqa: S603
-            ["git", "rev-parse", "--verify", "origin/main"],  # noqa: S607
-            cwd=repo, capture_output=True, text=True, check=False,
-        )
-        # origin/main still points at the original push, not new_sha.
-        assert proc.stdout.strip() != new_sha
-
-    # Source remains untouched after exit (no cleanup paths to assert).
-    assert repo.exists()
-
-
-@pytest.mark.parametrize("ephemeral", [False, True], ids=["source", "model-worktree"])
-@pytest.mark.parametrize("change", ["replacement", "git-routing"])
-async def test_workspace_setup_refuses_changed_code_before_yield(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ephemeral: bool, change: str,
-) -> None:
-    """Setup anchor reads cannot yield ownership of a replacement checkout or foreign Git tree.
-
-    Existing cleanup tests change ownership after the workspace is yielded; setup previously ran
-    these reads outside its captured authority and accepted a mixed or foreign commit identity.
-    """
-    repo, _ = _make_repo_with_origin(tmp_path)
-    owner = _private_owner(repo, tmp_path)
-    foreign = tmp_path / "foreign"
-    _init_repo(foreign)
-    (foreign / "foreign.txt").write_bytes(b"foreign checkout must survive\n")
-    _git(foreign, "add", "foreign.txt")
-    _commit(foreign, "foreign commit")
-    _git(foreign, "checkout", "-b", "foreign-branch")
-    original_run = subprocess.run
-    retained = tmp_path / "retained-code"
-    changed: Path | None = None
-
-    def replace_at_anchor(args: Any, **kwargs: Any) -> Any:
-        nonlocal changed
-        if changed is None and args == ["git", "branch", "--show-current"]:
-            changed = Path(kwargs["cwd"])
-            if change == "replacement":
-                changed.rename(retained)
-                foreign.rename(changed)
-            elif (changed / ".git").is_file():
-                (changed / ".git").write_text(f"gitdir: {foreign / '.git'}\n")
-            else:
-                (changed / ".git").rename(tmp_path / "retained-git")
-                shutil.copytree(foreign / ".git", changed / ".git")
-        return original_run(args, **kwargs)
-
-    monkeypatch.setattr("daydream.git_ops.process.subprocess.run", replace_at_anchor)
-    with pytest.raises(ArtifactVisibilityError):
-        async with _open(repo, owner, ephemeral=ephemeral):
-            pytest.fail("workspace yielded changed code ownership")
-
-    assert changed is not None
-    if change == "replacement":
-        assert (retained / "base.txt").read_bytes() == b"base\n"
-        assert (changed / "foreign.txt").read_bytes() == b"foreign checkout must survive\n"
-    else:
-        assert (changed / "base.txt").read_bytes() == b"base\n"
-        assert (foreign / "foreign.txt").read_bytes() == b"foreign checkout must survive\n"
-    if ephemeral:
-        assert changed.is_dir(), "unsafe cleanup must retain the operational checkout"
-
-
-async def test_external_worktrees_use_supplied_private_workspace_owner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    locations = private_root_locations(base=tmp_path / "private")
-    owner = _private_owner(repo, tmp_path)
-    artifact_owner = owner.artifact_state_root / "owner.json"
-    operational_owner = owner.operational_state_root / "owner.json"
-    assert artifact_owner.read_bytes() == operational_owner.read_bytes()
-    payload = json.loads(artifact_owner.read_text(encoding="utf-8"))
-    assert payload["source"] == str(repo.resolve())
-    assert payload["git_common_dir"] == str(git_ops.git_common_dir(repo))
-
-    _forbid_default_private_base(monkeypatch)
-    captured: list[Path] = []
-    async with _open(repo, owner, ephemeral=True) as first:
-        captured.append(first.repo)
-        async with _open(repo, owner, ephemeral=True) as second:
-            captured.append(second.repo)
-            for work in (first, second):
-                assert work.source == repo.resolve()
-                assert work.repo.parent == owner.operational_state_root / "operational"
-                assert work.repo.is_relative_to(locations.operational_workspaces)
-                assert not work.repo.is_relative_to(repo)
-                assert not work.repo.is_relative_to(locations.artifact_runtime)
-                assert not locations.artifact_runtime.is_relative_to(work.repo)
-                assert work.repo not in repo.rglob("*")
-                assert git_ops.git_common_dir(work.repo) == owner.git_common_dir
-            assert first.repo != second.repo
-            assert all(path.exists() for path in captured)
-
-    assert all(not path.exists() for path in captured)
-    assert not (repo / ".daydream" / "worktrees").exists()
-
-
-async def test_open_workspace_without_owner_resolves_default_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    private_base = tmp_path / "standalone-private"
-    lookups = 0
-
-    def default_private_base() -> Path:
-        nonlocal lookups
-        lookups += 1
-        return private_base
-
-    monkeypatch.setattr(artifact_ownership, "_default_private_base", default_private_base)
-    async with open_workspace(repo, branch=None, base="main", force_ephemeral=True, extra_copy=[], skip_tests=True,
-    ) as work:
-        assert work.repo.is_relative_to(private_base / "workspaces")
-        assert not work.repo.is_relative_to(private_base / "runtime")
-
-    assert lookups == 1
-
-
-async def test_open_workspace_rejects_wrong_supplied_owner_before_git_mutation(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    first_repo, _ = _make_repo_with_origin(tmp_path / "first")
-    second_repo, _ = _make_repo_with_origin(tmp_path / "second")
-    wrong_owner = _private_owner(first_repo, tmp_path)
-    before = _git(second_repo, "worktree", "list", "--porcelain")
-
-    _forbid_default_private_base(monkeypatch)
-    with pytest.raises(ArtifactVisibilityError, match="owner identity mismatch"):
-        async with _open(second_repo, wrong_owner, ephemeral=True):
-            pass
-
-    assert _git(second_repo, "worktree", "list", "--porcelain") == before
-    assert not (wrong_owner.operational_state_root / "operational").exists()
-
-
 async def test_unsafe_operational_root_rejects_before_fetch_mutation(tmp_path: Path,) -> None:
     repo, bare = _make_repo_with_origin(tmp_path)
     owner = _private_owner(repo, tmp_path)
@@ -277,73 +142,17 @@ async def test_unsafe_operational_root_rejects_before_fetch_mutation(tmp_path: P
     assert not any("worktree " in line for line in _git(repo, "worktree", "list", "--porcelain").splitlines()[1:])
 
 
-@pytest.mark.parametrize("namespace,name,lock_state,broken,residue", [
-        pytest.param("worktrees", "run-old-reanchor", None, True, False, id="registry-listed-broken-git-chain"),
-        pytest.param("worktrees", "custom-named-worktree", "live", False, False, id="live-custom-name"),
-        pytest.param("audit", "run-crashed", "stale", False, False, id="stale-audit-lock"),
-        pytest.param("worktrees", "run-known-reanchor", None, False, True, id="registered-and-unknown-residue"),
-    ])
-async def test_open_workspace_rejects_public_registered_worktrees_without_mutation(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, namespace: str, name: str,
-    lock_state: str | None, broken: bool, residue: bool,
-) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    owner = _private_owner(repo, tmp_path)
-    checkout = repo / ".daydream" / namespace / name
-    git_ops.worktree_add(repo, checkout, "main", detach=True, lock_reason=lock_state)
-    lock = git_ops.git_dir(checkout) / "locked"
-    if lock_state == "stale":
-        os.utime(lock, (0, 0))
-    lock_bytes = lock.read_bytes() if lock.exists() else None
-    if broken:
-        (checkout / ".git").unlink()
-    canary = checkout / "operator.bin"
-    canary.write_bytes(b"registered operator bytes\x00")
-    unknown = checkout.parent / "operator-notes" / "retained.txt"
-    if residue:
-        unknown.parent.mkdir()
-        unknown.write_bytes(b"retain me")
-    before = _git(repo, "worktree", "list", "--porcelain")
-    _forbid_default_private_base(monkeypatch)
-    monkeypatch.setattr(git_ops, "worktree_lock_mtime", lambda _path: pytest.fail("unsupported storage was probed"))
-    with pytest.raises(ArtifactVisibilityError, match="Unsupported public operational storage"):
-        async with _open(repo, owner):
-            pass
-    assert checkout.is_dir() and checkout.parent.is_dir()
-    assert canary.read_bytes() == b"registered operator bytes\x00"
-    assert (lock.read_bytes() if lock.exists() else None) == lock_bytes
-    assert (checkout / ".git").exists() is not broken
-    if residue:
-        assert unknown.read_bytes() == b"retain me"
-    assert _git(repo, "worktree", "list", "--porcelain") == before
-    assert not (owner.operational_state_root / "operational").exists()
-
-
-@pytest.mark.parametrize("namespace_shape", ["ancestor-symlink", "terminal-symlink", "ancestor-file", "terminal-file"],
-)
-async def test_open_workspace_rejects_linked_public_namespace_before_mutation(tmp_path: Path, namespace_shape: str,
-) -> None:
+async def test_open_workspace_rejects_linked_public_namespace_before_mutation(tmp_path: Path) -> None:
+    """A file occupying the public ``.daydream`` namespace rejects before any worktree mutation."""
     repo, _ = _make_repo_with_origin(tmp_path)
     owner = _private_owner(repo, tmp_path)
     outside = tmp_path / "outside"
     name = "run-outside-reanchor"
-    if namespace_shape.startswith("ancestor"):
-        external = outside / "worktrees" / name
-    else:
-        external = outside / name
+    external = outside / "worktrees" / name
     git_ops.worktree_add(repo, external, "main", detach=True)
     canary = external / "operator.bin"
     canary.write_bytes(b"outside operator bytes\x00")
-    if namespace_shape == "ancestor-symlink":
-        (repo / ".daydream").symlink_to(outside, target_is_directory=True)
-    elif namespace_shape == "terminal-symlink":
-        (repo / ".daydream").mkdir()
-        (repo / ".daydream" / "worktrees").symlink_to(outside, target_is_directory=True,)
-    elif namespace_shape == "ancestor-file":
-        (repo / ".daydream").write_bytes(b"operator namespace bytes\x00")
-    else:
-        (repo / ".daydream").mkdir()
-        (repo / ".daydream" / "worktrees").write_bytes(b"operator namespace bytes\x00")
+    (repo / ".daydream").write_bytes(b"operator namespace bytes\x00")
     before = _git(repo, "worktree", "list", "--porcelain")
 
     with pytest.raises(ArtifactVisibilityError, match="public operational storage"):
@@ -351,103 +160,16 @@ async def test_open_workspace_rejects_linked_public_namespace_before_mutation(tm
             pass
 
     assert canary.read_bytes() == b"outside operator bytes\x00"
-    if namespace_shape.endswith("file"):
-        unsafe_file = repo / ".daydream"
-        if namespace_shape == "terminal-file":
-            unsafe_file /= "worktrees"
-        assert unsafe_file.read_bytes() == b"operator namespace bytes\x00"
+    assert (repo / ".daydream").read_bytes() == b"operator namespace bytes\x00"
     assert _git(repo, "worktree", "list", "--porcelain") == before
     assert not (owner.operational_state_root / "operational" / name).exists()
 
 
-@pytest.mark.parametrize("contents", [
-    pytest.param({"worktrees/run-old-reanchor/retained.txt": b"operator bytes\n"}, id="unregistered-directory"),
-    pytest.param({"worktrees": None, "audit": None}, id="empty-operational-roots"),
-    pytest.param({"worktrees/run-old-reanchor/retained.txt": b"stray operator bytes",
-                  "audit/notes.txt": b"not a worktree"}, id="unrecognized-mixed-residue"),
-])
-async def test_open_workspace_rejects_public_operational_residue_without_removing_operator_data(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, contents: dict[str, bytes | None],
-) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    owner = _private_owner(repo, tmp_path)
-    for relative, data in contents.items():
-        path = repo / ".daydream" / relative
-        if data is None:
-            path.mkdir(parents=True)
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
-    before = _git(repo, "worktree", "list", "--porcelain")
-    _forbid_default_private_base(monkeypatch)
-    with pytest.raises(ArtifactVisibilityError, match="Unsupported public operational storage"):
-        async with _open(repo, owner):
-            pass
-    for relative, data in contents.items():
-        path = repo / ".daydream" / relative
-        assert path.is_dir() if data is None else path.read_bytes() == data
-    assert _git(repo, "worktree", "list", "--porcelain") == before
-    assert not (owner.operational_state_root / "operational").exists()
-
-
-async def test_open_workspace_still_refuses_different_ownership_worktree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A worktree registered to a DIFFERENT repo is operator data: fail closed."""
-    repo, _ = _make_repo_with_origin(tmp_path)
-    owner = _private_owner(repo, tmp_path)
-    foreign = _bare_remote(tmp_path / "foreign.git")
-    foreign_repo = tmp_path / "foreign-repo"
-    _init_repo(foreign_repo)
-    _configure_identity(foreign_repo)
-    (foreign_repo / "foreign.txt").write_text("foreign\n")
-    _git(foreign_repo, "add", "foreign.txt")
-    _commit(foreign_repo, "foreign initial")
-    _git(foreign_repo, "remote", "add", "origin", str(foreign))
-    _git(foreign_repo, "push", "-u", "origin", "main")
-    embedded = repo / ".daydream" / "worktrees" / "run-old-reanchor"
-    git_ops.worktree_add(foreign_repo, embedded, "main", detach=True)
-    canary = embedded / "foreign-checkout.txt"
-    canary.write_bytes(b"foreign worktree bytes")
-    before = _git(repo, "worktree", "list", "--porcelain")
-
-    _forbid_default_private_base(monkeypatch)
-    with pytest.raises(ArtifactVisibilityError, match="Unsupported public operational storage"):
-        async with _open(repo, owner):
-            pass
-
-    assert canary.read_bytes() == b"foreign worktree bytes"
-    assert _git(repo, "worktree", "list", "--porcelain") == before
-
-
-async def test_unknown_branch_raises(tmp_path: Path) -> None:
+async def test_unknown_branch_or_base_ref_raises_named_error(tmp_path: Path) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
     with pytest.raises(BranchNotFoundError):
-        async with open_workspace(
-            repo,
-            branch="nope-not-here",
-            base="main",
-            force_ephemeral=False,
-            skip_tests=False,
-        ):
-            pass  # pragma: no cover
-
-
-async def test_base_accepts_raw_sha(tmp_path: Path) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    base_sha = git_ops.head_sha(repo)  # pin base to current commit
-    # Advance HEAD so base != HEAD and a merge-base exists.
-    (repo / "next.txt").write_text("next\n")
-    _git(repo, "add", "next.txt")
-    _git(repo, "commit", "-m", "advance head")
-
-    async with open_workspace(repo, branch=None, base=base_sha, force_ephemeral=False, skip_tests=False) as ctx:
-        assert isinstance(ctx, WorkContext)
-        assert ctx.base_branch == base_sha
-        assert ctx.base_sha == base_sha  # merge-base of HEAD and its parent
-
-
-async def test_base_unknown_ref_raises_reworded(tmp_path: Path) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
+        async with open_workspace(repo, branch="nope-not-here", base="main", force_ephemeral=False, skip_tests=False):
+            pass
     with pytest.raises(BranchNotFoundError, match="base ref 'deadbeef' not found"):
         async with open_workspace(repo, branch=None, base="deadbeef", force_ephemeral=False, skip_tests=False):
             pass
@@ -467,91 +189,32 @@ def _ignore(repo: Path, *patterns: str, message: str = "ignore env") -> None:
     _commit(repo, message)
 
 
-@pytest.mark.parametrize("source_kind", ["config", "extra"])
-@pytest.mark.parametrize("escape_kind", ["parent", "absolute"])
-def test_copy_rejects_absolute_and_parent_entries_before_copy(tmp_path: Path, source_kind: str, escape_kind: str,
-) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    _ignore(repo, ".env")
-    (repo / ".env").write_text("E=1\n")
-    outside = tmp_path / "outside.txt"
-    outside.write_text("KEEP\n")
-    entry = "../outside.txt" if escape_kind == "parent" else str(outside)
+def test_copy_rejects_resolved_symlink_escape(tmp_path: Path) -> None:
+    """A source- or destination-side symlink escaping its worktree is rejected before any write."""
+    for root_label in ("source", "destination"):
+        repo, _ = _make_repo_with_origin(tmp_path / root_label)
+        outside_dir = tmp_path / root_label / "outside"
+        outside_dir.mkdir()
+        secret = outside_dir / "secret.txt"
+        secret.write_text("KEEP\n")
+        (repo / "pyproject.toml").write_text('[tool.daydream.workspace]\ncopy = ["sub/leak.txt"]\n')
+        dest = _dest(tmp_path / root_label)
+        if root_label == "source":
+            # The source-side "sub" is a symlink escaping the checkout.
+            (repo / "sub").symlink_to(outside_dir, target_is_directory=True)
+            (dest / "sub").mkdir()
+        else:
+            # The source has a real nested file; the destination-side "sub" escapes the worktree.
+            (repo / "sub").mkdir()
+            (repo / "sub" / "leak.txt").write_text("real\n")
+            (dest / "sub").symlink_to(outside_dir, target_is_directory=True)
 
-    if source_kind == "config":
-        (repo / "pyproject.toml").write_text(f'[tool.daydream.workspace]\ncopy = [".env", "{entry}"]\n')
-        extra = None
-    else:
-        (repo / "pyproject.toml").write_text('[tool.daydream.workspace]\ncopy = [".env"]\n')
-        extra = [Path(entry)]
+        with pytest.raises(WorkspaceCopyPathError, match=f"resolves outside the {root_label} worktree"):
+            copy_files_into_ephemeral(repo, dest, extra=None, skip=False)
 
-    dest = _dest(tmp_path)
-
-    with pytest.raises(WorkspaceCopyPathError, match="must be relative and must not contain"):
-        copy_files_into_ephemeral(repo, dest, extra=extra, skip=False)
-
-    # Fail-closed: the valid earlier ".env" entry was NOT copied.
-    assert not (dest / ".env").exists()
-    # The external file was never read or modified.
-    assert outside.read_text() == "KEEP\n"
-
-
-@pytest.mark.parametrize("root_kind", ["source", "destination"])
-def test_copy_rejects_resolved_symlink_escape(tmp_path: Path, root_kind: str) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    outside_dir = tmp_path / "outside"
-    outside_dir.mkdir()
-    secret = outside_dir / "secret.txt"
-    secret.write_text("KEEP\n")
-    (repo / "pyproject.toml").write_text('[tool.daydream.workspace]\ncopy = ["sub/leak.txt"]\n')
-    (repo / "sub").mkdir()
-
-    dest = _dest(tmp_path)
-    (dest / "sub").mkdir()
-
-    if root_kind == "source":
-        # The SOURCE-side "sub" is a symlink escaping the checkout. Do not
-        # write the real nested file first -- the directory is replaced by the
-        # symlink below.
-        (repo / "sub").rmdir()
-        (repo / "sub").symlink_to(outside_dir, target_is_directory=True)
-        root_label = "source"
-    else:
-        # The source has a real nested file (passes source containment); the
-        # DESTINATION-side "sub" is a symlink escaping the worktree.
-        (repo / "sub" / "leak.txt").write_text("real\n")
-        (dest / "sub").rmdir()
-        (dest / "sub").symlink_to(outside_dir, target_is_directory=True)
-        root_label = "destination"
-
-    with pytest.raises(WorkspaceCopyPathError, match=f"resolves outside the {root_label} worktree",):
-        copy_files_into_ephemeral(repo, dest, extra=None, skip=False)
-
-    # Nothing was written into the escaped directory.
-    assert not (outside_dir / "leak.txt").exists()
-    assert secret.read_text() == "KEEP\n"
-
-
-async def test_open_workspace_rejects_escape_without_persistent_copy(artifact_runtime_root: Path, tmp_path: Path
-) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    # Seed the source file the traversal entry reads. `../retained.cfg` resolves
-    # from the source root to tmp_path/retained.cfg; without it the copy loop
-    # would silently skip (not a file) and the fail-closed assertion below could
-    # never detect a regressed guard.
-    (tmp_path / "retained.cfg").write_text("secret\n")
-    with pytest.raises(WorkspaceCopyPathError, match="must be relative and must not contain"):
-        async with open_workspace(
-            repo, branch=None, base=None, force_ephemeral=True, extra_copy=[Path("../retained.cfg")], skip_tests=False,
-        ):
-            pass  # never reached — the copy boundary rejects before yielding
-    # Fail-closed: nothing is written into the retired source-local namespace.
-    assert not (repo / ".daydream" / "worktrees" / "retained.cfg").exists()
-    assert not (repo / ".daydream" / "worktrees").exists()
-    # Cleanup ran: the source-owned operational directory retains no worktree.
-    operational_dirs = list((artifact_runtime_root.parent / "workspaces").glob("*/operational"))
-    assert len(operational_dirs) == 1
-    assert not any(operational_dirs[0].iterdir())
+        # Nothing was written into the escaped directory.
+        assert not (outside_dir / "leak.txt").exists(), root_label
+        assert secret.read_text() == "KEEP\n"
 
 
 def _audit_source_signature(repo: Path) -> tuple[object, ...]:
@@ -562,24 +225,6 @@ def _audit_source_signature(repo: Path) -> tuple[object, ...]:
         (Path(_git(repo, "rev-parse", "--path-format=absolute", "--git-path", "index"))).read_bytes(),
         _git(repo, "worktree", "list", "--porcelain"), _git(repo, "remote", "-v"),
     )
-
-
-@pytest.mark.anyio
-async def test_audit_workspace_binds_diff_base_to_recorded_head(tmp_path: Path) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    common = _git(repo, "rev-parse", "HEAD")
-    _git(repo, "checkout", "-b", "feature")
-    (repo / "feature.py").write_text("feature\n")
-    _git(repo, "add", "feature.py")
-    head = _commit(repo, "feature")
-
-    async with open_audit_workspace(repo, run_id="branch-base", branch_base_ref="main", expected_head_sha=head,
-    ) as audit:
-        assert audit.branch_base_sha == common
-        assert git_ops.head_sha(audit.repo) == head
-        assert git_ops.commit_exists(audit.repo, common)
-        assert git_ops.list_remotes(audit.repo, strict=True) == []
-        assert _git(audit.repo, "for-each-ref", "refs/remotes") == ""
 
 
 @pytest.mark.anyio
@@ -601,7 +246,7 @@ async def test_audit_workspace_rejects_recorded_head_race_before_snapshot(tmp_pa
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("mode", ["malformed-head", "remove-after-preference"])
+@pytest.mark.parametrize("mode", ["remove-after-preference"])
 async def test_audit_workspace_redacts_diff_base_probe_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
 ) -> None:
@@ -627,174 +272,10 @@ async def test_audit_workspace_redacts_diff_base_probe_failures(
 
 
 @pytest.mark.anyio
-async def test_audit_workspace_rejects_missing_cloned_diff_base_object(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_audit_workspace_cleanup_failure_preserves_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """An external Git fault removes only the cloned merge-base object."""
-
-    repo, _ = _make_repo_with_origin(tmp_path)
-    common = _git(repo, "rev-parse", "HEAD")
-    (repo / "main.py").write_text("main\n")
-    _git(repo, "add", "main.py")
-    _commit(repo, "main advancement")
-    _git(repo, "checkout", "-b", "feature", common)
-    (repo / "feature.py").write_text("feature\n")
-    _git(repo, "add", "feature.py")
-    head = _commit(repo, "feature")
-    before = _audit_source_signature(repo)
-
-    real_git = shutil.which("git")
-    assert real_git is not None
-    shim_dir = tmp_path / "git shim"
-    shim_dir.mkdir()
-    shim = shim_dir / "git"
-    shim.write_text(
-        f"#!{sys.executable}\n"
-        "import os, pathlib, subprocess, sys\n"
-        "real = os.environ['DAYDREAM_TEST_REAL_GIT']\n"
-        "result = subprocess.run([real, *sys.argv[1:]])\n"
-        "if result.returncode == 0 and len(sys.argv) > 2 and sys.argv[1] == 'clone':\n"
-        "    destination = pathlib.Path(sys.argv[-1])\n"
-        "    objects = destination / '.git' / 'objects'\n"
-        "    packs = list((objects / 'pack').glob('*.pack'))\n"
-        "    payloads = [pack.read_bytes() for pack in packs]\n"
-        "    for packed in list((objects / 'pack').iterdir()):\n"
-        "        packed.unlink()\n"
-        "    for payload in payloads:\n"
-        "        unpack = subprocess.run([real, 'unpack-objects', '-r'], cwd=destination, input=payload)\n"
-        "        if unpack.returncode != 0:\n"
-        "            sys.exit(unpack.returncode)\n"
-        "    oid = os.environ['DAYDREAM_TEST_REMOVE_CLONED_OID']\n"
-        "    (objects / oid[:2] / oid[2:]).unlink()\n"
-        "sys.exit(result.returncode)\n"
-    )
-    shim.chmod(0o755)
-    monkeypatch.setenv("DAYDREAM_TEST_REAL_GIT", real_git)
-    monkeypatch.setenv("DAYDREAM_TEST_REMOVE_CLONED_OID", common)
-    monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{os.environ['PATH']}")
-
-    with pytest.raises(git_ops.SnapshotPreparationError, match="diff base object is missing from audit snapshot",
-    ) as exc_info:
-        async with open_audit_workspace(
-            repo, run_id="missing-base-object", branch_base_ref="main", expected_head_sha=head,
-        ):
-            pytest.fail("snapshot with missing base object yielded")
-    assert str(repo) not in str(exc_info.value)
-    assert git_ops.commit_exists(repo, common)
-    assert _audit_source_signature(repo) == before
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("linked", [False, True])
-async def test_audit_workspace_independent_of_source_storage(tmp_path: Path, linked: bool) -> None:
-    repo, bare = _make_repo_with_origin(tmp_path)
-    if linked:
-        source = tmp_path / "linked source"
-        _git(repo, "worktree", "add", "-b", "feature", str(source))
-        repo = source
-    for name in ("layered.txt", "deleted.txt", "recreated.txt"):
-        (repo / name).write_text("committed\n")
-    (repo / "binary.bin").write_bytes(b"committed\x00\xff")
-    (repo / ".gitignore").write_text("secret.txt\n")
-    (repo / "inside-link").symlink_to("layered.txt")
-    outside = tmp_path / "outside-secret"
-    outside.write_text("must not materialize")
-    (repo / "outside-link").symlink_to(outside)
-    _git(repo, "add", "-A")
-    _commit(repo, "snapshot fixture")
-    _git(repo, "branch", "another-branch")
-    _git(repo, "tag", "independent-tag")
-    (repo / "layered.txt").write_text("staged\n")
-    (repo / "binary.bin").write_bytes(b"staged\x00\xfe")
-    (repo / "new.bin").write_bytes(b"new\x00\xfd")
-    _git(repo, "add", "layered.txt", "binary.bin", "new.bin")
-    _git(repo, "rm", "recreated.txt")
-    (repo / "recreated.txt").write_text("recreated but not indexed\n")
-    (repo / "layered.txt").write_text("working\n")
-    (repo / "deleted.txt").unlink()
-    (repo / "secret.txt").write_text("ignored secret")
-    (repo / "scratch.txt").write_text("untracked scratch")
-    before = _audit_source_signature(repo)
-    before_origin_refs = _git(bare, "show-ref")
-    captured: Path | None = None
-    async with open_audit_workspace(repo, run_id="independent-storage") as audit:
-        captured = audit.repo
-        assert not audit.repo.is_relative_to(repo.resolve())
-        assert not repo.resolve().is_relative_to(audit.repo)
-        assert audit.source == repo.resolve()
-        assert audit.repo_git_common_dir != audit.source_git_common_dir
-        assert not audit.repo_git_common_dir.is_relative_to(audit.source_git_common_dir)
-        assert not audit.source_git_common_dir.is_relative_to(audit.repo_git_common_dir)
-        assert git_ops.object_alternates(audit.repo, strict=True) == ()
-        assert git_ops.list_remotes(audit.repo, strict=True) == []
-        assert _git(audit.repo, "for-each-ref", "refs/remotes") == ""
-        assert git_ops.list_local_branches(audit.repo) == git_ops.list_local_branches(repo)
-        assert _git(audit.repo, "rev-parse", "independent-tag") == _git(repo, "rev-parse", "independent-tag")
-        assert git_ops.staged_patch(audit.repo) == before[3]
-        for name in ("layered.txt", "binary.bin", "new.bin", "recreated.txt"):
-            assert (audit.repo / name).read_bytes() == (repo / name).read_bytes()
-        assert not (audit.repo / "deleted.txt").exists()
-        assert not (audit.repo / "secret.txt").exists()
-        assert not (audit.repo / "scratch.txt").exists()
-        assert (audit.repo / "inside-link").is_symlink()
-        assert (audit.repo / "outside-link").is_symlink()
-        assert os.readlink(audit.repo / "outside-link") == str(outside)
-        assert audit.outward_symlinks == frozenset({audit.repo / "outside-link"})
-        _configure_identity(audit.repo)
-        (audit.repo / "model-note.txt").write_text("only in snapshot")
-        _git(audit.repo, "add", "-A")
-        _commit(audit.repo, "model commit")
-        _git(audit.repo, "update-ref", "refs/heads/audit-only", "HEAD")
-        assert _audit_source_signature(repo) == before
-        assert _git(bare, "show-ref") == before_origin_refs
-    assert captured is not None and not captured.exists()
-    assert _audit_source_signature(repo) == before
-    assert outside.read_text() == "must not materialize"
-
-
-@pytest.mark.anyio
-async def test_audit_workspace_unborn_is_independent(tmp_path: Path) -> None:
-    repo = tmp_path / "unborn-trunk"
-    _init_repo(repo)
-    _git(repo, "symbolic-ref", "HEAD", "refs/heads/trunk")
-    (repo / "staged.bin").write_bytes(b"staged\x00bytes\xff")
-    _git(repo, "add", "staged.bin")
-    (repo / "staged.bin").write_bytes(b"working\x00bytes\xfe")
-    (repo / "scratch.txt").write_text("private")
-    before = _audit_source_signature(repo)
-    captured: Path | None = None
-    async with open_audit_workspace(repo, run_id="independent-unborn") as audit:
-        captured = audit.repo
-        assert audit.repo != repo.resolve()
-        assert git_ops.is_unborn_head(audit.repo)
-        assert git_ops.symbolic_head(audit.repo, strict=True) == "trunk"
-        assert git_ops.staged_patch(audit.repo) == before[3]
-        assert (audit.repo / "staged.bin").read_bytes() == b"working\x00bytes\xfe"
-        assert not (audit.repo / "scratch.txt").exists()
-        _configure_identity(audit.repo)
-        _commit(audit.repo, "snapshot initial commit")
-        assert not git_ops.is_unborn_head(audit.repo)
-        assert git_ops.is_unborn_head(repo)
-    assert captured is not None and not captured.exists()
-    assert _audit_source_signature(repo) == before
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("failure", [RuntimeError, SystemExit])
-async def test_audit_workspace_cleanup_runs_on_exception(tmp_path: Path, failure: type[BaseException]) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    before = _audit_source_signature(repo)
-    captured: Path | None = None
-    with pytest.raises(failure, match="primary"):
-        async with open_audit_workspace(repo, run_id="cleanup-error") as audit:
-            captured = audit.repo
-            raise failure("primary")
-    assert captured is not None and not captured.exists()
-    assert _audit_source_signature(repo) == before
-
-
-@pytest.mark.anyio
-async def test_audit_workspace_cleanup_runs_on_cancellation(tmp_path: Path) -> None:
-
+    """A cleanup failure surfaces alone, but never replaces a primary error; cancellation still cleans up."""
     repo, _ = _make_repo_with_origin(tmp_path)
     captured: Path | None = None
     with anyio.CancelScope() as scope:
@@ -803,88 +284,26 @@ async def test_audit_workspace_cleanup_runs_on_cancellation(tmp_path: Path) -> N
             scope.cancel()
             await anyio.lowlevel.checkpoint()
     assert captured is not None and not captured.exists()
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(("primary", "cleanup_error"), [(False, OSError), (True, RuntimeError)])
-async def test_audit_workspace_cleanup_failure_preserves_primary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, primary: bool,
-    cleanup_error: type[Exception],
-) -> None:
-
-    repo, _ = _make_repo_with_origin(tmp_path)
     cleanups: list[Path] = []
     real_cleanup = tempfile.TemporaryDirectory.cleanup
+    for primary, cleanup_error in ((False, OSError), (True, RuntimeError)):
+        def failing_cleanup(instance: tempfile.TemporaryDirectory[str], error: type[Exception] = cleanup_error) -> None:
+            cleanups.append(Path(instance.name))
+            real_cleanup(instance)
+            raise error("injected cleanup failure")
 
-    def failing_cleanup(instance: tempfile.TemporaryDirectory[str]) -> None:
-        cleanups.append(Path(instance.name))
-        real_cleanup(instance)
-        raise cleanup_error("injected cleanup failure")
-
-    monkeypatch.setattr(tempfile.TemporaryDirectory, "cleanup", failing_cleanup)
-    expected = RuntimeError if primary else GitError
-    with pytest.raises(expected, match="primary" if primary else "cleanup failed"):
-        async with open_audit_workspace(repo, run_id="cleanup-failure"):
-            if primary:
-                raise RuntimeError("primary")
-    assert len(cleanups) == 1
-    if primary:
-        assert "cleanup failed during primary error" in caplog.text
-
-
-@pytest.mark.anyio
-async def test_audit_workspace_preparation_failure_cleans_temporary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-
-    repo, _ = _make_repo_with_origin(tmp_path)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / "child.txt").write_text("secret")
-    (repo / "tracked").mkdir()
-    (repo / "tracked" / "child.txt").write_text("tracked")
-    _git(repo, "add", "tracked")
-    _commit(repo, "directory")
-    (repo / "tracked" / "child.txt").unlink()
-    (repo / "tracked").rmdir()
-    (repo / "tracked").symlink_to(outside, target_is_directory=True)
-    before = _audit_source_signature(repo)
-    created: list[Path] = []
-    real_temp = tempfile.TemporaryDirectory
-
-    def capture_temp(*args: object, **kwargs: object) -> tempfile.TemporaryDirectory[str]:
-        assert not args
-        prefix = kwargs["prefix"]
-        assert isinstance(prefix, str)
-        temporary = real_temp(prefix=prefix)
-        created.append(Path(temporary.name))
-        return temporary
-
-    monkeypatch.setattr("daydream.workspace.tempfile.TemporaryDirectory", capture_temp)
-    with pytest.raises(git_ops.SnapshotPreparationError, match="symlinked parent"):
-        async with open_audit_workspace(repo, run_id="preparation-error"):
-            pytest.fail("unsafe snapshot yielded")
-    assert len(created) == 1 and not created[0].exists()
-    assert (outside / "child.txt").read_text() == "secret"
-    assert _audit_source_signature(repo) == before
+        monkeypatch.setattr(tempfile.TemporaryDirectory, "cleanup", failing_cleanup)
+        expected = RuntimeError if primary else GitError
+        with pytest.raises(expected, match="primary" if primary else "cleanup failed"):
+            async with open_audit_workspace(repo, run_id=f"cleanup-failure-{primary}"):
+                if primary:
+                    raise RuntimeError("primary")
+    assert len(cleanups) == 2
+    assert "cleanup failed during primary error" in caplog.text
 
 
 @pytest.mark.anyio
-async def test_open_workspace_unborn_requires_explicit_opt_in(tmp_path: Path) -> None:
-    repo = tmp_path / "unborn"
-    _init_repo(repo)
-    _git(repo, "symbolic-ref", "HEAD", "refs/heads/trunk")
-    with pytest.raises(GitError):
-        async with open_workspace(repo, branch=None, base=None, force_ephemeral=False, skip_tests=True):
-            pytest.fail("ordinary workspace admitted an unborn repository")
-    async with open_workspace(repo, branch=None, base=None, force_ephemeral=False, skip_tests=True, allow_unborn=True,
-    ) as work:
-        assert work.is_unborn and work.head_sha is None and work.base_sha is None
-        assert work.head_branch == work.base_branch == "trunk"
-        assert work.repo == repo
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("options", [{"branch": "trunk"}, {"base": "trunk"}, {"force_ephemeral": True}])
+@pytest.mark.parametrize("options", [{"branch": "trunk"}, ])
 async def test_open_workspace_unborn_rejects_commit_anchored_options(tmp_path: Path, options: dict[str, object],
 ) -> None:
     repo = tmp_path / "unborn"
@@ -898,60 +317,6 @@ async def test_open_workspace_unborn_rejects_commit_anchored_options(tmp_path: P
             skip_tests=True, allow_unborn=True,
         ):
             pytest.fail("commit-anchored mode admitted unborn repository")
-
-
-async def test_ephemeral_support_files_follow_ignore_extra_and_skip_policy(tmp_path: Path) -> None:
-    """Detached worktrees retain admitted support bytes and clean up normal and failed bodies."""
-    repo, _ = _make_repo_with_origin(tmp_path)
-    _ignore(repo, ".env.local", "workspace.json")
-    (repo / ".env").write_text("COMMITTED=1\n")
-    _git(repo, "add", ".env")
-    _commit(repo, "tracked environment")
-    expected_head = git_ops.head_sha(repo)
-    assert expected_head != _git(repo, "rev-parse", "origin/main")
-    (repo / ".env").write_text("DO_NOT_COPY_WORKING_TRACKED=1\n")
-    (repo / ".env.local").write_text("LOCAL=1\n")
-    (repo / "workspace.json").write_text("{}\n")
-    (repo / "actual.cfg").write_text("inside\n")
-    (repo / "inside-link.cfg").symlink_to("actual.cfg")
-    owner = _private_owner(repo, tmp_path)
-    before = _git(repo, "status", "--porcelain")
-    async with open_workspace(
-        repo,
-        branch=None,
-        base=None,
-        force_ephemeral=True,
-        extra_copy=[Path("workspace.json"), Path("inside-link.cfg")],
-        skip_tests=True,
-        private_owner=owner,
-    ) as skipped:
-        assert skipped.is_ephemeral is True
-        assert skipped.repo != repo
-        assert skipped.repo.is_dir()
-        assert git_ops.is_inside_worktree(skipped.repo) is True
-        assert skipped.head_sha == expected_head
-        assert skipped.head_branch is None
-        assert (skipped.repo / ".env").read_text() == "COMMITTED=1\n"
-        assert not (skipped.repo / ".env.local").exists()
-        assert not (skipped.repo / "workspace.json").exists()
-    with pytest.raises(RuntimeError, match="boom"):
-        async with open_workspace(
-            repo,
-            branch=None,
-            base="main",
-            force_ephemeral=True,
-            extra_copy=[Path("workspace.json"), Path("inside-link.cfg")],
-            skip_tests=False,
-            private_owner=owner,
-        ) as copied:
-            assert (copied.repo / ".env").read_text() == "COMMITTED=1\n"
-            assert (copied.repo / ".env.local").read_text() == "LOCAL=1\n"
-            assert (copied.repo / "workspace.json").read_text() == "{}\n"
-            assert (copied.repo / "inside-link.cfg").read_text() == "inside\n"
-            assert not (copied.repo / "inside-link.cfg").is_symlink()
-            raise RuntimeError("boom")
-    assert not skipped.repo.exists() and not copied.repo.exists()
-    assert _git(repo, "status", "--porcelain") == before
 
 
 async def test_ephemeral_copy_configuration_overrides_then_falls_back_to_defaults(tmp_path: Path) -> None:

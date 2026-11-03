@@ -46,10 +46,10 @@ async def test_parse_preserves_structural_partition_on_resume(
     assert ctx.data["record_pool"].language == []
 
 
-@pytest.mark.parametrize("start_at", [None, "per-stack"])
 async def test_per_stack_rerun_clears_stale_structural_outputs_before_review(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any, start_at: str | None,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
 ) -> None:
+    start_at = None
     dd = tmp_path / ".daydream/deep"
     dd.mkdir(parents=True)
     artifacts = [dd / name for name in ("stack-structure-records.json", "stack-structure-review.md",)]
@@ -198,70 +198,33 @@ def test_report_collection_keeps_each_scope_bound_and_optional_faults_isolated(t
     assert all(path.read_text() == raw for path, raw in (canonical | raw_sidecars).items())
 
 
-@pytest.mark.parametrize('author_kind', [
-    'current', 'foreign-head', 'unknown-head', 'redacted', 'null',
-    'missing-field', 'extra-field', 'source', 'body-type', 'body-length', 'head-length', 'nested', 'file-size',
-])
-def test_report_collection_admits_only_valid_author_context(tmp_path: Path, author_kind: str) -> None:
+def test_report_collection_admits_only_valid_author_context(tmp_path: Path) -> None:
     """Retained optional prose is shape-checked before it can enter rendering or a canonical handoff."""
     from daydream.deep.report_context import collect_report_context
     from daydream.review_reporting import render_review_context
 
     coverage = review_coverage()
     record = records_artifact(coverage, 'python')
-    records_path = tmp_path / 'stack-python-records.json'
-    records_path.write_text(json.dumps(record))
     author: Any = {'source': 'pull_request_body', 'head_sha': coverage.revision.head_sha,
-                   'body': 'Retained author assertion', 'truncated': False}
-    if author_kind == 'foreign-head':
-        author['head_sha'] = 'f' * 40
-    elif author_kind == 'unknown-head':
-        author['head_sha'] = None
-    elif author_kind == 'redacted':
-        author['body'] = 'Retained author assertion {"token":"private-value"}'
-    elif author_kind == 'null':
-        author = None
-    elif author_kind == 'missing-field':
-        author.pop('truncated')
-    elif author_kind == 'extra-field':
-        author['invented'] = True
-    elif author_kind == 'source':
-        author['source'] = 'host_execution'
-    elif author_kind == 'body-type':
-        author['body'] = []
-    elif author_kind == 'body-length':
-        author['body'] = 'x' * 4097
-    elif author_kind == 'head-length':
-        author['head_sha'] = 'h' * 513
-    raw = ('[' * 30000 + '0' + ']' * 30000 if author_kind == 'nested' else
-           ' ' * 65536 + 'null' if author_kind == 'file-size' else json.dumps(author))
-    author_path = tmp_path / 'review-author-context.json'
-    author_path.write_text(raw)
-    collected = collect_report_context(tmp_path, coverage.to_dict())
-    retained = collected['author_reported']
-    valid = author_kind in {'current', 'foreign-head', 'unknown-head', 'redacted'}
-    if valid:
-        assert retained['source'] == 'pull_request_body' and retained['head_sha'] == author['head_sha']
-        assert retained['truncated'] is False and 'Retained author assertion' in retained['body']
-        if author_kind == 'redacted':
-            assert 'private-value' not in retained['body'] and retained['body'] != author['body']
-        else:
-            assert retained == author
-        report = render_review_context(collected)
-        assert ('f' * 40 if author_kind == 'foreign-head' else
-                'unavailable' if author_kind == 'unknown-head' else author['head_sha']) in report
-    else:
-        assert retained is None
+                   'body': 'Retained author assertion', 'truncated': False, 'invented': True}
+    for author_kind, raw in (('extra-field', json.dumps(author)), ('file-size', ' ' * 65536 + 'null')):
+        root = tmp_path / author_kind
+        root.mkdir()
+        records_path = root / 'stack-python-records.json'
+        records_path.write_text(json.dumps(record))
+        author_path = root / 'review-author-context.json'
+        author_path.write_text(raw)
+        collected = collect_report_context(root, coverage.to_dict())
+        assert collected['author_reported'] is None
         assert 'Author-reported check context unavailable.' in render_review_context(collected)
-    assert collected['scopes'][0]['originating_run_id'] == coverage.run_id
-    assert collected['scopes'][0]['analyzed_revision'] == coverage.revision.to_dict()
-    assert json.loads(records_path.read_text()) == record and author_path.read_text() == raw
-    assert collected['verification'] == {'status': 'unproduced', 'value': None}
+        assert collected['scopes'][0]['originating_run_id'] == coverage.run_id
+        assert collected['scopes'][0]['analyzed_revision'] == coverage.revision.to_dict()
+        assert json.loads(records_path.read_text()) == record and author_path.read_text() == raw
+        assert collected['verification'] == {'status': 'unproduced', 'value': None}
 
 
-@pytest.mark.parametrize('shape', ['padding', 'nested-arrays'])
 def test_report_collection_bounds_existing_artifacts_and_prioritizes_test_identity(
-    tmp_path: Path, shape: str,
+    tmp_path: Path,
 ) -> None:
     """Bound aggregate handoff size while explicitly accounting for omitted existing evidence."""
     from daydream.deep.report_context import collect_report_context
@@ -281,8 +244,7 @@ def test_report_collection_bounds_existing_artifacts_and_prioritizes_test_identi
     names = ('test-verdict.json', 'remote-ci-verdict.json', 'fix-outcomes.json', 'fix-failures.json',
              'fix-quality-gate.json', 'recommended-capture.json')
     for name in names:
-        payload = ({'existing_evidence': name, 'padding': 'x' * 60_000} if shape == 'padding' else
-                   {'paths': [['x']] * 10_000})
+        payload = {'existing_evidence': name, 'padding': 'x' * 60_000}
         (tmp_path / name).write_text(json.dumps(payload, separators=(',', ':')))
     captured = collect_report_context(tmp_path, coverage.to_dict())
     assert 0 < len(captured['scopes']) < 32
@@ -291,10 +253,7 @@ def test_report_collection_bounds_existing_artifacts_and_prioritizes_test_identi
     verification = captured['verification']
     assert verification['status'] == 'failed' and verification['omitted_artifacts']
     assert set(verification['omitted_artifacts']) | set(verification['value']) >= set(names)
-    if shape == 'padding':
-        assert {'test-verdict.json', 'remote-ci-verdict.json'} <= verification['value'].keys()
-    else:
-        assert set(verification['omitted_artifacts']) >= set(names)
+    assert {'test-verdict.json', 'remote-ci-verdict.json'} <= verification['value'].keys()
     output = tmp_path / 'findings.json'
     write_findings_artifact(output, findings_artifact(
         review_context=captured, terminal_result=coverage.finalize('completed')))

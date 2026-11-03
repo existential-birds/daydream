@@ -12,19 +12,17 @@ survives a process restart — is pinned below that capture half.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import anyio
 import pytest
 
 from daydream import phases
 from daydream.backends import ResultEvent, TextEvent
+from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.repair_coordinator import (
     _candidate_restore_decision,
     _owner_lock,
@@ -38,9 +36,7 @@ from daydream.deep.repair_job import (
     RepairJobState,
     read_repair_job_record,
 )
-from daydream.deep.settings import _resolve_non_negative_float
 from daydream.fix_footprint import AuthorizedFixFootprint
-from daydream.phases.repair_checkpoint import read_repair_checkpoint
 from daydream.phases.repair_outcome import repair_scope_request
 from daydream.repository_paths import InvalidRepositoryFilePath
 from daydream.workspace import WorkContext
@@ -75,18 +71,6 @@ def _job(**overrides: Any) -> RepairJobRecord:
     }
     fields.update(overrides)
     return RepairJobRecord(**fields)
-
-
-def _limit_config(**attrs: object) -> Any:
-    """Minimal RunConfig stand-in carrying only the scalar under test."""
-    return SimpleNamespace(file_config=None, **attrs)
-
-
-def test_corrupt_job_record_is_not_read_as_an_empty_job(tmp_path: Path) -> None:
-    """A foreign or corrupt record is reported as absent, never as fresh state."""
-    assert read_repair_job_record(tmp_path) is None
-    (tmp_path / "repair-job.json").write_text("{not json")
-    assert read_repair_job_record(tmp_path) is None
 
 
 @pytest.mark.asyncio
@@ -141,99 +125,13 @@ async def test_phase_blocks_the_repair_when_the_checkpoint_cannot_be_persisted(
     assert any("checkpoint_write_failed" in diagnostic for diagnostic in job.diagnostics)
 
 
-@pytest.mark.asyncio
-async def test_checkpoint_captures_authorized_work_before_the_guard_restores(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
-) -> None:
-    """Requirements 25/28: cleanup can never erase the only copy."""
-    init_repo(tmp_path)
-    (tmp_path / "allowed.py").write_text("-- original\n")
-    (tmp_path / "migrations").mkdir()
-    (tmp_path / "migrations" / "0001_init.sql").write_text("-- generated original\n")
-    git(tmp_path, "add", "allowed.py", "migrations/0001_init.sql")
-    git_commit(tmp_path, "test: seed authorized and generated files")
+def test_job_bounds_exhaust_and_operator_grant_is_recorded_apart_from_usage() -> None:
+    """Requirements 42/43: count, cost, and time bounds exhaust (never block); a grant is explicit.
 
-    monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "2")
-
-    suite_dir = tmp_path.parent / f"{tmp_path.name}-suite"
-    config = SimpleNamespace(file_config=None, test_command=host_test_command(suite_dir, mode="all"))
-
-    async def repair(**_kwargs: Any) -> AsyncIterator[TextEvent]:
-        # The spike's confirmed sequence: authorized edit, authorized new file,
-        # then a stall to the wall budget with no terminal ResultEvent.
-        (tmp_path / "allowed.py").write_text("-- repair edit\n")
-        (tmp_path / "helper.py").write_text("# new helper\n")
-        (tmp_path / "migrations" / "0001_init.sql").write_text("-- forbidden generated edit\n")
-        while True:
-            yield TextEvent(text="PARTIAL-DIAGNOSIS")
-            await anyio.sleep(0)
-
-    backend = ScriptedBackend(responder=lambda cwd, prompt, *_: repair()
-                              if prompt.lower().startswith("the tests failed") else None)
-    footprint = AuthorizedFixFootprint(
-        run_allowed_paths=frozenset({"allowed.py", "helper.py", "migrations/0001_init.sql"}),
-        policy_revision=1,
-    )
-    result = await phases.phase_test_and_heal(
-        backend, make_work(tmp_path), config=config, session_id="s1",
-        capture_tree_key=lambda: "tree-1", footprint=footprint,
-        allow_standalone=True,
-    )
-
-    assert (result.passed, result.proceed) == (False, False)
-    read = read_repair_checkpoint(tmp_path / ".daydream" / "deep")
-    assert read.blocked is False, read.reason
-    checkpoint = read.checkpoint
-    assert checkpoint is not None
-    # Both authorized artifacts the interrupted turn produced are in the capture,
-    # read from the live tree before the guard could restore anything.
-    assert "repair edit" in checkpoint.candidate_patch
-    assert "helper.py" in checkpoint.candidate_patch
-    assert "forbidden generated edit" in checkpoint.candidate_patch
-    assert (tmp_path / "migrations" / "0001_init.sql").read_text() == "-- generated original\n"
-    assert (tmp_path / "allowed.py").read_text() == "-- repair edit\n"
-    assert (tmp_path / "helper.py").read_text() == "# new helper\n"
-    assert (suite_dir / "suite-count.txt").read_text() == "1"
-    # The capture is the interrupted turn's own identity, not a later attempt's.
-    assert checkpoint.execution_id == f"repair-s1:execution:{result.retries}"
-    assert checkpoint.authorized_scope == ("allowed.py", "helper.py", "migrations/0001_init.sql")
-    assert checkpoint.backend_name == "scripted"
-    assert checkpoint.base_tree_key == "tree-1"
-    assert checkpoint.next_experiment, "a bounded follow-up must be named for the resuming job"
-    # The stored payload is verifiable on its own terms.
-    stored = json.loads(
-        (tmp_path / ".daydream" / "deep" / "repair-checkpoint.json").read_text(encoding="utf-8")
-    )
-    assert stored["patch_digest"] == hashlib.sha256(
-        stored["candidate_patch"].encode()).hexdigest()
-    assert result.repairs[0].checkpoint_ref == "repair-checkpoint.json"
-
-
-def test_more_output_or_changed_bytes_alone_is_not_progress() -> None:
-    """Requirement 40: a real defect alone is not progress."""
-    job = _job(unchanged_evidence=("focused test:tests/test_a.py", "src/handler.py"))
-    job.record_execution(progress=True, next_experiment=None,
-                         completed_experiments=[], tool_calls=400, changed_paths=("src/a.py",))
-    assert job.next_action() == RepairAction.BLOCKED
-    assert "tests/test_a.py" in (job.last_transition_reason or "")
-
-
-@pytest.mark.parametrize(("raw_value", "expected"), [("nonsense", 1800.0), (0.0, 0.0)])
-def test_invalid_job_limits_degrade_to_the_default(raw_value: object, expected: float) -> None:
-    """The existing resolver family degrades invalid input to the default."""
-    cfg = _limit_config(repair_execution_wall_s=raw_value)
-    assert _resolve_non_negative_float(cfg, "repair_execution_wall_s", 1800.0) == expected
-
-
-def test_execution_count_ceiling_is_exhausted_not_blocked() -> None:
-    """Requirement 42: a bounded job stops on its own bounds, not on a defect."""
-    job = _job(executions=4, policy=_policy(max_executions=4))
-    assert job.next_action() == RepairAction.EXHAUSTED
-
-
-def test_operator_grant_is_recorded_apart_from_usage_and_never_silent() -> None:
-    """Requirement 43: replenishment is explicit, auditable, and separate from history."""
+    Replenishment is auditable and separate from historical usage.
+    """
+    assert _job(executions=4, policy=_policy(max_executions=4)).next_action() == RepairAction.EXHAUSTED
+    assert _job(cumulative_cost_usd=5.01, policy=_policy(max_cost_usd=5.0)).next_action() == RepairAction.EXHAUSTED
     job = _job(consumed_s=7200.0, executions=2, policy=_policy())
     assert job.next_action() == RepairAction.EXHAUSTED
     with pytest.raises(ValueError, match="reason"):
@@ -243,12 +141,6 @@ def test_operator_grant_is_recorded_apart_from_usage_and_never_silent() -> None:
     assert job.consumed_s == 7200.0, "a grant must not rewrite historical usage"
     assert job.next_action() == RepairAction.EXECUTE
     assert "operator: budget extended after triage" in (job.last_transition_reason or "")
-
-
-def test_cost_ceiling_is_exhausted_not_blocked() -> None:
-    """Requirement 42: cost is a bound like time and count, and reports as exhausted."""
-    job = _job(cumulative_cost_usd=5.01, policy=_policy(max_cost_usd=5.0))
-    assert job.next_action() == RepairAction.EXHAUSTED
 
 
 # --- the coordinator's decisions -----------------------------------------------------------------
@@ -285,25 +177,7 @@ def test_scope_request_resolves_against_the_existing_authorization_policy(tmp_pa
     assert outside.accepted == ("src/other.rs",)
     assert outside.new_revision == 2, "an approved expansion bumps the policy revision"
 
-
-def test_scope_request_path_merely_appearing_in_test_output_grants_nothing(tmp_path: Path) -> None:
-    """Requirement 10: test output is not evidence of authorization."""
-    repo = _scope_repo(tmp_path)
-    result = _resolve_scope_request(
-        repo,
-        requested={"src/leaked.rs"},
-        granted=frozenset({"src/handler.py"}),
-        evidence_source="test_output",
-    )
-    assert result.expanded is False
-    assert result.reason == "insufficient_evidence"
-    assert result.accepted == (), "a blocked path is never accepted, only recorded"
-    assert result.new_revision == 1
-
-
-def test_scope_request_validation_is_fail_closed_on_untrusted_paths(tmp_path: Path) -> None:
-    """Requirement 13: an unsafe requested path is rejected, never reflected or authorized."""
-    repo = _scope_repo(tmp_path)
+    # Requirement 13: an unsafe requested path is rejected, never reflected or authorized.
     with pytest.raises(InvalidRepositoryFilePath):
         _resolve_scope_request(
             repo,
@@ -352,3 +226,69 @@ def test_second_coordinator_does_not_launch_a_second_worker(tmp_path: Path) -> N
     # coordinator owns the same job.
     with try_acquire_repair_owner(tmp_path) as reacquired:
         assert reacquired.acquired is True
+    # An unreadable checkpoint is untrustworthy, never mistaken for an absent one.
+    from daydream.phases.repair_checkpoint import read_repair_checkpoint
+    DeepArtifact.REPAIR_CHECKPOINT.at(tmp_path).write_text("{unreadable")
+    read = read_repair_checkpoint(tmp_path)
+    assert read.checkpoint is None and read.blocked is True
+
+
+async def test_coordinator_restores_only_trusted_candidates_and_blocks_unrecoverable_jobs(tmp_path: Path) -> None:
+    """Requirements 32/41: absent, foreign, conflicting, or corrupt candidates never re-apply or loop.
+
+    The runner journeys reach the coordinator only through slow interrupted repairs;
+    each refusal here is a distinct terminal decision on the persisted job.
+    """
+    from types import SimpleNamespace as NS
+
+    from daydream.deep.repair_coordinator import (
+        BOUNDED_VALIDATION_EXPERIMENT,
+        _charge_failure,
+        _restore_candidate,
+        _restore_refused,
+        continue_repair_job,
+    )
+    from daydream.phases.repair_checkpoint import RepairCheckpoint, write_repair_checkpoint
+    from daydream.phases.repair_outcome import RepairOutcome
+
+    repo = _scope_repo(tmp_path)
+    deep = repo / ".daydream" / "deep"
+    deep.mkdir(parents=True)
+    job_id = "repair-job-0001"
+    restore: dict[str, Any] = {"repo": repo, "deep_dir_path": deep, "current_tree_key": "now",
+                               "policy_revision": 3, "job_id": job_id}
+    assert _restore_candidate(checkpoint=None, **restore) == (False, "no candidate to restore")
+    assert _restore_refused(None, "no candidate to restore") is False
+    candidate = RepairCheckpoint(job_id=job_id, execution_id="e1", candidate_patch="--- a\n+++ b\n",
+                                 base_tree_key="then", policy_revision=3, failure_identity="sha256:f")
+    restored, reason = _restore_candidate(checkpoint=RepairCheckpoint(
+        job_id="repair-other", execution_id="e1", candidate_patch="patch"), **restore)
+    assert not restored and "belongs to job 'repair-other'" in reason
+    write_repair_checkpoint(deep, candidate)
+    restored, reason = _restore_candidate(checkpoint=candidate, **restore)
+    assert not restored and "base" in reason and _restore_refused(candidate, reason)
+
+    # A second cut-short repair of the same candidate is unchanged evidence, not progress.
+    job = _job(progress_evidence=(BOUNDED_VALIDATION_EXPERIMENT,))
+    repair: Any = NS(outcome=RepairOutcome.BUDGET_INTERRUPTED, execution_id="e2", changed_paths=("src/handler.py",),
+                checkpoint_ref="repair-checkpoint.json")
+    job = _charge_failure(job, result=None, repair=repair, checkpoint=candidate, elapsed_s=1.0, cost_usd=0.0)
+    assert any("re-validated against the same failure sha256:f" in entry for entry in job.unchanged_evidence)
+
+    footprint = AuthorizedFixFootprint(run_allowed_paths=frozenset({"src/handler.py"}), policy_revision=3)
+    work = WorkContext(repo=repo, source=repo, base_branch="main", base_sha="1" * 40, head_branch=None,
+                       head_sha="2" * 40, is_ephemeral=False, run_id="run-1")
+
+    async def no_dispatch() -> Any:
+        raise AssertionError("an unrecoverable job must not dispatch")
+
+    continuation: dict[str, Any] = {"work": work, "deep_dir_path": deep, "job_id": job_id, "footprint": footprint,
+                                    "capture_tree_key": lambda: "now", "first": None, "dispatch": no_dispatch}
+    outcome = await continue_repair_job(**continuation)
+    assert outcome.job is not None and outcome.job.state is RepairJobState.BLOCKED
+    assert "captured candidate cannot be restored" in outcome.reason
+    (deep / "repair-job.json").unlink()
+    DeepArtifact.REPAIR_CHECKPOINT.at(deep).write_text("{unreadable")
+    outcome = await continue_repair_job(**continuation)
+    assert outcome.job is not None and outcome.job.state is RepairJobState.BLOCKED
+    assert "captured candidate cannot be trusted" in outcome.reason

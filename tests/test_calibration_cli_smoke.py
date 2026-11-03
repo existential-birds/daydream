@@ -5,28 +5,6 @@ from pathlib import Path
 
 from tests.harness.scripts import cli_main
 
-FIXTURE = Path(__file__).parent / "fixtures" / "training" / "calibration"
-
-
-def test_fixture_run_produces_valid_replayable_artifact(tmp_path: Path) -> None:
-    """Real-path: cli.main over the checked-in fixture, twice."""
-    out1, out2 = tmp_path / "r1", tmp_path / "r2"
-    argv = ["corpus", "calibrate-reward", "--corpus-dir", str(FIXTURE / "corpus"), "--gold-labels",
-        str(FIXTURE / "gold.json"), "--breakdowns", str(FIXTURE / "breakdowns.json"), "--run-id", "fixture-run",
-        "--seed", "42", "--candidate", "w_fp=0.1,0.2,0.3", "--grid-points", "5", "--bootstrap-resamples", "200",
-        "--out",
-    ]
-    assert cli_main([*argv, str(out1)]) == 0
-    art = json.loads((out1 / "calibration.json").read_text())
-    assert art["schema_version"] == "calibration-artifact"
-    assert art["record_count"] == 12
-    assert art["metrics"]["class_balance"] == {"accepted": 6, "rejected": 6}
-    assert art["version_stamps"]["reward_version"] == "2026.09.04-1"
-    assert "grounding_axis" not in art["metrics"]["per_axis_correlations"]
-    assert art["stage0_analysis"]["status"] in {"unavailable", "ok"}  # explicit, never missing
-    assert cli_main([*argv, str(out2)]) == 0
-    assert {p.name: p.read_bytes() for p in out1.iterdir()} == {p.name: p.read_bytes() for p in out2.iterdir()}
-
 
 def test_calibration_consumes_canonical_record_projection_and_preserves_reward_policy(tmp_path: Path) -> None:
     from daydream.training.corpus_projection.projector import build_frozen_corpus

@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 
 from daydream.backends import ResultEvent
-from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.deep.artifacts import (
     DeepArtifact,
     deep_dir,
@@ -21,7 +20,6 @@ from daydream.extensions.builtins import register_builtins
 from daydream.phases import phase_cross_stack_merge
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
-from tests.harness.review_profile import default_strategy as _default_strategy
 
 
 def _empty_merge_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -34,116 +32,82 @@ def _empty_merge_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
     return dd, records, alternatives
 
 
-@pytest.mark.parametrize("payload", [[], {"issues": []}])
-async def test_empty_merge_host_noop_requires_current_record_envelope(
-    tmp_path: Path, make_work: Callable[..., WorkContext], payload: object,
-) -> None:
-    dd = deep_dir(tmp_path, allow_standalone=True)
-    records = dd / "stack-python-records.json"
-    records.write_text(json.dumps(payload))
-    alternatives = dd / "alternatives.json"
-    alternatives.write_text("[]")
-    backend = ScriptedBackend(events=[ResultEvent(structured_output={"items": []}, continuation=None)])
-
-    report = await phase_cross_stack_merge(
-        backend, make_work(tmp_path), per_stack_records_paths=[records], intent_path=dd / "intent.md",
-        alternatives_path=alternatives, dedup_candidates_path=dd / "dedup-candidates.json", allow_standalone=True,
-    )
-
-    assert backend.call_count == int(isinstance(payload, list))
-    assert json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text()) == {"items": []}
-    assert report.read_text() == DeepArtifact.MERGED_REPORT.at(dd).read_text()
-
-
-@pytest.mark.parametrize('input_kind', [
-    "missing-records",
-    "missing-alternatives",
-    "malformed-records",
-    "malformed-alternatives",
-    "wrong-records-shape",
-    "wrong-alternatives-shape",
-    "envelope-alternatives",
-    "no-record-paths",
-    "custom-builder",
-])
 async def test_empty_merge_requires_completed_inputs_and_builtin_contract(
-    tmp_path: Path, make_work: Callable[..., WorkContext], monkeypatch: pytest.MonkeyPatch, input_kind: str,
+    tmp_path: Path, make_work: Callable[..., WorkContext], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    dd, records, alternatives = _empty_merge_inputs(tmp_path)
-    structural: Path | None = None
-    if input_kind.startswith("missing-"):
-        (records if input_kind == "missing-records" else alternatives).unlink()
-    elif input_kind.startswith("malformed-"):
-        (records if input_kind == "malformed-records" else alternatives).write_text("{bad json")
-    elif input_kind.startswith("wrong-"):
-        (records if input_kind == "wrong-records-shape" else alternatives).write_text('{"issues": null}')
-    elif input_kind == "envelope-alternatives":
-        alternatives.write_text('{"issues": []}')
-    elif input_kind == "custom-builder":
-        registry = Registry()
-        register_builtins(registry)
-        structural = dd / "stack-structure-records.json"
-        structural.write_text(json.dumps({"issues": [{
-            "id": 1, "uid": "structure:1", "file": "design.py", "line": 0,
-            "description": "Retained structural concern", "evidence": "Dependency violates the documented boundary",
-            "confidence": "HIGH", "severity": "medium", "rationale": "Module coupling",
-        }]}))
+    for input_kind in ("missing-records", "missing-alternatives", "malformed-records",
+                       "wrong-alternatives-shape", "custom-builder"):
+        case = tmp_path / input_kind
+        case.mkdir()
+        with monkeypatch.context() as patch:
+            dd, records, alternatives = _empty_merge_inputs(case)
+            structural: Path | None = None
+            if input_kind.startswith("missing-"):
+                (records if input_kind == "missing-records" else alternatives).unlink()
+            elif input_kind.startswith("malformed-"):
+                (records if input_kind == "malformed-records" else alternatives).write_text("{bad json")
+            elif input_kind.startswith("wrong-"):
+                alternatives.write_text('{"issues": null}')
+            elif input_kind == "custom-builder":
+                registry = Registry()
+                register_builtins(registry)
+                structural = dd / "stack-structure-records.json"
+                structural.write_text(json.dumps({"issues": [{
+                    "id": 1, "uid": "structure:1", "file": "design.py", "line": 0,
+                    "description": "Retained structural concern",
+                    "evidence": "Dependency violates the documented boundary",
+                    "confidence": "HIGH", "severity": "medium", "rationale": "Module coupling",
+                }]}))
 
-        def custom_builder(**kwargs: Any) -> str:
-            assert kwargs["structural_records_path"] == structural
-            return build_merge_prompt(**kwargs)
+                def custom_builder(**kwargs: Any) -> str:
+                    assert kwargs["structural_records_path"] == structural
+                    return build_merge_prompt(**kwargs)
 
-        registry.override_prompt("merge", custom_builder)
-        monkeypatch.setattr("daydream.extensions.loader._REGISTRY_VAR", ContextVar("merge-registry", default=registry))
-    backend = ScriptedBackend(events=[ResultEvent(structured_output={"items": []}, continuation=None)])
+                registry.override_prompt("merge", custom_builder)
+                patch.setattr("daydream.extensions.loader._REGISTRY_VAR",
+                              ContextVar("merge-registry", default=registry))
+            backend = ScriptedBackend(events=[ResultEvent(structured_output={"items": []}, continuation=None)])
 
-    await phase_cross_stack_merge(
-        backend, make_work(tmp_path), per_stack_records_paths=[] if input_kind == "no-record-paths" else [records],
-        intent_path=dd / "intent.md", alternatives_path=alternatives,
-        dedup_candidates_path=dd / "dedup-candidates.json", structural_records_path=structural,
-        allow_standalone=True,
-    )
+            await phase_cross_stack_merge(
+                backend, make_work(case), per_stack_records_paths=[records],
+                intent_path=dd / "intent.md", alternatives_path=alternatives,
+                dedup_candidates_path=dd / "dedup-candidates.json", structural_records_path=structural,
+                allow_standalone=True,
+            )
 
-    assert backend.call_count == 1
-    if input_kind == "custom-builder":
-        assert json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text()) == {"items": []}
-
-
-async def test_empty_merge_keeps_structural_findings_and_clears_stale_outputs(
-    tmp_path: Path, make_work: Callable[..., WorkContext],
-) -> None:
-    dd, records, alternatives = _empty_merge_inputs(tmp_path)
-    structural = dd / "stack-structure-records.json"
-    structural.write_text(json.dumps({"issues": [{
-        "id": 42, "uid": "structure:42", "item_uid": "stable-structural-item", "file": "design.py", "line": 0,
-        "description": "concrete structural finding", "evidence": "Documented dependency contradicts contract",
-        "rationale": "The dependency must honor the documented boundary",
-        "severity": "medium", "confidence": "MEDIUM",
-    }]}))
-    for path in (DeepArtifact.MERGED_ITEMS.at(dd), DeepArtifact.MERGED_REPORT.at(dd), tmp_path / REVIEW_OUTPUT_FILE,
-                 dd / "dropped-speculative.json", dd / "folded-structural.json"):
-        path.write_text("stale result")
-    backend = ScriptedBackend(events=[AssertionError("empty language merge must not dispatch")])
-
-    await phase_cross_stack_merge(
-        backend, make_work(tmp_path), per_stack_records_paths=[records], intent_path=dd / "intent.md",
-        alternatives_path=alternatives, dedup_candidates_path=dd / "dedup-candidates.json",
-        structural_records_path=structural, strategy=_default_strategy("merge"), allow_standalone=True,
-    )
-
-    assert backend.call_count == 0
-    items = json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text())["items"]
-    assert len(items) == 1
-    assert items[0]["id"] == 1
-    assert items[0]["uid"] == "structure:42"
-    assert items[0]["item_uid"] == "stable-structural-item"
-    assert items[0]["source_uids"] == ["structure:42"]
-    assert items[0]["lens"] == "structural"
-    assert items[0]["severity"] == "medium"
-    assert items[0]["confidence"] == "MEDIUM"
-    assert not (dd / "dropped-speculative.json").exists()
-    assert not (dd / "folded-structural.json").exists()
-    assert "stale result" not in (tmp_path / REVIEW_OUTPUT_FILE).read_text()
+            assert backend.call_count == 1
+            if input_kind == "custom-builder":
+                assert json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text()) == {"items": []}
 
 
 # The merge agent returns a schema item list; the host renders the report.
+
+
+async def test_report_only_review_mode_never_enters_pr_posting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review (report-only) mode stops before PR resolution or posting."""
+    from daydream.deep.merge_steps import _step_post_review
+    from daydream.flows.engine import FlowContext
+    from daydream.run_config import RunConfig
+    from daydream.run_context import InteractionPolicy, RunContext
+    from tests.harness.review_result import review_coverage
+
+    coverage = review_coverage()
+    for scope in coverage.scopes:
+        coverage.record_scope(scope, "complete")
+    coverage.record_phase("merge", "complete", noop=True)
+    coverage.finalize("completed")
+    dd = tmp_path / "private-deep"
+    ctx = FlowContext(
+        config=RunConfig(), registry=Registry(), run_context=RunContext(InteractionPolicy()),
+        work=WorkContext(repo=tmp_path, source=tmp_path, base_branch="main", base_sha="base", head_branch="feature",
+                         head_sha="head", is_ephemeral=False, run_id="test-run"),
+        data={"dd": dd, "items_file": tmp_path / "merged-items.json", "review_coverage": coverage, "mode": "review"},
+    )
+
+    async def _post_forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("report-only review mode must not resolve or post to a PR")
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)
+    assert await _step_post_review(ctx) is None

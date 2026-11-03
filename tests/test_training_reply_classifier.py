@@ -1,6 +1,6 @@
 from typing import Any
 
-from daydream.training.reply_classifier import is_qualifying_author
+from daydream.training.reply_classifier import classify_reply, is_qualifying_author
 
 
 def _reply(body: str, login: str = "maintainer", assoc: str = "MEMBER", bot: str = "User") -> dict[str, Any]:
@@ -20,3 +20,5 @@ def test_qualifying_author_rules() -> None:
         is True
     )
     assert is_qualifying_author(_reply("x", bot="Bot", login="ci[bot]"), pr_author_logins=set()) is False
+    # Blank lines between a decisive reply's lines carry no direction of their own.
+    assert classify_reply(_reply("Good catch.\n\n   \nApplied in the next commit.")) == "accepted"

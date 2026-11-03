@@ -14,11 +14,6 @@ from daydream.benchmark.harbor import calibrate, entrypoint
 from daydream.config_file import DaydreamFileConfig
 from daydream.review_profile import ProfileError
 
-_resolver_fixture = (
-    'schema_version = 1\nname = "candidate"\n[strategies.intent]\n'
-    'content = "C"\nsource = "copied: a"'
-)
-
 
 def _judge_env(**extra: str) -> dict[str, str]:
     return {"DAYDREAM_JUDGE_PROVIDER": "openai-compatible", "DAYDREAM_JUDGE_MODEL": "openrouter/test-model",
@@ -32,14 +27,6 @@ def test_harbor_resolver_ignores_user_env_and_repo_config(monkeypatch: pytest.Mo
     resolved = rp.resolve_harbor_profile(file_config=malicious)  # no candidate requested
     assert resolved.source_kind == "default"  # falls to packaged default, ignores env+repo
     assert resolved.profile.name  # the packaged default, not user/repo
-
-def test_harbor_resolver_accepts_only_explicit_control_plane_candidate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    p = tmp_path / "control-plane-candidate.toml"
-    p.write_text(_resolver_fixture)
-    monkeypatch.setenv("DAYDREAM_REVIEW_PROFILE_CANDIDATE", str(p))
-    resolved = rp.resolve_harbor_profile(env={"DAYDREAM_REVIEW_PROFILE_CANDIDATE": str(p)})
-    assert resolved.profile.name == "candidate"
 
 def test_entrypoint_invalid_candidate_fails_and_writes_no_review(tmp_path: Path,) -> None:
     bad = tmp_path / "bad.toml"

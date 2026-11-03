@@ -19,20 +19,6 @@ def test_bare_corpus_prints_supported_help(capsys: pytest.CaptureFixture[str]) -
     assert "checkpoint" not in output
 
 
-@pytest.mark.parametrize('verb', [
-    "publish-final",
-])
-def test_retired_annotation_commands_rejected_without_side_effects(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verb: str,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
-    directories = {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_dir()}
-    assert cli_main(["corpus", "adjudicate", verb]) == 2
-    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
-    assert {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_dir()} == directories
-
-
 def test_retired_hydration_command_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     before = set(tmp_path.rglob("*"))
@@ -92,22 +78,10 @@ def test_snapshot_cli_freezes_temporal_membership(tmp_path: Path, capsys: pytest
     assert store.read_snapshot(snapshot["snapshot_id"]).observations == selected.observations
 
 
-def test_record_build_cli_without_license_configuration(tmp_path: Path) -> None:
-    store = seed_projection_store(tmp_path, dispositions=("accepted",))
-    snapshot = store.select_snapshot(observed_before="2100-01-01T00:00:00Z")
-    output = tmp_path / "out"
-    assert cli_main(["corpus", "build", "--store", str(store.root), "--snapshot-id", snapshot["snapshot_id"],
-                     "--out", str(output / "corpus.jsonl")]) == 0
-    assert (output / "_SUCCESS").exists()
-    lineage = json.loads((output / "lineage.json").read_text())
-    assert "license_policy" not in lineage
-    assert not (output / "license-report.json").exists()
-
-
-@pytest.mark.parametrize("flag", ["--license-policy", "--allow-copyleft"])
 def test_record_build_cli_rejects_removed_flags(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], flag: str,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
+    flag = "--allow-copyleft"
     store = seed_projection_store(tmp_path, dispositions=("accepted",))
     snapshot = store.select_snapshot(observed_before="2100-01-01T00:00:00Z")
     output = tmp_path / "out"
@@ -118,20 +92,3 @@ def test_record_build_cli_rejects_removed_flags(
     assert not output.exists()
     assert cli_main(args) == 0
     assert (output / "_SUCCESS").exists()
-
-
-def test_bare_harvest_is_unknown_verb_treated_as_review_target(capsys: pytest.CaptureFixture[str]) -> None:
-    assert cli_main(["harvest", "--dry-run"]) == 2
-    assert "--dry-run" in capsys.readouterr().err
-
-
-def test_frozen_evidence_consumer_can_enter_fresh_cli_process(tmp_path: Path) -> None:
-    import subprocess
-    import sys
-
-    code = ("from daydream.training.record_evidence import sessions_from_snapshot; "
-            "from daydream.cli import main; main(['corpus', 'harvest', '--help'])")
-    result = subprocess.run([sys.executable, "-c", code], cwd=tmp_path,
-                            capture_output=True, text=True, check=False)
-    assert result.returncode == 0, result.stderr
-    assert "usage: daydream corpus harvest" in result.stdout

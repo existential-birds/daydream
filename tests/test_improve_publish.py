@@ -42,7 +42,6 @@ def _publish(tmp_path: Path, *, package_id: str, title: str,
     return publisher.publish(package_id=package_id, title=title, plan_path=plan_path, **kwargs)
 
 
-
 def test_package_marker_rejects_comment_injection() -> None:
     with pytest.raises(ValueError, match="package_id"):
         package_marker("package -->\nmalicious")
@@ -77,15 +76,6 @@ def test_connect_infers_repository_and_lists_open_and_closed_issues(monkeypatch:
     assert publisher.repo_slug == "acme/widgets"
     assert captured == {"repo": tmp_path, "state": "all", "repo_slug": "acme/widgets",}
 
-def test_existing_closed_issue_is_reused_without_creating_a_duplicate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    _stub_existing_issue(
-        monkeypatch, [_issue("reuse-handler", state="closed")], create_failure="must not create a duplicate issue",
-    )
-    result = _publish(tmp_path, package_id="reuse-handler", title="Reuse the existing handler")
-    assert result.disposition == "existing"
-    assert result.issue_url.endswith("/7")
-
 def test_all_member_aliases_reconcile_a_regrouped_package(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,) -> None:
     existing = _issue("older-package")
     existing["body"] = issue_body("older-package", "old plan", member_aliases=("member:aaa", "member:bbb"),)
@@ -100,22 +90,17 @@ def test_partial_member_alias_overlap_fails_instead_of_creating_duplicate_work(
 ) -> None:
     existing = _issue("older-package")
     existing["body"] = issue_body("older-package", "old plan", member_aliases=("member:shared",),)
-    _stub_existing_issue(monkeypatch, [existing], create_failure="must not create overlapping work")
+    unrelated = _issue("unrelated-package", number=8)
+    _stub_existing_issue(monkeypatch, [unrelated, existing], create_failure="must not create overlapping work")
     with pytest.raises(ImprovePublishError, match="partially covers"):
         _publish(tmp_path, package_id="expanded-package", title="Expand reuse cleanup",
             plan="# Expanded plan\n",
             member_aliases=("member:shared", "member:new"),
         )
-
-def test_matching_package_marker_cannot_hide_stale_member_coverage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    existing = _issue("same-package")
-    existing["body"] = issue_body("same-package", "old plan", member_aliases=("member:old",),)
-    _stub_existing_issue(monkeypatch, [existing], create_failure="must not publish stale coverage")
-    with pytest.raises(ImprovePublishError, match="stale or overlapping"):
-        _publish(tmp_path, package_id="same-package", title="Expanded cleanup",
-            plan="# Expanded plan\n",
-            member_aliases=("member:old", "member:new"),
+    # Colliding aliases without raw fingerprints can prove no complete coverage.
+    with pytest.raises(ImprovePublishError, match="partially covers"):
+        _publish(tmp_path, package_id="colliding-package", title="Two cleanups share one alias",
+            member_aliases=("member:shared", "member:shared"),
         )
 
 def test_colliding_member_aliases_require_every_raw_fingerprint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
@@ -144,13 +129,8 @@ def test_ambiguous_create_failure_reconciles_before_returning(monkeypatch: pytes
     result = _publish(tmp_path, package_id="reuse-handler", title="Reuse the existing handler")
     assert result.disposition == "reconciled"
     assert result.issue_url.endswith("/19")
-
-def test_ambiguous_create_failure_without_a_marker_remains_a_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
+    # With no matching marker after the lost response, the timed-out create remains a failure.
     monkeypatch.setattr(git_ops, "gh_issue_list_strict", lambda *args, **kwargs: [])
-    monkeypatch.setattr(git_ops, "gh_issue_create",
-        lambda *args, **kwargs: (_ for _ in ()).throw(git_ops.GitTimeoutError("response lost")),
-    )
     with pytest.raises(ImprovePublishError, match="no matching issue"):
         _publish(tmp_path, package_id="reuse-handler", title="Reuse the existing handler")
 

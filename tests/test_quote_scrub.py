@@ -72,59 +72,51 @@ def test_scrub_driver_atomic_write_leaves_original_intact_on_failure(tmp_path: P
     # No sibling temp file is left behind by the failed atomic write.
     assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
 
-def test_scrub_driver_raises_git_error_on_attribution_diff_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_scrub_driver_raises_git_error_on_unattributable_diffs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Expose GitError so the caller can warn and continue without unattributed edits."""
-    repo = _baseline_repo(tmp_path, {"main.go": "x\n"})
-    src = repo / "main.go"
-    src.write_text("// \u201d\n", encoding="utf-8")
+    repo = _baseline_repo(tmp_path / "failed", {"main.go": "x\n"})
+    (repo / "main.go").write_text("// \u201d\n", encoding="utf-8")
+
     def _fail_diff(repo: Any, ref: Any, paths: Any) -> None:
         raise GitError("git diff failed")
-    monkeypatch.setattr("daydream.quote_scrub.diff_worktree_against", _fail_diff)
-    with pytest.raises(GitError):
-        scrub_smart_quotes_changed_files(repo, ["main.go"], pre_fix_ref="HEAD")
 
-def test_scrub_driver_with_non_utf8_diff_content_raises_git_error(tmp_path: Path) -> None:
-    """Translate undecodable attribution into GitError for the caller's fail-open guard."""
-    repo = _baseline_repo(tmp_path, {"latin.go": b"// caf\xe9\n"})
-    src = repo / "latin.go"
-    src.write_bytes(b"// caf\xe9\n// \xe2\x80\x9cadded\xe2\x80\x9d\n")
+    with monkeypatch.context() as failing:
+        failing.setattr("daydream.quote_scrub.diff_worktree_against", _fail_diff)
+        with pytest.raises(GitError):
+            scrub_smart_quotes_changed_files(repo, ["main.go"], pre_fix_ref="HEAD")
+    # Undecodable attribution is translated into GitError for the caller's fail-open guard.
+    repo = _baseline_repo(tmp_path / "latin", {"latin.go": b"// caf\xe9\n"})
+    (repo / "latin.go").write_bytes(b"// caf\xe9\n// \xe2\x80\x9cadded\xe2\x80\x9d\n")
     with pytest.raises(GitError):
         scrub_smart_quotes_changed_files(repo, ["latin.go"], pre_fix_ref="HEAD")
-
-
-def test_scrub_driver_raises_git_error_on_external_driver_diff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reject unattributable external diff output with GitError so the caller
-    can skip it without normalizing baseline quotes."""
-    repo = _baseline_repo(tmp_path, {"main.go": "// baseline \u201d quote\n"})
+    # Unattributable external diff output is rejected without normalizing baseline quotes.
+    repo = _baseline_repo(tmp_path / "external", {"main.go": "// baseline \u201d quote\n"})
     src = repo / "main.go"
     src.write_text("// baseline \u201d quote\n// added \u201cquote\u201d\n", encoding="utf-8")
+
     def _garbage_diff(repo: Any, ref: Any, paths: Any) -> str:
         return "raw external-driver output without unified-diff structure\n"
+
     monkeypatch.setattr("daydream.quote_scrub.diff_worktree_against", _garbage_diff)
     with pytest.raises(GitError):
         scrub_smart_quotes_changed_files(repo, ["main.go"], pre_fix_ref="HEAD")
-    # Fail-open: nothing was rewritten.
     assert src.read_text(encoding="utf-8") == "// baseline \u201d quote\n// added \u201cquote\u201d\n"
 
-def test_scrub_driver_binary_only_diff_does_not_raise(tmp_path: Path) -> None:
+
+def test_scrub_driver_skips_binary_diffs_and_preserves_symlinks(tmp_path: Path) -> None:
     """Binary diff output is valid: skip undecodable content and still scrub
-    the untracked text sibling without invoking the external-driver guard."""
-    repo = _baseline_repo(tmp_path, {"blob.bin": b"\x00\x01"})
+    the untracked text sibling; a rewrite through a symlink keeps the link."""
+    repo = _baseline_repo(tmp_path, {"blob.bin": b"\x00\x01", "real.go": "// baseline\n"},
+                          symlinks={"link.go": "real.go"})
     blob = repo / "blob.bin"
     blob.write_bytes(b"\x00\x02")
     new_file = repo / "new.go"
     new_file.write_text("// \u201cnew\u201d\n", encoding="utf-8")
-    scrubbed = scrub_smart_quotes_changed_files(repo, ["blob.bin", "new.go"], pre_fix_ref="HEAD",)
-    assert scrubbed == ["new.go"]
-    assert new_file.read_text(encoding="utf-8") == '// "new"\n'
-
-def test_scrub_driver_preserves_symlink_on_rewrite(tmp_path: Path) -> None:
-    repo = _baseline_repo(tmp_path, {"real.go": "// baseline\n"}, symlinks={"link.go": "real.go"})
     target = repo / "real.go"
-    link = repo / "link.go"
     target.write_text("// baseline\n// added \u201cquote\u201d\n", encoding="utf-8")
-    scrubbed = scrub_smart_quotes_changed_files(repo, ["link.go"], pre_fix_ref="HEAD")
-    assert scrubbed == ["link.go"]
-    assert link.is_symlink()
+    assert scrub_smart_quotes_changed_files(repo, ["blob.bin", "new.go"], pre_fix_ref="HEAD") == ["new.go"]
+    assert new_file.read_text(encoding="utf-8") == '// "new"\n'
+    assert scrub_smart_quotes_changed_files(repo, ["link.go"], pre_fix_ref="HEAD") == ["link.go"]
+    assert (repo / "link.go").is_symlink()
     assert target.read_text(encoding="utf-8") == '// baseline\n// added "quote"\n'

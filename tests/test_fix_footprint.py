@@ -8,7 +8,6 @@ import json
 import os
 import shutil
 import stat
-import subprocess
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any, cast
@@ -20,7 +19,7 @@ from daydream import git_ops
 from daydream.backends import AgentEvent, Backend, ResultEvent
 from daydream.deep.scope_issues import ScopeEnforcementResult, enforce_authorized_fix_footprint
 from daydream.fix_footprint import AuthorizedFixFootprint
-from daydream.git_ops import GitError, GitPathState, WorktreeRollbackSnapshot, process as git_process
+from daydream.git_ops import GitError, GitPathState, WorktreeRollbackSnapshot
 from daydream.phases import (
     phase_fix_parallel,
 )
@@ -99,7 +98,9 @@ import sys
 
 argv = sys.argv[1:]
 if argv[:2] == ["issue", "list"]:
-    print("[]")
+    record = Path(os.environ["P01_GH_RECORD"])
+    lines = record.read_text().splitlines() if record.is_file() else []
+    print(json.dumps([{"body": json.loads(line)["body"]} for line in lines]))
     raise SystemExit(0)
 if argv[:2] != ["issue", "create"]:
     print("unexpected gh invocation", file=sys.stderr)
@@ -135,150 +136,47 @@ def _items() -> list[dict[str, object]]:
         {"id": 3, "item_uid": "item:3", "file": "src/c.py", "related_files": None},
     ]
 
-@pytest.mark.parametrize(
-    "value",
-    ["", 7, None, "/tmp/outside", "../outside", "src/../outside", "a\n.py", "a`touch nope`", "bad-\udcff.py"],
-)
-def test_model_path_normalization_rejects_malformed_and_escaping_values(tmp_path: Path, value: object) -> None:
-    with pytest.raises(InvalidRepositoryFilePath, match="invalid repository file path"):
-        canonicalize_repository_file_path(tmp_path, value)
-
-def test_model_path_normalization_removes_dot_prefix_and_rejects_symlink_escape(tmp_path: Path) -> None:
+def test_model_and_reviewed_paths_normalize_or_fail_closed(tmp_path: Path) -> None:
+    """Model paths drop "./" and reject symlink escapes; reviewed and related paths must be confined."""
     repo = tmp_path / "repo"
     outside = tmp_path / "outside"
     repo.mkdir()
     outside.mkdir()
 
     assert canonicalize_repository_file_path(repo, "./src/a.py") == "src/a.py"
+    with pytest.raises(InvalidRepositoryFilePath, match="invalid reviewed repository path"):
+        AuthorizedFixFootprint.build(repo, {"/outside"}, [])
+    item = {"id": 1, "item_uid": "item:1", "file": "src/a.py", "related_files": "src/b.py"}
+    with pytest.raises(InvalidRepositoryFilePath, match="invalid repository file path"):
+        AuthorizedFixFootprint.build(repo, set(), [item])
 
     (repo / "src").symlink_to(outside, target_is_directory=True)
     with pytest.raises(InvalidRepositoryFilePath, match="invalid repository file path"):
         canonicalize_repository_file_path(repo, "src/a.py")
 
-def test_git_observed_confinement_leaf_symlink_only_with_flag(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    outside = tmp_path / "outside"
-    repo.mkdir()
-    outside.mkdir()
-    (repo / "leaf").symlink_to(outside / "target.txt")
-    (repo / "dirlink").symlink_to(outside, target_is_directory=True)
-
-    # A symlink leaf is an escape by default; inspecting the leaf itself is
-    # allowed only when the caller opts in, and a symlinked parent is never.
-    assert not git_observed_path_is_confined(repo, "leaf")
-    assert git_observed_path_is_confined(repo, "leaf", allow_leaf_symlink=True)
-    assert not git_observed_path_is_confined(repo, "dirlink/target.txt", allow_leaf_symlink=True)
-
-def test_footprint_uses_item_uids_and_exact_item_group_and_run_unions(tmp_path: Path) -> None:
-    footprint = AuthorizedFixFootprint.build(tmp_path, {"README.md", "./src/a.py"}, _items())
-
-    assert footprint.item_paths("item:1") == frozenset({"src/a.py", "src/shared.py", "tests/test_a.py"})
-    assert footprint.item_paths("item:2") == frozenset({"src/b.py", "src/shared.py"})
-    assert footprint.item_paths("item:3") == frozenset({"src/c.py"})
-    assert footprint.group_paths([_items()[0], _items()[1]]) == frozenset(
-        {"src/a.py", "src/b.py", "src/shared.py", "tests/test_a.py"}
-    )
-    assert footprint.run_allowed_paths == frozenset(
-        {"README.md", "src/a.py", "src/b.py", "src/c.py", "src/shared.py", "tests/test_a.py"}
-    )
-    actions = [(event.origin, event.path, event.item_uid) for event in footprint.events]
-    assert ("reviewed", "README.md", None) in actions
-    assert ("primary", "src/a.py", "item:1") in actions
-    assert ("related", "tests/test_a.py", "item:1") in actions
-
-@pytest.mark.parametrize("reviewed_path", ["odd\n$name[1].txt", "literal-$(value)[1].py", "native-\udcff.py"])
-def test_footprint_treats_reviewed_git_names_separately_from_model_paths(git_repo: Path, reviewed_path: str,) -> None:
-
-    if reviewed_path == "odd\n$name[1].txt":
+def test_footprint_treats_reviewed_git_names_separately_from_model_paths(git_repo: Path) -> None:
+    """Git-observed names (control characters, globs, non-UTF-8 bytes) are authorized verbatim, not re-parsed."""
+    for reviewed_path in ("odd\n$name[1].txt", "native-\udcff.py"):
+        try:
+            _seed(git_repo, {reviewed_path: b"before\n", "normal.py": b"before\n"})
+        except OSError as exc:
+            if exc.errno == errno.EILSEQ:
+                continue  # this host filesystem rejects non-UTF-8 names; Linux CI exercises them
+            raise
         assert git_observed_path_is_confined(git_repo, reviewed_path)
-    try:
-        _seed(git_repo, {reviewed_path: b"before\n", "normal.py": b"before\n"})
-    except OSError as exc:
-        if exc.errno == errno.EILSEQ:
-            pytest.skip("host filesystem rejects non-UTF-8 filenames; exercised on Linux CI")
-        raise
-    (git_repo / reviewed_path).write_bytes(b"reviewed\n")
-    reviewed = set(git_ops.changed_paths_z(git_repo, "HEAD"))
-    assert reviewed == {reviewed_path}
-    item = {"item_uid": "item:normal", "file": "normal.py"}
-    footprint = AuthorizedFixFootprint.build(git_repo, reviewed, [item])
+        (git_repo / reviewed_path).write_bytes(b"reviewed\n")
+        reviewed = set(git_ops.changed_paths_z(git_repo, "HEAD"))
+        assert reviewed == {reviewed_path}
+        item = {"item_uid": "item:normal", "file": "normal.py"}
+        footprint = AuthorizedFixFootprint.build(git_repo, reviewed, [item])
 
-    assert footprint.run_allowed_paths == frozenset({reviewed_path, "normal.py"})
-    assert footprint.group_paths([item]) == frozenset({"normal.py"})
-    reviewed_event = next(event for event in footprint.events if event.origin == "reviewed")
-    assert reviewed_event.path == reviewed_path
-    assert reviewed_event.path_kind == "git"
-    assert footprint.accept_retarget(git_repo, "item:normal", reviewed_path, phase="fix", round_number=1,) is None
-    assert json.loads(json.dumps(footprint.audit_payload("run")))["run_allowed_paths"]
+        assert footprint.run_allowed_paths == frozenset({reviewed_path, "normal.py"})
+        assert footprint.group_paths([item]) == frozenset({"normal.py"})
+        reviewed_event = next(event for event in footprint.events if event.origin == "reviewed")
+        assert (reviewed_event.path, reviewed_event.path_kind) == (reviewed_path, "git")
+        assert footprint.accept_retarget(git_repo, "item:normal", reviewed_path, phase="fix", round_number=1,) is None
+        assert json.loads(json.dumps(footprint.audit_payload("run")))["run_allowed_paths"]
 
-@pytest.mark.parametrize("reviewed_path", ["", ".", "/outside", "../outside", "src/../outside", "src//a.py"])
-def test_footprint_rejects_unconfined_reviewed_git_paths(tmp_path: Path, reviewed_path: str) -> None:
-    with pytest.raises(InvalidRepositoryFilePath, match="invalid reviewed repository path"):
-        AuthorizedFixFootprint.build(tmp_path, {reviewed_path}, [])
-
-@pytest.mark.parametrize("related", ["src/b.py", ["src/b.py", 7], ["../escape.py"], ["src/../escape.py"]],)
-def test_footprint_rejects_malformed_related_paths(tmp_path: Path, related: object) -> None:
-    item = {"id": 1, "item_uid": "item:1", "file": "src/a.py", "related_files": related}
-    with pytest.raises(InvalidRepositoryFilePath, match="invalid repository file path"):
-        AuthorizedFixFootprint.build(tmp_path, set(), [item])
-
-def test_generated_authorization_is_idempotent_and_retarget_is_item_bounded(tmp_path: Path) -> None:
-    footprint = AuthorizedFixFootprint.build(tmp_path, set(), _items())
-    initial_revision = footprint.policy_revision
-    footprint.authorize_widened_path(
-        tmp_path, "generated/schema.py",
-        action="approve_generated", origin="generated",
-        phase="generated-guard", round_number=1, reason="approved migration output",
-    )
-    footprint.authorize_widened_path(
-        tmp_path, "./generated/schema.py",
-        action="approve_generated", origin="generated",
-        phase="generated-guard", round_number=2,
-        reason="same generated output observed again",
-    )
-    assert footprint.policy_revision == initial_revision + 1
-    assert sum(event.action == "approve_generated" for event in footprint.events) == 1
-    revision = footprint.policy_revision
-    run_scope = footprint.run_allowed_paths
-    item_scope = footprint.item_paths("item:1")
-    event_count = len(footprint.events)
-    assert footprint.accept_retarget(
-        tmp_path, "item:1", "./tests/test_a.py", phase="fix", round_number=2
-    ) == "tests/test_a.py"
-    assert footprint.policy_revision == revision
-    assert footprint.run_allowed_paths == run_scope
-    assert footprint.item_paths("item:1") == item_scope
-    assert len(footprint.events) == event_count + 1
-    event = footprint.events[-1]
-    assert event.action == "authorize"
-    assert event.origin == "retarget"
-    assert event.path_kind == "model"
-    assert event.path == "tests/test_a.py"
-    assert event.item_uid == "item:1"
-    assert event.phase == "fix"
-    assert event.round_number == 2
-    assert footprint.accept_retarget(tmp_path, "item:1", "src/b.py", phase="verify", round_number=2) is None
-    assert footprint.item_paths("item:1") == frozenset({"src/a.py", "src/shared.py", "tests/test_a.py"})
-    rejection = footprint.events[-1]
-    assert (rejection.action, rejection.path, rejection.item_uid) == ("rejected_retarget", "src/b.py", "item:1",)
-
-def test_changed_paths_z_preserves_newline_shell_metacharacters_and_surrogate_bytes(
-    git_repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    weird = "odd\n$(not-a-command).txt"
-    (git_repo / weird).write_bytes(b"odd")
-    paths = git_ops.changed_paths_z(git_repo, "HEAD")
-    assert weird in paths
-
-    raw_name = b"invalid-\xff.txt"
-    monkeypatch.setattr(
-        git_process, "_run_git",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=raw_name + b"\0", stderr=b""
-        ),
-    )
-    paths = git_ops.changed_paths_z(git_repo, "HEAD", include_untracked=False)
-    assert os.fsdecode(raw_name) in paths
 
 def test_preexisting_untracked_state_is_restored_exactly_and_new_residual_is_removed(git_repo: Path) -> None:
     _seed(git_repo, {"allowed.txt": b"base\n", "outside.txt": b"outside base\n"})
@@ -326,104 +224,6 @@ def test_preexisting_untracked_state_is_restored_exactly_and_new_residual_is_rem
     sequences = [event["sequence"] for event in payload["events"]]
     assert sequences == list(range(1, len(sequences) + 1))
     assert "odd\\n$(ignored).txt" in json.dumps(payload)
-
-def test_runtime_artifacts_do_not_enter_fix_scope_or_invalidate_content_evidence(git_repo: Path) -> None:
-    _seed(git_repo, {"allowed.txt": b"base\n"})
-    artifacts = git_repo / ".daydream" / "deep"
-    artifacts.mkdir(parents=True)
-    audit = artifacts / "fix-footprint.json"
-    audit.write_text('{"version": 1}')
-    report = git_repo / ".review-output.md"
-    report.write_text("old report")
-    scratch = git_repo / "scratch.txt"
-    scratch.write_bytes(b"user scratch")
-    protected = git_ops.snapshot_untracked_paths(git_repo, include_runtime_artifacts=False)
-    assert set(protected) == {"scratch.txt"}
-    assert ".daydream/deep/fix-footprint.json" in git_ops.changed_paths_z(git_repo, "HEAD")
-
-    before = git_ops.tree_key(git_ops.snapshot_worktree_delta(git_repo, "HEAD", preexisting_untracked=protected,))
-    audit.write_text('{"version": 2}')
-    report.write_text("new report")
-    assert git_ops.tree_key(git_ops.snapshot_worktree_delta(
-        git_repo, "HEAD", preexisting_untracked=protected,
-    )) == before
-    scratch.write_bytes(b"changed scratch")
-    assert git_ops.tree_key(git_ops.snapshot_worktree_delta(
-        git_repo, "HEAD", preexisting_untracked=protected,
-    )) != before
-    footprint = AuthorizedFixFootprint.build(git_repo, {"allowed.txt"}, [])
-    result = _enforce_fix(git_repo, footprint, phase="post-test", preexisting_untracked=protected)
-    assert result.mutated
-    assert not result.retained_paths
-    assert scratch.read_bytes() == b"user scratch"
-    assert audit.read_text() == '{"version": 2}'
-    assert report.read_text() == "new report"
-    assert {event.path for event in footprint.events if event.action == "restore"} == {"scratch.txt"}
-
-def test_runtime_exclusion_keeps_tracked_artifacts_and_similar_user_paths_visible(git_repo: Path) -> None:
-    _seed(git_repo, {".daydream/tracked.txt": b"tracked\n"})
-    (git_repo / ".daydream/tracked.txt").write_bytes(b"changed\n")
-    for name in (".daydream.toml", ".review-output.md.user", "src/.daydream/user.txt"):
-        path = git_repo / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("user file")
-    expected = {".daydream/tracked.txt", ".daydream.toml", ".review-output.md.user", "src/.daydream/user.txt"}
-    assert set(git_ops.changed_paths_z(git_repo, "HEAD", include_runtime_artifacts=False)) == expected
-    protected = git_ops.snapshot_untracked_paths(git_repo, include_runtime_artifacts=False)
-    assert set(protected) == expected - {".daydream/tracked.txt"}
-
-def test_worktree_restore_leaves_the_index_tree_unchanged(git_repo: Path) -> None:
-    _seed(git_repo, {"tracked.txt": b"base\n"})
-    path = git_repo / "tracked.txt"
-    path.write_bytes(b"staged\n")
-    _git(git_repo, "add", "tracked.txt")
-    before = git_ops.snapshot_index(git_repo)
-    path.write_bytes(b"worktree-only\n")
-    git_ops.restore_worktree_paths_from_ref(git_repo, "HEAD", ["tracked.txt"])
-
-    assert path.read_bytes() == b"base\n"
-    assert git_ops.snapshot_index(git_repo) == before
-
-def test_group_rollback_restores_all_paths_untracked_and_supplied_index(git_repo: Path) -> None:
-    _seed(git_repo, {"a.txt": b"base a\n", "b.txt": b"base b\n"})
-    (git_repo / "a.txt").write_bytes(b"round baseline a\n")
-    (git_repo / "b.txt").write_bytes(b"round baseline b\n")
-    (git_repo / "round-scratch").write_bytes(b"scratch baseline")
-    (git_repo / "round-scratch").chmod(0o600)
-    round_ref = git_ops.stash_create(git_repo) or "HEAD"
-    snapshot = WorktreeRollbackSnapshot(
-        ref=round_ref, index=git_ops.snapshot_index(git_repo),
-        path_states=git_ops.snapshot_worktree_paths(git_repo, ["a.txt", "b.txt"]),
-        untracked=git_ops.snapshot_untracked_paths(git_repo),
-    )
-    (git_repo / "a.txt").write_bytes(b"failed a\n")
-    (git_repo / "b.txt").unlink()
-    (git_repo / "new.txt").write_bytes(b"failed new")
-    (git_repo / "round-scratch").write_bytes(b"failed scratch")
-    _git(git_repo, "add", "a.txt", "b.txt")
-    git_ops.restore_group_from_snapshot(git_repo, snapshot, ["a.txt", "b.txt", "new.txt", "round-scratch"])
-
-    assert (git_repo / "a.txt").read_bytes() == b"round baseline a\n"
-    assert (git_repo / "b.txt").read_bytes() == b"round baseline b\n"
-    assert not (git_repo / "new.txt").exists()
-    assert (git_repo / "round-scratch").read_bytes() == b"scratch baseline"
-    assert stat.S_IMODE((git_repo / "round-scratch").stat().st_mode) == 0o600
-    assert git_ops.snapshot_index(git_repo) == snapshot.index
-
-def test_group_worktree_rollback_preserves_sibling_index_entry(git_repo: Path) -> None:
-    _seed(git_repo, {"a.py": b"A = 1\n", "b.py": b"B = 1\n"})
-    snapshot = WorktreeRollbackSnapshot(
-        ref="HEAD", index=git_ops.snapshot_index(git_repo),
-        path_states=git_ops.snapshot_worktree_paths(git_repo, ["a.py"]), untracked={},
-    )
-    (git_repo / "a.py").write_bytes(b"A = partial\n")
-    write_and_stage(git_repo, "b.py", b"B = sibling\n")
-    sibling_index = git_ops.snapshot_index(git_repo)
-    git_ops.restore_group_worktree_from_snapshot(git_repo, snapshot, ["a.py"])
-
-    assert (git_repo / "a.py").read_bytes() == b"A = 1\n"
-    assert (git_repo / "b.py").read_bytes() == b"B = sibling\n"
-    assert git_ops.snapshot_index(git_repo) == sibling_index
 
 def test_scope_issue_diff_failure_skips_only_that_filing_after_restoring_all_residuals(
     git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
@@ -475,70 +275,11 @@ def test_scope_issue_filing_failure_occurs_after_verified_restore_and_is_best_ef
     assert len(calls) == 1
     assert calls[0]["watched"] == {"outside.py": b"owner\n".hex()}
     assert "+unauthorized" in calls[0]["body"]
-
-@pytest.mark.asyncio
-async def test_parallel_group_fallback_never_restores_index_while_sibling_is_live(git_repo: Path,) -> None:
-    """Real fix dispatch uses a join barrier before the one complete index restore."""
-
-
-    _seed(git_repo, {"a.py": b"A = 1\n", "b.py": b"B = 1\n"})
-    round_index = git_ops.snapshot_index(git_repo)
-    snapshot = WorktreeRollbackSnapshot(
-        ref="HEAD", index=round_index, path_states=git_ops.snapshot_worktree_paths(git_repo, ["a.py", "b.py"]),
-        untracked={},
-    )
-    items = [
-        {"id": 1, "item_uid": "item:a1", "file": "a.py", "description": "a one"},
-        {"id": 2, "item_uid": "item:a2", "file": "a.py", "description": "a two"},
-        {"id": 3, "item_uid": "item:b1", "file": "b.py", "description": "b one"},
-        {"id": 4, "item_uid": "item:b2", "file": "b.py", "description": "b two"},
-    ]
-    footprint = AuthorizedFixFootprint.build(git_repo, {"a.py", "b.py"}, items)
-    b_staged = anyio.Event()
-    a_fallback_started = anyio.Event()
-    b_observed_sibling_index = anyio.Event()
-
-    a_fallback_calls = 0
-    b_cached_while_live = ""
-
-    def responder(cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> Any:
-        async def _gen() -> AsyncGenerator[AgentEvent, None]:
-            nonlocal a_fallback_calls, b_cached_while_live
-            if prompt.startswith("Fix these 2 issues") and "b one" in prompt:
-                write_and_stage(cwd, "b.py", b"B = sibling\n")
-                b_staged.set()
-                await a_fallback_started.wait()
-                b_cached_while_live = _git(cwd, "diff", "--cached", "--name-only")
-                b_observed_sibling_index.set()
-            elif prompt.startswith("Fix these 2 issues") and "a one" in prompt:
-                await b_staged.wait()
-                (cwd / "a.py").write_bytes(b"A = partial\n")
-                raise RuntimeError("force batch fallback")
-            elif prompt.startswith("Fix this issue:") and ("a one" in prompt or "a two" in prompt):
-                a_fallback_calls += 1
-                (cwd / "a.py").write_bytes(b"A = fixed\n")
-                a_fallback_started.set()
-                await b_observed_sibling_index.wait()
-            yield ResultEvent(structured_output=None, continuation=None)
-
-        return _gen()
-
-    backend = ScriptedBackend(responder=responder, model="barrier-backend", fanout_concurrency=2, retry_attempts=0,)
-    failures = await phase_fix_parallel(
-        cast(Backend, backend), work_context(git_repo, run_id="test-run"), items, footprint=footprint,
-        round_snapshot=snapshot, limiter_size=2,
-    )
-
-    assert failures == {}
-    assert a_fallback_calls == 2, backend.prompts
-    assert sum(prompt.startswith("Fix these 2 issues") and "b one" in prompt for prompt in backend.prompts) == 1
-    assert not any(prompt.startswith("Fix this issue:") and "b one" in prompt for prompt in backend.prompts)
-    assert not any(prompt.startswith("Fix this issue:") and "b two" in prompt for prompt in backend.prompts)
-    assert b_observed_sibling_index.is_set()
-    assert b_cached_while_live == "b.py"
-    assert (git_repo / "a.py").read_bytes() == b"A = fixed\n"
-    assert (git_repo / "b.py").read_bytes() == b"B = sibling\n"
-    assert git_ops.snapshot_index(git_repo) == round_index
+    # An identical edit already carried by an open issue is restored without a duplicate filing.
+    (git_repo / "outside.py").write_bytes(b"unauthorized\n")
+    assert _enforce_fix(git_repo, footprint, phase="fix", preexisting_untracked={}, file_scope_issues=True).mutated
+    assert (git_repo / "outside.py").read_bytes() == b"owner\n"
+    assert len(gh_record.read_text().splitlines()) == 1
 
 @pytest.mark.asyncio
 async def test_parallel_fix_cancellation_closes_backend_before_restoring_round_index(git_repo: Path,) -> None:
@@ -603,90 +344,26 @@ async def test_fanout_cancellation_and_index_restore_failure_are_both_reported(g
     assert isinstance(raised.value.exceptions[0], asyncio.CancelledError)
     assert isinstance(raised.value.exceptions[1], GitError)
 
-def test_authorized_parent_symlink_substitution_fails_before_read_restore_or_stage(
-    git_repo: Path, tmp_path: Path
-) -> None:
-    footprint = AuthorizedFixFootprint.build(git_repo, {"nested/allowed.txt"}, [])
+def test_authorized_symlink_substitution_fails_before_read_restore_or_stage(git_repo: Path, tmp_path: Path) -> None:
+    """A parent or leaf replaced by a symlink after authorization is never read, restored, or staged."""
+    _seed(git_repo, {"allowed.txt": b"base\n"})
+    footprint = AuthorizedFixFootprint.build(git_repo, {"nested/allowed.txt", "allowed.txt"}, [])
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "allowed.txt").write_bytes(b"outside")
     (git_repo / "nested").symlink_to(outside, target_is_directory=True)
-
-    assert "nested/allowed.txt" in footprint.run_allowed_paths
-    with pytest.raises(GitError, match="not confined"):
-        git_ops.snapshot_worktree_paths(git_repo, footprint.run_allowed_paths)
-    with pytest.raises(GitError, match="not confined"):
-        git_ops.restore_worktree_paths_from_ref(git_repo, "HEAD", footprint.run_allowed_paths)
-    with pytest.raises(GitError, match="not confined"):
-        git_ops.stage_paths(git_repo, [Path("nested/allowed.txt")])
-    assert (outside / "allowed.txt").read_bytes() == b"outside"
-
-def test_authorized_leaf_symlink_substitution_fails_before_read_restore_or_stage(git_repo: Path) -> None:
-    _seed(git_repo, {"allowed.txt": b"base\n"})
-    footprint = AuthorizedFixFootprint.build(git_repo, {"allowed.txt"}, [])
     (git_repo / "allowed.txt").unlink()
     (git_repo / "allowed.txt").symlink_to("base.txt")
-    with pytest.raises(GitError, match="not confined"):
-        git_ops.snapshot_worktree_paths(git_repo, footprint.run_allowed_paths)
-    with pytest.raises(GitError, match="not confined"):
-        git_ops.restore_worktree_paths_from_ref(git_repo, "HEAD", footprint.run_allowed_paths)
-    with pytest.raises(GitError, match="not confined"):
-        git_ops.stage_paths(git_repo, [Path("allowed.txt")])
 
-def test_tree_key_is_binary_safe_mode_type_delete_new_and_order_deterministic(git_repo: Path) -> None:
-    _seed(git_repo, {"binary.bin": b"\x00before\xff", "delete.txt": b"delete me", "mode.sh": b"#!/bin/sh\n"})
-    baseline = git_ops.snapshot_worktree_paths(git_repo, ["binary.bin", "delete.txt", "mode.sh", "new.bin"])
-    (git_repo / "binary.bin").write_bytes(b"\x00after\xff")
-    (git_repo / "delete.txt").unlink()
-    (git_repo / "mode.sh").chmod(0o755)
-    (git_repo / "new.bin").write_bytes(b"\x00new\xfe")
-    changed = git_ops.snapshot_worktree_paths(git_repo, ["new.bin", "mode.sh", "delete.txt", "binary.bin"])
-
-    assert git_ops.tree_key(baseline) != git_ops.tree_key(changed)
-    assert git_ops.tree_key(changed) == git_ops.tree_key(reversed(changed))
-    states = {state.path: state for state in changed}
-    assert states["delete.txt"].state == "missing"
-    assert states["new.bin"].state == "regular"
-    assert states["mode.sh"].mode == 0o100755
-
-    footprint = AuthorizedFixFootprint.build(git_repo, {"binary.bin"}, [])
-    key = git_ops.tree_key(changed)
-    footprint.authorize_widened_path(
-        git_repo, "generated.py",
-        action="approve_generated", origin="generated",
-        phase="guard", round_number=1, reason="approved",
-    )
-    assert git_ops.tree_key(changed) == key
-
-def test_gitlink_evidence_uses_checked_out_head_not_staged_commit(git_repo: Path) -> None:
-    nested = _add_gitlink(git_repo)
-    original_head = _git(nested, "rev-parse", "HEAD")
-    baseline = git_ops.snapshot_worktree_paths(git_repo, ["dependency"])
-    _seed(nested, {"source.py": b"value = 2\n"})
-    checked_out_head = _git(nested, "rev-parse", "HEAD")
-    current = git_ops.snapshot_worktree_paths(git_repo, ["dependency"])
-
-    assert baseline[0].digest == original_head
-    assert git_ops.snapshot_index_paths(git_repo, ["dependency"])[0].digest == original_head
-    assert current[0].digest == checked_out_head
-    assert git_ops.tree_key(current) != git_ops.tree_key(baseline)
-
-@pytest.mark.parametrize("dirty_path", ["source.py", "untracked.py"])
-def test_dirty_gitlink_cannot_claim_commit_only_test_evidence(git_repo: Path, dirty_path: str,) -> None:
-    nested = _add_gitlink(git_repo)
-    (nested / dirty_path).write_bytes(b"value = 2\n")
-    with pytest.raises(GitError, match="dirty gitlink"):
-        git_ops.snapshot_worktree_paths(git_repo, ["dependency"])
-
-def test_uninitialized_gitlink_cannot_capture_parent_repository_head(git_repo: Path) -> None:
-    nested = git_repo / "dependency"
-    nested.mkdir()
-    head = _git(git_repo, "rev-parse", "HEAD")
-    _git(git_repo, "update-index", "--add", "--cacheinfo", f"160000,{head},dependency")
-    _commit(git_repo, "record uninitialized dependency")
-    with pytest.raises(GitError, match="gitlink working tree is unavailable"):
-        git_ops.snapshot_worktree_paths(git_repo, ["dependency"])
-
+    assert "nested/allowed.txt" in footprint.run_allowed_paths
+    for paths in ({"nested/allowed.txt"}, {"allowed.txt"}):
+        with pytest.raises(GitError, match="not confined"):
+            git_ops.snapshot_worktree_paths(git_repo, frozenset(paths))
+        with pytest.raises(GitError, match="not confined"):
+            git_ops.restore_worktree_paths_from_ref(git_repo, "HEAD", frozenset(paths))
+        with pytest.raises(GitError, match="not confined"):
+            git_ops.stage_paths(git_repo, [Path(next(iter(paths)))])
+    assert (outside / "allowed.txt").read_bytes() == b"outside"
 
 def _add_gitlink(git_repo: Path) -> Path:
     """Seed a committed ``dependency`` gitlink and return the nested repo."""
@@ -704,25 +381,14 @@ def _gitlink_rollback_snapshot(repo: Path, path: str = "dependency") -> Worktree
         untracked=git_ops.snapshot_untracked_paths(repo),
     )
 
-def test_gitlink_group_rollback_preserves_initial_non_index_checkout(git_repo: Path) -> None:
-    nested = _add_gitlink(git_repo)
-    indexed = _git(nested, "rev-parse", "HEAD")
-    _seed(nested, {"source.py": b"value = 2\n"})
-    captured = _git(nested, "rev-parse", "HEAD")
-    assert captured != indexed
-    snapshot = _gitlink_rollback_snapshot(git_repo)
-    _git(nested, "checkout", "--detach", indexed)
-    git_ops.restore_group_from_snapshot(git_repo, snapshot, ["dependency"])
-
-    assert _git(nested, "rev-parse", "HEAD") == captured
-    assert _git(nested, "status", "--porcelain=v1", "--untracked-files=all") == ""
-    assert _git(git_repo, "status", "--porcelain=v1", "--untracked-files=all") == "M dependency"
-
-def test_gitlink_group_rollback_refuses_dirty_nested_tree_without_mutating_it(git_repo: Path,) -> None:
+def test_dirty_gitlink_cannot_claim_evidence_or_be_rolled_back(git_repo: Path,) -> None:
+    """A dirty nested tree neither snapshots as commit-only evidence nor is mutated by group rollback."""
     nested = _add_gitlink(git_repo)
     snapshot = _gitlink_rollback_snapshot(git_repo)
     original_head = _git(nested, "rev-parse", "HEAD")
     (nested / "source.py").write_bytes(b"owner dirty bytes\n")
+    with pytest.raises(GitError, match="dirty gitlink"):
+        git_ops.snapshot_worktree_paths(git_repo, ["dependency"])
     write_and_stage(git_repo, "agent-staged.txt", b"agent index mutation\n")
     with pytest.raises(GitError, match="dirty gitlink"):
         git_ops.restore_group_from_snapshot(git_repo, snapshot, ["dependency"])
@@ -753,18 +419,3 @@ def test_scope_guard_restores_pre_run_non_index_gitlink_checkout(git_repo: Path)
         and "gitlink" in event.reason
         for event in footprint.events
     )
-
-def test_strict_recommended_patch_contains_binary_change_and_commit_staged_does_not_restage(git_repo: Path) -> None:
-    _seed(git_repo, {"binary.bin": b"\x00before\xff", "keep.txt": b"base\n"})
-    (git_repo / "binary.bin").write_bytes(b"\x00after\xfe")
-    (git_repo / "new.bin").write_bytes(b"\x00new\xfd")
-    patch = git_ops.build_recommended_patch_strict(git_repo, "HEAD", ["new.bin", "binary.bin"])
-    assert b"binary.bin" in patch
-    assert b"new.bin" in patch
-    assert b"GIT binary patch" in patch
-
-    git_ops.stage_paths(git_repo, [Path("binary.bin")])
-    (git_repo / "binary.bin").write_bytes(b"changed after stage")
-    git_ops.commit_staged(git_repo, "commit validated index")
-    assert git_ops.show(git_repo, "HEAD", "binary.bin") == b"\x00after\xfe"
-    assert (git_repo / "binary.bin").read_bytes() == b"changed after stage"

@@ -11,7 +11,7 @@ import jsonschema
 
 from daydream.host_tools import _MAX_ARGUMENT_BYTES
 from daydream.immutable_review import IMMUTABLE_REVIEW_INPUT_SCHEMA, validate_immutable_input
-from daydream.json_utils import canonical_json
+from daydream.json_utils import canonical_json, validate_json_schema
 from daydream.output_schema import strict_object
 from daydream.review_result import TERMINAL_RESULT_SCHEMA, ReasonCode, validate_terminal_result
 from daydream.review_source_refs import (
@@ -186,7 +186,7 @@ def validate_committed_result(value: dict[str, Any]) -> None:
         version = value.get("schema_version")
         if type(version) is not int or version not in RESULT_VERSIONS.values():
             raise ValueError("unsupported committed review result version; restart review")
-        jsonschema.validate(value, {RESULT_VERSIONS["committed"]: COMMITTED_RESULT_SCHEMA,
+        validate_json_schema(value, {RESULT_VERSIONS["committed"]: COMMITTED_RESULT_SCHEMA,
                                     RESULT_VERSIONS["immutable"]: IMMUTABLE_COMMITTED_RESULT_SCHEMA,
                                     RESULT_VERSIONS["local"]: LOCAL_REVIEW_RESULT_SCHEMA}[version])
     except jsonschema.ValidationError as exc:

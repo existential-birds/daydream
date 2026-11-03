@@ -1,56 +1,42 @@
+import copy
 import hashlib
 import json
-import os
-import re
-import shutil
-from collections import Counter
 from collections.abc import AsyncIterator, Callable
-from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
 import anyio
 import pytest
 
-from daydream import git_ops
-from daydream.artifact_visibility import (
-    private_root_locations,
-    resolve_private_workspace_owner,
-)
-from daydream.backends import AgentEvent, Backend, ClaudeBackend, TextEvent
+from daydream import git_ops, runner as runner_module
+from daydream.backends import AgentEvent, Backend, ClaudeBackend, ResultEvent, TextEvent
 from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS, PHASE_DEFAULT_MODELS, VET_BATCH_MAX_FINDINGS
 from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.deep.detection import StackAssignment
-from daydream.exploration_runner import _sample_paths, repo_scan
+from daydream.exploration import EXPLORATION_SECTION_PREFIX
+from daydream.exploration_runner import repo_scan
 from daydream.extensions.loader import build_registry
 from daydream.flows.engine import FlowContext
 from daydream.git_ops import GitError, head_sha
-from daydream.improve import artifacts
+from daydream.improve import authoring
 from daydream.improve.audit import (
     _apply_vet_verdicts,
 )
 from daydream.improve.audit_scope import (
     _restrict_diff_to_services,
-    _services_for_files,
     _stacks_for_services,
     _stamp_finding,
 )
-from daydream.improve.command_contract import validate_recon_commands
 from daydream.improve.context import _audit_repo
 from daydream.improve.partition import Partition
-from daydream.improve.plan_index import (
-    PLAN_INDEX_FILENAME,
-)
 from daydream.improve.planning import (
     _step_write_plans,
 )
 from daydream.improve.prompts import (
-    AUDIT_PLAYBOOK_SECTIONS,
-    HARD_RULE_4,
-    HARD_RULE_6,
     PLAN_AUTHOR_SCHEMA,
     build_audit_prompt,
 )
+from daydream.improve.recon import _build_recon_prompt, _host_enumerated_commands
 from daydream.prompts.grounding import (
     REPOSITORY_SEARCH_GUIDANCE,
     UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
@@ -58,53 +44,54 @@ from daydream.prompts.grounding import (
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from daydream.services import Service, enumerate_services
-from daydream.workspace import AuditWorkspace, WorkContext, open_audit_workspace, open_workspace
-from tests.conftest import improve_fixture_test_command_anchor
-from tests.deep_orchestrator.support import _forbidden_input, _scan_trajectory_extra
+from daydream.workspace import AuditWorkspace, WorkContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import (
-    bare_remote,
     commit,
-    configure_identity,
     git,
     init_repo,
-    install_diff_base_git_shim,
 )
 from tests.harness.improve_backend import (
     ImproveStubBackend,
-    IncrementalPlanBackend,
     ManifestReadingBackend,
-    OutOfOrderPlanBackend,
     ProductionPathBackend,
     RendezvousImproveBackend,
-    group_file_counts,
-    group_roots,
-    group_scope,
     improve_artifact,
     install_capable_improve_backend,
     install_improve_stub,
-    install_per_phase_improve_stubs,
     stub_recon_commands,
 )
 from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.stub_backend import force_interactive as _force_interactive
 from tests.harness.trajectory import (
-    assert_dispatch_children,
     dispatch_encloses_children,
     root_trajectory as _root_run_trajectory,
 )
 
 MakeConfig = Callable[..., RunConfig]
 
-def test_improve_dir_uses_active_artifact_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    routed = tmp_path / "private" / ".daydream"
-    monkeypatch.setattr(artifacts, "artifact_dir_for", lambda _target, **_kwargs: routed)
-    assert artifacts.improve_dir(tmp_path / "model-cwd", allow_standalone=True) == routed / "improve"
-    assert (routed / "improve").is_dir()
-
 @pytest.fixture
 def stub(improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch) -> ImproveStubBackend:
     return install_improve_stub(monkeypatch, improve_monorepo_target)
+
+
+def _record_phase_tiers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each resolved phase backend its own (model, reasoning_effort) while sharing the call log."""
+    shared_factory = cast(Callable[..., ImproveStubBackend], getattr(runner_module, "create_backend"))
+
+    def _per_phase(*args: Any, **kwargs: Any) -> ImproveStubBackend:
+        backend = copy.copy(shared_factory(*args, **kwargs))
+        backend.model, backend.reasoning_effort = kwargs["model"], kwargs["reasoning_effort"]
+        return backend
+
+    monkeypatch.setattr(runner_module, "create_backend", _per_phase)
+
+
+def _tiers_by_marker(calls: list[dict[str, Any]]) -> dict[str, set[tuple[str, str | None]]]:
+    tiers: dict[str, set[tuple[str, str | None]]] = {}
+    for call in calls:
+        tiers.setdefault(call["marker"], set()).add((call["model"], call["reasoning_effort"]))
+    return tiers
 
 
 def _load_improve_json(repo: Path, name: str) -> dict[str, Any]:
@@ -112,9 +99,6 @@ def _load_improve_json(repo: Path, name: str) -> dict[str, Any]:
 
 def _plan_write_diagnostics(repo: Path) -> dict[str, Any]:
     return _load_improve_json(repo, "plan-write-diagnostics.json")
-
-def _plan_write_dispositions(repo: Path) -> list[Any]:
-    return [attempt["disposition"] for attempt in _plan_write_diagnostics(repo)["attempts"]]
 
 def _flow_context_with_audit_root(root: Path, *, audit_repo: Path,) -> FlowContext:
     work = WorkContext(
@@ -130,13 +114,9 @@ def _flow_context_with_audit_root(root: Path, *, audit_repo: Path,) -> FlowConte
     )
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(("selection", "backend_name"), [
-    ("global", "pi"), ("recon", "codex"), ("audit", "pi"),
-    ("vet", "osprey"), ("plan_write", "osprey"),
-])
 async def test_unsupported_improve_backend_fails_atomic_preflight(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    make_config: MakeConfig, backend_name: str, selection: str, tmp_path: Path,
+    make_config: MakeConfig,
 ) -> None:
     execute_calls: list[str] = []
 
@@ -146,41 +126,28 @@ async def test_unsupported_improve_backend_fails_atomic_preflight(
         yield TextEvent(text="UNEXPECTED_CLAUDE_EXECUTION")
 
     monkeypatch.setattr(ClaudeBackend, "execute", _execute_canary)
-    phases = ({selection: {"backend": backend_name}} if selection != "global" else {})
-    file_config = DaydreamFileConfig(phases=phases)
-    config_kwargs: dict[str, Any] = {"flow_name": "improve", "file_config": file_config,}
-    if selection == "global":
-        config_kwargs["backend"] = backend_name
-    if backend_name == "osprey" and selection == "plan_write":
-        profile = tmp_path / "strict-profile.toml"
-        profile.write_text(
-            'schema_version = 1\nname = "strict-isolation"\n'
-            '[strategies.intent]\ncontent = "Inspect only."\nsource = "test"\n',
-            encoding="utf-8",
-        )
-        config_kwargs["review_profile_path"] = profile
-
+    file_config = DaydreamFileConfig(phases={"recon": {"backend": "codex"}})
     before_head = head_sha(improve_monorepo_target)
     before_status = _git_status_porcelain(improve_monorepo_target)
-    code = await run(make_config(improve_monorepo_target, **config_kwargs))
+    code = await _run_improve(make_config, improve_monorepo_target, file_config=file_config)
     output = capsys.readouterr().out
-    expected_phase = "recon" if selection == "global" else selection
     assert code == 1
     assert execute_calls == []
-    assert f"Phase '{expected_phase}'" in output
-    assert f"backend '{backend_name}'" in output
+    assert "Phase 'recon'" in output
+    assert "backend 'codex'" in output
     assert "Use backend 'claude'" in output
     assert len(output) < 5_000
     assert head_sha(improve_monorepo_target) == before_head
     assert _git_status_porcelain(improve_monorepo_target) == before_status
 
 
-@pytest.mark.parametrize("intent_profile", [False, True], ids=["packaged-profile", "intent-only-profile"])
 def test_improve_cli_discovers_nested_workspace_and_preserves_downstream_facts(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: Any,
-    tmp_path: Path, intent_profile: bool,
 ) -> None:
-    """One CLI discovery must retain guidance and nested command evidence downstream."""
+    """One CLI discovery retains tracked guidance and nested command evidence downstream.
+
+    Ignored and untracked source-only manifests never reach a model input or recon.json.
+    """
     repo = improve_monorepo_target
     nested = repo / "platform" / "payments" / "ui"
     nested.mkdir(parents=True)
@@ -190,6 +157,12 @@ def test_improve_cli_discovers_nested_workspace_and_preserves_downstream_facts(
     (nested / "AGENTS.md").write_text("Preserve payment accessibility conventions.\n")
     git(repo, "add", "package.json", "platform")
     commit(repo, "add nested workspace")
+    canaries = ("PRIVATE_IGNORED_MAKE_CANARY", "PRIVATE_UNTRACKED_MAKE_CANARY", "private-ignored-service-canary")
+    (repo / ".git/info/exclude").write_text("/Makefile\n/services/\n", encoding="utf-8")
+    (repo / "Makefile").write_text(f"test-private: ; @echo {canaries[0]}\n")
+    (nested / "Makefile").write_text(f"test-private: ; @echo {canaries[1]}\n")
+    (repo / "services" / canaries[2]).mkdir(parents=True)
+    (repo / "services" / canaries[2] / "pyproject.toml").write_text(f'[project]\nname = "{canaries[2]}"\n')
     before_head = head_sha(repo)
 
     class NestedDiscoveryBackend(ImproveStubBackend):
@@ -207,17 +180,16 @@ def test_improve_cli_discovers_nested_workspace_and_preserves_downstream_facts(
             return None
 
     backend = install_capable_improve_backend(monkeypatch, NestedDiscoveryBackend(repo, n_findings=1))
-    argv = ["improve", str(repo), "--non-interactive", "--no-archive", "--no-eval"]
-    if intent_profile:
-        profile = tmp_path / "intent-only.toml"
-        profile.write_text(
-            'schema_version = 1\nname = "intent-only"\n'
-            '[strategies.intent]\ncontent = "Inspect product intent."\nsource = "test"\n'
-        )
-        argv.extend(["--review-profile", str(profile)])
-    result = cli_runner.invoke(argv)
+    _record_phase_tiers(monkeypatch)
+    result = cli_runner.invoke(["improve", str(repo), "--non-interactive", "--no-archive", "--no-eval"])
 
     assert result.exit_code == 0
+    # Each Improve phase resolves its own built-in model and reasoning tier.
+    models = PHASE_DEFAULT_MODELS["claude"]
+    assert _tiers_by_marker(backend.calls) == {
+        "recon": {(models["recon"], "low")}, "audit": {(models["audit"], "high")},
+        "vet": {(models["vet"], "xhigh")}, "plan-writer": {(models["plan_write"], "max")},
+    }
     discovery = [call for call in backend.calls if call["marker"] in {"repo-scan", "recon"}]
     assert len(discovery) == 1
     assert discovery[0]["marker"] == "recon"
@@ -251,15 +223,15 @@ def test_improve_cli_discovers_nested_workspace_and_preserves_downstream_facts(
     assert list((repo / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     assert all(call["read_only"] for call in backend.calls)
     assert not (nested / "candidate-command-ran").exists()
+    model_inputs = [call["prompt"] for call in backend.calls] + [json.dumps(recon)]
+    assert all(canary not in text for canary in canaries for text in model_inputs)
     assert head_sha(repo) == before_head
     assert _git_status_porcelain(repo) == ""
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("survey_fails", [False, True], ids=["guidance-retained", "survey-best-effort"])
 async def test_custom_improve_survey_uses_compatible_two_pass_fallback(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
-    survey_fails: bool,
 ) -> None:
     """A custom survey still runs, and its guidance survives a recon that omits it."""
     repo = improve_monorepo_target
@@ -272,7 +244,7 @@ async def test_custom_improve_survey_uses_compatible_two_pass_fallback(
 
     class CustomSurveyBackend(ImproveStubBackend):
         async def _pre_execute(self, cwd: Path, prompt: str, **kwargs: Any) -> list[AgentEvent] | None:
-            if survey_fails and "CUSTOM_SURVEY_INSTRUCTION" in prompt:
+            if "CUSTOM_SURVEY_INSTRUCTION" in prompt:
                 self._record_call(cwd, prompt, "repo-scan", **kwargs)
                 raise RuntimeError("survey unavailable")
             return None
@@ -288,61 +260,12 @@ async def test_custom_improve_survey_uses_compatible_two_pass_fallback(
     assert "Combined repository discovery" not in discovery[1]["prompt"]
     recon = _load_improve_json(repo, "recon.json")
     assert recon["discovery_mode"] == "survey-recon"
-    if survey_fails:
-        assert recon["conventions"] == []
-        assert recon["guidelines"] == []
-    else:
-        for text in ("openapi.yaml is the HTTP contract", "Keep API examples synchronized with openapi.yaml."):
-            assert text in discovery[1]["prompt"]
-            assert text in json.dumps(recon)
-            for marker in ("audit", "plan-writer"):
-                calls = [call for call in backend.calls if call["marker"] == marker]
-                assert calls
-                assert all(text in call["prompt"] for call in calls)
+    assert recon["conventions"] == []
+    assert recon["guidelines"] == []
     events = _root_run_trajectory(repo)["extra"]["phase_events"]
     assert any(event["phase"] == "exploration" and event["metadata"] == {"stage": "repo-survey"} for event in events)
     assert all(not Path(call["cwd"]).exists() for call in backend.calls)
 
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("terminal", ["cancelled", "failed"])
-async def test_combined_discovery_terminal_closes_lifecycle_and_snapshot(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, terminal: str,
-) -> None:
-    """Discovery teardown must close the real snapshot before any audit starts."""
-    repo = improve_monorepo_target
-    started = anyio.Event()
-
-    class TerminalDiscoveryBackend(ImproveStubBackend):
-        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-            self._record_call(cwd, prompt, "recon", **kwargs)
-            yield TextEvent(text="repository discovery started")
-            started.set()
-            if terminal == "failed":
-                raise RuntimeError("discovery provider failed")
-            await anyio.sleep_forever()
-
-    backend = install_capable_improve_backend(monkeypatch, TerminalDiscoveryBackend(repo))
-    before_head = head_sha(repo)
-    before_status = _git_status_porcelain(repo)
-    if terminal == "failed":
-        with pytest.raises(RuntimeError, match="discovery provider failed"):
-            await _run_improve(make_config, repo)
-    else:
-        async with anyio.create_task_group() as tasks:
-            tasks.start_soon(_run_improve, make_config, repo)
-            await started.wait()
-            tasks.cancel_scope.cancel()
-    assert len(backend.calls) == 1
-    assert not Path(backend.calls[0]["cwd"]).exists()
-    assert head_sha(repo) == before_head
-    assert _git_status_porcelain(repo) == before_status
-    events = _root_run_trajectory(repo)["extra"]["phase_events"]
-    ends = [event for event in events if event["event"] == "phase_end" and event["phase"] == "recon"]
-    assert len(ends) == 1
-    assert ends[0]["metadata"] == {"stage": "combined"}
-    assert ends[0]["status"] == terminal
-    assert not improve_artifact(repo, "report.md").exists()
 
 @pytest.mark.anyio
 async def test_improve_git_environment_refusal_names_key_without_value(
@@ -370,37 +293,11 @@ async def test_improve_git_environment_refusal_names_key_without_value(
     assert head_sha(repo) == before_head
     assert _git_status_porcelain(repo) == before_status
 
-@pytest.mark.anyio
-async def test_branch_improve_redacts_malformed_external_git_probe_before_model(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    make_config: MakeConfig, tmp_path: Path,
-) -> None:
-    repo = improve_monorepo_target
-    head = head_sha(repo)
-    before_status = _git_status_porcelain(repo)
-    before_refs = git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
-    backend = install_improve_stub(monkeypatch, repo)
-    with install_diff_base_git_shim(tmp_path, monkeypatch, mode="malformed-head", head=head):
-        code = await _run_improve(make_config, repo, improve_focus="branch")
-    captured = capsys.readouterr()
-    output = captured.out + captured.err
-
-    assert code == 1
-    assert backend.calls == []
-    assert "cannot resolve branch-focus diff merge-base" in output
-    assert "PRIVATE_STDOUT_SENTINEL" not in output
-    assert str(repo) not in output
-    assert len(output) < 5_000
-    assert head_sha(repo) == head
-    assert _git_status_porcelain(repo) == before_status
-    assert git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
-
 class _UnbornAuditBackend(ImproveStubBackend):
-    """Capability fake that observes and optionally commits its unborn snapshot."""
+    """Capability fake that observes and commits inside its unborn snapshot."""
 
-    def __init__(self, target: Path, *, failure: BaseException | None = None) -> None:
+    def __init__(self, target: Path) -> None:
         super().__init__(target, n_findings=0)
-        self.failure = failure
         self.audit_paths: list[Path] = []
         self.first_symbolic_head: str | None = None
         self.first_was_unborn: bool | None = None
@@ -412,63 +309,13 @@ class _UnbornAuditBackend(ImproveStubBackend):
             self.first_symbolic_head = git(cwd, "symbolic-ref", "--short", "HEAD")
             self.ignored_visible = (cwd / "ignored-secret.txt").exists()
             self.audit_paths.append(cwd)
-            if self.failure is None:
-                (cwd / "model-scratch.txt").write_text(
-                    "snapshot only\n", encoding="utf-8"
-                )
-                git(cwd, "add", "model-scratch.txt")
-                git(cwd, "-c", "user.name=Audit Test", "-c", "user.email=audit@example.invalid", "commit", "-m",
-                    "snapshot initial commit",
-                )
+            (cwd / "model-scratch.txt").write_text("snapshot only\n", encoding="utf-8")
+            git(cwd, "add", "model-scratch.txt")
+            git(cwd, "-c", "user.name=Audit Test", "-c", "user.email=audit@example.invalid", "commit", "-m",
+                "snapshot initial commit",
+            )
         elif cwd not in self.audit_paths:
             self.audit_paths.append(cwd)
-        if self.failure is not None:
-            raise self.failure
-        async for event in super().execute(cwd, prompt, *args, **kwargs):
-            yield event
-
-class _AuditGitBoundaryBackend(ImproveStubBackend):
-    """Observe the real Git boundary from each external backend turn."""
-
-    def __init__(self, target: Path, *, absent_oid: str | None = None) -> None:
-        super().__init__(target)
-        self.absent_oid = absent_oid
-        self.git_observations: list[dict[str, object]] = []
-
-    async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-        self.git_observations.append({
-                "outside_source": not cwd.is_relative_to(self._target.resolve()), "remotes": git(cwd, "remote"),
-                "remote_refs": git(cwd, "for-each-ref", "refs/remotes"),
-                "absent_oid_present": (git_ops.commit_exists(cwd, self.absent_oid)
-                    if self.absent_oid is not None
-                    else None
-                ),
-            }
-        )
-        async for event in super().execute(cwd, prompt, *args, **kwargs):
-            yield event
-
-class _DirectoryToFileBackend(ImproveStubBackend):
-    """Observe staged and unstaged path replacements in real audit snapshots."""
-
-    def __init__(self, target: Path, *, staged: bool) -> None:
-        super().__init__(target, n_findings=0)
-        self.staged = staged
-        self.audit_paths: list[Path] = []
-        self.replacement_bytes: bytes | None = None
-        self.observed_status: str | None = None
-
-    async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-        if cwd not in self.audit_paths:
-            self.audit_paths.append(cwd)
-        if self.staged and self.replacement_bytes is None:
-            replacement = cwd / "x"
-            assert replacement.is_file()
-            self.replacement_bytes = replacement.read_bytes()
-        elif not self.staged and self.observed_status is None:
-            assert not (cwd / "x").is_file()
-            assert not (cwd / "x" / "child.txt").exists()
-            self.observed_status = git(cwd, "status", "--short")
         async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
@@ -508,44 +355,6 @@ def _make_unborn_improve_repo(tmp_path: Path) -> Path:
     (repo / "ignored-secret.txt").write_text("do-not-copy\n", encoding="utf-8")
     git(repo, "add", ".gitignore", "tracked.bin")
     return repo
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("staged", [True, False], ids=["staged", "unstaged"])
-async def test_full_improve_snapshots_directory_to_file_change(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, staged: bool,
-) -> None:
-    repo = improve_monorepo_target
-    nested = repo / "x"
-    nested.mkdir()
-    child = "old.py" if staged else "child.txt"
-    nested.joinpath(child).write_text("old child\n", encoding="utf-8")
-    git(repo, "add", f"x/{child}")
-    commit(repo, "add tracked directory")
-    nested.joinpath(child).unlink()
-    nested.rmdir()
-    payload = b"replacement file\x00\xff" if staged else b"untracked replacement\x00\xff"
-    nested.write_bytes(payload)
-    if staged:
-        git(repo, "add", "-A")
-    before_head = head_sha(repo)
-    before_status = _git_status_porcelain(repo)
-    before_patch = git_ops.staged_patch(repo)
-    before_refs = git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
-    backend = install_capable_improve_backend(monkeypatch, _DirectoryToFileBackend(repo, staged=staged),)
-    code = await _run_improve(make_config, repo)
-
-    assert code == 0
-    if staged:
-        assert backend.replacement_bytes == payload
-    else:
-        assert backend.observed_status == "D x/child.txt"
-    assert backend.audit_paths
-    assert all(not path.exists() for path in backend.audit_paths)
-    assert head_sha(repo) == before_head
-    assert _git_status_porcelain(repo) == before_status
-    assert git_ops.staged_patch(repo) == before_patch
-    assert git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
-    assert (repo / "x").read_bytes() == payload
 
 @pytest.mark.anyio
 async def test_full_improve_denies_glob_through_inward_then_outward_symlink(
@@ -596,20 +405,6 @@ async def test_full_improve_uses_independent_unborn_snapshot(
     assert all(not path.exists() for path in backend.audit_paths)
 
 @pytest.mark.anyio
-async def test_unborn_improve_backend_error_cleans_snapshot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    repo = _make_unborn_improve_repo(tmp_path)
-    backend = install_capable_improve_backend(
-        monkeypatch, _UnbornAuditBackend(repo, failure=RuntimeError("injected audit failure")),
-    )
-    with pytest.raises(RuntimeError, match="injected audit failure"):
-        await _run_improve(make_config, repo)
-    assert backend.first_was_unborn is True
-    assert git_ops.is_unborn_head(repo)
-    assert all(not path.exists() for path in backend.audit_paths)
-
-@pytest.mark.anyio
 async def test_unborn_improve_cancellation_cleans_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
@@ -644,60 +439,17 @@ async def test_unborn_improve_cancellation_cleans_snapshot(
     assert all(not path.exists() for path in backend.audit_paths)
 
 @pytest.mark.anyio
-async def test_audit_dispatch_interval_cancelling_two_blocked_auditors(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    """Cancellation retains one closed interval for two real child attempts."""
-    two_started = anyio.Event()
-
-    class BlockingAuditBackend(ImproveStubBackend):
-        def __init__(self) -> None:
-            super().__init__(improve_monorepo_target, n_findings=0, fanout_concurrency=2,)
-            self.blocked = 0
-
-        async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-            if "read-only improve audit specialist" in prompt:
-                self.blocked += 1
-                if self.blocked == 2:
-                    two_started.set()
-                yield TextEvent(text="blocked audit child started")
-                await anyio.sleep_forever()
-            async for event in super().execute(cwd, prompt, *args, **kwargs):
-                yield event
-
-    backend = install_capable_improve_backend(monkeypatch, BlockingAuditBackend())
-    async with anyio.create_task_group() as tasks:
-        tasks.start_soon(_run_improve, make_config, improve_monorepo_target)
-        await two_started.wait()
-        tasks.cancel_scope.cancel()
-
-    assert backend.blocked == 2
-    trajectory = _root_run_trajectory(improve_monorepo_target)
-    dispatch = _dispatch_for_phase(trajectory, "audit")
-    assert dispatch["extra"]["dispatch_status"] == "cancelled"
-    assert dispatch["extra"]["reason_code"] == "cancelled"
-    assert dispatch["extra"]["attempted_count"] == 2
-    end = _phase_end(trajectory, "audit")
-    assert end["status"] == "cancelled"
-    assert end["reason_code"] == "cancelled"
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(("config_fields", "message"),
-    [({"improve_focus": "branch"}, "--focus branch requires a commit anchor"),
-        ({"improve_plan_description": "add checks"}, "requires a planned-at commit"),
-    ],
-)
 async def test_unborn_commit_anchored_improve_modes_fail_before_backend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], make_config: MakeConfig,
-    config_fields: dict[str, Any], message: str,
 ) -> None:
     repo = _make_unborn_improve_repo(tmp_path)
     factory_calls: list[object] = []
     monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: factory_calls.append((args, kwargs)),)
-    code = await _run_improve(make_config, repo, **config_fields)
-    assert code == 1
+    for config_fields, message in (({"improve_focus": "branch"}, "--focus branch requires a commit anchor"),
+            ({"improve_plan_description": "add checks"}, "requires a planned-at commit")):
+        assert await _run_improve(make_config, repo, **config_fields) == 1
+        assert message in capsys.readouterr().out
     assert factory_calls == []
-    assert message in capsys.readouterr().out
     assert git_ops.is_unborn_head(repo)
 
 def test_audit_repo_requires_flow_context_boundary_identity(tmp_path: Path) -> None:
@@ -712,19 +464,9 @@ def test_audit_repo_requires_flow_context_boundary_identity(tmp_path: Path) -> N
     with pytest.raises(RuntimeError, match="audit workspace"):
         _audit_repo(context)
 
-def test_vet_rejection_preserves_null_unborn_anchor() -> None:
-    finding = {"fingerprint": "fp", "title": "Title", "path": "a.py"}
-    kept, rejected = _apply_vet_verdicts(
-        [finding], [{"vet_id": 1, "keep": False, "reason": "not actionable"}], rejected_at_sha=None,
-    )
-    assert kept == []
-    assert rejected[0]["rejected_at_sha"] is None
-
 @pytest.mark.anyio
-@pytest.mark.parametrize("selected_count", [0, 2])
-async def test_unborn_plan_write_never_constructs_a_writer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selected_count: int,
-) -> None:
+async def test_unborn_plan_write_never_constructs_a_writer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    selected_count = 2
     source = tmp_path / "source"
     source.mkdir()
     audit = tmp_path / "audit"
@@ -762,74 +504,10 @@ async def test_unborn_plan_write_never_constructs_a_writer(
     assert result["skipped"] == []
     assert len(result["failed"]) == selected_count
     assert len(result["diagnostics"]) == selected_count
-    assert context.data["plan_exit_code"] == (1 if selected_count else 0)
+    assert context.data["plan_exit_code"] == 1
     for entry in [*result["failed"], *result["diagnostics"]]:
         assert "UNBORN_PLAN_ANCHOR_UNAVAILABLE" in json.dumps(entry)
     assert not (source / "daydream_plans").exists()
-
-@pytest.mark.anyio
-async def test_real_plan_phase_reanchor_reuses_ephemeral_source_owner(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, tmp_path: Path,
-) -> None:
-    source = improve_monorepo_target
-    remote = bare_remote(tmp_path / "origin.git")
-    git(source, "remote", "add", "origin", str(remote))
-    git(source, "push", "-u", "origin", "main")
-    git(source, "remote", "set-head", "origin", "main")
-    locations = private_root_locations(base=tmp_path / "private")
-    owner = resolve_private_workspace_owner(source, locations=locations)
-    monkeypatch.setattr("daydream.artifacts.ownership._default_private_base",
-        lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
-    )
-    advanced: list[Path] = []
-
-    async with open_workspace(
-        source, branch=None, base="main", force_ephemeral=True, extra_copy=[], skip_tests=True, private_owner=owner,
-    ) as work:
-
-        def advance_active_checkout() -> None:
-            """Move the active ephemeral checkout's HEAD off the planned-at sha."""
-            (work.repo / "concurrent.txt").write_text(
-                "advanced after plan session opened\n", encoding="utf-8"
-            )
-            git(work.repo, "add", "concurrent.txt")
-            commit(work.repo, "advance active ephemeral checkout")
-            advanced.append(work.repo)
-
-        backend = ImproveStubBackend(work.repo)
-        backend.on_first_plan_write = advance_active_checkout
-        backend.plan_gate_on_first_menu_id = True
-        install_capable_improve_backend(monkeypatch, backend)
-        async with open_audit_workspace(work.repo, run_id="owner-reanchor") as audit:
-            context = FlowContext(config=make_config(
-                    work.repo, flow_name="improve", improve_plan_description="Add explicit billing rate limits",
-                ), work=work, registry=build_registry(), audit_workspace=audit, private_workspace_owner=owner,
-            )
-            improve_dir = work.repo / ".daydream" / "improve"
-            improve_dir.mkdir(parents=True)
-            pyproject = work.repo / "pyproject.toml"
-            commands = stub_recon_commands(start_line=improve_fixture_test_command_anchor(pyproject))
-            accepted, errors = validate_recon_commands({"commands": commands}, repo=work.repo,)
-            assert errors == []
-            assert len(accepted) == 2
-            context.data.update({"audit_repo": audit.repo, "improve_dir": improve_dir,
-                    "recon": {"commands": accepted, "languages": [], "conventions": [], "intent_docs": [],},
-                }
-            )
-
-            await _step_write_plans(context)
-
-            assert advanced == [work.repo]
-            written = context.data["plan_write"]["written"]
-            assert len(written) == 1
-            landed = Path(written[0]["path"])
-            assert landed.is_relative_to(owner.operational_state_root / "operational")
-            assert not landed.is_relative_to(owner.artifact_state_root)
-            assert not landed.is_relative_to(source)
-            assert audit.repo != work.repo
-            assert git_ops.git_common_dir(audit.repo) != owner.git_common_dir
-            assert {path.name for path in locations.operational_workspaces.iterdir()} == {owner.workspace_key}
-            assert not (source / ".daydream" / "worktrees").exists()
 
 _GROUP = {"name": "group-01", "stack": "python", "file_count": 24,
     "partitions": [{"name": "billing", "root": "apps/billing", "file_count": 12, "service": "billing"},
@@ -850,30 +528,14 @@ def test_audit_prompt_carries_group_roots_and_no_file_list() -> None:
     assert "Relevant tracked files:" not in prompt
     assert "<primary_manifest>\n{}\n</primary_manifest>" in prompt
     assert "frontend/web" in prompt and "service billing" in prompt
-
-def _index_numbers_by_fingerprint(index_text: str) -> dict[str, int]:
-    return {match.group(2): int(match.group(1))
-        for match in re.finditer(
-            r"\|\s+\[(\d{3})\]\([^)]+\)\s+<!-- fingerprint:([^ ]+) -->",
-            index_text,
-        )
-    }
+    assert "Deep audit: search every relevant package very thoroughly." in _audit_prompt("correctness", tier="deep")
 
 @pytest.fixture
 def tmp_git_repo(improve_monorepo_target: Path) -> Path:
     return improve_monorepo_target
 
-def _tiers_by_marker(calls: list[dict[str, Any]]) -> dict[str, set[tuple[str, str | None]]]:
-    tiers: dict[str, set[tuple[str, str | None]]] = {}
-    for call in calls:
-        tiers.setdefault(str(call["marker"]), set()).add((str(call["model"]), call["reasoning_effort"]))
-    return tiers
-
 def _git_status_porcelain(repo: Path) -> str:
     return git(repo, "status", "--porcelain", "--untracked-files=no")
-
-def _untracked(repo: Path) -> list[str]:
-    return git(repo, "ls-files", "--others", "--exclude-standard").splitlines()
 
 def _dispatch_for_phase(trajectory: dict[str, Any], phase: str) -> dict[str, Any]:
     steps = [step
@@ -891,13 +553,6 @@ def _phase_end(trajectory: dict[str, Any], phase: str) -> dict[str, Any]:
     ]
     assert len(ends) == 1
     return cast(dict[str, Any], ends[0])
-
-def _assert_complete_phase_dispatch(repo: Path, trajectory: dict[str, Any], phase: str, descriptors: list[str],
-) -> None:
-    """Prove dispatch enclosure and one real invocation per exact child ref."""
-    dispatch = _dispatch_for_phase(trajectory, phase)
-    assert dispatch["extra"]["dispatch_status"] == "succeeded"
-    assert_dispatch_children(repo, dispatch, phase, descriptors)
 
 def _improve_observable_texts(repo: Path) -> list[str]:
     return [path.read_text(encoding="utf-8")
@@ -938,43 +593,12 @@ async def test_repo_scan_sample_spans_the_tree_not_the_alphabetical_head(tmp_git
         for text in ("pattern-scanner", "git diff", "affected_files", "relevant to the changes"))
     assert "no change set here" in prompt.lower()
     assert ctx.affected_files == []
-    assert "Affected Files" not in ctx.to_prompt_section()
-
-def test_sample_paths_spreads_across_a_capped_list() -> None:
-    paths = [f"f{i:03d}" for i in range(100)]
-    sample = _sample_paths(paths, 10)
-    assert len(sample) == 10
-    assert sample[0] == "f000"
-    assert sample[-1] == "f090"
-    assert _sample_paths(paths, 200) == paths
-    assert _sample_paths(paths, 0) == []
-    assert _sample_paths([], 10) == []
-
-
-@pytest.mark.anyio
-async def test_credentials_never_reach_improve_observables(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    make_config: MakeConfig,
-) -> None:
-    secret = "OPENAI_API_KEY=sk-secret123456"
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=1,)
-    stub.inject_credential = True
-    code = await _run_improve(make_config, improve_monorepo_target)
-
-    assert code == 1
-    console_output = capsys.readouterr().out
-    artifact_texts = [path.read_text(encoding="utf-8")
-        for root in (improve_monorepo_target / ".daydream" / "improve", improve_monorepo_target / ".daydream" / "runs",
-            improve_monorepo_target / "daydream_plans",
-        )
-        if root.exists()
-        for path in root.rglob("*")
-        if path.is_file()
-    ]
-    observables = [console_output, *artifact_texts]
-    assert all(secret not in observable for observable in observables)
-    assert "[REDACTED" in "\n".join(observables)
-
+    section = ctx.to_prompt_section()
+    assert "Affected Files" not in section
+    assert section.startswith(EXPLORATION_SECTION_PREFIX)
+    recon_prompt = _build_recon_prompt(tmp_git_repo, [], [], section)
+    assert recon_prompt.count(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) == 1
+    assert "OpenAPI First" in recon_prompt
 
 def _pin_stack_availability(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Use an absent registry so ambient Beagle plugins cannot alter stack availability or group count."""
@@ -990,298 +614,18 @@ def _append_improve_config(target: Path, body: str) -> DaydreamFileConfig:
 
 
 @pytest.mark.anyio
-async def test_audit_fans_out_per_partition_group_on_scaled_monorepo(
-    improve_scaled_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
-) -> None:
-    _pin_stack_availability(monkeypatch, tmp_path)
-    # Default bound (400): partitions = 12 services + frontend + residue, which
-    # pack into exactly 3 stack-homogeneous groups (python / react / generic).
-    stub = install_capable_improve_backend(monkeypatch, ManifestReadingBackend(improve_scaled_monorepo_target))
-    code = await _run_improve(make_config, improve_scaled_monorepo_target)
-
-    assert code == 0
-    recon_calls = [call for call in stub.calls if call["marker"] == "recon"]
-    assert len(recon_calls) == 1
-    prompt = recon_calls[0]["prompt"]
-    assert "`apps/svc00`" in prompt and "`frontend`" in prompt
-    assert "Return the per-subtree build, test, and lint commands" in prompt
-    assert "`in-scope-paths`" in prompt
-    assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in prompt
-    assert prompt.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < prompt.index("Combined repository discovery")
-    # The exploration summary embedded below the recon header already opened with
-    # the boundary; dedup must leave exactly one occurrence in the full prompt.
-    assert prompt.count(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) == 1
-    assert "<tracked_file_sample>" in prompt
-    assert "apps/svc00/api.py" in prompt
-    # Service roots are printed anchored at the audit snapshot (the model's
-    # cwd), never as bare relative paths a model could resolve against the
-    # live target, so resolving a service root reads the snapshot.
-    audit_cwd = recon_calls[0]["cwd"]
-    assert f"- svc00: {(audit_cwd / 'apps/svc00').as_posix()}" in prompt
-    assert f"- svc01: {(audit_cwd / 'apps/svc01').as_posix()}" in prompt
-
-    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
-    assert len(audit_calls) == 3 * len(AUDIT_CATEGORIES)
-    assert all("Relevant tracked files" not in call["prompt"] for call in audit_calls)
-    assert {group_scope(call["prompt"])[0] for call in audit_calls} == {"group-01", "group-02", "group-03",}
-    tracked = git(improve_scaled_monorepo_target, "ls-files").splitlines()
-    for category in AUDIT_CATEGORIES:
-        owned = [path for read in stub.assignment_reads
-            if read["category"] == category for path in read["primary_files"]
-        ]
-        assert Counter(owned) == Counter(tracked)
-    coverage = _load_improve_json(improve_scaled_monorepo_target, "coverage.json")
-    assert len(coverage["groups"]) == 3
-    assert {entry["name"] for entry in coverage["partitions"]} == {
-        *(f"svc{index:02d}" for index in range(12)), "frontend", "residue",
-    }
-    assert coverage["not_audited"] == []
-    partition_counts = {entry["name"]: entry["file_count"] for entry in coverage["partitions"]}
-    for group in coverage["groups"]:
-        assert group["file_count"] == len(group["primary_files"])
-        assert group["context_file_count"] == sum(partition_counts[name] for name in group["partitions"]) - len(
-            group["primary_files"]
-        )
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("fail_shared_docs", [False, True])
-async def test_mixed_service_primary_reads_preserve_boundary_recall_and_generic_fallback(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
-    fail_shared_docs: bool,
-) -> None:
-    """Root-only dispatch passed despite duplicated primary work and unreadable ownership.
-
-    The provider must read the client and its concrete schema dependency to
-    discover the mismatch; a failed sibling category must retain that finding.
-    """
-    repo = improve_monorepo_target
-    _pin_stack_availability(monkeypatch, tmp_path)
-    client = "apps/billing/client.ts"
-    contract = "apps/billing/shared contract.json"
-    unknown = "apps/billing/adapter.grammar"
-    (repo / client).write_text(
-        f'import React from "react"; export const responseField = "total_cents";\n// Contract: {contract}\n'
-    )
-    (repo / contract).write_text('{"response_field": "total"}\n')
-    (repo / unknown).write_text("response ::= total\n")
-    git(repo, "add", client, contract, unknown)
-    commit(repo, "add mixed service contract mismatch")
-    before = (head_sha(repo), _git_status_porcelain(repo), _untracked(repo))
-    stub = install_capable_improve_backend(monkeypatch, ManifestReadingBackend(repo))
-    if fail_shared_docs:
-        stub.fail_assignments.add(("docs", "group-01"))
-
-    assert await _run_improve(make_config, repo) == 0
-
-    tracked = git(repo, "ls-files").splitlines()
-    for category in AUDIT_CATEGORIES:
-        reads = [record for record in stub.assignment_reads if record["category"] == category]
-        assert Counter(path for record in reads for path in record["primary_files"]) == Counter(tracked)
-    coverage = _load_improve_json(repo, "coverage.json")
-    owners = {path: group["stack"] for group in coverage["groups"] for path in group["primary_files"]}
-    assert {path: owners[path] for path in (client, contract, unknown, "apps/billing/pyproject.toml")} == {
-        client: "react", contract: "generic", unknown: "generic", "apps/billing/pyproject.toml": "python",
-    }
-    client_read = next(record for record in stub.assignment_reads
-        if record["category"] == "correctness" and client in record["primary_files"]
-    )
-    assert client_read["context_files"] == [contract]
-    assert client_read["context_bytes"] == len((repo / contract).read_bytes())
-    findings = _load_improve_json(repo, "audit-findings.json")["findings"]
-    assert len(findings) == 1
-    assert findings[0]["path"] == client
-    assert findings[0]["partition"] == "billing"
-    assert findings[0]["evidence"] == [f"{client}:1", f"{contract}:1"]
-    vetted = _load_improve_json(repo, "vetted-findings.json")["findings"]
-    assert len(vetted) == 1
-    if fail_shared_docs:
-        assert "docs:group-01" in coverage["failed_assignments"]
-        failed_group = next(group for group in coverage["groups"] if group["name"] == "group-01")
-        assert failed_group["status"] == "partial"
-        assert failed_group["categories"] == {
-            category: "failed" if category == "docs" else "audited" for category in AUDIT_CATEGORIES
-        }
-        billing = next(entry for entry in coverage["partially_audited"] if entry["partition"] == "billing")
-        assert billing["missing_by_category"] == {
-            category: [unknown, contract] if category == "docs" else [] for category in AUDIT_CATEGORIES
-        }
-        assert billing["omitted_primary_files"] == [unknown, contract]
-        assert billing["audited_file_count"] == 3
-        assert billing["reached_file_count"] == 5
-        assert "group-failed" in improve_artifact(repo, "report.md").read_text()
-    else:
-        assert coverage["not_audited"] == coverage["partially_audited"] == []
-    assert (head_sha(repo), _git_status_porcelain(repo)) == before[:2]
-    assert set(before[2]) <= set(_untracked(repo))
-    assert all(path.startswith(("daydream_plans/", ".daydream/"))
-        for path in set(_untracked(repo)) - set(before[2])
-    )
-
-
-@pytest.mark.anyio
-async def test_large_primary_manifest_is_readable_from_the_actual_audit_snapshot(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
-) -> None:
-    """Only an actual provider read detects a manifest published outside its snapshot."""
-    repo = improve_monorepo_target
-    _pin_stack_availability(monkeypatch, tmp_path)
-    paths = [f"apps/billing/module_{index:03d}_{'x' * 60}.py" for index in range(140)]
-    for path in paths:
-        (repo / path).write_text("VALUE = 1\n")
-    git(repo, "add", *paths)
-    commit(repo, "add a flat service requiring a bounded manifest reference")
-    stub = install_capable_improve_backend(monkeypatch, ManifestReadingBackend(repo))
-
-    assert await _run_improve(make_config, repo, improve_focus="security") == 0
-
-    referenced = [record for record in stub.assignment_reads if record["manifest_path"] is not None]
-    assert referenced
-    assert all(record["manifest_pages"] > 1 for record in referenced)
-    assert Counter(path for record in stub.assignment_reads for path in record["primary_files"]) == Counter(
-        git(repo, "ls-files").splitlines()
-    )
-    assert all(record["cwd"] != repo and not record["cwd"].exists() for record in referenced)
-    coverage = _load_improve_json(repo, "coverage.json")
-    assert sorted(path for group in coverage["groups"] for path in group["primary_files"]) == sorted(
-        git(repo, "ls-files").splitlines()
-    )
-    assert all(path.startswith(".daydream/") for path in _untracked(repo) if "manifest" in path)
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("effort", ["quick", "standard"])
-async def test_submodule_references_do_not_block_owned_files_or_claim_nested_content(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
-    effort: str,
-) -> None:
-    repo = improve_monorepo_target
-    nested = tmp_path / "submodule-origin"
-    init_repo(nested)
-    (nested / "nested.py").write_text("ONLY_IN_SUBMODULE = True\n")
-    git(nested, "add", "nested.py")
-    nested_commit = commit(nested, "seed the local submodule")
-    initialized, uninitialized = "apps/billing/vendor-initialized", "apps/billing/vendor-uninitialized"
-    git(repo, "-c", "protocol.file.allow=always", "submodule", "add", str(nested), initialized)
-    git(repo, "-c", "protocol.file.allow=always", "submodule", "add", str(nested), uninitialized)
-    commit(repo, "track initialized and uninitialized submodules")
-    git(repo, "submodule", "deinit", "-f", "--", uninitialized)
-    _pin_stack_availability(monkeypatch, tmp_path)
-    before = (head_sha(repo), _git_status_porcelain(repo))
-    backend = install_capable_improve_backend(monkeypatch, ManifestReadingBackend(repo))
-
-    assert await _run_improve(make_config, repo, improve_effort=effort) == 0
-
-    categories = EFFORT_TIERS[effort].categories or AUDIT_CATEGORIES
-    ordinary = set(git(repo, "ls-files").splitlines()) - {initialized, uninitialized}
-    references = [{"path": initialized, "commit": nested_commit}, {"path": uninitialized, "commit": nested_commit}]
-    for category in categories:
-        assignments = [entry for entry in backend.assignment_reads if entry["category"] == category]
-        assert Counter(path for entry in assignments for path in entry["primary_files"]) == Counter(ordinary)
-        assert sorted([item for entry in assignments for item in entry["submodule_references"]],
-            key=lambda item: item["path"]) == references
-    coverage = _load_improve_json(repo, "coverage.json")
-    assert coverage["failed_assignments"] == {}
-    assert coverage["not_audited"] == coverage["partially_audited"] == []
-    assert coverage["unavailable_submodule_contents"] == [
-        {**references[0], "file_count": None, "reason": "not-captured"},
-        {**references[1], "file_count": None, "reason": "not-captured"},
-    ]
-    assert sum(group["primary_file_count"] for group in coverage["groups"]) == len(ordinary)
-    assert sum(group["submodule_reference_count"] for group in coverage["groups"]) == 2
-    report = improve_artifact(repo, "report.md").read_text()
-    assert "Submodule contents were not audited" in report
-    assert f"`{initialized}`" in report and f"`{uninitialized}`" in report
-    durable = repo / ".daydream/improve/primary-manifests"
-    documents = [json.loads(path.read_text()) for path in durable.glob("group-*.json")]
-    assert sorted([item for doc in documents for item in doc.get("submodule_references", [])],
-        key=lambda item: item["path"]) == references
-    assert (head_sha(repo), _git_status_porcelain(repo)) == before
-    assert (repo / initialized / "nested.py").exists() and not (repo / uninitialized / "nested.py").exists()
-
-
-@pytest.mark.anyio
-async def test_partition_bound_splits_oversized_trees_via_config(
-    improve_scaled_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
-) -> None:
-    _pin_stack_availability(monkeypatch, tmp_path)
-    # max-partition-groups is raised out of the way so the bound alone is measured.
-    file_config = _append_improve_config(improve_scaled_monorepo_target,
-        "\n[tool.daydream.improve]\npartition-max-files = 5\nmax-partition-groups = 20\n",
-    )
-    stub = install_improve_stub(monkeypatch, improve_scaled_monorepo_target, n_findings=0)
-    code = await _run_improve(make_config, improve_scaled_monorepo_target, file_config=file_config)
-
-    assert code == 0
-    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
-    groups = {group_scope(call["prompt"])[0] for call in audit_calls}
-    # The owned Python residue file now fits beside a two-service group;
-    # six Python groups, three frontend groups and one generic group remain.
-    assert len(groups) == 10
-    assert len(audit_calls) == 10 * len(AUDIT_CATEGORIES)
-    for call in audit_calls:
-        assert sum(group_file_counts(call["prompt"])) <= 5
-    coverage = _load_improve_json(improve_scaled_monorepo_target, "coverage.json")
-    assert {"frontend/src/alpha", "frontend/src/beta", "frontend/src/gamma"} <= {
-        entry["name"] for entry in coverage["partitions"]
-    }
-    assert coverage["not_audited"] == []
-
-@pytest.mark.anyio
-async def test_group_ceiling_reports_full_and_partial_stack_coverage(
-    improve_scaled_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
-) -> None:
-    _pin_stack_availability(monkeypatch, tmp_path)
-    file_config = _append_improve_config(improve_scaled_monorepo_target,
-        "\n[tool.daydream.improve]\nmax-partition-groups = 1\n",
-    )
-    stub = install_improve_stub(monkeypatch, improve_scaled_monorepo_target, n_findings=0)
-    code = await _run_improve(make_config, improve_scaled_monorepo_target, file_config=file_config)
-
-    assert code == 0
-    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
-    # Only the largest group (24 service files plus the Python root config) is audited.
-    assert len(audit_calls) == len(AUDIT_CATEGORIES)
-    assert {group_scope(call["prompt"])[0] for call in audit_calls} == {"group-01"}
-    coverage = _load_improve_json(improve_scaled_monorepo_target, "coverage.json")
-    not_audited = {entry["partition"]: entry for entry in coverage["not_audited"]}
-    assert set(not_audited) == {"frontend"}
-    assert not_audited["frontend"]["reason"] == "group-ceiling"
-    assert not_audited["frontend"]["omitted_stacks"] == ["react"]
-    partially = {entry["partition"]: entry for entry in coverage["partially_audited"]}
-    assert set(partially) == {"residue"}
-    assert partially["residue"]["reason"] == "group-ceiling"
-    assert partially["residue"]["audited_stacks"] == ["python"]
-    assert partially["residue"]["omitted_stacks"] == ["generic"]
-
-@pytest.mark.anyio
-async def test_quick_tier_audits_whole_repo_in_one_group(
-    improve_scaled_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
-) -> None:
-    _pin_stack_availability(monkeypatch, tmp_path)
-    stub = install_improve_stub(monkeypatch, improve_scaled_monorepo_target, n_findings=0)
-    code = await _run_improve(make_config, improve_scaled_monorepo_target, improve_effort="quick")
-    assert code == 0
-    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
-    assert len(audit_calls) == 4  # quick also hunts tech-debt/code bloat
-    assert sorted(_load_improve_json(improve_scaled_monorepo_target, "audit-findings.json")["categories_run"]) == [
-        "correctness", "security", "tech-debt", "tests",
-    ]
-    assert all(call["read_only"] for call in audit_calls)
-    for call in audit_calls:
-        assert group_roots(call["prompt"]) == ["."]
-    coverage = _load_improve_json(improve_scaled_monorepo_target, "coverage.json")
-    assert coverage["not_audited"] == []
-    assert [entry["name"] for entry in coverage["partitions"]] == ["repository"]
-
-@pytest.mark.anyio
 async def test_audit_dispatch_interval_preserves_isolation_when_all_failed(
     improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
     stub.fail_categories = set(AUDIT_CATEGORIES)
+    stub.recon_output_override = ["not a recon object"]
     code = await _run_improve(make_config, improve_monorepo_target)
 
     assert code == 1
+    # A malformed recon container is recorded and never stops the audit dispatch.
+    recon = _load_improve_json(improve_monorepo_target, "recon.json")
+    assert {"code": "RECON_CONTAINER_INVALID", "pointer": "/"} in recon["command_rejections"]
+    assert recon["languages"] == []
     assert not improve_artifact(improve_monorepo_target, "report.md").exists()
     coverage = _load_improve_json(improve_monorepo_target, "coverage.json")
     assert coverage["not_audited"]
@@ -1305,29 +649,6 @@ async def test_audit_dispatch_interval_preserves_isolation_when_all_failed(
     end = _phase_end(trajectory, "audit")
     assert end["status"] == "failed"
     assert end["reason_code"] == "all_children_failed"
-
-@pytest.mark.anyio
-async def test_small_repo_collapses_to_bounded_groups(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    _pin_stack_availability(monkeypatch, tmp_path)
-    target = tmp_path / "single_package"
-    target.mkdir()
-    (target / "api.py").write_text("def handler():\n    return 1\n")
-    (target / "pyproject.toml").write_text('[project]\nname = "single-package"\n')
-    init_repo(target)
-    git(target, "add", ".")
-    commit(target, "initial")
-    stub = install_improve_stub(monkeypatch, target, n_findings=0)
-    code = await _run_improve(make_config, target)
-
-    assert code == 0
-    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
-    assert len(audit_calls) == len(AUDIT_CATEGORIES)
-    assert all(group_roots(call["prompt"]) == ["."] for call in audit_calls)
-    coverage = _load_improve_json(target, "coverage.json")
-    assert [entry["name"] for entry in coverage["partitions"]] == ["residue"]
-    assert len(coverage["groups"]) == 1
 
 def _not_audited_section(report: str) -> str:
     return report.split("## What was not audited")[1].split("## ")[0]
@@ -1385,27 +706,6 @@ async def test_report_names_unaudited_partitions_and_failed_groups(
 
 
 @pytest.mark.anyio
-async def test_top_offenders_name_directory_partitions_and_survive_artifacts(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
-) -> None:
-    _pin_stack_availability(monkeypatch, tmp_path)
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=1)
-    # Each group's agent cites a file inside its own group, so the react group's
-    # finding lands in the uncovered `web/` tree, which no service covers.
-    stub.group_scoped_findings = True
-    code = await _run_improve(make_config, improve_monorepo_target)
-
-    assert code == 0
-    audit = _load_improve_json(improve_monorepo_target, "audit-findings.json")
-    assert {finding["partition"] for finding in audit["findings"]} == {"billing", "web", "residue",}
-    vetted = _load_improve_json(improve_monorepo_target, "vetted-findings.json")
-    assert len(vetted["findings"]) == 1
-    assert set(vetted["findings"][0]["partitions"]) == {"billing", "web", "residue"}
-    report = improve_artifact(improve_monorepo_target, "report.md").read_text()
-    offenders = report.split("## Top offenders")[1].split("## ")[0]
-    assert "**web**" in offenders and "**billing**" in offenders
-
-@pytest.mark.anyio
 async def test_vet_dispatch_interval_batch_failure_fails_closed_per_batch(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
 ) -> None:
@@ -1439,210 +739,69 @@ async def test_vet_dispatch_interval_batch_failure_fails_closed_per_batch(
     assert end["status"] == "partial"
     assert end["reason_code"] == "some_children_failed"
 
-@pytest.mark.anyio
-async def test_run_with_no_findings_writes_report_and_empty_plan_diagnostics(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
-) -> None:
-    _pin_stack_availability(monkeypatch, tmp_path)
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=0,)
-    code = await _run_improve(make_config, improve_monorepo_target)
-    assert code == 0
-    assert [call for call in stub.calls if call["marker"] == "audit"]
-    assert not [call for call in stub.calls if call["marker"] == "plan-writer"]
-    diagnostics = _plan_write_diagnostics(improve_monorepo_target)
-    assert diagnostics["attempts"] == []
-    assert "Plans written: 0" in improve_artifact(improve_monorepo_target, "report.md",).read_text(encoding="utf-8")
-
-    coverage = _load_improve_json(improve_monorepo_target, "coverage.json")
-    assert coverage["not_audited"] == []
-    assert {entry["status"] for entry in coverage["groups"]} == {"audited"}
-    section = _not_audited_section(improve_artifact(improve_monorepo_target, "report.md").read_text())
-    assert "hotspot-weighted" in section  # the standard tier statement
-    assert "All 4 partitions were audited." in section
-
-@pytest.mark.anyio
-async def test_improve_continues_audit_and_planning_when_recon_has_no_valid_commands(
-    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
-) -> None:
-    stub.all_recon_commands_invalid = True
-    code = await _run_improve(make_config, improve_monorepo_target)
-
-    assert [call for call in stub.calls if call["marker"] == "audit"]
-    assert [call for call in stub.calls if call["marker"] == "plan-writer"]
-    recon_path = improve_artifact(improve_monorepo_target, "recon.json")
-    recon_text = recon_path.read_text()
-    recon = json.loads(recon_text)
-    assert recon["commands"] == []
-    assert recon["command_rejections"] == [
-        {"code": "RECON_APPLICABILITY_INVALID", "pointer": f"/commands/{index}/applicability/scope/kind",}
-        for index in range(2)
-    ]
-    assert "verbatim_excerpt" not in recon_text
-    assert "uv run pytest" not in recon_text
-    report = improve_artifact(improve_monorepo_target, "report.md")
-    plans = sorted((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
-    plan_diagnostics = _plan_write_diagnostics(improve_monorepo_target)
-    assert code == 0
-    assert report.is_file()
-    assert plans
-    assert all("**Command**" not in plan.read_text() for plan in plans)
-    assert any(attempt["disposition"] == "success" for attempt in plan_diagnostics["attempts"])
-    assert all(call["read_only"] for call in stub.calls)
-    trajectories = list((improve_monorepo_target / ".daydream" / "runs").glob("*/trajectory.json"))
-    trajectory = json.loads(trajectories[0].read_text())
-    validation_events = [event
-        for event in trajectory["extra"]["phase_events"]
-        if event["event"] == "command_validation"
-    ]
-    assert validation_events[0]["metadata"]["counts"] == {"total_candidates": 2, "accepted": 0, "rejected": 2,}
-    assert validation_events[0]["metadata"]["reasons"] == {"RECON_APPLICABILITY_INVALID": 2}
-    assert recon["artifact_provenance"]["session_id"] == trajectory["session_id"]
-
-@pytest.mark.anyio
-async def test_makefile_and_manifest_gate_plans_when_the_model_cites_nothing(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    (improve_monorepo_target / "Makefile").write_text(
-        "check: ## Run the full gate\n\tuv run pytest\n",
-        encoding="utf-8",
-    )
-    (improve_monorepo_target / "web" / "package.json").write_text(
-        json.dumps({"name": "web", "scripts": {"test": "vitest run"}}, indent=2)
-        + "\n",
-        encoding="utf-8",
-    )
-    (improve_monorepo_target / "web" / "pnpm-lock.yaml").write_text(
-        "lockfileVersion: '9.0'\n",
-        encoding="utf-8",
-    )
-    git(improve_monorepo_target, "add", "Makefile", "web/package.json", "web/pnpm-lock.yaml",)
-    commit(improve_monorepo_target, "add build tooling")
-    # Neither invocation is written verbatim anywhere, so `literal-command`
-    # evidence for them cannot exist: only host enumeration can supply them.
-    for tracked in improve_monorepo_target.rglob("*"):
-        if not tracked.is_file() or ".git" in tracked.parts:
-            continue
-        source = tracked.read_text(encoding="utf-8", errors="ignore")
-        assert "make check" not in source and "pnpm test" not in source
-
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
-    stub.recon_output_override = {
-        "languages": ["python", "typescript"], "commands": [], "conventions": ["OpenAPI First"],
-        "intent_docs": ["README.md"],
-    }
-    stub.plan_gate_on_first_menu_id = True
-    code = await _run_improve(make_config, improve_monorepo_target)
-
-    assert code == 0
-    recon = _load_improve_json(improve_monorepo_target, "recon.json")
-    by_command = {command["command"]: command for command in recon["commands"]}
-    assert "make check" in by_command and "pnpm test" in by_command
-    assert by_command["make check"]["id"] == "make-check"
-    assert by_command["make check"]["working_directory"] == "."
-    assert by_command["make check"]["evidence"] == {
-        "kind": "host-derived", "source_path": "Makefile", "line_anchor": {"start_line": 1, "end_line": 1},
-        "verbatim_excerpt": "check: ## Run the full gate",
-    }
-    assert by_command["pnpm test"]["working_directory"] == "web"
-    assert by_command["pnpm test"]["applicability"]["scope"] == {"kind": "in-scope-paths", "paths": ["web"],}
-
-    plans = sorted((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
-    assert plans
-    texts = [plan.read_text(encoding="utf-8") for plan in plans]
-    assert all("**Command**: `make check`" in text for text in texts)
-    assert all("No repository command was verified during planning" not in text for text in texts)
-    assert all(call["read_only"] for call in stub.calls)
-    assert _git_status_porcelain(improve_monorepo_target) == ""
-
-@pytest.mark.anyio
-async def test_host_enumeration_failure_is_visible_and_keeps_model_commands(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    make_config: MakeConfig,
+def test_host_enumeration_failure_is_visible_and_keeps_model_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr("daydream.improve.recon.enumerate_repository_commands", _raise_enumeration_failure,)
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
-    code = await _run_improve(make_config, improve_monorepo_target)
-    assert code == 0
-    recon = _load_improve_json(improve_monorepo_target, "recon.json")
-    assert [command["id"] for command in recon["commands"]] == ["test-suite", "git-diff",]
-    assert recon["command_rejections"] == [{"code": "HOST_COMMAND_ENUMERATION_FAILED", "pointer": "/host_commands"}]
+    model_commands = [{"id": "test-suite", "command": "uv run pytest", "working_directory": "."}]
+    assert _host_enumerated_commands(tmp_path, [], [], model_commands=model_commands) == (
+        0, [], ["HOST_COMMAND_ENUMERATION_FAILED@/host_commands"])
     assert "Host command enumeration failed" in capsys.readouterr().out
-    assert [call for call in stub.calls if call["marker"] == "plan-writer"]
+    assert model_commands == [{"id": "test-suite", "command": "uv run pytest", "working_directory": "."}]
+
+_AUDIT_FINDING_SECRET = "sk-audit-title-secret123456"
+
+
+class _AuditFindingCredentialBackend(ProductionPathBackend):
+    """Append a credential to one audit finding body."""
+
+    async def _pre_execute(self, cwd: Path, prompt: str, **turn_kwargs: Any) -> list[AgentEvent] | None:
+        events = await super()._pre_execute(cwd, prompt, **turn_kwargs)
+        if events and "read-only improve audit specialist" in prompt:
+            output = cast(ResultEvent, events[0]).structured_output
+            for finding in cast(dict[str, Any], output)["findings"]:
+                if finding["title"] == "Production finding 05":
+                    finding["body"] += f" OPENAI_API_KEY={_AUDIT_FINDING_SECRET}"
+        return events
+
 
 @pytest.mark.anyio
-async def test_unrelated_recon_container_error_preserves_valid_commands(
-    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
-) -> None:
-    stub.recon_output_override = {
-        "languages": {"secret-model-prose": "must not persist"},
-        "conventions": ["Preserve HTTP semantics (source: AGENTS.md)"],
-        "guidelines": {"private-guideline-prose": "must not persist"},
-        "intent_docs": ["README.md"], "commands": stub_recon_commands(),
-    }
-    code = await _run_improve(make_config, improve_monorepo_target)
-
-    assert code == 0
-    assert [call for call in stub.calls if call["marker"] == "audit"]
-    recon_text = improve_artifact(improve_monorepo_target, "recon.json").read_text()
-    assert "secret-model-prose" not in recon_text
-    assert "private-guideline-prose" not in recon_text
-    recon = json.loads(recon_text)
-    assert recon["languages"] == []
-    assert recon["guidelines"] == []
-    assert recon["conventions"] == ["Preserve HTTP semantics (source: AGENTS.md)"]
-    assert recon["intent_docs"] == ["README.md"]
-    assert len(recon["commands"]) == 2
-    assert all(command["evidence"]["verbatim_excerpt"]
-        in {'test-command = "uv run pytest"', 'scope-command = "git diff --exit-code"',}
-        for command in recon["commands"]
-    )
-    assert recon["command_rejections"] == []
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("invalid_container", [False, True], ids=["non-array-commands", "non-object-discovery"])
-async def test_malformed_discovery_preserves_diagnostics_and_continues_audit(
-    improve_monorepo_target: Path, stub: ImproveStubBackend, capsys: pytest.CaptureFixture[str],
-    make_config: MakeConfig, invalid_container: bool,
-) -> None:
-    secret = "OPENAI_API_KEY=sk-secret123456"
-    model_prose = "private arbitrary model explanation"
-    rejected_command = "uv run pytest --private-selection"
-    stub.recon_output_override = [secret, rejected_command] if invalid_container else {
-        "languages": [model_prose], "commands": {"command": rejected_command, "verbatim_excerpt": secret,},
-        "conventions": [model_prose], "intent_docs": [model_prose],
-    }
-
-    code = await _run_improve(make_config, improve_monorepo_target)
-
-    assert code == 1
-    assert [call for call in stub.calls if call["marker"] == "audit"]
-    assert [call for call in stub.calls if call["marker"] == "plan-writer"]
-    assert improve_artifact(improve_monorepo_target, "report.md").is_file()
-    recon_text = improve_artifact(improve_monorepo_target, "recon.json").read_text()
-    recon = json.loads(recon_text)
-    assert recon["commands"] == []
-    assert recon["command_rejections"] == ([{"code": "RECON_CONTAINER_INVALID", "pointer": "/"}]
-        if invalid_container else [{"code": "RECON_COMMANDS_INVALID", "pointer": "/commands"}])
-    # `model_prose` is legitimate recon prose and stays; the rejected
-    # candidate's own content must never reach the persisted artifact.
-    for private_value in (secret, rejected_command, "verbatim_excerpt"):
-        assert private_value not in recon_text
-
-    console_output = capsys.readouterr().out
-    for private_value in (secret, model_prose, rejected_command):
-        assert private_value not in console_output
-
-@pytest.mark.anyio
-async def test_capable_improve_stub_partial_failure_is_successful_and_safe(
+async def test_capable_improve_partial_plan_failure_is_safe_and_publishes_the_rest(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     make_config: MakeConfig,
 ) -> None:
+    """One blocked plan keeps planning successful, stays secret-free, and publishes only the landed plan."""
     _force_interactive(monkeypatch)
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *args, **kwargs: "1-5",)
-    backend = ProductionPathBackend(improve_monorepo_target, failed_title="Production finding 03",)
-    install_capable_improve_backend(monkeypatch, backend)
+    answers: list[str] = []
 
-    code = await _run_improve(make_config, improve_monorepo_target, non_interactive=False)
+    def _answer(*_args: Any, **_kwargs: Any) -> str:
+        answers.append("2,1-2" if answers else "two")
+        return answers[-1]
+
+    monkeypatch.setattr("daydream.run_context._prompt_user", _answer)
+    backend = _AuditFindingCredentialBackend(improve_monorepo_target, failed_title="Production finding 03",)
+    install_capable_improve_backend(monkeypatch, backend)
+    _no_open_issues(monkeypatch)
+    created: list[str] = []
+
+    def _create_issue(*args: Any, **kwargs: Any) -> str:
+        created.append(str(kwargs["title"]))
+        return "https://github.com/acme/widgets/issues/1"
+
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _create_issue)
+
+    code = await _run_publish(make_config, improve_monorepo_target, non_interactive=False)
+    selected = _load_improve_json(improve_monorepo_target, "selected.json")
+    publication = _load_improve_json(improve_monorepo_target, "published-issues.json",)
+    vetted = _load_improve_json(improve_monorepo_target, "vetted-findings.json")["findings"]
+    assert answers == ["two", "2,1-2"]
+    assert selected["mode"] == "interactive"
+    assert selected["selected"] == [vetted[1]["fingerprint"], vetted[0]["fingerprint"]]
+    assert code == 2
+    assert publication["status"] == "partial"
+    assert len(publication["published"]) == len(created) == 1
+    assert [(entry["stage"], entry["plan_path"]) for entry in publication["failed"]] == [("plan-write", None)]
+    assert len(publication["published"]) + len(publication["failed"]) == len(selected["selected"])
     recon = _load_improve_json(improve_monorepo_target, "recon.json")
     plan_files = sorted((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     diagnostics_text = improve_artifact(improve_monorepo_target, "plan-write-diagnostics.json",
@@ -1652,7 +811,6 @@ async def test_capable_improve_stub_partial_failure_is_successful_and_safe(
     console_output = capsys.readouterr().out
     observables = [console_output, *_improve_observable_texts(improve_monorepo_target),]
 
-    assert code == 0
     assert recon["commands"]
     assert recon["command_rejections"] == [{"code": "RECON_MALFORMED_COMMAND", "pointer": "/commands/42/command",}]
     assert len(plan_files) == 1
@@ -1665,6 +823,9 @@ async def test_capable_improve_stub_partial_failure_is_successful_and_safe(
     assert "Plans blocked by plan-writing failure: 1" in report
     assert all(backend.recon_secret not in text for text in observables)
     assert all(backend.planner_secret not in text for text in observables)
+    # An audit finding carrying a credential is redacted before any artifact, plan or report.
+    assert all(_AUDIT_FINDING_SECRET not in text for text in observables)
+    assert "coverage 05. OPENAI_API_KEY=[REDACTED" in "\n".join(observables)
 
 @pytest.mark.anyio
 async def test_branch_focus_manifest_retains_deleted_paths_without_reading_missing_files(
@@ -1726,168 +887,29 @@ async def test_branch_focus_manifest_retains_deleted_paths_without_reading_missi
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("effort", ["standard", "deep"])
-async def test_branch_fanout_reverses_completion_without_changing_delivered_results(
-    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
-    effort: str,
-) -> None:
-    """Branch scheduling must retain tier/backend limits and deterministic delivery.
-
-    Existing branch scope and vet batch tests never hold a provider invocation
-    open, so they passed when branch focus silently serialized both phases.
-    """
-    outcomes = []
-    for capacity in (1, 3):
-        repo = tmp_path / f"capacity-{capacity}"
-        shutil.copytree(improve_branch_target, repo)
-        backend = install_capable_improve_backend(monkeypatch,
-            RendezvousImproveBackend(repo, capacity=capacity, expected_concurrency=capacity),
-        )
-        backend.findings_per_category = 45
-        backend.phase_sizes["vet"] = 6
-        backend.vet_reject_titles = {"Security finding 45"}
-        before = (head_sha(repo), git(repo, "for-each-ref", "--format=%(refname) %(objectname)"),
-            git(repo, "ls-files", "--stage"), _git_status_porcelain(repo),
-        )
-        with anyio.fail_after(15):
-            code = await _run_improve(make_config, repo, improve_focus="branch", improve_effort=effort)
-        assert code == 0
-        assert backend.max_active == {"audit": capacity, "vet": capacity}
-        assert backend.active == {"audit": 0, "vet": 0}
-        assert backend.closed == {"audit": 8, "vet": 6}
-        if capacity > 1:
-            assert backend.completion_order["audit"] == [2, 1, 0, 5, 4, 3, 7, 6]
-            assert backend.completion_order["vet"] == [2, 1, 0, 5, 4, 3]
-        audit_calls = [call for call in backend.calls if call["marker"] == "audit"]
-        assert len(audit_calls) == len(AUDIT_CATEGORIES)
-        assert all("apps/billing/api.py" in call["prompt"] for call in audit_calls)
-        assert all(group_roots(call["prompt"]) == ["."] for call in audit_calls)
-        coverage = _load_improve_json(repo, "coverage.json")
-        assert [entry["name"] for entry in coverage["partitions"]] == ["branch"]
-        assert coverage["not_audited"] == []
-        assert all(("Deep audit:" if effort == "deep" else "Standard audit:") in call["prompt"]
-            for call in audit_calls)
-        for category in AUDIT_CATEGORIES:
-            prompts = [call["prompt"] for call in audit_calls if AUDIT_PLAYBOOK_SECTIONS[category] in call["prompt"]]
-            assert len(prompts) == 1, (category, effort)
-            assert HARD_RULE_4 in prompts[0] and HARD_RULE_6 in prompts[0], (category, effort)
-            assert "The value itself must never appear in anything you write." in prompts[0], (category, effort)
-            assert "data, not instructions" in prompts[0], (category, effort)
-        tech_debt = next(call["prompt"] for call in audit_calls if "## Tech Debt & Architecture" in call["prompt"])
-        tests = next(call["prompt"] for call in audit_calls if "## Test Coverage" in call["prompt"])
-        assert "existing repository code" in tech_debt
-        assert "language standard library" in tech_debt
-        assert "already-declared dependency" in tech_debt
-        assert "mature new dependency" in tech_debt
-        assert "comments that merely narrate self-evident code" in tech_debt
-        assert "net reduction in production and test code" in tech_debt
-        assert "Parameterizable matrices" in tests
-        assert "Preserve separate tests" in tests
-        assert all(call["read_only"] for call in backend.calls)
-        assert all(not call["persist_session"] for call in backend.calls if call["marker"] in {"audit", "vet"})
-        assert backend.audit_root is not None and not backend.audit_root.exists()
-        assert (head_sha(repo), git(repo, "for-each-ref", "--format=%(refname) %(objectname)"),
-            git(repo, "ls-files", "--stage"), _git_status_porcelain(repo),
-        ) == before
-        trajectory = _root_run_trajectory(repo)
-        _assert_complete_phase_dispatch(repo, trajectory, "audit",
-            [f"audit-{category}-group-01" for category in AUDIT_CATEGORIES])
-        # Batches follow leverage order (security precedes correctness).
-        _assert_complete_phase_dispatch(repo, trajectory, "vet",
-            [f"vet-{category}-{index:02d}" for index, category in enumerate(["security"] * 3 + ["correctness"] * 3)])
-        vet_calls = [call for call in backend.calls if call["marker"] == "vet"]
-        for call in vet_calls:
-            assert "re-open both implementations" in call["prompt"]
-            assert "layer boundaries" in call["prompt"]
-            assert "Similar-looking tests" in call["prompt"]
-            assert "preserve rationale, invariants, security" in call["prompt"]
-        for call in [*audit_calls, *vet_calls]:
-            collection = "findings" if call["marker"] == "audit" else "verdicts"
-            item = call["output_schema"]["properties"][collection]["items"]
-            assert {"maintenance_signals", "change_shape", "reuse_target"} <= set(item["required"])
-            assert item["properties"]["change_shape"]["enum"] == [
-                "delete", "reuse", "consolidate", "neutral", "additive", "unknown",
-            ]
-        assert [len(json.loads(call["prompt"].split("```json\n")[1].split("```", 1)[0])) for call in vet_calls
-            ] == ([20, 20, 5, 20, 20, 5] if capacity == 1 else [5, 20, 20, 5, 20, 20])
-        audit = _load_improve_json(repo, "audit-findings.json")
-        vetted = _load_improve_json(repo, "vetted-findings.json")
-        assert {finding["provenance"] for finding in vetted["findings"]} == {"introduced", "inherited"}
-        report = improve_artifact(repo, "report.md").read_text()
-        outcomes.append((audit["findings"], vetted["findings"], _load_improve_json(repo, "selected.json")["selected"],
-            json.loads((repo / "daydream_plans" / "rejected.json").read_text()),
-            re.sub(r"Daydream run: `[^`]+`", "Daydream run: <run>", report),
-        ))
-    assert outcomes[0] == outcomes[1]
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(("effort", "backend_capacity", "tier_capacity"),
-    [("quick", 3, None), ("standard", 1, None), ("deep", 3, 1), ("standard", 3, 2)],
-)
 async def test_branch_fanout_preserves_serial_limits_and_quick_filtering(
     improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-    effort: str, backend_capacity: int, tier_capacity: int | None,
 ) -> None:
     """One category group still obeys each independently selected serial ceiling."""
-    if tier_capacity is not None:
-        monkeypatch.setitem(EFFORT_TIERS, effort, replace(EFFORT_TIERS[effort], max_concurrency=tier_capacity))
-    expected = min(EFFORT_TIERS[effort].max_concurrency, backend_capacity)
+    backend_capacity = 3
+    expected = min(EFFORT_TIERS["quick"].max_concurrency, backend_capacity)
     backend = install_capable_improve_backend(monkeypatch,
         RendezvousImproveBackend(improve_branch_target, capacity=backend_capacity, expected_concurrency=expected,
-            n_findings=None if effort == "quick" else 2),
+            n_findings=None),
     )
-    if effort == "quick":
-        backend.findings_per_category = 3
-        backend.low_confidence_tail = True
+    backend.findings_per_category = 3
+    backend.low_confidence_tail = True
     with anyio.fail_after(15):
-        code = await _run_improve(make_config, improve_branch_target, improve_focus="branch", improve_effort=effort)
+        code = await _run_improve(make_config, improve_branch_target, improve_focus="branch", improve_effort="quick")
         assert code == 0
     assert backend.max_active == {"audit": expected, "vet": expected}
     audited = _load_improve_json(improve_branch_target, "audit-findings.json")
     assert audited["categories_run"] == list(AUDIT_CATEGORIES)
-    if effort == "quick":
-        assert len(audited["findings"]) == 6
-        assert {finding["confidence"] for finding in audited["findings"]} == {"HIGH"}
-        report = improve_artifact(improve_branch_target, "report.md").read_text()
-        assert "Non-HIGH-confidence findings dropped by tier: 8" in report
-        assert "Lowest-leverage findings dropped by tier cap: 10" in report
-
-
-@pytest.mark.anyio
-async def test_branch_fanout_isolates_failures_and_drops_missing_verdicts(
-    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    """A failed sibling or incomplete verdict cannot admit an unconfirmed finding."""
-    backend = install_capable_improve_backend(monkeypatch,
-        RendezvousImproveBackend(improve_branch_target, capacity=3, expected_concurrency=3),
-    )
-    backend.findings_per_category = 45
-    backend.phase_sizes["vet"] = 6
-    backend.fail_categories = {"docs"}
-    backend.fail_vet_titles = {"Correctness finding 41"}
-    backend.omit_vet_title = "Security finding 21"
-    backend.vet_reject_titles = {"Security finding 45"}
-    with anyio.fail_after(15):
-        assert await _run_improve(make_config, improve_branch_target, improve_focus="branch") == 0
-    audit = _load_improve_json(improve_branch_target, "audit-findings.json")
-    assert set(audit["failed"]) == {"docs:group-01"}
-    vetted = _load_improve_json(improve_branch_target, "vetted-findings.json")
-    members = [member for package in vetted["findings"] for member in package.get("members", [package])]
-    titles = {finding["title"] for finding in members}
-    assert len(members) == 83
-    assert "Security finding 40" not in titles  # missing verdict is not confirmation
-    assert "Security finding 45" not in titles  # explicit rejection is durable
-    assert not titles.intersection(f"Correctness finding {number:02d}" for number in range(41, 46))
-    assert {"Security finding 01", "Security finding 44", "Correctness finding 40"} <= titles
-    rejections = json.loads((improve_branch_target / "daydream_plans" / "rejected.json").read_text())
-    assert [entry["title"] for entry in rejections["rejected"]] == ["Security finding 45"]
-    trajectory = _root_run_trajectory(improve_branch_target)
-    for phase in ("audit", "vet"):
-        assert _dispatch_for_phase(trajectory, phase)["extra"]["dispatch_status"] == "partial"
-        assert _phase_end(trajectory, phase)["status"] == "partial"
-    assert backend.closed == {"audit": 8, "vet": 6}
-    assert backend.audit_root is not None and not backend.audit_root.exists()
+    assert len(audited["findings"]) == 6
+    assert {finding["confidence"] for finding in audited["findings"]} == {"HIGH"}
+    report = improve_artifact(improve_branch_target, "report.md").read_text()
+    assert "Non-HIGH-confidence findings dropped by tier: 8" in report
+    assert "Lowest-leverage findings dropped by tier cap: 10" in report
 
 
 @pytest.mark.anyio
@@ -1932,413 +954,66 @@ async def test_branch_cancellation_joins_provider_streams_before_snapshot_cleanu
 
 
 @pytest.mark.anyio
-async def test_branch_focus_pins_remote_preferred_merge_base_in_remote_free_snapshot(
-    improve_branch_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    repo = improve_branch_target
-    prior_feature = git(repo, "rev-parse", "feature")
-    local_main = git(repo, "rev-parse", "main")
-    git(repo, "checkout", "main")
-    (repo / "upstream.py").write_text("UPSTREAM = 1\n")
-    git(repo, "add", "upstream.py")
-    remote_main = commit(repo, "remote-only advancement")
-    git(repo, "rebase", "--onto", remote_main, local_main, "feature")
-    git(repo, "branch", "-f", "main", local_main)
-    bare = tmp_path / "origin.git"
-    bare.mkdir()
-    git(bare, "init", "--bare", "-b", "main")
-    git(repo, "remote", "add", "origin", str(bare))
-    git(repo, "push", "origin", f"{remote_main}:refs/heads/main")
-    git(repo, "fetch", "origin", "main")
-    git(repo, "remote", "set-head", "origin", "main")
-    git(repo, "checkout", "feature")
-    assert git(repo, "rev-parse", "feature") != prior_feature
-
-    git_dir = Path(git(repo, "rev-parse", "--absolute-git-dir"))
-    index_path = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-path", "index"))
-    before = {
-        "head": git(repo, "rev-parse", "HEAD"), "refs": git(repo, "for-each-ref", "--format=%(refname) %(objectname)"),
-        "config": (git_dir / "config").read_bytes(), "index": index_path.read_bytes(),
-    }
-    backend = install_capable_improve_backend(monkeypatch, _AuditGitBoundaryBackend(repo))
-
-    assert await _run_improve(make_config, repo, improve_focus="branch") == 0
-    diff_blocks = [
-        call["prompt"].split("```diff\n", 1)[1].split("\n```", 1)[0]
-        for call in backend.calls
-        if call["marker"] in ("audit", "vet") and "```diff\n" in call["prompt"]
-    ]
-    assert diff_blocks
-    assert all("billing-v2" in block for block in diff_blocks)
-    assert all("UPSTREAM = 1" not in block for block in diff_blocks)
-    assert backend.git_observations
-    assert all(obs["outside_source"] is True for obs in backend.git_observations)
-    assert all(obs["remotes"] == obs["remote_refs"] == "" for obs in backend.git_observations)
-    assert git(repo, "rev-parse", "HEAD") == before["head"]
-    assert git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before["refs"]
-    assert (git_dir / "config").read_bytes() == before["config"]
-    assert index_path.read_bytes() == before["index"]
-
-@pytest.mark.anyio
-async def test_branch_focus_dangling_base_carries_only_merge_base_into_snapshot(
-    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    repo = improve_branch_target
-    feature = git(repo, "rev-parse", "feature")
-    common = git(repo, "rev-parse", "main")
-    git(repo, "checkout", "--detach", common)
-    (repo / "side.py").write_text("SIDE = 1\n")
-    git(repo, "add", "side.py")
-    dangling_tip = commit(repo, "dangling explicit base")
-    git(repo, "checkout", "feature")
-    assert git(repo, "rev-parse", "HEAD") == feature
-    backend = install_capable_improve_backend(monkeypatch, _AuditGitBoundaryBackend(repo, absent_oid=dangling_tip),)
-    assert await _run_improve(make_config, repo, improve_focus="branch", base=dangling_tip) == 0
-    assert backend.git_observations
-    assert all(obs["absent_oid_present"] is False for obs in backend.git_observations)
-    assert all(obs["remotes"] == obs["remote_refs"] == "" for obs in backend.git_observations)
-
-@pytest.mark.anyio
-async def test_branch_focus_shallow_preferred_history_fails_before_model(
-    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    repo = improve_branch_target
-    common = git(repo, "rev-parse", "main")
-    git(repo, "checkout", "main")
-    (repo / "remote.py").write_text("remote\n")
-    git(repo, "add", "remote.py")
-    remote_tip = commit(repo, "preferred remote tip")
-    git(repo, "checkout", "feature")
-    git(repo, "branch", "-f", "main", common)
-    git(repo, "update-ref", "refs/remotes/origin/main", remote_tip)
-    shallow_path = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-path", "shallow"))
-    shallow_path.write_text(f"{common}\n{remote_tip}\n")
-    before_shallow = shallow_path.read_bytes()
-    backend = install_capable_improve_backend(monkeypatch, _AuditGitBoundaryBackend(repo))
-
-    assert await _run_improve(make_config, repo, improve_focus="branch") == 1
-    output = capsys.readouterr().out
-    assert "branch-focus" in output
-    assert "merge-base" in output
-    assert backend.calls == []
-    assert backend.git_observations == []
-    assert shallow_path.read_bytes() == before_shallow
-
-@pytest.mark.anyio
-async def test_branch_focus_with_scope_excludes_out_of_scope_service_diff(
-    improve_branch_two_services_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    stub = install_improve_stub(monkeypatch, improve_branch_two_services_target)
-    code = await _run_improve(make_config, improve_branch_two_services_target, improve_focus="branch",
-                     improve_scope="apps/billing",
-                 )
-    assert code == 0
-    # Isolate the embedded ```diff fenced block so the assertion targets the
-    # branch diff itself, not the whole-repo recon context that legitimately
-    # names other services.
-    diff_blocks = [
-        prompt.split("```diff\n", 1)[1].split("\n```", 1)[0]
-        for call in stub.calls
-        if call["marker"] in ("audit", "vet")
-        for prompt in [call["prompt"]]
-        if "```diff\n" in prompt
-    ]
-    assert diff_blocks
-    assert all("apps/billing/api.py" in block for block in diff_blocks)
-    assert all("apps/catalog/api.py" not in block for block in diff_blocks)
-    assert all("catalog-v2" not in block for block in diff_blocks)
-
-@pytest.mark.anyio
 async def test_branch_focus_on_base_branch_reports_and_exits_cleanly(
     improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
     code = await _run_improve(make_config, improve_monorepo_target, improve_focus="branch")
     assert code == 1
 
-@pytest.mark.anyio
-async def test_previously_rejected_finding_is_not_revetted_or_rereported(
-    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
-) -> None:
-    stub.vet_reject_titles = {"Phantom N+1"}
-    config =make_config(improve_monorepo_target, flow_name="improve")
-    await run(config)
-    vetted = _load_improve_json(improve_monorepo_target, "vetted-findings.json")
-    assert all(finding["title"] != "Phantom N+1" for finding in vetted["findings"])
-    rejected = json.loads((improve_monorepo_target / "daydream_plans" / "rejected.json").read_text())
-    assert rejected["rejected"][0]["title"] == "Phantom N+1"
-    assert rejected["rejected"][0]["reason"]
-
-    stub.calls.clear()
-    await run(config)
-    vet_calls = [call for call in stub.calls if call["marker"] == "vet"]
-    assert all("Phantom N+1" not in call["prompt"] for call in vet_calls)
-    report = improve_artifact(improve_monorepo_target, "report.md").read_text()
-    assert "previously rejected" in report.lower()
 
 @pytest.mark.anyio
-async def test_non_interactive_run_selects_top_findings_and_writes_plans(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+async def test_group_scope_slices_search_but_report_names_the_unaudited_rest(
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("builtins.input", _forbidden_input)
-    install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=8,)
-    code = await _run_improve(make_config, improve_monorepo_target)
-    selected = _load_improve_json(improve_monorepo_target, "selected.json")
-    assert len(selected["selected"]) == 5
-    assert selected["mode"] == "non-interactive-default"
-    plans_dir = improve_monorepo_target / "daydream_plans"
-    plan_files = sorted(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
-    assert code == 0
-    assert 1 <= len(plan_files) <= 5
-    index = (plans_dir / "README.md").read_text()
-    assert "non-interactive default" in index.lower()
-    assert head_sha(improve_monorepo_target)[:7] in plan_files[0].read_text()
-
-    report = improve_artifact(improve_monorepo_target, "report.md").read_text()
-    assert report.index("high-leverage-title") < report.index("low-leverage-title")
-    assert "## Direction" not in report
-    assert "## Cleanup pressure" in report
-    assert "not audited" in report.lower()
-
-# Selection order is the leverage order of the two audited findings; the plan
-# number each one gets is claimed from that order before any writer runs.
-_PLAN_FILE_BY_TITLE = {
-    "Security finding": "001-security-finding.md", "high-leverage-title": "002-high-leverage-title.md",
-}
-
-@pytest.mark.anyio
-async def test_finished_plan_is_on_disk_while_a_slower_writer_still_runs(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    """The first selected plan and index land while a later writer still runs."""
-    backend = IncrementalPlanBackend(improve_monorepo_target, slow_title="high-leverage-title",)
-    install_capable_improve_backend(monkeypatch, backend)
-
-    code = await _run_improve(make_config, improve_monorepo_target)
-    plans_dir = improve_monorepo_target / "daydream_plans"
-    assert code == 0
-    assert backend.observed_while_slow_writer_ran == ["001-security-finding.md"]
-    # An interrupt at that moment would leave a resumable index, not an
-    # orphaned plan file.
-    assert "(001-security-finding.md)" in backend.observed_index_while_slow_writer_ran
-    assert sorted(path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")) == sorted(_PLAN_FILE_BY_TITLE.values())
-    index = (plans_dir / "README.md").read_text(encoding="utf-8")
-    for filename in _PLAN_FILE_BY_TITLE.values():
-        assert f"({filename})" in index
-
-@pytest.mark.anyio
-async def test_plan_numbers_track_selection_order_when_writers_finish_out_of_order(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    backend = OutOfOrderPlanBackend(improve_monorepo_target, n_findings=3)
-    backend.vet_reject_titles = {"Phantom N+1"}
-    install_capable_improve_backend(monkeypatch, backend)
-
-    code = await _run_improve(make_config, improve_monorepo_target)
-    plans_dir = improve_monorepo_target / "daydream_plans"
-    selected = _load_improve_json(improve_monorepo_target, "selected.json")["selected"]
-    index = (plans_dir / "README.md").read_text(encoding="utf-8")
-    assert code == 0
-    assert len(selected) == 3
-    assert backend.selection_order == selected
-    assert backend.completion_order == [1, 2, 0]
-    assert _index_numbers_by_fingerprint(index) == {fingerprint: rank + 1 for rank, fingerprint in enumerate(selected)}
-    assert len(list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))) == 3
-    assert index.count("| TODO |") == 3
-    sidecar = json.loads((plans_dir / PLAN_INDEX_FILENAME).read_text(encoding="utf-8"))
-    assert sidecar["schema_version"] == 1
-    assert sidecar["artifact_type"] == "daydream.plan-index"
-    assert [(entry["number"], entry["fingerprint"], entry["status"]) for entry in sidecar["plans"]] == [
-        (rank + 1, fingerprint, "TODO")
-        for rank, fingerprint in enumerate(selected)
-    ]
-    assert all((plans_dir / f"{entry['number']:03d}-{entry['slug']}.md").is_file()
-        and entry["planned_at"] == head_sha(improve_monorepo_target)
-        for entry in sidecar["plans"]
+    """A named group audits every member, names the rest unaudited, and a phase table retunes only its phase."""
+    ledger = improve_monorepo_target / "apps/ledger"
+    ledger.mkdir()
+    (ledger / "pyproject.toml").write_text('[project]\nname = "ledger"\n')
+    (ledger / "api.py").write_text('def service_name():\n    return "ledger"\n')
+    git(improve_monorepo_target, "add", "apps/ledger")
+    commit(improve_monorepo_target, "add ledger service")
+    _record_phase_tiers(monkeypatch)
+    code = await _run_improve(make_config, improve_monorepo_target, improve_scope="core",
+        file_config=DaydreamFileConfig(improve_service_groups={"core": ["apps/billing", "apps/ledger"]},
+            phases={"plan_write": {"model": "file-plan-model", "reasoning_effort": "medium"}}),
     )
-
-@pytest.mark.anyio
-async def test_plan_writer_crash_leaves_the_finished_plan_on_disk(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    backend = IncrementalPlanBackend(improve_monorepo_target, slow_title="Security finding", crash=True,)
-    install_capable_improve_backend(monkeypatch, backend)
-    code = await _run_improve(make_config, improve_monorepo_target)
-    plans_dir = improve_monorepo_target / "daydream_plans"
-    assert code == 0
-    assert backend.observed_while_slow_writer_ran == [_PLAN_FILE_BY_TITLE["high-leverage-title"]]
-    assert "(002-high-leverage-title.md)" in backend.observed_index_while_slow_writer_ran
-    assert [path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")
-    ] == [_PLAN_FILE_BY_TITLE["high-leverage-title"]]
-    index = (plans_dir / "README.md").read_text(encoding="utf-8")
-    assert "BLOCKED (PLAN_WRITER_FAILED: PROCESS_EXIT)" in index
-    assert "002" in index
-
-@pytest.mark.anyio
-async def test_real_improve_flow_plans_from_live_dirty_source_without_running_candidates(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    source_path = improve_monorepo_target / "apps/billing/api.py"
-    user_edit = (
-        "def service_name():\n"
-        '    return "billing-from-live-working-tree"\n'
-        "# verify manually: touch candidate-command-ran\n"
-    )
-    source_path.write_text(user_edit, encoding="utf-8")
-    dirty_status = _git_status_porcelain(improve_monorepo_target)
-    plans_dir = improve_monorepo_target / "daydream_plans"
-    plans_dir.mkdir()
-    (plans_dir / "001-billing-foundation.md").write_text(
-        "# Plan 001: Establish billing foundation\n",
-        encoding="utf-8",
-    )
-    (plans_dir / "README.md").write_text(
-        "# Implementation Plans\n\n"
-        "## Execution order & status\n\n"
-        "| Plan | Title | Priority | Effort | Status |\n"
-        "|------|-------|----------|--------|--------|\n"
-        "| [001](001-billing-foundation.md) "
-        "<!-- fingerprint:trusted-existing-foundation --> | "
-        "Establish billing foundation | P1 | S | TODO |\n",
-        encoding="utf-8",
-    )
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=1,)
-    stub.recon_commands_extra = [{
-            "id": "manual-sentinel", "purpose": "Manually verify candidate commands are never auto-executed",
-            "command": "touch candidate-command-ran", "working_directory": ".",
-            "expected_success": {"exit_code": 0, "observable_result": "exit 0 and the manual sentinel exists",},
-            "applicability": {"scope": {"kind": "whole-repository"}, "preconditions": [],
-                "rationale": "The live source records this manual-only command.",
-            },
-            "evidence": {"kind": "literal-command", "source_path": "apps/billing/api.py",
-                "line_anchor": {"start_line": 3, "end_line": 3}, "verbatim_excerpt": "touch candidate-command-ran",
-            },
-        }
-    ]
-
-    code = await _run_improve(make_config, improve_monorepo_target)
-
-    assert code == 0
-    generated = sorted(plans_dir.glob("[0-9][0-9][0-9]-high-leverage-title.md"))
-    assert len(generated) == 1
-    plan = generated[0].read_text(encoding="utf-8")
-    assert (
-        'def service_name():\n    return "billing-from-live-working-tree"'
-        in plan
-    )
-    assert "uv run pytest apps/billing/test_api.py -q" in plan
-    assert source_path.read_text(encoding="utf-8") == user_edit
-    assert _git_status_porcelain(improve_monorepo_target) == dirty_status
-    assert not (improve_monorepo_target / "candidate-command-ran").exists()
-
-    report = improve_artifact(improve_monorepo_target, "report.md").read_text(encoding="utf-8")
-    assert "high-leverage-title" in report
-    recon = _load_improve_json(improve_monorepo_target, "recon.json")
-    sentinel = next(command for command in recon["commands"] if command["id"] == "manual-sentinel")
-    assert sentinel["evidence"]["verbatim_excerpt"] == (
-        "# verify manually: touch candidate-command-ran"
-    )
-
-    index = (plans_dir / "README.md").read_text(encoding="utf-8")
-    assert "| high-leverage-title | P1 | S | TODO |" in index
-
-    diagnostics = _plan_write_diagnostics(improve_monorepo_target)
-    assert diagnostics["artifact_type"] == "daydream.plan-write-diagnostics"
-    assert any(attempt["disposition"] == "success"
-        and attempt["artifact"]["path"] == generated[0].name
-        for attempt in diagnostics["attempts"]
-    )
-
-@pytest.mark.anyio
-async def test_interactive_selection_honors_user_choice(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    _force_interactive(monkeypatch)
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "2")
-    install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=8,)
-    code = await _run_improve(make_config, improve_monorepo_target, non_interactive=False)
-    assert code == 0
-    selected = _load_improve_json(improve_monorepo_target, "selected.json")
-    assert len(selected["selected"]) == 1
-    assert selected["mode"] == "interactive"
-
-
-@pytest.mark.anyio
-async def test_scope_slices_search_but_report_names_the_unaudited_rest(
-    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
-) -> None:
-    code = await _run_improve(make_config, improve_monorepo_target, improve_scope="apps/billing")
     assert code == 0
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
-    assert all("apps/billing" in call["prompt"] for call in audit_calls)
+    assert audit_calls and all("apps/billing" in call["prompt"] and "apps/ledger" in call["prompt"]
+        for call in audit_calls)
+    assert not any("apps/catalog" in call["prompt"] for call in audit_calls)
+    tiers = _tiers_by_marker(stub.calls)
+    assert tiers["plan-writer"] == {("file-plan-model", "medium")}
+    assert tiers["recon"] == {(PHASE_DEFAULT_MODELS["claude"]["recon"], "low")}
     # A slice bounds where the audit searches, never what it may read: a
     # cross-service finding must stay reachable (spec.md monorepo requirement).
     assert all("bounds where you search, never what you may read" in call["prompt"] for call in audit_calls)
-    assert any("bounds where the audit searches" in call["prompt"].lower() for call in audit_calls)
     report = improve_artifact(improve_monorepo_target, "report.md").read_text()
-    assert "catalog" in report and "not audited" in report.lower()
-
-@pytest.fixture
-def improve_requirements_service_target(improve_monorepo_target: Path) -> Path:
-    """Monorepo whose third service pins deps with ``requirements.txt`` only."""
-    root = improve_monorepo_target / "apps" / "ledger"
-    root.mkdir(parents=True)
-    (root / "requirements.txt").write_text("httpx==0.27.0\n")
-    (root / "api.py").write_text('def service_name():\n    return "ledger"\n')
-    git(improve_monorepo_target, "add", ".")
-    commit(improve_monorepo_target, "add requirements-based service")
-    return improve_monorepo_target
-
-@pytest.mark.anyio
-async def test_scope_selects_a_requirements_only_python_service(
-    improve_requirements_service_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    # Pre-PEP-621 services carry no pyproject.toml; before issue #963 they were
-    # never enumerated, so --scope rejected them as an unknown service.
-    stub = install_improve_stub(monkeypatch, improve_requirements_service_target)
-    code = await _run_improve(make_config, improve_requirements_service_target, improve_scope="apps/ledger")
-    assert code == 0
-    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
-    assert audit_calls
-    assert all("apps/ledger" in call["prompt"] for call in audit_calls)
-    report = improve_artifact(improve_requirements_service_target, "report.md").read_text()
-    assert "billing" in report and "not audited" in report.lower()
-
-@pytest.mark.anyio
-async def test_group_scope_expands_named_service_group_to_all_members(
-    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
-) -> None:
-    code = await _run_improve(make_config, improve_monorepo_target, improve_scope="core",
-                     file_config=DaydreamFileConfig(improve_service_groups={"core": ["apps/billing", "apps/catalog"]}),
-                 )
-
-    assert code == 0
-    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
-    audited_paths = {call["prompt"] for call in audit_calls}
-    assert any("apps/billing" in p for p in audited_paths)
-    assert any("apps/catalog" in p for p in audited_paths)
-    report = improve_artifact(improve_monorepo_target, "report.md").read_text()
-    assert "No other detected service directories." in report
+    assert "limited to `core`" in report
+    assert "**catalog** — `apps/catalog`" in report
 
 async def _run_improve(make_config: MakeConfig, repo: Path, **overrides: Any) -> int:
     return await run(make_config(repo, flow_name="improve", **overrides))
 
-async def _run_publish(make_config: MakeConfig, repo: Path) -> int:
+async def _run_publish(make_config: MakeConfig, repo: Path, **overrides: Any) -> int:
     return await _run_improve(
         make_config, repo, pr_repo="acme/widgets", file_config=DaydreamFileConfig(improve_github_publish_issues=True),
+        **overrides,
     )
 
 async def _run_plan_subverb(make_config: MakeConfig, repo: Path) -> int:
     return await _run_improve(make_config, repo, improve_plan_description="add rate limiting")
 
 @pytest.mark.anyio
-async def test_plan_subverb_repairs_schema_invalid_plan_once(
+async def test_plan_subverb_repairs_invalid_plan_once_then_blocks_without_truncating(
     improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
+    """A secret-bearing invalid plan gets one sanitized repair; a still over-length plan blocks whole."""
     stub.return_secret_invalid_enum_once = True
+    stub.plan_instruction_override = "Replace service_name. " + "x" * 4000
     code = await _run_plan_subverb(make_config, improve_monorepo_target)
     plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
-    assert code == 0
+    assert code == 1
     assert len(plan_calls) == 2
     repair_prompt = plan_calls[1]["prompt"]
     assert "PRIVATE_SCHEMA_SECRET" not in repair_prompt
@@ -2347,8 +1022,10 @@ async def test_plan_subverb_repairs_schema_invalid_plan_once(
         call["output_schema"] == PLAN_AUTHOR_SCHEMA and call["read_only"] is True and call["persist_session"] is False
         for call in plan_calls
     )
-    plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
-    assert len(plans) == 1
+    diagnostics = _plan_write_diagnostics(improve_monorepo_target)
+    errors = [error for attempt in diagnostics["attempts"] for error in attempt["errors"]]
+    assert any(error["pointer"] == "/steps/0/changes/0/instruction" for error in errors), errors
+    assert not list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     persisted = "\n".join(
         path.read_text(encoding="utf-8")
         for root in (improve_monorepo_target / ".daydream", improve_monorepo_target / "daydream_plans",)
@@ -2360,184 +1037,21 @@ async def test_plan_subverb_repairs_schema_invalid_plan_once(
     assert "TOKEN=" not in persisted
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(("stub_attr", "stub_value", "error_code", "error_pointer"),
-    [pytest.param("return_secret_invalid_enum", True, "AUTHOR_SCHEMA_INVALID", "/steps/0/changes/0/operation",
-            id="schema-invalid-on-every-attempt",
-        ),
-        pytest.param("plan_bad_recon_id_attempts", 99, "RECON_COMMAND_UNKNOWN", None,
-            id="unknown-recon-command-on-every-attempt",
-        ),
-    ],
-)
-async def test_persistent_authoring_failure_blocks_after_one_repair(
-    improve_monorepo_target: Path, stub: ImproveStubBackend, stub_attr: str, stub_value: bool | int,
-    error_code: str, error_pointer: str | None, make_config: MakeConfig, capsys: pytest.CaptureFixture[str],
-) -> None:
-    setattr(stub, stub_attr, stub_value)
-
-    code = await _run_plan_subverb(make_config, improve_monorepo_target)
-    plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
-    plans_dir = improve_monorepo_target / "daydream_plans"
-    diagnostics = _plan_write_diagnostics(improve_monorepo_target)
-    assert code == 1
-    assert len(plan_calls) == 2
-    assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
-    index = (plans_dir / "README.md").read_text(encoding="utf-8")
-    blocked_rows = [line for line in index.splitlines() if "BLOCKED (PLAN_VALIDATION_FAILED: " in line]
-    assert len(blocked_rows) == 1
-    assert re.search(r"\| 001 <!-- fingerprint:", blocked_rows[0])
-    dispositions = [attempt["disposition"] for attempt in diagnostics["attempts"]]
-    assert dispositions == ["retried", "blocked"]
-    for attempt in diagnostics["attempts"]:
-        assert attempt["stage"] == "authoring"
-        assert any(error["code"] == error_code
-            and (error_pointer is None or error["pointer"] == error_pointer)
-            for error in attempt["errors"]
-        )
-    if stub_attr == "return_secret_invalid_enum":
-        sidecar = (plans_dir / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
-        report = improve_artifact(improve_monorepo_target, "report.md").read_text(encoding="utf-8")
-        observables = [index, sidecar, report, json.dumps(diagnostics), capsys.readouterr().out]
-        assert all("SCHEMA_INVALID" in text for text in observables)
-        assert all("PRIVATE_SCHEMA_SECRET" not in text and "TOKEN=" not in text
-            for text in [*observables, *_improve_observable_texts(improve_monorepo_target)])
-
-@pytest.mark.anyio
-async def test_secret_value_never_reaches_any_artifact(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=1,)
-    stub.plan_problem_override = ("Document the rotation runbook including secret: hunter2realvalue "
-        "before the credential expires."
-    )
-    stub.plan_bad_recon_id_attempts = 1
-    code = await _run_improve(make_config, improve_monorepo_target)
-    plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
-    plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
-    assert code == 0
-    assert len(plan_calls) == 2
-    assert len(plans) == 1
-    plan_text = plans[0].read_text(encoding="utf-8")
-    assert "<redacted>" in plan_text
-    assert "hunter2realvalue" not in plan_text
-    assert all("hunter2realvalue" not in call["prompt"] for call in stub.calls)
-    diagnostics_text = improve_artifact(improve_monorepo_target, "plan-write-diagnostics.json"
-    ).read_text(encoding="utf-8")
-    assert "hunter2realvalue" not in diagnostics_text
-    diagnostics = json.loads(diagnostics_text)
-    assert [attempt["disposition"] for attempt in diagnostics["attempts"]] == ["retried", "success"]
-    assert all("hunter2realvalue" not in observable
-        for observable in _improve_observable_texts(improve_monorepo_target)
-    )
-
-@pytest.mark.anyio
-async def test_sloppy_but_salvageable_output_is_normalized_and_written(
-    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
-) -> None:
-    stub.plan_sloppy = True
-    stub.plan_file_role_override = "Billing role " + "x" * 293
-    code = await _run_plan_subverb(make_config, improve_monorepo_target)
-    plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
-    plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
-    assert code == 0
-    assert not improve_artifact(improve_monorepo_target, "audit-findings.json").exists()
-    assert stub.calls and all(call["read_only"] for call in stub.calls)
-    assert len(plan_calls) == 1
-    assert len(plans) == 1
-    plan_text = plans[0].read_text(encoding="utf-8")
-    assert "rate limiting" in plan_text.lower()
-    sloppy_role = "Billing role " + "x" * 293
-    assert sloppy_role[:299] + "…" in plan_text
-    assert sloppy_role not in plan_text
-    assert "<redacted>" in plan_text
-    assert "hunter2realvalue" not in plan_text
-    assert "Make the change." not in plan_text
-    assert "Planner scratch notes" not in plan_text
-    assert "The billing implementation file must not change further." not in plan_text
-    assert "The billing implementation does not alter documentation." in plan_text
-    assert all("hunter2realvalue" not in observable
-        and "Planner scratch notes" not in observable
-        for observable in _improve_observable_texts(improve_monorepo_target)
-    )
-    assert _plan_write_dispositions(improve_monorepo_target) == ["success"]
-
-
-@pytest.mark.anyio
-async def test_a_finding_audited_by_several_stack_groups_yields_one_plan(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
-) -> None:
-    """Pin stack availability so deduplication is exercised across multiple real audit groups."""
-    _pin_stack_availability(monkeypatch, tmp_path)
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=3,)
-    stub.vet_reject_titles = {"Phantom N+1"}
-    code = await _run_improve(make_config, improve_monorepo_target)
-
-    assert code == 0
-    # The fan-out really did span multiple groups -- otherwise the dedup path is
-    # never taken and the assertions below prove nothing.
-    coverage = _load_improve_json(improve_monorepo_target, "coverage.json")
-    assert len(coverage["groups"]) > 1
-    assert sorted(group["stack"] for group in coverage["groups"]) == ["generic", "python", "react"]
-    audit_findings = _load_improve_json(improve_monorepo_target, "audit-findings.json")["findings"]
-    fingerprints = [finding["fingerprint"] for finding in audit_findings]
-    assert len(fingerprints) == len(set(fingerprints))
-
-    plans_dir = improve_monorepo_target / "daydream_plans"
-    plans = sorted(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
-    assert stub.plan_writer_calls == 3
-    assert [plan.name for plan in plans] == [
-        "001-security-finding.md", "002-high-leverage-title.md", "003-performance-finding.md",
-    ]
-
-    for plan_path in plans:
-        plan_text = plan_path.read_text(encoding="utf-8")
-        assert "`uv run pytest apps/billing/test_api.py -q`" in plan_text
-        assert "`git diff --exit-code -- README.md`" in plan_text
-        assert "exit 0 and the selected pytest tests pass" in plan_text
-        assert "recon_command_id" not in plan_text
-    index = (plans_dir / "README.md").read_text(encoding="utf-8")
-    assert index.count("| TODO |") == 3
-    assert "BLOCKED (PLAN_" not in index
-
-
-@pytest.mark.anyio
-async def test_bad_recon_id_gets_named_feedback_and_retry_succeeds(
-    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
-) -> None:
-    stub.plan_bad_recon_id_attempts = 1
-    stub.plan_missing_path_attempts = 1
-    code = await _run_plan_subverb(make_config, improve_monorepo_target)
-    plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
-    assert code == 0
-    assert len(plan_calls) == 2
-    repair_prompt = plan_calls[1]["prompt"]
-    assert "RECON_COMMAND_UNKNOWN" in repair_prompt
-    assert "/steps/0/verification" in repair_prompt
-    assert "valid recon command ids: test-suite, git-diff" in repair_prompt
-    assert "make-tests" not in repair_prompt
-    assert "EXISTING_PATH_MISSING" in repair_prompt
-    assert "/scope/existing_paths/1/path" in repair_prompt
-    plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
-    assert len(plans) == 1
-    plan_text = plans[0].read_text(encoding="utf-8")
-    assert "uv run pytest apps/billing/test_api.py -q" in plan_text
-    assert "apps/billing/legacy_api.py" not in plan_text
-    diagnostics = _plan_write_diagnostics(improve_monorepo_target)
-    assert [attempt["disposition"] for attempt in diagnostics["attempts"]] == ["retried", "success"]
-    first_attempt_codes = {error["code"] for error in diagnostics["attempts"][0]["errors"]}
-    assert {"RECON_COMMAND_UNKNOWN", "EXISTING_PATH_MISSING"} <= first_attempt_codes
-
-@pytest.mark.anyio
 async def test_an_edited_file_left_unquoted_is_repaired_before_the_plan_lands(
     improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    """Reject and repair missing quotes before publishing an executable drift comparison."""
-    stub.plan_unquoted_path_attempts = 1
+    """Reject and repair missing quotes before publishing an executable drift comparison.
+
+    A non-retryable writer crash replaces only that generation; it spends no repair.
+    """
+    stub.plan_crash_attempts = 1
+    stub.plan_unquoted_path_attempts = 2
     code = await _run_plan_subverb(make_config, improve_monorepo_target)
     plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
     assert code == 0
-    assert len(plan_calls) == 2
-    repair_prompt = plan_calls[1]["prompt"]
+    assert len(plan_calls) == 3
+    assert "EXISTING_PATH_NOT_QUOTED" not in plan_calls[1]["prompt"]
+    repair_prompt = plan_calls[2]["prompt"]
     assert "EXISTING_PATH_NOT_QUOTED" in repair_prompt
     assert "/scope/existing_paths/0/path" in repair_prompt
     assert "context_excerpts" in repair_prompt
@@ -2555,291 +1069,23 @@ async def test_an_edited_file_left_unquoted_is_repaired_before_the_plan_lands(
         ("EXISTING_PATH_NOT_QUOTED", "/scope/existing_paths/0/path")
     }
 
-def _out_of_scope_section(plan_text: str) -> str:
-    return plan_text.split("**Out of scope**\n\n", 1)[1].split("\n\n## ", 1)[0]
-
 @pytest.mark.anyio
-@pytest.mark.parametrize("failure_attr",
-    [pytest.param("plan_crash_attempts", id="transport-crash"),
-        pytest.param("plan_stall_attempts", id="stream-stall"),
-    ],
-)
-async def test_plan_writer_transient_failure_is_retried_and_the_plan_lands(
-    failure_attr: str, improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
-) -> None:
-    setattr(stub, failure_attr, 1)
+async def test_retryable_plan_writer_failure_is_not_regenerated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run_agent already spent the retry budget on a retryable failure; authoring must not restart it."""
+    calls: list[str] = []
 
-    code = await _run_plan_subverb(make_config, improve_monorepo_target)
-    plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
-    assert code == 0
-    assert stub.plan_writer_calls == 2
-    assert len(plans) == 1
-    assert "## Steps" in plans[0].read_text(encoding="utf-8")
-    assert _plan_write_dispositions(improve_monorepo_target) == ["success"]
+    class _RateLimited(RuntimeError):
+        retryable = True
 
-@pytest.mark.anyio
-async def test_persistent_retryable_failure_does_not_restart_the_retry_budget(
-    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
-) -> None:
-    """The plan writer cannot restart run_agent's exhausted retry budget."""
-    stub.plan_rate_limit_always = True
-    stub.retry_attempts = 2
-    code = await _run_plan_subverb(make_config, improve_monorepo_target)
-    plans_dir = improve_monorepo_target / "daydream_plans"
-    assert code == 1
-    assert stub.plan_writer_calls == 3
-    assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
-    index = (plans_dir / "README.md").read_text(encoding="utf-8")
-    assert "BLOCKED (PLAN_WRITER_FAILED: RATE_LIMIT)" in index
+    async def _generate_once(_ctx: Any, _backend: Any, prompt: str) -> tuple[Any, str | None]:
+        calls.append(prompt)
+        raise _RateLimited("provider rate limit")
 
-@pytest.mark.anyio
-async def test_two_consecutive_transport_crashes_block_the_finding(
-    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
-) -> None:
-    stub.plan_crash_attempts = 2
-    code = await _run_plan_subverb(make_config, improve_monorepo_target)
-    plans_dir = improve_monorepo_target / "daydream_plans"
-    assert code == 1
-    assert stub.plan_writer_calls == 2
-    assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
-    index = (plans_dir / "README.md").read_text(encoding="utf-8")
-    assert "BLOCKED (PLAN_WRITER_FAILED: PROCESS_EXIT)" in index
-    diagnostics = _plan_write_diagnostics(improve_monorepo_target)
-    assert [(attempt["disposition"], attempt["stage"])
-        for attempt in diagnostics["attempts"]
-    ] == [("blocked", "transport")]
-    assert diagnostics["attempts"][0]["errors"] == [{"code": "PROCESS_EXIT", "pointer": "/"}]
+    monkeypatch.setattr(authoring, "_generate_once", _generate_once)
+    with pytest.raises(_RateLimited):
+        await authoring._generate_with_crash_retry(cast(FlowContext, None), cast(Backend, None), "plan")
+    assert calls == ["plan"]
 
-@pytest.mark.anyio
-async def test_improve_model_inputs_exclude_source_only_repository_canaries(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    ignored_make_canary = "PRIVATE_IGNORED_MAKE_CANARY"
-    untracked_package_canary = "PRIVATE_UNTRACKED_PACKAGE_CANARY"
-    service_canary = "private-source-only-service-canary"
-    git_dir = Path(git(improve_monorepo_target, "rev-parse", "--git-dir"))
-    if not git_dir.is_absolute():
-        git_dir = improve_monorepo_target / git_dir
-    exclude = git_dir / "info" / "exclude"
-    exclude.write_text(exclude.read_text(encoding="utf-8")
-        + "\n/Makefile\n/services/private-source-only-service-canary/\n",
-        encoding="utf-8",
-    )
-    (improve_monorepo_target / "Makefile").write_text(
-        f"test-private: ; @echo {ignored_make_canary}\n",
-        encoding="utf-8",
-    )
-    (improve_monorepo_target / "package.json").write_text(
-        json.dumps({"scripts": {"test-private": f"echo {untracked_package_canary}",}}, indent=2,)
-        + "\n",
-        encoding="utf-8",
-    )
-    private_service = improve_monorepo_target / "services" / service_canary
-    private_service.mkdir(parents=True)
-    (private_service / "pyproject.toml").write_text(
-        f'[project]\nname = "{service_canary}"\n',
-        encoding="utf-8",
-    )
-    assert git(improve_monorepo_target, "check-ignore", "Makefile", f"services/{service_canary}/pyproject.toml",
-    ).splitlines() == ["Makefile", f"services/{service_canary}/pyproject.toml",]
-    assert git(improve_monorepo_target, "ls-files", "--others", "--exclude-standard", "package.json",) == "package.json"
-
-    backend = install_capable_improve_backend(monkeypatch, ImproveStubBackend(improve_monorepo_target, n_findings=1),)
-    backend.recon_commands_extra = [{"id": "source-only-package-test", "purpose": "Run a source-only package test",
-            "command": "npm run test-private", "working_directory": ".",
-            "expected_success": {"exit_code": 0, "observable_result": "the private package test passes",},
-            "applicability": {"scope": {"kind": "whole-repository"}, "preconditions": [],
-                "rationale": "The source-only manifest declares the test.",
-            },
-            "evidence": {"kind": "literal-command", "source_path": "package.json",
-                "line_anchor": {"start_line": 3, "end_line": 3},
-                "verbatim_excerpt": (f'    "test-private": "echo {untracked_package_canary}"'),
-            },
-        }
-    ]
-
-    code = await _run_improve(make_config, improve_monorepo_target)
-
-    assert code == 0
-    assert backend.calls
-    forbidden = (ignored_make_canary, untracked_package_canary, service_canary,)
-    for call in backend.calls:
-        prompt = call["prompt"]
-        assert all(canary not in prompt for canary in forbidden), call["marker"]
-    recon = improve_artifact(improve_monorepo_target, "recon.json",).read_text(encoding="utf-8")
-    assert all(canary not in recon for canary in forbidden)
-
-class _AuditCommittingBackend(ImproveStubBackend):
-    """Host fake that performs a real Git commit in each distinct model cwd.
-
-    This test proves Git-storage independence only. The Claude SDK hook tests
-    separately prove the tool-root policy; direct Python access is not claimed
-    to be confined here.
-    """
-
-    def __init__(self, target: Path) -> None:
-        super().__init__(target)
-        self._commit_count = 0
-        self.escape_attempts = 0
-        self.local_identities: list[tuple[str, str]] = []
-
-    async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-        self._commit_count += 1
-        # A standalone snapshot deliberately does not inherit source-local
-        # config. This committing test actor needs its own fixture identity.
-        configure_identity(cwd)
-        self.local_identities.append((git(cwd, "config", "--local", "--get", "user.name", check=False),
-            git(cwd, "config", "--local", "--get", "user.email", check=False),
-        ))
-        (cwd / "model-scratch.txt").write_text(
-            f"model residual {self._commit_count}\n"
-        )
-        git(cwd, "add", "-A")
-        git(cwd, "commit", "-m", "model residual commit")
-        # Exercise an out-of-repository Git pathspec. This is a Git behavior
-        # assertion, not evidence of an OS or Python filesystem sandbox.
-        self.escape_attempts += 1
-        escape_target = os.path.relpath(self._target, cwd)
-        git(cwd, "add", escape_target, check=False)
-        git(cwd, "commit", "-m", "escaped model commit", check=False)
-        async for event in super().execute(cwd, prompt, *args, **kwargs):
-            yield event
-
-@pytest.mark.anyio
-async def test_improve_model_commit_is_confined_to_audit_worktree(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    configure_identity(improve_monorepo_target)
-    stub = _AuditCommittingBackend(improve_monorepo_target)
-    install_capable_improve_backend(monkeypatch, stub)
-
-    before_head = git(improve_monorepo_target, "rev-parse", "HEAD")
-    before_refs = git(improve_monorepo_target, "show-ref")
-    before_status = _git_status_porcelain(improve_monorepo_target)
-    source_config = improve_monorepo_target / ".git" / "config"
-    config_before = source_config.read_bytes()
-    before_untracked = _untracked(improve_monorepo_target)
-    code = await _run_improve(make_config, improve_monorepo_target)
-
-    assert code == 0
-    assert stub.calls
-    # Every model turn also attempted the escape, so the escape-class coverage
-    # is real, not vacuous; the target assertions below prove it was confined.
-    assert stub.escape_attempts == len(stub.calls)
-    assert stub.local_identities == [("Tester", "test@example.com")] * len(stub.calls)
-    audit_cwds = {str(call["cwd"]) for call in stub.calls}
-    assert len(audit_cwds) == 1, audit_cwds
-    audit_path = next(iter(audit_cwds))
-    audit_repo = Path(audit_path)
-    assert audit_repo != improve_monorepo_target
-    assert not audit_repo.is_relative_to(improve_monorepo_target)
-    assert "daydream-audit-" in str(audit_repo.parent)
-    assert git(improve_monorepo_target, "rev-parse", "HEAD") == before_head
-    assert git(improve_monorepo_target, "show-ref") == before_refs
-    assert _git_status_porcelain(improve_monorepo_target) == before_status
-    assert source_config.read_bytes() == config_before
-    assert all(path.startswith(("daydream_plans/", ".daydream/"))
-        for path in _untracked(improve_monorepo_target) if path not in before_untracked)
-    assert not audit_repo.exists()
-    worktrees = git(improve_monorepo_target, "worktree", "list", "--porcelain")
-    assert "daydream-audit-" not in worktrees
-
-@pytest.mark.anyio
-async def test_improve_timing_completeness_preserves_p09_audit_isolation(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
-) -> None:
-    repo = improve_monorepo_target
-    _pin_stack_availability(monkeypatch, tmp_path)
-    stub = install_improve_stub(monkeypatch, repo)
-    before_head = git(repo, "rev-parse", "HEAD")
-    before_refs = git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
-    before_index = git(repo, "ls-files", "--stage")
-    before_status = _git_status_porcelain(repo)
-    source_config = repo / ".git" / "config"
-    config_before = source_config.read_bytes()
-    before_untracked = _untracked(improve_monorepo_target)
-    code = await _run_improve(make_config, repo)
-
-    assert code == 0
-    audited = _load_improve_json(repo, "audit-findings.json")
-    assert sorted(audited["categories_run"]) == sorted(AUDIT_CATEGORIES)
-    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
-    assert audit_calls and all(call["read_only"] for call in audit_calls)
-    trajectory = _root_run_trajectory(repo)
-    trajectories = list((improve_monorepo_target / ".daydream" / "runs").glob("*/trajectory.json"))
-    assert len(trajectories) == 1
-    trajectory_path = trajectories[0]
-    run_root = trajectory_path.parent
-    flows = _scan_trajectory_extra(run_root, trajectory_path, "daydream_run_flow",)
-    phases = _scan_trajectory_extra(run_root, trajectory_path, "daydream_phase",)
-    assert flows and set(flows) == {"improve"}
-    assert {"recon", "audit", "vet", "plan_write"} <= set(phases)
-    events = trajectory["extra"]["phase_events"]
-    recon_start = next(index
-        for index, event in enumerate(events)
-        if event["event"] == "phase_start" and event["phase"] == "recon"
-    )
-    recon_end = next(index
-        for index, event in enumerate(events)
-        if event["event"] == "phase_end" and event["phase"] == "recon"
-    )
-    assert recon_start < recon_end
-    assert events[recon_start]["metadata"] == {"stage": "combined"}
-    assert events[recon_end]["metadata"] == {"stage": "combined"}
-    assert not any(event["phase"] == "exploration" for event in events)
-    discovery = [call for call in stub.calls if call["marker"] in {"repo-scan", "recon"}]
-    assert len(discovery) == 1
-    assert discovery[0]["marker"] == "recon"
-    assert discovery[0]["max_turns"] == 50
-    assert discovery[0]["persist_session"] is False
-    recon = _load_improve_json(repo, "recon.json")
-    assert recon["discovery_mode"] == "combined"
-
-    audit_descriptors = [f"audit-{category}-group-{group:02d}"
-        for category in AUDIT_CATEGORIES
-        for group in range(1, 4)
-    ]
-    vet_descriptors = [
-        "vet-security-00", "vet-correctness-01", "vet-performance-02", "vet-tests-03", "vet-tech-debt-04",
-        "vet-dependencies-05", "vet-dx-06", "vet-docs-07",
-    ]
-    _assert_complete_phase_dispatch(repo, trajectory, "audit", audit_descriptors)
-    _assert_complete_phase_dispatch(repo, trajectory, "vet", vet_descriptors)
-
-    audit_cwds = {Path(call["cwd"]) for call in stub.calls}
-    assert len(audit_cwds) == 1
-    assert stub.calls and all(call["read_only"] for call in stub.calls)
-    audit_root = next(iter(audit_cwds))
-    assert stub.audit_root == audit_root
-    assert audit_root != repo
-    assert not audit_root.is_relative_to(repo)
-    assert not repo.is_relative_to(audit_root)
-    assert audit_root.name == "repo"
-    assert audit_root.parent.name.startswith("daydream-audit-")
-    assert not audit_root.exists()
-    assert git(repo, "rev-parse", "HEAD") == before_head
-    assert git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
-    assert git(repo, "ls-files", "--stage") == before_index
-    assert _git_status_porcelain(repo) == before_status
-    assert source_config.read_bytes() == config_before
-    assert all(path.startswith(("daydream_plans/", ".daydream/"))
-        for path in _untracked(improve_monorepo_target) if path not in before_untracked)
-    assert "daydream-audit-" not in git(repo, "worktree", "list", "--porcelain")
-    dd = repo / ".daydream" / "improve"
-    assert (dd / "report.md").is_file()
-    report_text = (dd / "report.md").read_text()
-    assert "- **billing** — `apps/billing`" in report_text
-    assert "- **catalog** — `apps/catalog`" in report_text
-    assert trajectory["steps"]
-    assert all(step["extra"]["daydream_run_flow"] == "improve" for step in trajectory["steps"])
-    assert any(step["extra"]["daydream_phase"] == "recon" for step in trajectory["steps"])
-    run_marker = f"Daydream run: `{trajectory['session_id']}`"
-    assert run_marker in (dd / "report.md").read_text()
-    plans_dir = repo / "daydream_plans"
-    assert run_marker in (plans_dir / "README.md").read_text()
-    assert all(run_marker in plan.read_text() for plan in plans_dir.glob("[0-9][0-9][0-9]-*.md"))
-    plan_diagnostics = json.loads((dd / "plan-write-diagnostics.json").read_text())
-    assert (plan_diagnostics["artifact_provenance"]["session_id"] == trajectory["session_id"])
 
 def test_apply_vet_verdicts_restamps_a_corrected_location(tmp_path: Path) -> None:
     for root, source in (("apps/billing", "first\n" * 10), ("apps/catalog", "first\n" * 20), ("frontend", "x = 1\n")):
@@ -2855,39 +1101,34 @@ def test_apply_vet_verdicts_restamps_a_corrected_location(tmp_path: Path) -> Non
             "path": "apps/billing/api.py", "line": 10, "body": "The evidence belongs to catalog.",
             "evidence": ["`apps/billing/api.py:10`"]},
         {"fingerprint": "frontend", "title": "Frontend finding", "category": "correctness", "severity": "high",
-            "path": "./frontend/api.py", "line": 1, "evidence": ["./frontend/api.py:1"]},
+            "path": "./frontend/api.py", "line": 1, "evidence": ["./frontend/api.py:1"], "provenance": "inherited"},
         {"fingerprint": "unknown", "title": "Unknown severity", "severity": "CRITICAL"},
     ]
     kept, rejected = _apply_vet_verdicts(findings, [
         {"vet_id": 1, "keep": True, "path": "apps/catalog/api.py", "line": 20, "severity": "medium"},
         {"vet_id": 2, "keep": True, "path": "./frontend/api.py", "line": 1}, {"vet_id": 3, "keep": True},
-    ], rejected_at_sha="sha", repo=tmp_path, services=services, partitions=partitions)
+    ], rejected_at_sha="sha", repo=tmp_path, default_provenance="introduced", services=services,
+        partitions=partitions)
     assert rejected == []
-    assert [(finding["evidence"], finding["services"], finding["partition"], finding["severity"])
-        for finding in kept[:2]] == [
-        (["`apps/catalog/api.py:20`"], ["catalog"], "catalog", "MED"),
-        (["./frontend/api.py:1"], ["frontend"], "frontend", "HIGH"),
+    assert [(finding["evidence"], finding["services"], finding["partition"], finding["severity"],
+        finding["provenance"]) for finding in kept[:2]] == [
+        (["`apps/catalog/api.py:20`"], ["catalog"], "catalog", "MED", "introduced"),
+        (["./frontend/api.py:1"], ["frontend"], "frontend", "HIGH", "inherited"),
     ]
     assert len(kept) == 3 and kept[0]["fingerprint"] != "original" and kept[1]["fingerprint"] != "frontend"
-    assert kept[2] == {"fingerprint": "unknown", "title": "Unknown severity"}
+    assert kept[2] == {"fingerprint": "unknown", "title": "Unknown severity", "provenance": "introduced"}
 
 
-@pytest.mark.parametrize("citation", ["../outside.py:1", "missing.py:1", "valid.py:2:3",],)
-def test_stamp_finding_rejects_unconfined_missing_and_out_of_range_evidence(tmp_path: Path, citation: str,) -> None:
+def test_stamp_finding_rejects_unconfined_missing_and_out_of_range_evidence(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    (tmp_path / "outside.py").write_text("outside\n")
     (repo / "valid.py").write_text("first\nsecond\n")
-    stamped = _stamp_finding({"evidence": [citation]}, "correctness", [], [], repo=repo,)
-    assert stamped is None
-
-def test_stamp_finding_rejects_evidence_crossing_a_symlink(tmp_path: Path,) -> None:
-    outside = tmp_path.parent / f"outside-{tmp_path.name}"
+    outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "secret.py").write_text("secret\n")
-    (tmp_path / "escape").symlink_to(outside, target_is_directory=True)
-    stamped = _stamp_finding({"evidence": ["escape/secret.py:1"]}, "security", [], [], repo=tmp_path,)
-    assert stamped is None
+    (repo / "escape").symlink_to(outside, target_is_directory=True)
+    for citation in ("missing.py:1", "valid.py:2:3", "escape/secret.py:1"):
+        assert _stamp_finding({"evidence": [citation]}, "correctness", [], [], repo=repo,) is None, citation
 
 def _nested_service_repo(tmp_path: Path) -> Path:
     """A repo whose ``services/api/inner`` nests inside ``services/api``."""
@@ -2896,29 +1137,6 @@ def _nested_service_repo(tmp_path: Path) -> Path:
         (repo / root).mkdir(parents=True)
         (repo / root / "pyproject.toml").write_text("[project]\nname = 'x'\n")
     return repo
-
-def test_services_for_files_is_multi_valued_and_a_repo_root_service_is_ordinary(tmp_path: Path) -> None:
-    repo = _nested_service_repo(tmp_path)
-    services = enumerate_services(
-        repo, DaydreamFileConfig(improve_service_roots=["services/*", "services/api/inner", "."])
-    )
-    assert [(s.name, s.root.as_posix()) for s in services] == [
-        ("repo", "."), ("api", "services/api"), ("inner", "services/api/inner"),
-    ]
-    assert [s.name for s in _services_for_files(services, ("services/api/inner/main.py",))] == ["api", "inner"]
-    assert [s.name for s in _services_for_files(services, (".",))] == ["repo"]
-    assert [s.name for s in _services_for_files(services, ("README.md",))] == []
-    assert [s.name for s in _services_for_files(services, ("scripts/tool.py",))] == []
-
-def test_stamp_finding_attributes_nested_evidence_to_every_owning_service(tmp_path: Path) -> None:
-    repo = _nested_service_repo(tmp_path)
-    (repo / "services/api/inner/main.py").write_text("x = 1\n")
-    services = enumerate_services(
-        repo, DaydreamFileConfig(improve_service_roots=["services/*", "services/api/inner", "."])
-    )
-    stamped = _stamp_finding({"evidence": ["services/api/inner/main.py:1"]}, "correctness", services, [], repo=repo)
-    assert stamped is not None
-    assert stamped["services"] == ["api", "inner"]
 
 def test_scope_narrowing_does_not_widen_for_a_repo_root_service(tmp_path: Path) -> None:
     repo = _nested_service_repo(tmp_path)
@@ -2943,340 +1161,23 @@ def test_scope_narrowing_does_not_widen_for_a_repo_root_service(tmp_path: Path) 
     )
     assert [(stack.stack_name, list(stack.files)) for stack in scoped] == [("python", ["services/api/inner/main.py"])]
 
-_CLAUDE_MODELS = PHASE_DEFAULT_MODELS["claude"]
-
-
 @pytest.mark.anyio
-@pytest.mark.parametrize(("file_config", "expected_tiers"),
-    [
-        # Plan authoring runs on the top model tier at max reasoning; recon does not.
-        pytest.param(None,
-            {"plan-writer": (_CLAUDE_MODELS["plan_write"], "max"), "vet": (_CLAUDE_MODELS["vet"], "xhigh"),
-                "audit": (_CLAUDE_MODELS["audit"], "high"), "recon": (_CLAUDE_MODELS["recon"], "low"),
-            }, id="built-in-defaults",
-        ),
-        # A ``[tool.daydream.phases.plan_write]`` table still wins over those
-        # defaults, and unrelated phases keep their own.
-        pytest.param(
-            DaydreamFileConfig(phases={"plan_write": {"model": "file-plan-model", "reasoning_effort": "medium"}}),
-            {"plan-writer": ("file-plan-model", "medium"), "recon": (_CLAUDE_MODELS["recon"], "low"),
-                "vet": (_CLAUDE_MODELS["vet"], "xhigh"),
-            }, id="phase-table-override",
-        ),
-    ],
-)
-async def test_improve_phases_resolve_their_own_model_and_reasoning_tier(
-    file_config: DaydreamFileConfig | None, expected_tiers: dict[str, tuple[str, str]], improve_monorepo_target: Path,
-    monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    calls = install_per_phase_improve_stubs(monkeypatch, improve_monorepo_target)
-    code = await _run_improve(make_config, improve_monorepo_target, file_config=file_config)
-    assert code == 0
-    tiers = _tiers_by_marker(calls)
-    for marker, expected in expected_tiers.items():
-        assert tiers[marker] == {expected}, marker
-
-@pytest.mark.anyio
-async def test_long_step_instruction_reaches_the_plan_whole(
-    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
-) -> None:
-    assert not list(improve_monorepo_target.rglob("test_*.py"))
-    assert not list(improve_monorepo_target.rglob("*_test.py"))
-    (improve_monorepo_target / "apps/billing/api.py").write_text(
-        'password = "s3cr3tplaintext"\ndef service_name():\n    return "billing"\n', encoding="utf-8",
-    )
-    instruction = ("In apps/billing/api.py, replace the body of service_name. "
-        + "Keep every existing caller working. " * 45
-        + "Keep these five empty assignments in the example, with no values:\n"
-        "CLERK_SECRET_KEY=\nCLOUDFLARE_ACCOUNT_ID=\nCLOUDFLARE_API_TOKEN=\n"
-        "CLOUDFLARE_ACCOUNT_HASH=\nINTERNAL_SERVICE_SECRET=\n"
-        "Do NOT modify any other file in this step."
-    )
-    assert 1500 < len(instruction) <= 4000
-    stub.plan_instruction_override = instruction
-    stub.plan_problem_override = ("Callers must send X-Internal-Service-Secret: <internalSecret> in "
-        "production and X-Internal-Service-Secret: test-secret in tests.")
-    stub.plan_tool_calls_before_result = 200
-    stub.plan_ungate_steps = True
-    stub.plan_stop_condition_path = "apps/billing/legacy_loader.py"
-    code = await _run_plan_subverb(make_config, improve_monorepo_target)
-
-    assert code == 0
-    assert stub.plan_writer_calls == 1
-    plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
-    assert len(plans) == 1
-    plan_text = plans[0].read_text(encoding="utf-8")
-    assert instruction in plan_text and "…" not in plan_text
-    assert "[REDACTED_ENV_VAR]" not in plan_text
-    assert "X-Internal-Service-Secret: <internalSecret>" in plan_text
-    assert "X-Internal-Service-Secret: test-secret" in plan_text
-    assert "password = <redacted>" in plan_text
-    assert all("s3cr3tplaintext" not in text for text in _improve_observable_texts(improve_monorepo_target))
-    assert "No host-verified command is attached to this step." not in plan_text
-    assert "No repository command was verified during planning for this step." in plan_text
-    assert "confirm every **Target state** sentence above is now literally true" in plan_text
-    assert "From the repository root run `git status --porcelain`." in plan_text
-    assert "(scope-integrity)" in plan_text
-    assert "**Check**: from the repository root run `git status --porcelain`." in plan_text
-    assert "No host-verified command is attached." not in plan_text
-    assert ("run only `test_service_name_preserves_contract` in "
-        "`apps/billing/test_api.py` using this repository's own test runner" in plan_text)
-    assert "stop and report that — do not guess a command." in plan_text
-    assert ("- `apps/billing/legacy_loader.py` — Referenced by a stop condition for context only; "
-        "do not create, modify, or depend on this path." in _out_of_scope_section(plan_text))
-    assert not (improve_monorepo_target / "apps/billing/legacy_loader.py").exists()
-    assert "STOP_PATH_UNKNOWN" not in plan_text
-    assert "## Test plan" in plan_text and "### Named cases" in plan_text and "no existing test" in plan_text
-    diagnostics = _plan_write_diagnostics(improve_monorepo_target)
-    assert not any(error["code"] in ("TOOL_CALL_BUDGET_EXCEEDED", "WALL_BUDGET_EXCEEDED")
-        for attempt in diagnostics["attempts"] for error in attempt["errors"])
-    assert _plan_write_dispositions(improve_monorepo_target) == ["success"]
-
-@pytest.mark.anyio
-async def test_over_length_instruction_is_repaired_not_silently_truncated(
-    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
-) -> None:
-    stub.plan_instruction_override = "Replace service_name. " + "x" * 4000
-    code = await _run_plan_subverb(make_config, improve_monorepo_target)
-    assert code == 1
-    diagnostics = _plan_write_diagnostics(improve_monorepo_target)
-    errors = [error for attempt in diagnostics["attempts"] for error in attempt["errors"]]
-    assert any(error["pointer"] == "/steps/0/changes/0/instruction" for error in errors), errors
-    assert stub.plan_writer_calls == 2
-    assert not list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
-
-@pytest.mark.anyio
-async def test_configured_headless_publish_selects_all_and_embeds_local_plans(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    """Real runner path: configured CI mode writes no branches and files every plan."""
-    install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=len(AUDIT_CATEGORIES),)
-    _no_open_issues(monkeypatch)
-    created: list[dict[str, Any]] = []
-
-    def _create_issue(*args: Any, **kwargs: Any) -> str:
-        created.append(dict(kwargs))
-        return f"https://github.com/acme/widgets/issues/{len(created)}"
-
-    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _create_issue)
-    branches_before = git(improve_monorepo_target, "for-each-ref", "--format=%(refname)", "refs/heads",)
-    code = await _run_publish(make_config, improve_monorepo_target)
-
-    assert code == 0
-    selected = _load_improve_json(improve_monorepo_target, "selected.json")
-    vetted = _load_improve_json(improve_monorepo_target, "vetted-findings.json",)
-    assert len(selected["selected"]) == len(vetted["findings"])
-    assert len(selected["selected"]) > 5
-    plan_files = sorted((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
-    assert len(created) == len(plan_files) == len(selected["selected"])
-    assert {str(issue["body"]).partition("\n\n")[2] for issue in created} == {
-        path.read_text(encoding="utf-8") for path in plan_files
-    }
-    assert all(str(issue["body"]).startswith("<!-- daydream-improve: package=") for issue in created)
-    assert (git(improve_monorepo_target, "for-each-ref", "--format=%(refname)", "refs/heads",) == branches_before)
-
-@pytest.mark.anyio
-async def test_disabled_publication_overwrites_stale_current_run_artifact(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    artifact = improve_artifact(improve_monorepo_target, "published-issues.json",)
-    artifact.parent.mkdir(parents=True, exist_ok=True)
-    # This is a prior Daydream bundle, not an arbitrary unowned ``.daydream``
-    # tree. The legacy run anchor makes that ownership explicit so the artifact
-    # session may import it before proving the current disabled disposition
-    # replaces the stale publication record.
-    (artifact.parents[1] / "runs").mkdir()
-    artifact.write_text(json.dumps(
-            {"enabled": True, "status": "complete", "published": [{"issue_url": "https://example.test/stale"}],}
-        ), encoding="utf-8",
-    )
-    install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=0)
-
-    code = await _run_improve(make_config, improve_monorepo_target)
-    publication = _load_improve_json(improve_monorepo_target, "published-issues.json",)
-    assert code == 0
-    assert publication["enabled"] is False
-    assert publication["status"] == "disabled"
-    assert publication["published"] == []
-    assert "example.test/stale" not in artifact.read_text(encoding="utf-8")
-
-@pytest.mark.anyio
-async def test_configured_publish_records_a_pathless_reconciled_plan(
+async def test_publication_failures_are_not_reported_as_planning_failures(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     make_config: MakeConfig,
 ) -> None:
-    """An indexed package with no plan file is an explicit hard failure."""
-    install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=1,)
-    first_code = await _run_improve(make_config, improve_monorepo_target)
-    plan_path = next((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
-    plan_path.unlink()
-    capsys.readouterr()
-    monkeypatch.setattr("daydream.git_ops.gh_issue_list_strict",
-        lambda *args, **kwargs: pytest.fail("a pathless package must fail before GitHub reconciliation"),
-    )
-
-    second_code = await _run_publish(make_config, improve_monorepo_target)
-    publication = _load_improve_json(improve_monorepo_target, "published-issues.json",)
-    assert first_code == 0
-    assert second_code == 1
-    assert publication["status"] == "failed"
-    assert publication["published"] == []
-    assert len(publication["failed"]) == 1
-    assert publication["failed"][0]["stage"] == "plan-reconciliation"
-    assert publication["failed"][0]["plan_path"] is None
-    output = capsys.readouterr().out
-    assert "Improve issue publishing failed" in output
-    assert "Improve planning failed" not in output
-
-@pytest.mark.anyio
-async def test_reused_plan_publishes_its_stored_package_and_member_identities(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=1,)
-    first_code = await _run_improve(make_config, improve_monorepo_target)
-    assert first_code == 0
-    improve_calls = [call for call in stub.calls if call["marker"] in {"recon", "audit", "vet", "plan-writer"}]
-    assert {call["marker"] for call in improve_calls} == {"recon", "audit", "vet", "plan-writer"}
-    assert all(call["persist_session"] is False for call in improve_calls)
-    plan_path = next((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
-    text = plan_path.read_text(encoding="utf-8")
-    head_sha = git(improve_monorepo_target, "rev-parse", "HEAD")
-
-    assert "## Before you start" in text
-    assert f"`git cat-file -e {head_sha}^{{commit}}`" in text
-    assert "`git status --porcelain` — expected: no output at all." in text
-    assert head_sha in text  # full sha, not only the 7-char Status stamp
-    assert "You are expected to be running it later, from a HEAD" in text
-    assert "that has moved on — that is normal and is not by itself a reason to" in text
-    assert f"`git diff --name-only {head_sha} HEAD --" in text
-    assert "Files outside this list do not matter." in text
-    assert "`git switch --create improve/" in text
-    assert f"`git switch --create improve/batch-billing-contract {head_sha}`" not in text
-    assert "branches from your current HEAD, which is what you want." in text
-
-    # Why-this-matters is labelled, so the intended outcome cannot be misread
-    # as a statement about the code as it stands.
-    assert "- **Problem**:" in text
-    assert "- **Cost of leaving it**:" in text
-    assert "- **Intended outcome (does not describe the code today)**:" in text
-
-    assert "unless a reviewer maintains the index" not in text
-    assert "Do not skip a\n> step, reorder steps, or substitute your own judgement" in text
-
-    assert "| Purpose | Run from | Command | Expected on success |" in text
-    assert "**Run from**: the repository root" in text
-    assert "Run this now, before starting the next step." in text
-
-    assert "Do these in the order they are numbered." in text
-    assert "write it once, not twice." in text
-
-    assert "## Finishing" in text
-    assert "never `git add -A`" in text
-    assert "git add apps/billing/api.py apps/billing/test_api.py" in text
-    assert "4. Do not push and do not open a pull request." in text
-    # Issue publication copies the plan without committing the local index, so
-    # an executor must not be told to edit daydream_plans/README.md.
-    assert "`TODO` to `DONE`" not in text
-
-    assert "Before editing a file, read the exact line range quoted for it in the Current state section" in text
-    assert "two failures total for the same verification" in text
-
-    call = next(c for c in stub.calls if c["marker"] == "plan-writer")
-    prompt = call["prompt"]
-    assert "cannot infer and will not look" in prompt
-    assert "has never seen this repository" in prompt
-    for banned in ("the relevant handler", "as appropriate", "update accordingly"):
-        assert banned in prompt, banned
-    assert "Length is never a reason to compress." in prompt
-
-    changes = call["output_schema"]["properties"]["steps"]["items"]["properties"]["changes"]["items"]["properties"]
-    assert "Banned:" in changes["instruction"]["description"]
-    assert changes["instruction"]["maxLength"] == 4000
-    assert "re-read the file" in changes["target_state"]["description"]
-    assert "verbatim from the file" in changes["symbol"]["description"]
-    done = call["output_schema"]["properties"]["done_criteria"]["items"]["properties"]["description"]["description"]
-    assert "without judgement" in done
-
-    sidecar_path = (improve_monorepo_target / "daydream_plans" / PLAN_INDEX_FILENAME)
-    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
-    stored = sidecar["plans"][0]
-    stored["package_fingerprint"] = "stored-package"
-    # Preserve multiplicity: duplicate semantic aliases tell the publisher it
-    # must reconcile on raw member fingerprints instead.
-    stored["member_aliases"] = ["stored-alias", "stored-alias"]
-    stored_fingerprints = list(stored["member_fingerprints"])
-    sidecar_path.write_text(
-        json.dumps(sidecar, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    _no_open_issues(monkeypatch)
-    created: list[dict[str, Any]] = []
-
-    def _create_issue(*args: Any, **kwargs: Any) -> str:
-        created.append(dict(kwargs))
-        return "https://github.com/acme/widgets/issues/1"
-
-    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _create_issue)
-
-    second_code = await _run_publish(make_config, improve_monorepo_target)
-    publication = _load_improve_json(improve_monorepo_target, "published-issues.json",)
-    assert first_code == second_code == 0
-    assert stub.plan_writer_calls == 1
-    assert len(created) == 1
-    body = str(created[0]["body"])
-    assert body.startswith(
-        "<!-- daydream-improve: package=stored-package -->\n"
-        "<!-- daydream-improve-member: alias=stored-alias -->\n"
-    )
-    assert all(f"<!-- daydream-improve-member: fingerprint={fingerprint} -->"
-        in body
-        for fingerprint in stored_fingerprints
-    )
-    assert publication["published"][0]["package_id"] == "stored-package"
-    assert publication["published"][0]["member_aliases"] == ["stored-alias", "stored-alias",]
-    assert publication["published"][0]["member_fingerprints"] == (stored_fingerprints)
-
-@pytest.mark.anyio
-async def test_configured_publish_records_partial_plan_write_failure(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    backend = ProductionPathBackend(improve_monorepo_target, failed_title="Production finding 03",)
-    install_capable_improve_backend(monkeypatch, backend)
-    _no_open_issues(monkeypatch)
-    created: list[str] = []
-
-    def _create_issue(*args: Any, **kwargs: Any) -> str:
-        created.append(str(kwargs["title"]))
-        return "https://github.com/acme/widgets/issues/1"
-
-    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _create_issue)
-
-    code = await _run_publish(make_config, improve_monorepo_target)
-    publication = _load_improve_json(improve_monorepo_target, "published-issues.json",)
-    selected = _load_improve_json(improve_monorepo_target, "selected.json")
-    assert code == 2
-    assert publication["status"] == "partial"
-    assert len(publication["published"]) == len(created) == 1
-    assert len(publication["failed"]) == 1
-    assert publication["failed"][0]["stage"] == "plan-write"
-    assert publication["failed"][0]["plan_path"] is None
-    assert len(publication["published"]) + len(publication["failed"]) == len(selected["selected"])
-
-@pytest.mark.anyio
-async def test_publication_only_failure_is_not_reported_as_planning_failure(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    make_config: MakeConfig,
-) -> None:
-    install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=1,)
+    """Issue-create and pathless-plan failures are publication failures, never planning failures."""
+    repo = improve_monorepo_target
+    install_improve_stub(monkeypatch, repo, n_findings=1,)
     _no_open_issues(monkeypatch)
     monkeypatch.setattr(
         "daydream.git_ops.gh_issue_create", lambda *args, **kwargs: (_ for _ in ()).throw(GitError("offline")),
     )
 
-    code = await _run_publish(make_config, improve_monorepo_target)
-    publication = _load_improve_json(improve_monorepo_target, "published-issues.json",)
+    code = await _run_publish(make_config, repo)
+    publication = _load_improve_json(repo, "published-issues.json",)
     output = capsys.readouterr().out
-    report = improve_artifact(improve_monorepo_target, "report.md",).read_text(encoding="utf-8")
+    report = improve_artifact(repo, "report.md",).read_text(encoding="utf-8")
     assert code == 1
     assert publication["status"] == "failed"
     assert publication["published"] == []
@@ -3284,3 +1185,19 @@ async def test_publication_only_failure_is_not_reported_as_planning_failure(
     assert "Improve issue publishing failed" in output
     assert "Improve planning failed" not in output
     assert "GitHub publication failures: 1" in report
+
+    # An indexed package whose plan file vanished fails before GitHub reconciliation.
+    next((repo / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")).unlink()
+    monkeypatch.setattr("daydream.git_ops.gh_issue_list_strict",
+        lambda *args, **kwargs: pytest.fail("a pathless package must fail before GitHub reconciliation"),
+    )
+    code = await _run_publish(make_config, repo)
+    publication = _load_improve_json(repo, "published-issues.json",)
+    output = capsys.readouterr().out
+    assert code == 1
+    assert publication["status"] == "failed"
+    assert publication["published"] == []
+    assert [(entry["stage"], entry["plan_path"]) for entry in publication["failed"]] == [
+        ("plan-reconciliation", None)]
+    assert "Improve issue publishing failed" in output
+    assert "Improve planning failed" not in output

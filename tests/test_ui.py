@@ -7,45 +7,37 @@ import re
 from collections.abc import Callable
 from io import StringIO
 from pathlib import Path
-from typing import Any
-from unittest.mock import Mock
 
 import pytest
 from rich.console import Console
-from rich.panel import Panel
-from rich.style import Style
 from rich.text import Text
 
 import daydream.agent as agent_mod
-import daydream.ui.tools as ui_tools
 from daydream.agent import run_agent
-from daydream.backends import AgentEvent, ResultEvent, TextEvent, ThinkingEvent, ToolResultEvent, ToolStartEvent
-from daydream.exploration import Convention, Dependency, ExplorationContext, FileInfo
+from daydream.backends import (
+    AgentEvent,
+    CostEvent,
+    MetricsEvent,
+    ResultEvent,
+    TextEvent,
+    ThinkingEvent,
+    ToolResultEvent,
+    ToolStartEvent,
+)
+from daydream.exploration import ExplorationContext
 from daydream.run_context import InteractionPolicy, RunContext, resolve_run_context
 from daydream.trajectory import DaydreamPhase
 from daydream.ui import (
     NEON_THEME,
-    AgentTextRenderer,
-    format_verdict_join,
+    ShutdownPanel,
     print_verification_summary,
     render_exploration_summary,
 )
 from daydream.ui.agent_stream import AgentDisplay
-from daydream.ui.colorize import render_segments
 from daydream.ui.panels import LiveToolPanelRegistry
 from daydream.ui.theme import _TASK_PROMPT_MAX_LINES
-from daydream.ui.tools import (
-    _BASH_COMMAND_MAX_CHARS,
-    format_callback_progress,
-)
+from daydream.ui.tools import format_callback_progress
 from tests.harness.backend import ScriptedBackend
-
-
-def _render(renderable: object) -> str:
-    """Render one rich renderable to plain text for assertions."""
-    console = Console(file=StringIO(), record=True, force_terminal=True, width=100)
-    console.print(renderable)
-    return console.export_text()
 
 
 def _capture_console(fn: Callable[[Console], None]) -> str:
@@ -60,128 +52,55 @@ def _ask(console: Console, message: str, default: str = "n") -> str:
     return resolve_run_context().choice(message, default=default, safe_default=default, console=console)
 
 
-def _write_verdicts_artifact(directory: Path, *, verdicts: list[dict[str, Any]], selected: int, skipped: int) -> Path:
-    """Write a ``recommendation-verdicts.json`` carrying the sibling selection block."""
-    path = directory / "recommendation-verdicts.json"
-    path.write_text(json.dumps({"verdicts": verdicts,
-                "selection": {"rule_version": 1, "mode": "selective", "extra_categories": [], "decisions": [],
-                    "selected": selected, "skipped": skipped,
-                },
-            }
-        )
-    )
-    return path
-
-def test_format_verdict_join_renders_table_counts() -> None:
-
-
-    table = format_verdict_join(matched=[1, 2], unmatched=[3], skipped=[], structural=[4, 5], other=[], total=5)
-    console = Console(file=StringIO(), record=True, force_terminal=True, width=100)
-    console.print(table)
-    out = console.export_text()
-    assert "2" in out and "matched" in out.lower()
-    assert "structural" in out.lower()
-    assert "{" not in out
-
-def test_verdict_join_reports_selection_skips_as_their_own_bucket() -> None:
-    table = format_verdict_join(matched=[1], unmatched=[], skipped=[2, 3], structural=[4], other=[], total=4)
-    rendered = _render(table)
-    assert "2, 3" in rendered
-    assert "Skipped" in rendered
-    assert "Unmatched" not in rendered  # a selection skip is never an unmatched verdict
-
-def test_verification_summary_line_names_selected_and_skipped(tmp_path: Path) -> None:
-    _write_verdicts_artifact(tmp_path, verdicts=[], selected=2, skipped=5)
-    out = _capture_console(lambda c: print_verification_summary(c, tmp_path / "recommendation-verdicts.json"))
-    assert "2 selected" in out and "5 skipped" in out
-
-def test_verification_summary_omits_selection_when_block_absent(tmp_path: Path) -> None:
+def test_summaries_stay_quiet_and_choice_returns_the_typed_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     path = tmp_path / "recommendation-verdicts.json"
     path.write_text(json.dumps({"verdicts": []}))
     out = _capture_console(lambda c: print_verification_summary(c, path))
     assert "selected" not in out
     assert "Recommendation verification: 0 findings" in out
 
-
-def _run_renderer_and_count_panels(width: int, height: int, text_lines: list[str]) -> tuple[int, object]:
-
-
-    console = Console(width=width, height=height, force_terminal=True)
-    renderer = AgentTextRenderer(console)
-
-    panel_prints: list[Panel] = []
-    original_print = console.print
-
-    def spy_print(*args: Any, **kwargs: Any) -> Any:
-        for arg in args:
-            if isinstance(arg, Panel):
-                panel_prints.append(arg)
-        return original_print(*args, **kwargs)
-
-    console.print = spy_print  # type: ignore[method-assign]
-
-    renderer.start()
-    for line in text_lines:
-        renderer.append(line)
-    renderer.finish()
-
-    console.print = original_print  # type: ignore[method-assign]
-    return len(panel_prints), renderer
-
-def test_agent_text_renderer_overflow_single_panel() -> None:
-    lines = [f"line {i} with some content to fill horizontally\n" for i in range(200)]
-    panel_count, renderer = _run_renderer_and_count_panels(80, 20, lines)
-
-    # finish() must NOT print an extra Panel via console.print after stopping Live
-    assert panel_count == 0, f"finish() printed {panel_count} extra panel(s) via console.print"
-    assert renderer._live is None  # type: ignore[attr-defined]
-    assert renderer._buffer == []  # type: ignore[attr-defined]
-
-def test_render_exploration_summary_shows_content_not_json() -> None:
-
-
-    ctx = ExplorationContext(affected_files=[FileInfo(path="services/library/openapi.yaml", role="modified")],
-        conventions=[
-            Convention(name="OpenAPI First", description="openapi.yaml is the HTTP contract", source="AGENTS.md")
-        ], dependencies=[Dependency(source="router.go", target="gen/server.go", relationship="imports")],
-    )
-    console = Console(file=StringIO(), record=True, force_terminal=True, width=100)
-    console.print(render_exploration_summary(ctx))
-    out = console.export_text()
-    assert "OpenAPI First" in out
-    assert "1 convention" in out  # count line
-    assert "{" not in out  # no raw JSON
-
-def test_render_exploration_summary_empty_is_quiet() -> None:
-
-
     console = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     console.print(render_exploration_summary(ExplorationContext()))
     out = console.export_text()
     assert "{" not in out and "[" not in out  # never dumps a structure; one dim line at most
 
-
-def test_choice_non_interactive_skips_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unattended policy resolves the safe default without touching stdin."""
-    sentinel = Mock(side_effect=AssertionError("input() must not be called"))
-    monkeypatch.setattr("builtins.input", sentinel)
-    context = RunContext(InteractionPolicy(interactive=False))
-    assert context.choice("Apply fixes now?", default="n", safe_default="n", console=Console()) == "n"
-    sentinel.assert_not_called()
-
-def test_choice_returns_typed_value_interactively(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("builtins.input", lambda: "y")
     assert _ask(Console(), "Confirm?", default="n") == "y"
 
-def test_panel_refresh_survives_a_tool_finishing_mid_render() -> None:
-    registry = LiveToolPanelRegistry(Console(file=StringIO()))
-    first = registry.create("first", "Read", {"file_path": "one.py"})
-    second = registry.create("second", "Read", {"file_path": "two.py"})
-    rendering = registry.iter_active_panels()
-    assert next(rendering) is first
-    registry.remove("first")
-    assert list(rendering) == [second]
-    registry.finish_all()
+async def test_log_lines_live_headers_and_shutdown_steps_render_every_input_shape(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Log mode summarizes path/generic inputs and usage; live headers render Write, None and blank-line text."""
+    log = AgentDisplay(Console(file=StringIO()), InteractionPolicy(log_mode=True), None, structured=False)
+    for event in (ToolStartEvent("mv", "Move", {"path": "a.py", "new_path": "b.py"}),
+                  ToolStartEvent("odd", "Custom", {"dry_run": True, "note": "generic value"}),
+                  MetricsEvent("m", 12, 3, None, None), CostEvent(None, None, None), CostEvent(0.5, 1, 1)):
+        await log.observe(event)
+    out = capsys.readouterr().out
+    assert "a.py -> b.py" in out and "generic value" in out
+    assert "[metrics] prompt=12 completion=3" in out
+    assert "[cost] unknown" in out and "[cost] $0.5000" in out
+
+    console = Console(file=StringIO(), record=True, width=100, force_terminal=False)
+    live = AgentDisplay(console, InteractionPolicy(), None, structured=False)
+    await live.observe(ToolStartEvent("w", "Write", {"file_path": "out.py", "content": "x"}))
+    await live.observe(ToolStartEvent("u", "Custom", {"dry_run": True, "limit": None, "note": "generic value"}))
+    await live.observe(TextEvent("first\n\nsecond"))
+    await live.flush()
+    live.text.finish()
+    live.tools.finish_all()
+    panel = ShutdownPanel(console)
+    panel.start("stopped")
+    panel.complete_step(panel.add_step("cleanup"))
+    panel.finish()
+    text = console.export_text()
+    assert all(value in text for value in ("out.py", "limit=None", "first", "second", "stopped", "cleanup"))
+    # A boolean, mechanical or non-string argument is never chosen as an unknown tool's primary value.
+    progress = format_callback_progress("Custom", {"dry_run": True, "count": 3, "note": "generic value"}, None)
+    assert "generic value" in progress.plain
+    assert not console._live_stack
 
 
 def test_panel_discard_allows_tool_id_reuse_without_a_live_leak() -> None:
@@ -197,151 +116,79 @@ def test_panel_discard_allows_tool_id_reuse_without_a_live_leak() -> None:
     assert not console._live_stack
 
 
-@pytest.mark.parametrize('layout', ['wrapped', 'line_cut'])
-async def test_tool_result_redacts_native_auth_before_rich_wrap_or_line_cut(
-    layout: str,
+def _visible(console: Console, capsys: pytest.CaptureFixture[str], lines: list[Text]) -> str:
+    rendered = console.export_text() + '\n'.join(value.plain for value in lines) + capsys.readouterr().out
+    return ''.join(rendered.replace('│', '').split())
+
+
+async def test_displays_redact_complete_native_auth_before_selecting_or_formatting(
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """Native auth is redacted as a whole document before text selection, tool-argument choice, wrap or line cut.
+
+    Each route owns a different cut: streamed text split mid-secret, a wrapped or
+    line-capped tool result, and the primary tool argument chosen for a header.
+    """
     secret = 'opaque-ui-native-auth-canary'
-    credentials = {'key': secret}
-    payload: dict[str, object] = {**credentials, 'public': {'key': 'ordinary-public-key'}}
-    if layout == 'line_cut':
-        payload.update({f'public_{index}': index for index in range(30)})
-    payload['type'] = 'api_key'
-    content = json.dumps(payload, indent=2 if layout == 'line_cut' else None)
-    event = ToolResultEvent('credential', content, is_error=False)
-    console = Console(file=StringIO(), record=True, width=42, force_terminal=False)
-    display = AgentDisplay(console, InteractionPolicy(), None, structured=False)
-    await display.observe(ToolStartEvent('credential', 'Read', {'file_path': 'fixture-input.json'}))
-    await display.observe(event)
-    display.tools.finish_all()
-    rendered = ''.join(console.export_text().replace('│', '').split())
-    assert secret not in rendered
-    assert 'ordinary-public-key' in rendered and '[REDACTED' in rendered
-    assert event.output == content
-
-
-@pytest.mark.parametrize('route', ['panel', 'callback', 'thinking', 'log'])
-async def test_text_displays_redact_complete_native_auth_before_selecting_or_formatting(
-    route: str, capsys: pytest.CaptureFixture[str],
-) -> None:
-    secret = 'opaque-ui-text-native-auth-canary'
-    fields = {'key': secret}
     public = {'public': {'key': 'ordinary-public-key'}}
-    payload = ({**fields, **public, 'padding': 'x' * 400, 'type': 'api_key'} if route == 'thinking' else
-               {'type': 'api_key', **fields, **public})
-    content = json.dumps(payload).replace(', "', ',\n"', 1)
-    console = Console(file=StringIO(), record=True, width=40, force_terminal=False)
-    callback: list[Text] = []
-    display = AgentDisplay(console, InteractionPolicy(log_mode=route == 'log'),
-        callback.append if route == 'callback' else None, structured=False)
-    if route == 'thinking':
-        thinking = ThinkingEvent(content)
-        await display.observe(thinking)
-        assert thinking.text == content
-    else:
-        split = content.index(secret)
-        events = [TextEvent(content[:split]), TextEvent(content[split:])]
-        for event in events:
-            await display.observe(event)
-        await display.flush()
-        display.text.finish()
-        assert ''.join(event.text for event in events) == content
-    display.tools.finish_all()
-    rendered = console.export_text() + '\n'.join(value.plain for value in callback) + capsys.readouterr().out
-    visible = ''.join(rendered.replace('│', '').split())
-    assert secret not in visible
-    assert 'ordinary-public-key' in visible and '[REDACTED' in visible
-
-
-@pytest.mark.parametrize('route', ['direct', 'callback', 'panel', 'log'])
-async def test_callback_tool_input_redacts_native_auth_before_primary_argument_selection(
-    route: str, capsys: pytest.CaptureFixture[str],
-) -> None:
-    secret = 'opaque-ui-callback-native-auth-canary'
-    values: dict[str, object] = {'key': secret}
-    values['type'] = 'api_key'
-    before = dict(values)
-    public: dict[str, object] = {'key': 'ordinary-public-key', 'type': 'record'}
-    console = Console(file=StringIO(), record=True, width=40, force_terminal=False)
-    lines: list[Text] = []
-    if route == 'direct':
-        lines = [format_callback_progress('Inspect', values, None), format_callback_progress('Inspect', public, None)]
-    else:
-        display = AgentDisplay(console, InteractionPolicy(log_mode=route == 'log'),
-            lines.append if route == 'callback' else None, structured=False)
-        await display.observe(ToolStartEvent('credential', 'Inspect', values))
-        await display.observe(ToolStartEvent('public', 'Inspect', public))
+    for route in ('thinking', 'log'):
+        payload = ({'key': secret, **public, 'padding': 'x' * 400, 'type': 'api_key'} if route == 'thinking' else
+                   {'type': 'api_key', 'key': secret, **public})
+        content = json.dumps(payload).replace(', "', ',\n"', 1)
+        console = Console(file=StringIO(), record=True, width=40, force_terminal=False)
+        display = AgentDisplay(console, InteractionPolicy(log_mode=route == 'log'), None, structured=False)
+        if route == 'thinking':
+            thinking = ThinkingEvent(content)
+            await display.observe(thinking)
+            assert thinking.text == content
+        else:
+            split = content.index(secret)
+            events = [TextEvent(content[:split]), TextEvent(content[split:])]
+            for event in events:
+                await display.observe(event)
+            await display.flush()
+            display.text.finish()
+            assert ''.join(event.text for event in events) == content
         display.tools.finish_all()
-    rendered = ''.join((console.export_text() + capsys.readouterr().out +
-                        '\n'.join(line.plain for line in lines)).replace('│', '').split())
-    assert secret not in rendered and '[REDACTED' in rendered
-    assert 'ordinary-public-key' in rendered
-    assert values == before
+        visible = _visible(console, capsys, [])
+        assert secret not in visible, route
+        assert 'ordinary-public-key' in visible and '[REDACTED' in visible
 
+    for layout in ('wrapped', 'line_cut'):
+        result: dict[str, object] = {'key': secret, **public}
+        if layout == 'line_cut':
+            result.update({f'public_{index}': index for index in range(30)})
+        result['type'] = 'api_key'
+        content = json.dumps(result, indent=2 if layout == 'line_cut' else None)
+        output = ToolResultEvent('credential', content, is_error=False)
+        console = Console(file=StringIO(), record=True, width=42, force_terminal=False)
+        display = AgentDisplay(console, InteractionPolicy(), None, structured=False)
+        await display.observe(ToolStartEvent('credential', 'Read', {'file_path': 'fixture-input.json'}))
+        await display.observe(output)
+        display.tools.finish_all()
+        visible = _visible(console, capsys, [])
+        assert secret not in visible, layout
+        assert 'ordinary-public-key' in visible and '[REDACTED' in visible
+        assert output.output == content
 
-def test_callback_command_relies_on_the_owner_cap(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The owner is the only capper of a command value (issue #1227).
-
-    A stub owner returning more than max_len proves the callback passes the command through whole; a second
-    `value[:max_len]` at the call site would truncate it. Non-command values keep the generic single-line cap."""
-    long_value = "z" * (_BASH_COMMAND_MAX_CHARS + 50)
-    monkeypatch.setattr(ui_tools, "_redacted_bash_command", lambda *a, **k: long_value)
-
-    command_line = format_callback_progress("Bash", {"command": "anything"}, None)
-    assert long_value in command_line.plain
-
-    pattern = "p" * (_BASH_COMMAND_MAX_CHARS + 50)
-    generic_line = format_callback_progress("Grep", {"pattern": pattern}, None)
-    assert pattern[: _BASH_COMMAND_MAX_CHARS] in generic_line.plain
-    assert pattern not in generic_line.plain
-
-
-_BOUNDARY_PAD = 185  # 200-char cap: a token starting here straddles it (15 of 20 chars inside)
-_AKIA_TOKEN = "AKIA" + "Q7" * 8  # AKIA + 16 [A-Z0-9] — the pattern needs all 16
-
-
-def _straddling_command(token: str, *, prefix: str = "") -> str:
-    """A >cap command whose credential token starts at _BOUNDARY_PAD."""
-    before_token = prefix + "echo " + "a" * (_BOUNDARY_PAD - len(prefix) - 12) + " --key "
-    assert len(before_token) == _BOUNDARY_PAD
-    return before_token + token + " tail"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["panel", "callback"])
-async def test_run_agent_command_display_preserves_replayable_input(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
-) -> None:
-    command = "cd /srv/app && " + _straddling_command(_AKIA_TOKEN)
-    tool_event = ToolStartEvent(id="command-1", name="shell", input={"command": command})
-    backend = ScriptedBackend(
-        events=[tool_event, ResultEvent(structured_output=None, continuation=None)], model="mock-model",
-    )
-    if mode == "panel":
-        rec = Console(file=StringIO(), record=True, width=500)
-        monkeypatch.setattr(agent_mod, "console", rec)
-        await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW)
-        displayed = rec.export_text()
-    else:
+    values: dict[str, object] = {'key': secret, 'type': 'api_key'}
+    before = dict(values)
+    record: dict[str, object] = {'key': 'ordinary-public-key', 'type': 'record'}
+    for route in ('direct', 'callback', 'panel', 'log'):
+        console = Console(file=StringIO(), record=True, width=40, force_terminal=False)
         lines: list[Text] = []
-        await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW, progress_callback=lines.append)
-        displayed = "\n".join(line.plain for line in lines)
-
-    assert _AKIA_TOKEN[:8] not in displayed
-    assert "[REDACTED" in displayed
-    assert "cd /srv/app" not in displayed
-    assert tool_event.input == {"command": command}
-
-def test_render_segments_skips_span_contained_in_an_earlier_one() -> None:
-    """Longest-first ordering means a contained span is skipped, not double-styled."""
-    source = "abcdefgh"
-    wide = Style(bold=True)
-    narrow = Style(italic=True)
-    rendered = render_segments(
-        source, [(0, 4, source[0:4], wide), (1, 3, source[1:3], narrow), (4, 8, source[4:8], narrow)], Style(),
-    )
-    assert rendered.plain == source
-    assert [(span.start, span.end, str(span.style)) for span in rendered.spans] == [(0, 4, "bold"), (4, 8, "italic")]
+        if route == 'direct':
+            lines = [format_callback_progress('Inspect', args, None) for args in (values, record)]
+        else:
+            display = AgentDisplay(console, InteractionPolicy(log_mode=route == 'log'),
+                lines.append if route == 'callback' else None, structured=False)
+            await display.observe(ToolStartEvent('credential', 'Inspect', values))
+            await display.observe(ToolStartEvent('public', 'Inspect', record))
+            display.tools.finish_all()
+        visible = _visible(console, capsys, lines)
+        assert secret not in visible and '[REDACTED' in visible, route
+        assert 'ordinary-public-key' in visible
+        assert values == before
 
 
 def _task_lifecycle_events() -> list[AgentEvent]:

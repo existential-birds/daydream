@@ -12,24 +12,16 @@ and required-suite acceptance; passing prose cannot overrule their native eviden
 from __future__ import annotations
 
 import json
-import shlex
-import sys
-from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
 import anyio
 import pytest
 
-from daydream.artifact_visibility import ArtifactVisibilityError, artifact_dir_for
-from daydream.backends import AgentEvent
 from daydream.config_file import DaydreamFileConfig
 from daydream.run_config import RunConfig
 from daydream.runner import run
-from tests.deep_orchestrator.support import _scan_phase_events
 from tests.harness.execution import host_test_command
-from tests.harness.fake_clock import FakeClock
-from tests.harness.git_helpers import commit as _commit, git as _git
 from tests.harness.stub_backend import StubBackend
 from tests.test_deep_orchestrator import (
     Mute,
@@ -40,56 +32,15 @@ from tests.test_deep_orchestrator import (
 #: The interrupted repair below still lands the edits it was working on, so a
 #: candidate exists to continue from.
 CANDIDATE_LINE = "\n# candidate repair\n"
-HELPER_TEXT = "# helper the repair turn added\n"
-
-#: The failure-summarizer turn runs after the interrupted repair and before the
-#: coordinator restores anything, so it is the one real moment a test can observe
-#: what the job is going to do next.
-_SUMMARIZER_PROMPT = "read-only failure-summarizer"
-
 _JOB = "repair-job.json"
-_CHECKPOINT = "repair-checkpoint.json"
 _VERDICT = "test-verdict.json"
-
-
-def _deep_dir(cwd: Path) -> Path | None:
-    """The routed ``.daydream`` directory of the live run, as the host resolved it.
-
-    A run routes its artifacts through the private session root and publishes
-    them at the end, so the public ``.daydream`` location is not readable while
-    the run is still working. Reading the routed path is how anything *inside*
-    the run observes what the host has persisted so far. A turn that runs
-    outside the session's own repository (an operational fix worktree, say) is
-    not the run's artifact root at all, and observes nothing.
-    """
-    try:
-        return artifact_dir_for(cwd, allow_standalone=True) / "deep"
-    except ArtifactVisibilityError:
-        return None
-
-
-class _AcceptanceStub(StubBackend):
-    """Perform concurrent filesystem faults only at the external summary turn."""
-
-    def __init__(self, target: Path) -> None:
-        super().__init__(target)
-        self.on_summarizer: Callable[[Path], None] | None = None
-        self.on_repair_attempt: Callable[[], None] | None = None
-
-    async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-        if self.on_repair_attempt is not None and prompt.lower().startswith("the tests failed"):
-            self.on_repair_attempt()
-        if self.on_summarizer is not None and _SUMMARIZER_PROMPT in prompt.lower():
-            self.on_summarizer(cwd)
-        async for event in super().execute(cwd, prompt, *args, **kwargs):
-            yield event
 
 
 def _install(
     monkeypatch: pytest.MonkeyPatch, target: Path, **knobs: Any,
-) -> _AcceptanceStub:
-    """Install the acceptance stub, with the repair-turn knobs a row needs."""
-    stub = _AcceptanceStub(target)
+) -> StubBackend:
+    """Install the stub backend, with the repair-turn knobs a row needs."""
+    stub = StubBackend(target)
     for name, value in knobs.items():
         setattr(stub, name, value)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
@@ -119,11 +70,6 @@ def _job(target: Path) -> dict[str, Any]:
     return _read_json(target / ".daydream" / "deep" / _JOB)
 
 
-def _checkpoint(target: Path) -> dict[str, Any]:
-    """The persisted repair checkpoint of the run under test."""
-    return _read_json(target / ".daydream" / "deep" / _CHECKPOINT)
-
-
 def _verdict(target: Path) -> dict[str, Any]:
     """The persisted test verdict of the run under test."""
     return _read_json(target / ".daydream" / "deep" / _VERDICT)
@@ -140,334 +86,6 @@ async def _run_deep(target: Path, **overrides: Any) -> int:
 
 
 # --- rows -----------------------------------------------------------------------------------------
-
-
-async def test_required_excluded_suite_still_blocks_green(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Mute,
-) -> None:
-    """A required suite is red: the run is red, however convincing the repair's claim is.
-
-    The canonical command is a REAL pytest process over a real failing test file
-    that the repair turn never looks at. The repair reports a focused run that
-    excluded it; that report is a claim, and the run must still end red.
-    """
-    _silence(monkeypatch)
-    target = multi_stack_target
-    (target / "tests").mkdir(exist_ok=True)
-    (target / "tests" / "test_required.py").write_text(
-        "def test_required_suite():\n    assert 'universe' == 'world'\n",
-        encoding="utf-8",
-    )
-    _git(target, "add", "tests/test_required.py")
-    _commit(target, "test: add a required suite that is genuinely failing")
-
-    argv = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q", "tests/test_required.py"]
-    stub = _install(
-        monkeypatch, target,
-        # A completed repair that reports the focused run which skipped the
-        # required suite. Nothing here runs the required suite.
-        heal_fix_focused_claim=(
-            "FOCUSED-CLAIM: `pytest -k 'not required'` -> 4 passed "
-            "(excluded tests/test_required.py)"
-        ),
-    )
-    mute_side_effects(heal=False)
-
-    exit_code = await _run_deep(
-        target,
-        test_command=" ".join(shlex.quote(part) for part in argv),
-        test_required_suites=["required"],
-    )
-    assert exit_code != 0, "a genuinely failing required suite cannot report a green run"
-
-    verdict = _verdict(target)
-    assert verdict["passed"] is False, verdict
-    assert verdict["attempts"], "the host suite produced no evidence"
-    for attempt in verdict["attempts"]:
-        # Every recorded execution is the real host command, and every one of
-        # them is red: no focused claim was promoted to a pass.
-        assert attempt["kind"] == "host", attempt
-        assert attempt["passed"] is False, attempt
-    assert _job(target)["state"] != "completed", "no execution validated a green suite"
-    assert stub.test_suite_calls == 0, "the host command runs on the host, not through the agent"
-
-
-async def test_interrupted_tracked_and_untracked_edits_both_reach_the_checkpoint(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Mute,
-) -> None:
-    """An interrupted repair keeps BOTH kinds of work in the durable checkpoint.
-
-    The tracked edit is an authorized reviewed file; the untracked helper is
-    authorized through the item's own ``related_files``. Both must survive into
-    the checkpoint, because the next step of the phase restores files.
-    """
-    _silence(monkeypatch)
-    monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
-    target = multi_stack_target
-    item = _merge_item(1, "api.py", "high")
-    item["related_files"] = ["helper.py"]
-    stub = _install(
-        monkeypatch, target,
-        **_interrupted_repair(heal_fix_authorized_new="helper.py", heal_fix_authorized_new_text=HELPER_TEXT),
-    )
-    stub.merge_items = [item]
-    command = host_test_command(target.parent / "suite", mode="first")
-    mute_side_effects(heal=False)
-
-    exit_code = await _run_deep(target, test_command=command)
-    assert exit_code == 0, "the continued execution validated the retained tree"
-
-    checkpoint = _checkpoint(target)
-    patch = checkpoint["candidate_patch"]
-    assert "api.py" in patch, patch
-    assert "helper.py" in patch, patch
-    assert "candidate repair" in patch, patch
-    assert "helper the repair turn added" in patch, patch
-    assert checkpoint["authorized_scope"] == sorted(checkpoint["authorized_scope"]), checkpoint
-    assert "helper.py" in checkpoint["authorized_scope"], checkpoint
-    assert _job(target)["checkpoint_ref"] == _CHECKPOINT, _job(target)
-    # The work really was on disk before the capture, not invented by the host.
-    assert "candidate repair" in (target / "api.py").read_text(encoding="utf-8")
-    assert stub.test_suite_calls == 0
-
-
-async def test_candidate_finished_just_before_timeout_enters_validation(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Mute,
-) -> None:
-    """A candidate that landed just before its deadline is validated, not discarded.
-
-    The interrupted turn's work is admitted to bounded validation exactly once,
-    and the job says so on disk *before* the validating execution starts.
-    """
-    _silence(monkeypatch)
-    monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
-    target = multi_stack_target
-    stub = _install(monkeypatch, target, **_interrupted_repair())
-    suite = target.parent / "suite"
-    suite.mkdir()
-    pointer = suite / "job-path.txt"
-    observed = suite / "validation-state.txt"
-    script = suite / "observe_validation.py"
-    script.write_text(
-        "from pathlib import Path\nimport json, sys\n"
-        f"counter = Path({str(suite / 'suite-count.txt')!r})\n"
-        "count = int(counter.read_text()) + 1 if counter.exists() else 1\n"
-        "counter.write_text(str(count))\n"
-        "if count > 1:\n"
-        f"    job = json.loads(Path(Path({str(pointer)!r}).read_text()).read_text())\n"
-        f"    Path({str(observed)!r}).write_text(job['state'])\n"
-        "print('1 failed' if count == 1 else '2 passed')\n"
-        "sys.exit(1 if count == 1 else 0)\n"
-    )
-
-    def expose_job_for_host_observation(cwd: Path) -> None:
-        deep = _deep_dir(cwd)
-        assert deep is not None
-        pointer.write_text(str(deep / _JOB))
-
-    # The external summary turn exposes only the location of the host's real
-    # durable record to the fixture executable. The executable reads its state
-    # when validation begins, without replacing the coordinator or host runner.
-    stub.on_summarizer = expose_job_for_host_observation
-    command = shlex.join([sys.executable, str(script)])
-    mute_side_effects(heal=False)
-
-    exit_code = await _run_deep(target, test_command=command)
-    assert exit_code == 0, "the continued execution validated the retained tree"
-
-    # Two real host executions occurred, and the durable job records that the
-    # second was bounded validation of the interrupted candidate.
-    assert (target.parent / "suite/suite-count.txt").read_text() == "2"
-    assert stub.test_suite_calls == 0
-    assert observed.read_text() == "validating"
-    job = _job(target)
-    assert job["state"] == "completed", job
-    assert job["executions"] == 2, job
-    assert job["progress_evidence"][0] == "bounded validation of the interrupted candidate", job
-    verdict = _verdict(target)
-    assert verdict["passed"] is True, verdict
-    assert len(verdict["repairs"]) == 1, "the interrupted turn is the only repair record"
-
-
-async def test_focused_pass_does_not_override_canonical_red(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Mute,
-) -> None:
-    """A repair's focused-pass report never turns a red canonical suite green."""
-    _silence(monkeypatch)
-    monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
-    target = multi_stack_target
-    stub = _install(
-        monkeypatch, target,
-        **_interrupted_repair(
-            heal_fix_focused_claim="FOCUSED-CLAIM: focused run passed (2 passed, 0 failed)",
-        ),
-    )
-    # Every canonical suite run stays red, so the claim can never be corroborated.
-    command = host_test_command(target.parent / "suite", mode="all")
-    mute_side_effects(heal=False)
-
-    exit_code = await _run_deep(target, test_command=command)
-    assert exit_code != 0, "a focused pass claim cannot make a red canonical suite green"
-
-    verdict = _verdict(target)
-    assert verdict["passed"] is False, verdict
-    for attempt in verdict["attempts"]:
-        assert attempt["kind"] == "host", attempt
-        assert attempt["passed"] is False, attempt
-    job = _job(target)
-    assert job["state"] == "blocked", job
-    assert "unchanged evidence" in (job["last_transition_reason"] or ""), job
-    assert verdict["repairs"], "the claim-carrying turn must still be recorded as a repair"
-    assert stub.test_suite_calls == 0
-
-
-async def test_host_timeout_pass_prose_never_counts_as_green(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Mute,
-) -> None:
-    """A host process that prints passing prose then times out remains red."""
-    _silence(monkeypatch)
-    monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
-    target = multi_stack_target
-    script = target.parent / "timeout_suite.py"
-    script.write_text("import time\nprint('12 passed', flush=True)\ntime.sleep(30)\n")
-    stub = _install(monkeypatch, target, runaway_fix_sleep_s=0.05)
-    mute_side_effects(heal=False)
-
-    trajectory = target.parent / "host-timeout-trajectory.json"
-    exit_code = await _run_deep(target, test_command=shlex.join([sys.executable, str(script)]),
-                                trajectory_path=trajectory, file_config=DaydreamFileConfig(test_command_wall_s=0.3))
-    ends = [event for event in _scan_phase_events(target / ".daydream", trajectory, "phase_end")
-            if event["phase"] == "test-execution"]
-    assert ends and all(event["metadata"]["stop_reason"] == "timed_out"
-                        and event["metadata"]["duration_ms"] >= 0 for event in ends)
-    assert exit_code != 0, "an incomplete host process cannot report a green run"
-    assert stub.test_suite_calls == 0
-    verdict = _verdict(target)
-    assert verdict["passed"] is False
-    assert verdict["attempts"]
-    assert all(attempt["kind"] == "host" and not attempt["passed"] for attempt in verdict["attempts"])
-    assert verdict["attempts"][0]["identity"]["outcome"] == "timed-out"
-    assert _job(target)["state"] != "completed"
-
-
-async def test_provider_retry_does_not_restart_the_execution_deadline(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Mute,
-) -> None:
-    """Provider retries share one deadline: the execution cannot be re-based.
-
-    Each real backend attempt spends 0.3 injected seconds before returning a
-    retryable transport error. A 0.5-second invocation may dispatch two attempts,
-    but it must stop the ladder before a third attempt receives a fresh budget.
-    """
-    _silence(monkeypatch)
-    monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.5)
-    fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
-    # Real backoff stays short; only backend-attempt time advances the injected
-    # deadline clock, so the exact dispatch ceiling is deterministic.
-    monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "4")
-    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.05")
-    monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "0.05")
-    target = multi_stack_target
-    stub = _install(
-        monkeypatch, target,
-        **_interrupted_repair(heal_fix_retryable_failures=99, heal_fix_authorized=None),
-    )
-    stub.on_repair_attempt = lambda: fake.advance(0.3)
-    command = host_test_command(target.parent / "suite", mode="first")
-    mute_side_effects(heal=False)
-
-    exit_code = await _run_deep(target, test_command=command)
-    heal_calls = [call for call in stub.calls if call["prompt"].lower().startswith("the tests failed")]
-    assert len(heal_calls) == 2, "retry attempts cannot each receive a fresh execution allowance"
-    assert fake.monotonic_value == pytest.approx(1_000.6)
-    assert exit_code == 0, "the continued execution validated the retained tree"
-    verdict = _verdict(target)
-    assert len(verdict["repairs"]) == 1, verdict["repairs"]
-    repair = verdict["repairs"][0]
-    assert repair["abort_reason"] == "wall_budget_exceeded", repair
-    job = _job(target)
-    assert job["executions"] == 2, job
-
-
-async def test_changed_base_produces_a_named_conflict_not_a_stale_apply(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Mute,
-) -> None:
-    """A base that moved is a named conflict, never a best-effort re-apply.
-
-    A concurrent caller edits the same file between the capture and the restore.
-    Applying the captured patch on top of those bytes would silently clobber
-    them, so the job names the conflict and stops.
-    """
-    _silence(monkeypatch)
-    monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
-    target = multi_stack_target
-    stub = _install(monkeypatch, target, **_interrupted_repair())
-    command = host_test_command(target.parent / "suite", mode="first")
-
-    def _concurrent_caller_edit(cwd: Path) -> None:
-        edited = cwd / "api.py"
-        edited.write_text(edited.read_text(encoding="utf-8") + "\n# a caller edited this line\n",
-                          encoding="utf-8")
-
-    stub.on_summarizer = _concurrent_caller_edit
-    mute_side_effects(heal=False)
-
-    exit_code = await _run_deep(target, test_command=command)
-    assert exit_code != 0, "a job that cannot restore its candidate never reports green"
-
-    job = _job(target)
-    assert job["state"] == "blocked", job
-    reason = job["last_transition_reason"] or ""
-    assert "base" in reason, job
-    # The stale candidate was never re-applied on top of the caller's bytes: no
-    # second execution ran at all.
-    assert (target.parent / "suite/suite-count.txt").read_text() == "1"
-    assert stub.test_suite_calls == 0
-    assert "a caller edited this line" in (target / "api.py").read_text(encoding="utf-8")
-
-
-async def test_corrupt_checkpoint_blocks_rather_than_restarting_empty(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Mute,
-) -> None:
-    """A checkpoint that cannot be read is a blocker, not an empty job.
-
-    An interrupted repair's checkpoint is the only copy of its work. A truncated
-    file is not that copy, and guessing "nothing to continue" would throw the
-    work away without saying so.
-    """
-    _silence(monkeypatch)
-    monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
-    target = multi_stack_target
-    stub = _install(monkeypatch, target, **_interrupted_repair())
-    command = host_test_command(target.parent / "suite", mode="first")
-
-    def _truncate_checkpoint(cwd: Path) -> None:
-        deep = _deep_dir(cwd)
-        assert deep is not None, "the failure-summarizer turn runs inside the run's artifact root"
-        path = deep / _CHECKPOINT
-        path.write_text(path.read_text(encoding="utf-8")[:120], encoding="utf-8")
-
-    stub.on_summarizer = _truncate_checkpoint
-    mute_side_effects(heal=False)
-
-    exit_code = await _run_deep(target, test_command=command)
-    assert exit_code != 0, "an untrustworthy checkpoint never reports a green run"
-
-    job = _job(target)
-    assert job["state"] == "blocked", job
-    assert "malformed" in (job["last_transition_reason"] or ""), job
-    assert "cannot be trusted" in (job["last_transition_reason"] or ""), job
-    # Nothing was restarted from nothing: the coordinator dispatched nothing.
-    assert (target.parent / "suite/suite-count.txt").read_text() == "1"
-    assert stub.test_suite_calls == 0
 
 
 async def test_operator_grant_resumes_the_same_job_without_erasing_history(

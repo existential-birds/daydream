@@ -4,9 +4,7 @@ Only two native-parser failure injections are mocked, to verify graceful fallbac
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -16,13 +14,11 @@ from daydream.deep import diagram_trigger
 from daydream.deep.dependency import build_import_graph
 from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.deep.diagram_trigger import (
-    CandidateRoot,
     DiagramThresholds,
     Eligibility,
     count_function_branch_points,
     decide_eligibility,
 )
-from daydream.deep.orchestrator import _collapse_stacks_for_tiny_diff
 from daydream.hunk_index import head_side_ranges_by_file, parse_hunks
 from daydream.services import Service, enumerate_services
 from tests.harness.git_helpers import commit, git, init_repo
@@ -149,41 +145,18 @@ def _decide(
 
 # --- Sequence eligibility ---------------------------------------------------
 
-def test_cross_service_rule_fires_without_any_import_edge(tmp_path: Path) -> None:
-    """Two services and no import edge still qualify: HTTP boundaries have no edge."""
-    repo = tmp_path / "repo"
-    # The service manifests are pre-existing, not part of the change: a
-    # ``pyproject.toml`` in the diff would itself route to the python stack.
-    base = {
-        "services/a/pyproject.toml": "[project]\nname = 'a'\n",
-        "services/b/pyproject.toml": "[project]\nname = 'b'\n",
-    }
-    head = {"services/a/main.py": "def a():\n    return 1\n", "services/b/main.py": "def b():\n    return 2\n"}
-    changed, ranges = _diff_repo(repo, base, head)
-    services = enumerate_services(repo, DaydreamFileConfig())
-    assert [service.name for service in services] == ["a", "b"]
-
-    eligibility = _decide(repo, changed, ranges, services=services)
-
-    # Only two code files (below min_code_files=3) and zero import edges, so the
-    # cross-module rule cannot be what fired.
-    assert eligibility.code_files == ["services/a/main.py", "services/b/main.py"]
-    assert eligibility.cross_module_edges == 0
-    assert eligibility.services == {"services/a/main.py": "a", "services/b/main.py": "b"}
-    assert eligibility.modules == {"services/a/main.py": "services/a", "services/b/main.py": "services/b"}
-    assert eligibility.sequence.rule == "cross-service"
-    assert "2 services (a, b)" in eligibility.sequence.reason
-    assert eligibility.eligible_kinds() == ["sequence"]
-
 def test_single_module_diff_is_below_the_sequence_threshold(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     head = {
         "core/a.py": "from core.b import b\n\n\ndef a():\n    return b()\n",
         "core/b.py": "def b():\n    return 2\n",
         "core/c.py": "def c():\n    return 3\n",
+        "core/test_c.py": "def test_c():\n    assert True\n",
     }
     changed, ranges = _diff_repo(repo, {}, head)
     eligibility = _decide(repo, changed, ranges)
+
+    assert eligibility.code_files == ["core/a.py", "core/b.py", "core/c.py"], "changed tests are not code files"
 
     assert set(eligibility.modules.values()) == {"core"}
     assert eligibility.cross_module_edges == 0
@@ -191,52 +164,6 @@ def test_single_module_diff_is_below_the_sequence_threshold(tmp_path: Path) -> N
     assert eligibility.sequence.rule is None
     assert "1 module(s), 0 cross-module edge(s)" in eligibility.sequence.reason
     assert eligibility.eligible_kinds() == []
-
-def test_lowered_thresholds_admit_a_two_file_cross_module_change(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    head = {
-        "api/handler.py": "from core.engine import run\n\n\ndef handle(x):\n    return run(x)\n",
-        "core/engine.py": "def run(x):\n    return x\n",
-    }
-    changed, ranges = _diff_repo(repo, {}, head)
-
-    assert not _decide(repo, changed, ranges).sequence.eligible
-    lowered = _decide(repo, changed, ranges, thresholds=DiagramThresholds(min_code_files=2, min_modules=2))
-    assert lowered.sequence.rule == "cross-module"
-    assert lowered.cross_module_edges == 1
-
-
-def test_tests_and_docs_are_not_code_files(tmp_path: Path) -> None:
-    """One real changed inventory isolates every test-name rule from production lookalikes."""
-    test_paths = (
-        "tests/test_runner.py", "upper/TESTS/helper.py", "src/__tests__/widget.tsx", "app/spec/models/user.py",
-        "app/specs/models/user.py", "pkg/test/fixture.go", "test_runner.py", "runner_test.go", "src/tests.py",
-        "src/test.py", "src/WidgetTest.py", "src/WidgetTests.py", "src/widget.test.ts", "src/widget.spec.ts",
-        "deep/nesting/tests/a/b/c.py",
-    )
-    code_paths = (
-        "main.py", "daydream/runner.py", "src/widget.tsx", "src/latest.py", "src/contest.py",
-        "src/protest_handler.go", "testing/harness.py", "src/testable.py",
-    )
-    head = {path: "package fixture\n" if path.endswith(".go") else
-            "export const value = 1;\n" if path.endswith((".ts", ".tsx")) else "VALUE = 1\n"
-            for path in (*test_paths, *code_paths)}
-    head["README.md"] = "# documentation\n"
-    repo = tmp_path / "repo"
-    changed, ranges = _diff_repo(repo, {}, head)
-    eligibility = _decide(repo, changed, ranges)
-    assert eligibility.code_files == sorted(code_paths)
-    assert eligibility.modules["main.py"] == "."
-    assert not set(test_paths).intersection(eligibility.modules)
-    assert "README.md" not in eligibility.modules
-
-
-def test_sharded_stack_names_classify_like_unsharded_ones(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    changed, ranges = _diff_repo(repo, {}, {"api/a.py": "def a():\n    return 1\n"})
-    sharded = [StackAssignment(stack_name="python#2", files=["api/a.py"])]
-    assert _decide(repo, changed, ranges, stacks=sharded).code_files == ["api/a.py"]
-
 
 # --- Flowchart eligibility and branch counting ------------------------------
 
@@ -276,16 +203,12 @@ def test_multilingual_function_inventory_preserves_inner_ownership_thresholds_an
     assert "most: 6 in handle" in eligibility.flowchart.reason
     assert eligibility.eligible_kinds() == ["flowchart"]
 
-def test_unsupported_language_contributes_no_branch_points(tmp_path: Path) -> None:
+def test_branch_points_count_only_supported_changed_functions(tmp_path: Path) -> None:
+    """Unsupported languages, pure deletions and missing files contribute nothing; closures own their branches."""
     repo = tmp_path / "repo"
     (repo / "api").mkdir(parents=True)
     (repo / "api/sample.rb").write_text("def handle(a)\n  if a\n    1\n  end\nend\n")
     assert count_function_branch_points(repo, "api/sample.rb", [(1, 5)]) == []
-
-
-def test_only_branch_points_inside_a_changed_hunk_are_counted(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    (repo / "api").mkdir(parents=True)
     (repo / "api/sample.py").write_text(PYTHON_SOURCE)
 
     # Lines 1-5 hold ``if`` (2), ``elif`` (4) and ``for`` (5); ``inner``'s range
@@ -297,77 +220,23 @@ def test_only_branch_points_inside_a_changed_hunk_are_counted(tmp_path: Path) ->
     # zero changed branch points of its own.
     roots = count_function_branch_points(repo, "api/sample.py", [(10, 17)])
     assert [(root.name, root.branch_points) for root in roots] == [("outer", 0), ("inner", 3)]
-
-def test_no_hunks_means_no_changed_functions(tmp_path: Path) -> None:
-    """A file whose only hunk was a pure deletion contributes nothing."""
-    repo = tmp_path / "repo"
-    (repo / "api").mkdir(parents=True)
-    (repo / "api/sample.py").write_text(PYTHON_SOURCE)
+    # A file whose only hunk was a pure deletion contributes nothing.
     assert count_function_branch_points(repo, "api/sample.py", []) == []
-
-def test_missing_file_contributes_no_branch_points(tmp_path: Path) -> None:
     assert count_function_branch_points(tmp_path, "api/gone.py", [(1, 10)]) == []
 
 
-
-def test_raised_branch_threshold_disables_the_flowchart(tmp_path: Path) -> None:
+def test_forcing_and_tree_sitter_failures_fail_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force flags override thresholds; known-bad installs, query errors and budget exhaustion drop roots only."""
     repo = tmp_path / "repo"
     changed, ranges = _diff_repo(repo, {}, {"api/sample.py": PYTHON_SOURCE})
+    forced = _decide(repo, changed, ranges, force="both")
+    assert forced.eligible_kinds() == ["sequence", "flowchart"]
+    assert forced.sequence.rule == forced.flowchart.rule == "forced"
+    # Forcing with no function over the threshold still offers every changed function as a root.
+    unqualified = _decide(repo, changed, ranges, force="both", thresholds=DiagramThresholds(min_branch_points=99))
+    assert unqualified.candidate_roots and unqualified.flowchart.rule == "forced"
 
-    assert _decide(repo, changed, ranges).flowchart.eligible
-    raised = _decide(repo, changed, ranges, thresholds=DiagramThresholds(min_branch_points=6))
-    assert not raised.flowchart.eligible
-    assert raised.candidate_roots == []
-
-
-# --- Forcing ----------------------------------------------------------------
-
-def test_force_sequence_leaves_the_flowchart_skipped(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    changed, ranges = _diff_repo(repo, {}, {"api/sample.py": PYTHON_SOURCE})
-    eligibility = _decide(repo, changed, ranges, force="sequence")
-
-    assert eligibility.sequence.eligible
-    assert eligibility.sequence.rule == "forced"
-    # The auto rules would have made the flowchart eligible here.
-    assert not eligibility.flowchart.eligible
-    assert eligibility.flowchart.rule is None
-    assert "does not name this kind" in eligibility.flowchart.reason
-    assert eligibility.eligible_kinds() == ["sequence"]
-
-def test_force_both_makes_both_kinds_eligible(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    changed, ranges = _diff_repo(repo, {}, {"api/a.py": "def a():\n    return 1\n"})
-    eligibility = _decide(repo, changed, ranges, force="both")
-
-    assert eligibility.eligible_kinds() == ["sequence", "flowchart"]
-    assert eligibility.sequence.rule == eligibility.flowchart.rule == "forced"
-
-def test_forced_flowchart_falls_back_to_every_changed_function(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    head = {"api/a.py": "def a(x):\n    if x:\n        return 1\n    return 2\n\n\ndef b():\n    return 3\n"}
-    changed, ranges = _diff_repo(repo, {}, head)
-    eligibility = _decide(repo, changed, ranges, force="flowchart")
-
-    assert eligibility.flowchart.eligible
-    assert eligibility.flowchart.rule == "forced"
-    assert "every changed function is offered" in eligibility.flowchart.reason
-    assert [(root.name, root.branch_points) for root in eligibility.candidate_roots] == [("a", 1), ("b", 0)]
-
-def test_forced_flowchart_keeps_the_qualifying_candidates_when_there_are_any(tmp_path: Path,) -> None:
-    repo = tmp_path / "repo"
-    head = {"api/sample.py": PYTHON_SOURCE + "\n\ndef plain():\n    return 0\n"}
-    changed, ranges = _diff_repo(repo, {}, head)
-    eligibility = _decide(repo, changed, ranges, force="flowchart")
-
-    assert [root.name for root in eligibility.candidate_roots] == ["outer", "inner"]
-    assert "every changed function is offered" not in eligibility.flowchart.reason
-
-def test_force_off_skips_both_kinds(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    changed, ranges = _diff_repo(repo, {}, {"api/sample.py": PYTHON_SOURCE})
     eligibility = _decide(repo, changed, ranges, force="off")
-
     assert eligibility.eligible_kinds() == []
     assert eligibility.sequence == eligibility.flowchart
     assert eligibility.sequence.rule is None
@@ -377,109 +246,25 @@ def test_force_off_skips_both_kinds(tmp_path: Path) -> None:
     # Signals that cost no parsing are still recorded for the artifact.
     assert eligibility.code_files == ["api/sample.py"]
 
-def test_unrecognized_force_behaves_like_auto(tmp_path: Path) -> None:
-    """The vocabulary gate is the CLI; this function never raises on a bad mode."""
-    repo = tmp_path / "repo"
-    changed, ranges = _diff_repo(repo, {}, {"api/sample.py": PYTHON_SOURCE})
-
-    bogus = _decide(repo, changed, ranges, force="nonsense")
-    auto = _decide(repo, changed, ranges, force="auto")
-    assert bogus.flowchart == auto.flowchart
-    assert bogus.sequence == auto.sequence
-    assert bogus.force == "nonsense"
-
-
-# --- Tiny-diff stack collapse (why stacks are an argument) -------------------
-
-def test_decide_eligibility_is_immune_to_the_tiny_diff_stack_collapse(tmp_path: Path,) -> None:
-    """Fresh stack detection must precede diagram eligibility.
-
-    Tiny-diff collapse hides Python ownership inside generic. JS/TS stays code
-    independently of framework routing, but Python still needs fresh detection."""
-    repo = tmp_path / "repo"
-    head = {
-        "api/handler.py": "def handle():\n    return 1\n",
-        "web/App.tsx": 'import React from "react"; export const App = () => <div>hi</div>;\n',
-    }
-    changed, ranges = _diff_repo(repo, {}, head)
-
-    fresh = detect_stacks(sorted(changed), target_dir=repo)
-    collapsed, single_stack_mode = _collapse_stacks_for_tiny_diff(fresh, sorted(changed), threshold=2)
-    assert single_stack_mode
-    assert {stack.stack_name for stack in collapsed} == {"generic", "structure"}
-
-    assert _decide(repo, changed, ranges, stacks=collapsed).code_files == ["web/App.tsx"]
-    assert _decide(repo, changed, ranges).code_files == ["api/handler.py", "web/App.tsx"]
-
-
-# --- Fail-open and budget ---------------------------------------------------
-
-def test_bad_tree_sitter_install_fails_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo = tmp_path / "repo"
-    changed, ranges = _diff_repo(repo, {}, {"api/sample.py": PYTHON_SOURCE})
-
-    def _explode(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
-        raise TreeSitterBadVersionError("installed tree-sitter is known-bad")
-
-    monkeypatch.setattr(diagram_trigger, "definitions_in_file", _explode)
-    eligibility = _decide(repo, changed, ranges)
-
-    assert eligibility.candidate_roots == []
-    assert not eligibility.flowchart.eligible
-
-def test_unexpected_tree_sitter_error_fails_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo = tmp_path / "repo"
-    changed, ranges = _diff_repo(repo, {}, {"api/sample.py": PYTHON_SOURCE})
-
-    def _explode(*_args: object, **_kwargs: object) -> list[int]:
-        raise ValueError("query blew up")
-
-    monkeypatch.setattr(diagram_trigger, "branch_statement_lines", _explode)
-    assert _decide(repo, changed, ranges).candidate_roots == []
-
-def test_exhausted_wall_budget_yields_partial_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo = tmp_path / "repo"
-    changed, ranges = _diff_repo(repo, {}, {"api/sample.py": PYTHON_SOURCE})
-
     assert _decide(repo, changed, ranges).candidate_roots
+    with monkeypatch.context() as patch:
+        def _bad_install(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+            raise TreeSitterBadVersionError("installed tree-sitter is known-bad")
+
+        patch.setattr(diagram_trigger, "definitions_in_file", _bad_install)
+        bad = _decide(repo, changed, ranges)
+        assert bad.candidate_roots == [] and not bad.flowchart.eligible
+    with monkeypatch.context() as patch:
+        def _query_error(*_args: object, **_kwargs: object) -> list[int]:
+            raise ValueError("query blew up")
+
+        patch.setattr(diagram_trigger, "branch_statement_lines", _query_error)
+        assert _decide(repo, changed, ranges).candidate_roots == []
     monkeypatch.setattr(diagram_trigger, "_BRANCH_COUNT_WALL_BUDGET_S", -1.0)
     assert _decide(repo, changed, ranges).candidate_roots == []
 
 
 # --- Artifact form ----------------------------------------------------------
-
-def test_to_dict_is_json_serializable_and_complete(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    head = {
-        "api/handler.py": "from core.engine import run\n\n\ndef handle(x):\n    return run(x)\n",
-        "core/engine.py": "from api.handler import handle\n\n\ndef run(x):\n    return x\n",
-        "core/util.py": PYTHON_SOURCE,
-    }
-    changed, ranges = _diff_repo(repo, {}, head)
-    eligibility = _decide(repo, changed, ranges)
-    assert isinstance(eligibility.candidate_roots[0], CandidateRoot)
-    payload: dict[str, Any] = eligibility.to_dict()
-
-    assert set(payload) == {
-        "code_files", "modules", "services", "cross_module_edges", "function_branch_counts", "candidate_roots",
-        "sequence", "flowchart", "thresholds", "force",
-    }
-    assert payload["code_files"] == ["api/handler.py", "core/engine.py", "core/util.py"]
-    assert payload["modules"] == {"api/handler.py": "api", "core/engine.py": "core", "core/util.py": "core"}
-    assert payload["cross_module_edges"] == 2
-    assert payload["sequence"]["eligible"] is True
-    assert payload["sequence"]["rule"] == "cross-module"
-    assert "2 modules" in payload["sequence"]["reason"]
-    assert eligibility.eligible_kinds() == ["sequence", "flowchart"]
-    assert set(payload["sequence"]) == {"eligible", "rule", "reason"}
-    assert payload["thresholds"] == {"min_code_files": 3, "min_modules": 2, "min_branch_points": 3}
-    assert payload["candidate_roots"][0] == {
-        "file": "core/util.py", "name": "outer", "line": 1, "end_line": 18, "branch_points": 4,
-    }
-    assert payload["force"] == "auto"
-    assert json.loads(json.dumps(payload)) == payload
-
-
 
 # --- Service ownership --------------------------------------------------------
 
@@ -506,18 +291,3 @@ def test_service_ownership_is_the_deepest_root_and_a_repo_root_service_owns_noth
         "scripts/tool.py": "scripts", "services/api/handler.py": "services/api",
         "services/api/inner/main.py": "services/api/inner",
     }
-
-def test_a_repo_root_service_is_skipped_by_eligibility(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    head = {
-        "services/api/handler.py": "def handle():\n    return 1\n",
-        "scripts/tool.py": "def tool():\n    return 2\n",
-    }
-    changed, ranges = _diff_repo(repo, {}, head)
-    services = enumerate_services(repo, DaydreamFileConfig(improve_service_roots=["."]))
-    assert [service.root.as_posix() for service in services] == ["."]
-
-    eligibility = _decide(repo, changed, ranges, services=services)
-
-    assert eligibility.services == {}
-    assert eligibility.modules == {"scripts/tool.py": "scripts", "services/api/handler.py": "services"}

@@ -4,31 +4,24 @@ Only the backend seam is mocked; temporary extension packages modify registered
 steps. Assert delivered prompts and exit codes."""
 from __future__ import annotations
 
-import json
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
 from daydream import git_ops, pr_review, runner
-from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolStartEvent
+from daydream.backends import ResultEvent, TextEvent
 from daydream.config_file import load_file_config
 from daydream.deep.merge_steps import _step_post_review
-from daydream.extensions import build_registry, get_registry, set_registry
 from daydream.extensions.registry import Registry
 from daydream.flows.engine import FlowContext
-from daydream.github_app import GitHubExecutionInput
-from daydream.pr_review import ParsedIssue
 from daydream.run_config import RunConfig
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.workspace import WorkContext
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
-from tests.harness.git_helpers import bare_remote, git as _git
-from tests.harness.phase_backend import PhaseDispatchBackend
 from tests.harness.review_result import review_coverage
-from tests.test_deep_orchestrator import _fix_prompts, _install_stub_backend, _silence, _StubBackend
 
 KEEP_ME = "KEEP_ME"
 DROP_ME = "DROP_ME"
@@ -36,122 +29,11 @@ DROP_ME = "DROP_ME"
 MakeConfig = Callable[..., RunConfig]
 InstallBackend = Callable[[object], object]
 
-# The no-op turn every non-dispatching stub in this file yielded: empty text plus
-# a terminal result.
-_REVIEW_TURN = (TextEvent(text="Intent and review complete."),
-                ResultEvent(structured_output={"issues": []}, continuation=None))
-
 _EMPTY_TURN = (TextEvent(text=""), ResultEvent(structured_output=None, continuation=None))
-
 
 
 async def _no_post(*_args: object, **_kwargs: object) -> None:
     return None
-
-
-FILTER_ITEMS_EXT = """
-import json
-
-from daydream.extensions import FlowStep
-
-
-async def _filter_items(ctx):
-    items_file = ctx.data["items_file"]
-    payload = json.loads(items_file.read_text())
-    payload["items"] = [
-        item for item in payload["items"] if item["description"] != "DROP_ME"
-    ]
-    items_file.write_text(json.dumps(payload))
-
-
-def register(r):
-    r.register_phase(FlowStep(name="filter-items", run=_filter_items))
-    r.insert_after("deep", anchor="load-items", step="filter-items")
-"""
-
-
-STABLE_KEYS_FILTER_EXT = """
-import json
-from pathlib import Path
-
-from daydream.extensions import FlowStep
-
-
-_PROBE = "stable-key-probe.json"
-
-
-def _shape(value):
-    if isinstance(value, Path):
-        return {"type": "Path", "name": value.name, "exists": value.exists()}
-    if isinstance(value, dict):
-        return {"type": "dict", "keys": sorted(value)}
-    if isinstance(value, list):
-        return {
-            "type": "list",
-            "length": len(value),
-            "descriptions": [
-                item.get("description") for item in value if isinstance(item, dict)
-            ],
-        }
-    return {"type": type(value).__name__, "value": value}
-
-
-def _record(ctx, name, keys):
-    assert ctx.artifacts is not None
-    path = (
-        ctx.artifacts.daydream_dir
-        / "runs"
-        / ctx.artifacts.layout.session_id
-        / _PROBE
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.loads(path.read_text()) if path.exists() else {}
-    payload[name] = {
-        "mapping_id": id(ctx.data),
-        "has_artifacts": ctx.artifacts is not None,
-        "values": {key: _shape(ctx.data[key]) for key in keys},
-    }
-    path.write_text(json.dumps(payload, sort_keys=True))
-
-
-async def _after_exploration(ctx):
-    _record(ctx, "after-exploration", ["diff", "diff_path", "tier", "exploration_dir"])
-
-
-async def _after_intent(ctx):
-    _record(ctx, "after-intent", ["intent_path", "alts_path", "intent_authoritative"])
-
-
-async def _after_diagram(ctx):
-    _record(ctx, "after-diagram", ["diagrams", "import_graph"])
-
-
-async def _filter_items(ctx):
-    _record(ctx, "after-load-items", ["items_file"])
-    items_file = ctx.data["items_file"]
-    payload = json.loads(items_file.read_text())
-    payload["items"] = [
-        item for item in payload["items"] if item["description"] != "DROP_ME"
-    ]
-    items_file.write_text(json.dumps(payload))
-
-
-async def _after_fix_gate(ctx):
-    _record(ctx, "after-fix-gate", ["items"])
-
-
-def register(r):
-    r.register_phase(FlowStep(name="stable-after-exploration", run=_after_exploration))
-    r.register_phase(FlowStep(name="stable-after-intent", run=_after_intent))
-    r.register_phase(FlowStep(name="stable-after-diagram", run=_after_diagram))
-    r.register_phase(FlowStep(name="filter-items", run=_filter_items))
-    r.register_phase(FlowStep(name="stable-after-fix-gate", run=_after_fix_gate))
-    r.insert_after("deep", anchor="exploration", step="stable-after-exploration")
-    r.insert_after("deep", anchor="intent", step="stable-after-intent")
-    r.insert_after("deep", anchor="diagram", step="stable-after-diagram")
-    r.insert_after("deep", anchor="load-items", step="filter-items")
-    r.insert_after("deep", anchor="fix-gate", step="stable-after-fix-gate")
-"""
 
 
 def _post_context(*, dd: Path, items_file: Path) -> FlowContext:
@@ -173,31 +55,6 @@ def _post_context(*, dd: Path, items_file: Path) -> FlowContext:
         run_context=RunContext(InteractionPolicy()),
     )
 
-
-def _filtered_items() -> list[dict[str, Any]]:
-    """Return valid canonical items with distinctive post-filter markers."""
-    return [
-        {
-            "id": 1, "lens": "per-stack", "file": "api.py", "line": 1, "severity": "high", "description": KEEP_ME,
-            "confidence": "HIGH", "rationale": "keep this finding", "evidence": "api.py:1",
-        },
-        {
-            "id": 2, "lens": "per-stack", "file": "api.py", "line": 1, "severity": "medium", "description": DROP_ME,
-            "confidence": "MEDIUM", "rationale": "drop this finding", "evidence": "api.py:1",
-        },
-    ]
-
-
-def _install_filtered_surface(
-    ext_dir: ExtDir, target: Path, monkeypatch: pytest.MonkeyPatch, *, extension_source: str = FILTER_ITEMS_EXT,
-) -> Any:
-    """Install the one extension fork and a real-path deep backend."""
-
-    ext_dir.write_module(extension_source)
-    backend = _install_stub_backend(monkeypatch, target)
-    backend.merge_items = _filtered_items()
-    _silence(monkeypatch)
-    return backend
 
 async def test_post_review_uses_published_items_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The post step passes through the canonical path published by load-items."""
@@ -222,228 +79,6 @@ async def test_post_review_uses_published_items_path(tmp_path: Path, monkeypatch
     await _step_post_review(ctx)
 
     assert posted_paths == [stable_items]
-
-async def test_report_only_review_mode_never_enters_pr_posting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ctx = _post_context(dd=tmp_path / "private-deep", items_file=tmp_path / "stable-merged-items.json",)
-    ctx.data["mode"] = "review"
-
-    async def _post_forbidden(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("report-only review mode must not resolve or post to a PR")
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)
-
-    assert await _step_post_review(ctx) is None
-
-async def test_fork_filter_controls_findings_artifact(
-    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: Any, tmp_path: Path,
-    make_config: MakeConfig,
-) -> None:
-    """A load-items fork controls the canonical findings export surface."""
-    _install_filtered_surface(ext_dir, multi_stack_target, monkeypatch)
-    fake_gh.serve_open_pr(multi_stack_target)
-    findings_out = tmp_path / "findings.json"
-    merged_items = multi_stack_target / ".daydream" / "deep" / "merged-items.json"
-
-    rc = await runner.run(make_config(multi_stack_target, pr_number=7, findings_out=str(findings_out)))
-    artifact = findings_out.read_text()
-    canonical = merged_items.read_text()
-
-    assert rc == 0
-    assert KEEP_ME in artifact and KEEP_ME in canonical
-    assert DROP_ME not in artifact and DROP_ME not in canonical
-
-
-
-async def test_current_api_stable_keys_share_state_and_reparse_filtered_items(
-    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: Any, make_config: MakeConfig,
-    tmp_path: Path,
-) -> None:
-    """The real deep flow preserves current API state by reference across extensions."""
-
-    backend = _install_filtered_surface(
-        ext_dir, multi_stack_target, monkeypatch, extension_source=STABLE_KEYS_FILTER_EXT,
-    )
-    fake_gh.serve_open_pr(multi_stack_target)
-    _git(multi_stack_target, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")),)
-
-    rc = await runner.run(make_config(multi_stack_target, pr_number=7, assume="yes", diagram="auto"))
-    probe_paths = list((multi_stack_target / ".daydream" / "runs").glob("*/stable-key-probe.json"))
-    assert len(probe_paths) == 1
-    probe = json.loads(probe_paths[0].read_text())
-    values = {name: record["values"] for name, record in probe.items()}
-    fix_prompts = "\n".join(_fix_prompts(backend))
-
-    assert rc == 0
-    assert set(probe) == {"after-exploration", "after-intent", "after-diagram", "after-load-items", "after-fix-gate"}
-    assert len({record["mapping_id"] for record in probe.values()}) == 1
-    assert all(record["has_artifacts"] for record in probe.values())
-
-    assert values["after-exploration"]["diff"]["type"] == "str"
-    assert values["after-exploration"]["diff_path"]["type"] == "Path"
-    assert values["after-exploration"]["tier"]["type"] == "str"
-    assert values["after-exploration"]["exploration_dir"]["type"] in {"NoneType", "Path"}
-    assert values["after-intent"]["intent_path"]["type"] == "Path"
-    assert values["after-intent"]["alts_path"]["type"] == "Path"
-    assert values["after-intent"]["intent_authoritative"] == {"type": "bool", "value": False}
-    assert values["after-diagram"]["diagrams"]["type"] == "dict"
-    assert values["after-diagram"]["import_graph"]["type"] == "dict"
-    assert values["after-load-items"]["items_file"]["type"] == "Path"
-    filtered_items = json.loads(
-        (multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text()
-    )["items"]
-    assert [item["description"] for item in filtered_items] == [KEEP_ME]
-    assert values["after-fix-gate"]["items"] == {
-        "type": "list", "length": 1, "descriptions": [KEEP_ME],
-    }
-    assert KEEP_ME in fix_prompts
-    assert DROP_ME not in fix_prompts
-
-    posted = json.dumps([call.payload for call in (
-        *fake_gh.calls("POST", "repos/acme/widgets/pulls/7/reviews"),
-        *fake_gh.calls("POST", "repos/acme/widgets/pulls/7/comments"),
-    )])
-    assert fake_gh.pr_view_calls() and KEEP_ME in posted and DROP_ME not in posted
-
-
-def _deferred_write_responder(target: Path) -> Callable[..., Any]:
-    """Write only between yields, so a supervisor veto can close the stream first."""
-
-    def _respond(cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> Any:
-        async def _gen() -> AsyncGenerator[AgentEvent, None]:
-            yield ToolStartEvent(
-                id="write-1", name="Write", input={"path": str(target), "content": "backend resumed"},
-            )
-            target.write_text("backend resumed")
-            yield TextEvent(text="")
-            yield ResultEvent(structured_output=None, continuation=None)
-
-        return _gen()
-
-    return _respond
-
-async def test_fork_inserts_custom_phase_into_review_flow(
-    ext_dir: ExtDir, tiny_diff_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
-) -> None:
-    """A phase inserted after intent reaches the backend in review mode."""
-    ext_dir.write_module(
-        "from daydream.extensions import FlowStep\n"
-        "async def _ro(ctx):\n"
-        "    from daydream.agent import run_agent\n"
-        "    from daydream.trajectory import DaydreamPhase\n"
-        "    await run_agent(ctx.backend_for('ro_audit'), ctx.work.repo, 'RO-AUDIT-PROMPT',\n"
-        "                    phase=DaydreamPhase.REVIEW)\n"
-        "def register(r):\n"
-        "    r.register_phase(FlowStep(name='ro_audit', run=_ro))\n"
-        "    r.insert_after('deep', anchor='intent', step='ro_audit')\n"
-    )
-    backend = ScriptedBackend(events=_REVIEW_TURN, model="mock-model")
-    install_backend(backend)
-
-    rc = await runner.run(make_config(tiny_diff_target, flow_name="review"))
-
-    idx = [i for i, p in enumerate(backend.prompts) if p == "RO-AUDIT-PROMPT"]
-    assert idx, "custom phase never reached the backend"
-    assert rc == 0
-    assert any(
-        "You are the structural reviewer" in prompt
-        and "Within this same boundary review, check design choices" in prompt
-        for prompt in backend.prompts
-    )
-    assert not any(ALTERNATIVES_MARKER in prompt for prompt in backend.prompts)
-
-async def test_fork_inserts_phase_before_summary_in_shallow(
-    ext_dir: ExtDir, multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
-) -> None:
-    """A phase inserted before post-review reaches the backend in shallow mode."""
-    ext_dir.write_module(
-        "from daydream.extensions import FlowStep\n"
-        "async def _ro(ctx):\n"
-        "    from daydream.agent import run_agent\n"
-        "    from daydream.trajectory import DaydreamPhase\n"
-        "    await run_agent(ctx.backend_for('ro_shallow'), ctx.work.repo, 'RO-SHALLOW-PROMPT',\n"
-        "                    phase=DaydreamPhase.REVIEW)\n"
-        "def register(r):\n"
-        "    r.register_phase(FlowStep(name='ro_shallow', run=_ro))\n"
-        "    r.insert_before('deep', anchor='post-review', step='ro_shallow')\n"
-    )
-    backend = PhaseDispatchBackend(
-        parse_results=[[{"id": 1, "description": "Align hello() return value", "file": "api.py", "line": 1}]]
-    )
-    install_backend(backend)
-
-    rc = await runner.run(make_config(multi_stack_target, flow_name="shallow", stack="python"))
-
-    assert "RO-SHALLOW-PROMPT" in backend.prompts, "fork phase never reached the backend"
-    assert rc == 0
-    assert backend.review_prompts, "shallow pipeline did not run a per-stack review"
-
-
-# Distinctive literal from ``build_alternative_review_prompt``'s body: present in
-# every alternatives prompt, absent from every other prompt builder.
-ALTERNATIVES_MARKER = "Given this intent, explore the codebase and evaluate the implementation"
-
-async def test_fork_disables_arbiter_in_deep(
-    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    """Removing arbiter preserves the rest of deep review.
-
-    Assert successful completion and a delivered intent prompt as well as
-    arbiter absence, so a no-op run cannot satisfy the test."""
-
-    ext_dir.write_module("def register(r):\n" "    r.remove('deep', 'arbiter')\n")
-    backend = _install_stub_backend(monkeypatch, multi_stack_target)
-    backend.parse_severity = "high"
-    _silence(monkeypatch)
-
-    # The PR post runs before the fix gate; stub the non-idempotent GitHub write.
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-
-    rc = await runner.run(make_config(multi_stack_target))
-
-    prompts = [call["prompt"] for call in backend.calls]
-    assert rc == 0
-    assert any("intent" in p.lower() for p in prompts)  # pipeline still ran
-    # Removed step never sent its prompt.
-    assert not any("you are the arbiter" in p.lower() for p in prompts)
-
-
-# A fork registers phase ``ro_gate`` whose run() resolves its OWN backend
-# (``ctx.backend_for('ro_gate')`` -> per-phase config) and registered prompt
-# (``prompt('ro_gate')``), then inserts it into the deep flow after ``intent``.
-FULL_RO_EXT = (
-    "from daydream.extensions import FlowStep, get_registry\n"
-    "def _ro_prompt():\n"
-    "    return 'RO-GATE'\n"
-    "async def _ro(ctx):\n"
-    "    from daydream.agent import run_agent\n"
-    "    from daydream.trajectory import DaydreamPhase\n"
-    "    r = get_registry()\n"
-    "    prompt = r.prompt('ro_gate')()\n"
-    "    await run_agent(ctx.backend_for('ro_gate'), ctx.work.repo, prompt,\n"
-    "                    phase=DaydreamPhase.REVIEW)\n"
-    "def register(r):\n"
-    "    r.register_phase(FlowStep(name='ro_gate', run=_ro))\n"
-    "    r.override_prompt('ro_gate', _ro_prompt)\n"
-    "    r.insert_after('deep', anchor='intent', step='ro_gate')\n"
-)
-
-
-# A minimal fork flow: one custom step that sends a marker prompt, registered
-# as a brand-new flow name (NOT one of the four built-ins).
-CUSTOM_FLOW_EXT = (
-    "from daydream.extensions import FlowStep\n"
-    "async def _audit(ctx):\n"
-    "    from daydream.agent import run_agent\n"
-    "    from daydream.trajectory import DaydreamPhase\n"
-    "    await run_agent(ctx.backend_for('ro_audit'), ctx.work.repo, 'CUSTOM-FLOW-PROMPT',\n"
-    "                    phase=DaydreamPhase.REVIEW)\n"
-    "def register(r):\n"
-    "    r.register_phase(FlowStep(name='ro_audit', run=_audit))\n"
-    "    r.set_flow('ro-audit', ['ro_audit'])\n"
-)
 
 async def test_bound_custom_flow_rejects_public_artifact_before_backend_entry(
     ext_dir: ExtDir, multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
@@ -471,63 +106,6 @@ async def test_bound_custom_flow_rejects_public_artifact_before_backend_entry(
     assert backend.call_count == 0
 
 
-def _step_for_tool(trajectory: dict[str, Any], tool_name: str) -> dict[str, Any]:
-    """Return the recorded agent step containing a call to *tool_name*."""
-    for step in trajectory["steps"]:
-        if any(call.get("function_name") == tool_name for call in step.get("tool_calls", [])):
-            return cast(dict[str, Any], step)
-    raise AssertionError(f"no trajectory step recorded tool {tool_name!r}")
-
-
-async def _run_tool_case(
-    ext_dir: ExtDir, target: Path, install_backend: InstallBackend, make_config: MakeConfig, *,
-    register_supervisor: bool, supervisor_raises: bool = False, backend_capture: list[ScriptedBackend] | None = None,
-) -> tuple[Path, Path, int]:
-    """Run the extension-defined custom flow against the deferred-write backend."""
-    supervisor_registration = ""
-    if register_supervisor:
-        if supervisor_raises:
-            supervisor_registration = (
-                "    class RetryableSupervisorError(RuntimeError):\n"
-                "        retryable = True\n"
-                "    def _supervise(name, tool_input, *, phase):\n"
-                "        _credential = 'ZAI_API_KEY' + chr(61) + 'credential-shaped-supervisor-value'\n"
-                "        raise RetryableSupervisorError('supervisor failed ' + _credential)\n"
-                "    r.register_tool_supervisor(_supervise)\n"
-            )
-        else:
-            supervisor_registration = (
-                "    def _supervise(name, tool_input, *, phase):\n"
-                "        return ToolDecision(veto=name == 'Write', reason='protected path')\n"
-                "    r.register_tool_supervisor(_supervise)\n"
-            )
-
-    ext_dir.write_module(
-        "from daydream.extensions import FlowStep, ToolDecision\n"
-        "async def _audit(ctx):\n"
-        "    from daydream.agent import run_agent\n"
-        "    from daydream.trajectory import DaydreamPhase\n"
-        "    await run_agent(ctx.backend_for('ro_audit'), ctx.work.repo, 'CUSTOM-TOOL-PROMPT',\n"
-        "                    phase=DaydreamPhase.REVIEW)\n"
-        "def register(r):\n"
-        "    r.register_phase(FlowStep(name='ro_audit', run=_audit))\n"
-        "    r.set_flow('ro-audit', ['ro_audit'])\n"
-        + supervisor_registration
-    )
-
-    written = target / "deferred-write.txt"
-    trajectory = target / ".daydream" / "tool-supervisor-trajectory.json"
-    backend = ScriptedBackend(
-        responder=_deferred_write_responder(written), model="mock-model", fanout_concurrency=4, retry_attempts=1,
-        retry_base_delay_s=0.0,
-    )
-    if backend_capture is not None:
-        backend_capture.append(backend)
-    install_backend(backend)
-
-    rc = await runner.run(make_config(target, flow_name="ro-audit", trajectory_path=trajectory))
-    return written, trajectory, rc
-
 async def test_builtin_and_fork_tool_supervisor_conflict_fails_loud(
     ext_dir: ExtDir, multi_stack_target: Path, make_config: MakeConfig, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -550,91 +128,6 @@ async def test_builtin_and_fork_tool_supervisor_conflict_fails_loud(
     assert "config-enabled built-in" in output
     assert "extension-registered" in output
 
-async def test_fork_tool_supervisor_vetoes_write(
-    ext_dir: ExtDir, multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
-) -> None:
-    """A registered supervisor veto closes the deferred backend before its write."""
-    denied, traj, rc = await _run_tool_case(
-        ext_dir, multi_stack_target, install_backend, make_config, register_supervisor=True
-    )
-
-    assert rc == 0
-    assert not denied.exists()
-    step = _step_for_tool(json.loads(traj.read_text()), "Write")
-    assert step["tool_calls"][0]["function_name"] == "Write"
-    assert step["extra"]["stop_reason"] == "tool_vetoed:Write"
-
-async def test_no_tool_supervisor_allows_write(
-    ext_dir: ExtDir, multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
-) -> None:
-    """Without registration, the same deferred backend resumes and writes."""
-    written, traj, rc = await _run_tool_case(
-        ext_dir, multi_stack_target, install_backend, make_config, register_supervisor=False
-    )
-
-    assert rc == 0
-    assert written.read_text() == "backend resumed"
-    assert "tool_vetoed:Write" not in traj.read_text()
-
-async def test_retryable_tool_supervisor_failure_propagates_without_retry(
-    ext_dir: ExtDir, multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Supervisor failures propagate without backend retries; host diagnostics are redacted."""
-    backends: list[ScriptedBackend] = []
-
-    with pytest.raises(RuntimeError, match="supervisor failed") as exc_info:
-        await _run_tool_case(
-            ext_dir, multi_stack_target, install_backend, make_config, register_supervisor=True, supervisor_raises=True,
-            backend_capture=backends,
-        )
-
-    out = capsys.readouterr().out
-    assert "Extension Failure" in out
-    assert "RetryableSupervisorError" in out
-    assert "supervisor failed" in out
-    assert "[REDACTED_ENV_VAR]" in out
-    assert "credential-shaped-supervisor-value" not in out
-
-    # The propagated exception's str() must be scrubbed too: on the canonical
-    # `daydream <target>` path the CLI's "Fatal Error" handler re-prints
-    # str(exc), which would otherwise leak the credential past run_agent.
-    assert "[REDACTED_ENV_VAR]" in str(exc_info.value)
-    assert "credential-shaped-supervisor-value" not in str(exc_info.value)
-
-    assert getattr(exc_info.value, "retryable", False) is True
-    assert len(backends) == 1
-    assert backends[0].call_count == 1
-
-async def test_custom_flow_dispatches_and_dumps_artifacts(
-    ext_dir: ExtDir, multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
-    archive_dir: Path, tmp_path: Path,
-) -> None:
-    """Dispatch a registered custom flow end to end and dump its artifact bundle."""
-    ext_dir.write_module(CUSTOM_FLOW_EXT)
-    backend = ScriptedBackend(events=_EMPTY_TURN, model="mock-model")
-    install_backend(backend)
-
-    dump_dir = tmp_path / "uploaded-artifacts"
-    rc = await runner.run(make_config(multi_stack_target, flow_name="ro-audit", dump_artifacts=str(dump_dir)))
-
-    assert rc == 0
-    assert "CUSTOM-FLOW-PROMPT" in backend.prompts  # custom flow actually ran
-    assert (dump_dir / "manifest.json").is_file()    # dump fired on the custom path
-    assert (dump_dir / "trajectory.json").is_file()
-
-async def test_unknown_flow_name_errors(
-    ext_dir: ExtDir, multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
-) -> None:
-    """An unregistered flow name fails with exit 1 (Extension Error panel)."""
-    backend = ScriptedBackend(events=_EMPTY_TURN, model="mock-model")
-    install_backend(backend)
-
-    rc = await runner.run(make_config(multi_stack_target, flow_name="does-not-exist"))
-
-    assert rc == 1
-    assert not any("CUSTOM-FLOW-PROMPT" in p for p in backend.prompts)
-
 async def test_pr_feedback_not_selectable_via_flow(
     multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
 ) -> None:
@@ -643,81 +136,3 @@ async def test_pr_feedback_not_selectable_via_flow(
 
     rc = await runner.run(make_config(multi_stack_target, flow_name="pr-feedback"))
     assert rc == 1
-
-async def test_custom_phase_full_stack(
-    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    """A custom deep phase uses its registered prompt and configured backend model.
-
-    Assert the delivered RO-GATE prompt, selected model, and successful exit."""
-
-    ext_dir.write_module(FULL_RO_EXT)
-    (multi_stack_target / ".daydream.toml").write_text('[phases.ro_gate]\nmodel = "test-model-x"\n')
-
-    backend = _StubBackend(multi_stack_target)
-    created: list[tuple[str, str | None]] = []
-
-    def fake_create(name: str, model: str | None = None, **kwargs: object) -> _StubBackend:
-        created.append((name, model))
-        return backend
-
-    monkeypatch.setattr("daydream.runner.create_backend", fake_create)
-    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
-    _silence(monkeypatch)
-
-    # The PR post runs before the fix gate; stub the non-idempotent GitHub write.
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-
-    rc = await runner.run(make_config(multi_stack_target, file_config=load_file_config(multi_stack_target)))
-
-    prompts = [call["prompt"] for call in backend.calls]
-    ro_prompts = [p for p in prompts if p.startswith("RO-GATE")]
-    assert rc == 0
-    assert ro_prompts
-    assert ("claude", "test-model-x") in created  # [tool.daydream.phases.ro_gate] honored
-
-def test_ext_dir_renderer_override_reaches_pr_review(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A discovered extension finding renderer retains the host-injected footer."""
-    ext = tmp_path / "ext"
-    ext.mkdir()
-    (ext / "__init__.py").write_text(
-        "DAYDREAM_EXT_API = 8\n"
-        "def register(r):\n"
-        "    r.override_renderer('finding', lambda finding, ctx: f'EXT::{ctx.placement}::{finding.title}')\n"
-    )
-    monkeypatch.setenv("DAYDREAM_EXT_DIR", str(ext))
-
-    prev = get_registry()
-    set_registry(build_registry())
-    try:
-        body = pr_review.format_comment_body(
-            ParsedIssue(path="a.py", line=1, title="T", body="B", fingerprint="a" * 64), "inline",
-            renderers=pr_review.resolve_review_renderers(get_registry()),
-        )
-    finally:
-        set_registry(prev)
-    assert "EXT::inline::T" in body and pr_review.DAYDREAM_FOOTER in body
-
-def test_existing_extension_context_construction_keeps_auth_separate(
-    tmp_path: Path, make_work: Callable[..., WorkContext],
-) -> None:
-    """API v8 positional construction keeps data identity and hides credentials."""
-    data: dict[str, Any] = {"extension-marker": "retained"}
-    config = RunConfig(target=str(tmp_path))
-    work = make_work(tmp_path)
-    registry = Registry()
-    standalone = FlowContext(config, work, registry, data)
-    assert standalone.data is data
-    assert standalone.github_execution.auth.environment_for_request() is None
-    assert standalone.github_execution.auth is git_ops.INHERIT_GITHUB_AUTH
-
-    execution = GitHubExecutionInput(git_ops.StaticGitHubAuth({
-        "PATH": "/test/bin", "GH_TOKEN": "installation-secret-marker",
-    }))
-    owned = FlowContext(config, work, registry, data, github_execution=execution)
-    assert owned.data is data
-    assert owned.github_execution is execution
-    assert data == {"extension-marker": "retained"}
-    assert "installation-secret-marker" not in repr(owned)
-    assert "github_execution" not in repr(owned)

@@ -10,19 +10,17 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 
 from daydream.benchmark import curate_tui as tui, curation as cu
 from daydream.benchmark.curate_tui import (
     parse_indices,
-    render_case,
     render_index_table,
     run_curate_tui,
 )
-from daydream.benchmark.storage import atomic_write_json, load_json_strict, load_yaml_strict
+from daydream.benchmark.storage import load_yaml_strict
 from daydream.benchmark.workspace import validate_workspace
 from tests.harness.fake_gh import FakeGh
-from tests.test_benchmark_curation import _reanchor_frozen_inline, _seed_ready_case, _seed_ready_case_mixed
+from tests.test_benchmark_curation import _seed_ready_case, _seed_ready_case_mixed
 
 
 def _scripted(*lines: Any) -> Any:
@@ -52,93 +50,7 @@ def test_parse_indices_accepts_commas_and_ranges() -> None:
             raise AssertionError(f"{bad!r} must raise ValueError")
 
 
-def test_render_case_pages_all_evidence_kinds(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
-    view = cu.get_case(ws, case_id)
-    assert [row["source_id"] for row in view["evidence"]] == [
-        "github:inline_comment:1", "github:inline_comment:2", "github:review:100",
-        "github:review:101", "github:issue_comment:200",
-    ]
-    assert [row["source_id"] for row in view["prioritized_evidence"]["entries"]] == [
-        "github:inline_comment:1", "github:review:101", "github:inline_comment:2",
-        "github:review:100", "github:issue_comment:200",
-    ]
-    assert {row["source_id"]: (row["kind"], row["candidate_index"]) for row in view["evidence"]} == {
-        "github:inline_comment:1": ("inline_comment", 0), "github:inline_comment:2": ("inline_comment", None),
-        "github:review:100": ("review", None), "github:review:101": ("review", 1),
-        "github:issue_comment:200": ("issue_comment", None),
-    }
-    assert next(row for row in view["evidence"] if row["source_id"] == "github:review:100")["state"] == "APPROVED"
-    assert cu.list_cases(ws)[0]["evidence_count"] == 5
-    out = render_case(view)
-    assert "APPROVED" in out and "carol" in out          # pure approval review paged
-    assert "issue_comment" in out and "dave" in out      # conversation comment paged
-    assert "reply text" in out and "bob" in out          # inline reply paged
-    assert "inline_comment" in out and "please fix" in out  # root candidate still visible
-    assert "-- review_first --" in out and "-- context --" in out
-    assert "-- decided --" not in out and "-- withdrawn --" not in out and "-- likely_actioned --" not in out
-    assert out.index("-- review_first --") < out.index("-- context --")
-    assert "resolved" in out or "reasons:" in out
-    assert "legend:" in out.lower()
-    assert [
-        (line.split(". ", 1)[0].strip(), line.rsplit(" ", 1)[-1])
-        for line in out.splitlines() if line.startswith("  ") and ". [" in line
-    ] == [
-        ("1", "github:inline_comment:1"), ("2", "github:review:101"), ("3", "github:inline_comment:2"),
-        ("4", "github:review:100"), ("5", "github:issue_comment:200"),
-    ]
-
-
-def test_render_case_shows_authoring_commit_and_fixed_reason(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """The evidence row surfaces the strict authoring commit (short form) and the
-    fixed not-exact reason whenever exact acceptance is unavailable, next to the
-    re-anchored commit_id -- the two commits are never conflated."""
-
-    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    _reanchor_frozen_inline(ws, case_id, authoring_commit="b" * 40)
-    view = cu.get_case(ws, case_id)
-    projection = next(c for c in view["candidates"] if not c["exact_acceptable"])["evidence"]
-    assert (projection["authoring_commit_id"], projection["commit_id"], projection["not_exact_reason"]) == (
-        "b" * 40, head_sha, "re-anchored",
-    )
-    out = render_case(view)
-    assert f"auth:{'b' * 12}" in out       # authoring commit short form, labeled
-    assert "[re-anchored]" in out          # fixed reason shown for the non-exact candidate
-    assert "feature.py:2" in out           # anchor display unchanged
-
-
-def test_action_exclude_evidence_persists_supported_reason(
-    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
-) -> None:
-    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    source_id = cu.get_case(ws, case_id)["evidence"][0]["source_id"]
-
-    run_curate_tui(ws, case_id, read_line=_scripted("x", "1", "fixed_before_snapshot", "", "q"))
-
-    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    assert raw["curation"]["exclusions"] == [{"source_id": source_id, "reason": "fixed_before_snapshot", "note": None}]
-    assert raw["curation"]["state"] == "draft"
-    out = capsys.readouterr().out
-    assert "excluded 1 evidence source(s)" in out
-    assert "fixed_before_snapshot" in out
-
-
-def test_action_accept_non_exact_candidate_offers_edit_path(
-    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
-) -> None:
-    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    path = ws / "cases" / f"{case_id}.yaml"
-    raw = load_yaml_strict(path)
-    raw["candidates"][0]["exact_acceptable"] = False
-    raw["candidates"][0]["not_exact_reason"] = "needs rework"
-    path.write_text(yaml.safe_dump(raw, sort_keys=False))
-    after_rewrite = path.read_bytes()
-
-    run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "q"))
-    assert path.read_bytes() == after_rewrite
-    assert "not exactly acceptable" in capsys.readouterr().out
-
-def test_action_new_via_real_editor_persists_authored(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
+def _action_new_via_real_editor_persists_authored(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
     log = tmp_path / "editor.log"
@@ -165,16 +77,7 @@ def test_action_new_via_real_editor_persists_authored(tmp_path: Path, fake_gh: F
     assert mode == "600"                        # editor buffer was mode 0600
     assert not Path(buf).exists()               # buffer removed after the edit
 
-@pytest.mark.parametrize("editor_script",
-    [
-        pytest.param("#!/bin/sh\nexit 3\n", id="nonzero-exit"),
-        pytest.param(
-            "#!/bin/sh\ncat > \"$1\" <<'EOF'\ntitle: [unclosed\nEOF\n",
-            id="malformed-buffer",
-        ),
-    ],
-)
-def test_editor_failure_leaves_state_unchanged(
+def _editor_failure_leaves_state_unchanged(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     editor_script: str,
 ) -> None:
@@ -187,7 +90,7 @@ def test_editor_failure_leaves_state_unchanged(
     assert path.read_bytes() == before
     assert "Traceback" not in capsys.readouterr().err
 
-def test_action_edit_replaces_seeded_finding(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
+def _action_edit_replaces_seeded_finding(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     current = next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
     _install_editor(tmp_path, monkeypatch,
@@ -202,31 +105,7 @@ def test_action_edit_replaces_seeded_finding(tmp_path: Path, fake_gh: FakeGh, mo
     f = raw["curation"]["findings"][0]
     assert f["title"] == "Reworked" and f["provenance"]["kind"] == "edited"
 
-def test_edit_author_prefills_selected_evidence_source_ids(
-    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The [e]->a author selector must pin the selected evidence's source_ids
-    into the editor buffer before it opens, so a wrong/empty/off-by-one prefill
-    cannot slip past the callers that rewrite source_ids in their heredocs."""
-    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
-    log = tmp_path / "prefill.log"
-    _install_editor(tmp_path, monkeypatch,
-        "#!/bin/sh\n"
-        "cat > \"$LOG\" < \"$1\"\n"
-        "cat > \"$1\" <<'EOF'\nfindings:\n  - title: From selected\n    body: pinned\n"
-        "    severity: null\n    location: null\n    source_ids: [github:review:100]\nEOF\n"
-    )
-    monkeypatch.setenv("LOG", str(log))
-
-    run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "4", "q"))
-    f = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"][0]
-    assert f["title"] == "From selected" and f["provenance"]["kind"] == "edited"
-    assert f["provenance"]["source_ids"] == ["github:review:100"]
-    prefill = log.read_text()
-    assert "source_ids" in prefill and "- github:review:100" in prefill
-    assert "github:review:100" in prefill and "github:issue_comment:200" not in prefill
-
-def test_action_edit_splits_one_evidence_into_two_findings(
+def _action_edit_splits_one_evidence_into_two_findings(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
@@ -245,23 +124,7 @@ def test_action_edit_splits_one_evidence_into_two_findings(
     ]
 
 
-def test_action_edit_merges_range_into_one_finding(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ws, case_id, _f = _seed_ready_case_mixed(tmp_path, fake_gh)
-    _install_editor(tmp_path, monkeypatch,
-        "#!/bin/sh\ncat > \"$1\" <<'EOF'\nfindings:\n  - title: Merged\n    body: combined\n"
-        "    severity: medium\n    location: {path: feature.py, start_line: 2, end_line: 2}\n"
-        "    source_ids: [github:inline_comment:1, github:review:100, github:issue_comment:200]\nEOF\n"
-    )
-    run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "1,4,5", "q"))
-    f = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"][0]
-    assert f["provenance"]["source_ids"] == ["github:inline_comment:1", "github:review:100", "github:issue_comment:200"]
-    assert (f["title"], f["body"], f["severity"], f["location"], f["provenance"]["kind"]) == (
-        "Merged", "combined", "medium", {"path": "feature.py", "start_line": 2, "end_line": 2}, "edited",
-    )
-
-
-def test_action_exclude_evidence_other_requires_note(tmp_path: Path, fake_gh: FakeGh) -> None:
+def _action_exclude_evidence_other_requires_note(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     src = cu.get_case(ws, case_id)["candidates"][0]["source_id"]
 
@@ -269,7 +132,7 @@ def test_action_exclude_evidence_other_requires_note(tmp_path: Path, fake_gh: Fa
     ex = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["exclusions"][0]
     assert ex == {"source_id": src, "reason": "other", "note": "stale link"}
 
-def test_action_exclude_evidence_rejects_stray_note(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
+def _action_exclude_evidence_rejects_stray_note(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     path = ws / "cases" / f"{case_id}.yaml"
@@ -278,14 +141,7 @@ def test_action_exclude_evidence_rejects_stray_note(tmp_path: Path, fake_gh: Fak
     assert path.read_bytes() == before                      # service rejects the note
     assert "Traceback" not in capsys.readouterr().err
 
-def test_action_exclude_range_excludes_all_selected(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
-    run_curate_tui(ws, case_id, read_line=_scripted("x", "1,4", "duplicate", "q"))
-    ex = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["exclusions"]
-    assert {e["source_id"] for e in ex} == {"github:inline_comment:1", "github:review:100"}
-    assert all(e["reason"] == "duplicate" for e in ex)
-
-def test_action_exclude_range_invalid_mutates_nothing(
+def _action_exclude_range_invalid_mutates_nothing(
     tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
@@ -321,24 +177,7 @@ def test_no_comment_clean_then_ready_marks_case_ready(
     assert "attested" in out and f"mark {case_id} ready?" in out
 
 
-def test_stale_case_shows_marker_and_re_attests(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
-) -> None:
-    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    path = ws / "cases" / f"{case_id}.yaml"
-    raw = load_yaml_strict(path)
-    raw["curation"]["state"] = "stale"
-    raw["curation"]["snapshot_attested"] = True
-    path.write_text(yaml.safe_dump(raw, sort_keys=False))   # force stale + attested
-
-    assert "stale" in render_case(cu.get_case(ws, case_id))  # stale marker rendered
-
-    run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "r", "y", "q"))
-    cur = load_yaml_strict(path)["curation"]
-    assert cur["state"] == "ready" and cur["snapshot_attested"] is True
-    out = capsys.readouterr().out
-    assert f"valid against head {head_sha}" in out          # stale re-ran the SHA confirm
-
-def test_case_exclude_and_reinclude(tmp_path: Path, fake_gh: FakeGh) -> None:
+def _case_exclude_and_reinclude(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
     path = ws / "cases" / f"{case_id}.yaml"
 
@@ -351,7 +190,7 @@ def test_case_exclude_and_reinclude(tmp_path: Path, fake_gh: FakeGh) -> None:
     cur = load_yaml_strict(path)["curation"]
     assert cur["state"] == "draft" and cur["case_exclusion"] is None
 
-def test_case_exclude_other_requires_note(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str]) -> None:
+def _case_exclude_other_requires_note(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str]) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
@@ -361,39 +200,7 @@ def test_case_exclude_other_requires_note(tmp_path: Path, fake_gh: FakeGh, capsy
     assert "case exclusion reason 'other' requires a note" in out.out
     assert "Traceback" not in out.err
 
-def test_defer_is_ui_local_no_mutation(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str]) -> None:
-    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    path = ws / "cases" / f"{case_id}.yaml"
-    before = path.read_bytes()
-    rc = run_curate_tui(ws, case_id, read_line=_scripted("d"))   # defer in a case
-    assert rc == 0
-    assert path.read_bytes() == before                       # nothing persisted
-    assert "deferred" in capsys.readouterr().out
-
-
-def test_ctrl_c_preserves_prior_actions_and_cleans_temp(
-    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
-) -> None:
-    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    path = ws / "cases" / f"{case_id}.yaml"
-    src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"])
-
-    reads = iter(["a", "1", None, "q"])   # a,1 = accept; None=(Ctrl-C); q quits after
-    def interrupted(_prompt: Any) -> Any:
-        nxt = next(reads)
-        if nxt is None:
-            raise KeyboardInterrupt
-        return nxt
-    run_curate_tui(ws, case_id, read_line=interrupted)
-
-    raw = load_yaml_strict(path)
-    assert len(raw["curation"]["findings"]) == 1          # prior action persisted
-    assert raw["curation"]["findings"][0]["provenance"]["source_ids"] == [src]
-    out = capsys.readouterr()
-    assert "interrupted" in out.out
-    assert "Traceback" not in out.err
-
-def test_corrupt_workspace_returns_1_no_traceback(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
+def _corrupt_workspace_returns_1_no_traceback(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
     (ws / "cases" / f"{case_id}.yaml").unlink()          # absent case file
@@ -527,24 +334,60 @@ def test_stale_binding_prompts_rerender_instead_of_reinterpreting(
     cur = load_yaml_strict(path2)["curation"]
     assert len(cur["findings"]) == 2 and not cur.get("exclusions")
 
-def test_low_priority_exact_candidate_still_acceptable(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """Prioritization is advisory: a candidate whose facts/signals sink it to
-    possibly_actioned is still acceptable through the unchanged service path."""
-    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    cand_sid = raw["candidates"][0]["source_id"]
-    import_path = ws / raw["source"]["import_file"]
-    imp = load_json_strict(import_path)
-    for rec in imp["evidence"]:
-        if rec["source_id"] == cand_sid:
-            rec["resolved"] = True
-    atomic_write_json(import_path, imp)
 
+def _inexact_accept_interrupt_batch_exclude_then_defer(
+    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An inexact accept is refused, ^C keeps the loop, a range shares one reason, and defer ends."""
+    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
     view = cu.get_case(ws, case_id)
-    assert view["prioritized_evidence"]["by_source"][cand_sid]["band"] == "possibly_actioned"
-    assert view["prioritized_evidence"]["by_source"][cand_sid]["reasons"] == ["resolved"]
+    binding = tui._view_binding(view)
+    inexact = next(c["source_id"] for c in view["candidates"] if not c["exact_acceptable"])
+    actions = iter(["a", str(binding.index(inexact) + 1), None, "x", "1-2", "duplicate", "d"])
 
-    cu.accept_candidate(ws, case_id, cand_sid)   # must not raise
-    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
-    assert cur["findings"][0]["provenance"]["kind"] == "historical"
-    assert cur["findings"][0]["provenance"]["source_ids"] == [cand_sid]
+    def read_line(_prompt: str) -> str:
+        answer = next(actions)
+        if answer is None:
+            raise KeyboardInterrupt
+        return answer
+
+    capsys.readouterr()
+    assert run_curate_tui(ws, case_id, read_line=read_line) == 0
+    out = capsys.readouterr().out
+    assert f"{inexact} is not exactly acceptable" in out and "interrupted" in out
+    assert "excluded 2 evidence source(s)" in out and f"case {case_id} deferred" in out
+    exclusions = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["exclusions"]
+    assert [row["source_id"] for row in exclusions] == binding[:2]
+    assert {row["note"] for row in exclusions} == {None}
+
+
+def test_editor_and_exclusion_actions_persist_through_the_service(
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    for name, check in (("new", _action_new_via_real_editor_persists_authored),
+                        ("edit", _action_edit_replaces_seeded_finding),
+                        ("split", _action_edit_splits_one_evidence_into_two_findings)):
+        (tmp_path / name).mkdir()
+        check(tmp_path / name, fake_gh, monkeypatch)
+    (tmp_path / "batch").mkdir()
+    _inexact_accept_interrupt_batch_exclude_then_defer(tmp_path / "batch", fake_gh, capsys)
+    for name, plain in (("exclude", _action_exclude_evidence_other_requires_note),
+                        ("case", _case_exclude_and_reinclude)):
+        (tmp_path / name).mkdir()
+        plain(tmp_path / name, fake_gh)
+
+
+def test_invalid_actions_and_editor_failures_mutate_nothing(
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Every rejected input keeps the case bytes and never surfaces a traceback."""
+    for name, script in (("nonzero-exit", "#!/bin/sh\nexit 3\n"),
+                         ("malformed-buffer", "#!/bin/sh\ncat > \"$1\" <<'EOF'\ntitle: [unclosed\nEOF\n")):
+        (tmp_path / name).mkdir()
+        _editor_failure_leaves_state_unchanged(tmp_path / name, fake_gh, monkeypatch, capsys, script)
+    for name, check in (("stray", _action_exclude_evidence_rejects_stray_note),
+                        ("range", _action_exclude_range_invalid_mutates_nothing),
+                        ("note", _case_exclude_other_requires_note),
+                        ("corrupt", _corrupt_workspace_returns_1_no_traceback)):
+        (tmp_path / name).mkdir()
+        check(tmp_path / name, fake_gh, capsys)

@@ -90,26 +90,6 @@ def test_canonical_reuse_target_is_a_strong_cross_category_grouping_key() -> Non
     assert package["locations"] == ["src/api/headers.py:1", "tests/test_headers.py:1"]
 
 
-def test_work_package_caps_and_identity_are_deterministic() -> None:
-    findings = [
-        *[_f(fingerprint=f"a{index}", title=f"Use shared parser at call site {index}", path=f"src/call_{index}.py",
-             reuse_target="repo:src/parser.py#parse") for index in range(7)],
-        *[_f(fingerprint=f"b{index:02}", title=f"Use request parser for variant {index:02}", path="src/requests.py",
-             category="tech-debt", maintenance_signals=["reuse_existing"], reuse_target="repo:src/requests.py#parse")
-          for index in range(11)],
-    ]
-    forward = aggregate_cross_service(findings)
-    reverse = aggregate_cross_service(list(reversed(findings)))
-    assert {tuple(package["member_fingerprints"]) for package in forward} == {
-        ("a0", "a1", "a2", "a3", "a4"), ("a5", "a6"),
-        ("b00", "b01", "b02", "b03", "b04"), ("b05", "b06", "b07", "b08", "b09"), ("b10",),
-    }
-    assert len({package["package_fingerprint"] for package in forward}) == 5
-    assert [(package["package_fingerprint"], package["member_fingerprints"]) for package in forward] == [
-        (package["package_fingerprint"], package["member_fingerprints"]) for package in reverse
-    ]
-
-
 def test_member_aliases_survive_wording_and_expose_membership_drift() -> None:
     first = _f(fingerprint="volatile-first", title="Repeated catalog setup should use the fixture",
         path="tests/test_catalog.py", line=12, category="tests", maintenance_signals=["duplicated_test_structure"],

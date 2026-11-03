@@ -115,7 +115,7 @@ def test_unresolved_bot_inventory_accepts_only_viewer_proof(monkeypatch: pytest.
 # --- Prior diagram comments (issue #1113) ------------------------------------
 
 
-def test_fetch_prior_diagram_comments_harvests_nothing_without_a_bot_login(
+def test_unresolved_bot_login_harvests_nothing_and_minimize_reports_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """REST has no ``viewerDidAuthor``, so an unresolved login must not query at all."""
@@ -124,8 +124,7 @@ def test_fetch_prior_diagram_comments_harvests_nothing_without_a_bot_login(
     monkeypatch.setattr(git_ops, "gh_api", _forbidden)
     assert fetch_prior_diagram_comments(tmp_path, "o/r", 7, bot_login=None) == []
 
-def test_minimize_comment_reports_failure_instead_of_raising(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Every transport/shape failure is False; only a proven fold is True."""
+    # Every minimize transport/shape failure is False; only a proven fold is True.
     monkeypatch.setattr(
         git_ops, "gh_api", lambda *_a, **_k: {"data": {"minimizeComment": {"minimizedComment": {"isMinimized": True}}}},
     )

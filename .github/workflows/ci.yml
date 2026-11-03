@@ -278,6 +278,9 @@ jobs:
       - name: Lint workflows with actionlint
         run: make actionlint
 
+      - name: Run script unit tests
+        run: make test-scripts
+
       - name: Run tests
         # The coverage flags live in the `test` step (not in pyproject addopts),
         # so targeted runs like `pytest tests/foo.py` stay plain and never trip

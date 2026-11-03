@@ -41,9 +41,9 @@ def test_generated_seccomp_preserves_pinned_default_and_only_declared_bootstrap_
         assert len(indices) == len(set(indices)), rule
 
 
-@pytest.mark.parametrize('status', [200, 404])
-def test_seccomp_download_rejects_changed_or_unavailable_upstream(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
-    monkeypatch.setattr(httpx, 'get', lambda url, **kwargs: httpx.Response(
-        status, content=b'{}', request=httpx.Request('GET', url)))
-    with pytest.raises(ValueError if status == 200 else httpx.HTTPStatusError):
-        harbor_seccomp.seccomp_profile()
+def test_seccomp_download_rejects_changed_or_unavailable_upstream(monkeypatch: pytest.MonkeyPatch) -> None:
+    for status, error in ((200, ValueError), (404, httpx.HTTPStatusError)):
+        monkeypatch.setattr(httpx, 'get', lambda url, status=status, **kwargs: httpx.Response(
+            status, content=b'{}', request=httpx.Request('GET', url)))
+        with pytest.raises(error):
+            harbor_seccomp.seccomp_profile()

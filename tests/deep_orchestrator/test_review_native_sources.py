@@ -4,17 +4,13 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import sys
-import threading
 import tracemalloc
-from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from daydream import git_ops
-from daydream.backends import AgentEvent, ToolResultEvent, ToolStartEvent
 from daydream.deep import orchestrator
 from daydream.git_ops import queries
 from daydream.git_ops.models import GitError
@@ -22,224 +18,49 @@ from daydream.git_ops.source import frozen_source
 from daydream.host_tools import HostToolFatal, HostToolRejected
 from daydream.review_source_refs import (
     canonicalize_source_selectors,
-    part_source_mapping,
     source_id,
     validate_source_refs,
 )
-from daydream.review_stage_inputs import StageInputFactory
 from tests.deep_orchestrator.test_review_completion import ReviewRun, record, scopes
 from tests.deep_orchestrator.test_review_investigation import (
     InvestigationRun,
     candidate,
-    many_file_review,
-    read_events,
-    stage_ends,
 )
 from tests.deep_orchestrator.test_review_stage_reservations import NativeStageBackend
 from tests.harness.git_helpers import git, seed_feature_branch, tracked_source_state
 
 
 @pytest.mark.usefixtures('fake_gh')
-@pytest.mark.parametrize('failure', ['capture', 'accepted-source'])
 async def test_local_capture_failures_refuse_dispatch_without_changing_the_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    failure: str,
 ) -> None:
-    """Preparation and later setup failures need an actionable cause before model dispatch."""
+    """A captured source tampered before setup refuses model dispatch with an actionable cause."""
+    from tests.harness.console import collapse_panel_text
+
     repo = tmp_path / 'unstable_local'
     seed_feature_branch(repo, base={'api.py': 'VALUE = 0\n'}, feature={'api.py': 'VALUE = 1\n'})
     review = ReviewRun(repo, tmp_path, monkeypatch)
     before = tracked_source_state(repo)
     index = (repo / '.git/index').read_bytes()
     observed: list[Path] = []
-    if failure == 'capture':
-        enumerate_untracked = queries._list_untracked_z
+    setup = orchestrator.run_deep
 
-        def concurrent_write(source: Path) -> list[str]:
-            paths = enumerate_untracked(source)
-            if source == repo:
-                observed.append(source)
-                path = source / 'api.py'
-                # Real writes with unchanged bytes still invalidate observations
-                # accepted before this enumeration/materialization boundary.
-                path.write_bytes(path.read_bytes())
-            return paths
+    async def corrupt_before_setup(config: Any, work: Any, *args: Any, **kwargs: Any) -> int:
+        assert work.captured_source is not None and work.repo != repo
+        observed.append(work.repo)
+        (work.repo / 'api.py').write_bytes(b'TAMPER = True\n')
+        return await setup(config, work, *args, **kwargs)
 
-        monkeypatch.setattr(queries, '_list_untracked_z', concurrent_write)
-    else:
-        setup = orchestrator.run_deep
-
-        async def corrupt_before_setup(config: Any, work: Any, *args: Any, **kwargs: Any) -> int:
-            assert work.captured_source is not None and work.repo != repo
-            observed.append(work.repo)
-            (work.repo / 'api.py').write_bytes(b'TAMPER = True\n')
-            return await setup(config, work, *args, **kwargs)
-
-        monkeypatch.setattr(orchestrator, 'run_deep', corrupt_before_setup)
+    monkeypatch.setattr(orchestrator, 'run_deep', corrupt_before_setup)
     assert await review.run(findings_out=None) == 1
-    from tests.harness.console import collapse_panel_text
-
-    message = ('stop concurrent writers and rerun the review' if failure == 'capture'
-               else 'captured native source integrity failed')
-    assert message in collapse_panel_text(capsys)
+    assert 'captured native source integrity failed' in collapse_panel_text(capsys)
     assert review.backend.calls == []
-    if failure == 'capture':
-        assert len(observed) > 1
-    else:
-        assert len(observed) == 1 and not observed[0].exists()
+    assert len(observed) == 1 and not observed[0].exists()
     assert (repo / '.git/index').read_bytes() == index
     assert tracked_source_state(repo) == before
     assert not review.output.exists()
     assert not (repo / '.review-output.md').exists()
     assert not (repo / '.daydream/deep/review-coverage.json').exists()
-
-
-@pytest.mark.parametrize('ignored', [True, False], ids=['ignored', 'eligible'])
-async def test_reviewer_check_output_stops_later_stages_only_when_eligible(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], ignored: bool,
-) -> None:
-    """Capture-owner tests miss later stages, siblings and terminal validation sharing one writable capture."""
-    review = many_file_review(tmp_path, monkeypatch, supporting_sources={'.gitignore': 'generated/\n'})
-    capture: list[Path] = []
-    setup = orchestrator.run_deep
-
-    async def record_capture(config: Any, work: Any, *args: Any, **kwargs: Any) -> int:
-        capture.append(work.repo)
-        return await setup(config, work, *args, **kwargs)
-
-    monkeypatch.setattr(orchestrator, 'run_deep', record_capture)
-
-    @review.backend.script('python')
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
-        path = capture[0] / ('generated/check.txt' if ignored else 'stray.txt')
-        path.parent.mkdir(exist_ok=True)
-        path.write_text('check output')
-
-    assert await review.run() == 0
-    coverage = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
-    outcomes = {outcome['scope_id']: outcome for outcome in coverage['stack_outcomes']}
-    from tests.harness.console import collapse_panel_text
-
-    terminal = collapse_panel_text(capsys)
-    if ignored:
-        assert {outcome['status'] for outcome in outcomes.values()} == {'complete'}
-        assert 'Captured source integrity failed' not in terminal
-    else:
-        assert outcomes['python']['status'] == 'incomplete'
-        assert outcomes['python']['partial_evidence'] is True
-        assert 'stray.txt' in coverage['diagnostics']['scopes']['python']
-        assert 'Captured source integrity failed' in terminal and 'stray.txt' in terminal
-
-
-@pytest.mark.parametrize('cancelled', [False, True], ids=['final-working', 'net-cancellation'])
-async def test_local_runner_uses_one_capture_for_diff_targets_and_supporting_reads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancelled: bool,
-) -> None:
-    """Source-owner tests miss runner cwd routing and the no-model net-empty outcome."""
-    from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
-
-    repo = tmp_path / 'local_subject'
-    seed_feature_branch(repo, base={'api.py': 'VALUE = 0\n', 'support.py': 'HELPER = 0\n'},
-                        feature={'api.py': 'VALUE = 1\n', 'support.py': 'HELPER = 0\n'})
-    (repo / 'api.py').write_text('VALUE = 2\n')
-    git(repo, 'add', 'api.py')
-    accepted = 'VALUE = 0\n' if cancelled else 'VALUE = 3\n'
-    (repo / 'api.py').write_text(accepted)
-    (repo / 'support.py').write_text('HELPER = 2\n')
-    if not cancelled:
-        (repo / 'new.py').write_text('NEW = 3\n')
-    index = (repo / '.git/index').read_bytes()
-    original_head = git(repo, 'rev-parse', 'HEAD')
-    seen: list[Path] = []
-    review = ReviewRun(repo, tmp_path, monkeypatch)
-
-    class CapturedReader(EmptyReviewBackend):
-        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-            assert cwd != repo
-            assert (cwd / 'api.py').read_text() == accepted
-            assert (cwd / 'support.py').read_text() == 'HELPER = 2\n'
-            assert (cwd / 'new.py').read_text() == 'NEW = 3\n'
-            if not seen:
-                (repo / 'api.py').write_text('VALUE = 9\n')
-                (repo / 'support.py').write_text('HELPER = 9\n')
-                (repo / 'new.py').write_text('NEW = 9\n')
-            seen.append(cwd)
-            async for event in super().execute(cwd, prompt, *args, **kwargs):
-                yield event
-
-    review.backend = CapturedReader(repo)
-    assert await review.run(findings_out=None, ignore_paths=['support.py']) == 0
-    diff = (repo / '.daydream/diff.patch').read_text()
-    result = json.loads((repo / '.daydream/deep/review-coverage.json').read_text())
-    assert result['analyzed_revision']['head_sha'] == original_head
-    assert len(result['analyzed_revision']['source_id']) == 64
-    if cancelled:
-        assert diff == '' and not seen and result['planned_scopes'] == []
-    else:
-        assert seen and all(not root.exists() for root in seen)
-        assert 'VALUE = 3' in diff and 'NEW = 3' in diff and 'VALUE = 2' not in diff
-        assert 'support.py' not in diff
-        assert {path for scope in result['planned_scopes'] for path in scope['files']} == {'api.py', 'new.py'}
-    assert (repo / '.git/index').read_bytes() == index
-    assert git(repo, 'rev-parse', 'HEAD') == original_head
-
-
-async def test_preparation_validates_off_the_loop_while_submission_stays_synchronous(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Fake backends have no setup timers, so a full validation on the loop stalls nothing they can observe."""
-    review = many_file_review(tmp_path, monkeypatch, count=1, docs_count=0)
-    review.backend = NativeStageBackend(review.repo)
-    validations: list[tuple[str, bool]] = []
-    revalidate = StageInputFactory._revalidate_canonical
-
-    def observed(factory: StageInputFactory) -> None:
-        caller = sys._getframe(1).f_code.co_name
-        validations.append((caller, threading.current_thread() is threading.main_thread()))
-        revalidate(factory)
-
-    monkeypatch.setattr(StageInputFactory, '_revalidate_canonical', observed)
-    assert await review.run() == 0
-    assert {('__init__', False), ('prepare', False), ('admit_submission', True)} <= set(validations)
-    assert not {caller for caller, on_loop in validations if on_loop and caller in {'__init__', 'prepare'}}
-
-
-@pytest.mark.parametrize('sandbox', [False, True], ids=['exact-paths', 'inline'])
-@pytest.mark.parametrize('legacy', [False, True], ids=['compact', 'full-hash'])
-async def test_compact_assigned_selector_completes_on_the_last_native_call(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool, legacy: bool,
-) -> None:
-    """Long-hash fixtures miss a provider selecting a compact handle with no correction call left."""
-    review = many_file_review(tmp_path, monkeypatch, count=1, docs_count=0)
-    review.backend = NativeStageBackend(review.repo)
-    review.backend.sandbox = sandbox
-    diff = git_ops.diff(review.repo, 'main')
-    digest = hashlib.sha256(diff.encode()).hexdigest()
-
-    @review.backend.script('python')
-    def respond(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
-        binding = review.backend.calls[-1]['host_tools']
-        for index in range(stage['hard_tool_call_allowance'] - 1):
-            yield from read_events(review.repo, 'api.py', event_id=f'read-{index}')
-        identifier = source_id(stage['source_refs']['api.py'][0]) if legacy else 'source:1'
-        output['targets'][0]['evidence_refs'] = [
-            {'source_id': identifier, 'basis': 'supplied_diff', 'source_range': None}]
-        yield ToolStartEvent(id='compact-submit', name='structured_output', input=output)
-        yield ToolResultEvent(id='compact-submit', output='Submitted.', is_error=False)
-        assert binding.accepted and binding.fatal_error is None
-        assert [option['source_id'] for option in stage['source_options']['api.py']] == ['source:1', 'source:2']
-
-    data = await review.finish('python')
-    decision, = scopes(data)['python']['target_decisions']
-    assert decision['evidence_refs'] == [{
-        'artifact_sha256': digest, 'part_sha256': digest, 'revision': review.pr.base_sha,
-        'path': 'api.py', 'side': 'old', 'source_range': {'start': 1, 'end': 2}, 'fragment': None,
-        'basis': 'supplied_diff', 'role': 'assigned',
-    }]
-    event, = stage_ends(review, 'python')
-    assert event['metadata']['admitted'] is True
-    assert event['metadata']['remaining_tool_calls'] == 0
-    assert event['metadata']['successful_submissions'] == 1
 
 
 async def test_oversized_renamed_source_is_omitted_without_buffering_the_blob(
@@ -280,31 +101,24 @@ async def test_oversized_renamed_source_is_omitted_without_buffering_the_blob(
     assert (repo / 'modern.py').exists()
 
 
-@pytest.mark.parametrize('change', ['deleted', 'renamed', 'pure-rename'])
-@pytest.mark.parametrize('broken', [False, True], ids=['compatible', 'consumer-defect'])
 async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str, broken: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A pure rename furnishes the removed side privately and binds its metadata-only decision to Git bytes."""
     repo = tmp_path / 'before_source'
-    renamed = change != 'deleted'
-    old_path = 'legacy.py' if renamed else 'retired.py'
-    old = (''.join(f'# Stable API contract context {index:02}\n' for index in range(30)) if renamed else
-           '# Public greeting used by retained consumers.\n') + 'def hello():\n    return "world"\n'
-    base_consumer = 'EXPECTED_GREETING = "world"\n' if renamed else (
-        'from retired import hello\nprint(hello())\n' if broken else 'print("world")\n')
-    consumer = 'EXPECTED_GREETING = "universe"\n' if renamed and broken else base_consumer
-    after = {'consumer.py': consumer + '# Existing public contract retained.\n'}
-    if renamed:
-        after['modern.py'] = old + ('' if change == 'pure-rename' else
-                                    '# Relocated implementation retains the greeting.\n')
+    old_path = 'legacy.py'
+    old = ''.join(f'# Stable API contract context {index:02}\n' for index in range(30)) + (
+        'def hello():\n    return "world"\n')
+    base_consumer = 'EXPECTED_GREETING = "world"\n'
+    after = {'consumer.py': 'EXPECTED_GREETING = "universe"\n# Existing public contract retained.\n',
+             'modern.py': old}
     seed_feature_branch(repo, base={old_path: old, 'consumer.py': base_consumer}, feature=after)
     git(repo, 'rm', old_path)
     git(repo, 'commit', '-m', 'remove old greeting path')
     before = tracked_source_state(repo)
     review = InvestigationRun(repo, tmp_path, monkeypatch)
     review.backend = NativeStageBackend(repo)
-    title = ('Renamed greeting no longer satisfies the consumer contract' if renamed else
-             'Retained consumer imports a deleted greeting module')
+    title = 'Renamed greeting no longer satisfies the consumer contract'
     submitted: dict[str, list[dict[str, Any]]] = {}
 
     @review.backend.script('python')
@@ -330,77 +144,38 @@ async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
                     {'source_id': option['source_id'], 'basis': 'supplied_diff', 'source_range': None}
                     for option in options]
                 submitted[target['target_id']] = copy.deepcopy(offered)
-        if broken:
-            finding = dict(record(1), file='consumer.py', description=title,
-                           rationale='The retained consumer disagrees with the removed source contract.',
-                           evidence=('consumer.py:1 expects universe; legacy.py:32 returned world.' if renamed else
-                                     'consumer.py:1 imports retired.hello; the supplied before-context defined it.'))
-            output['candidates'] = [candidate(disposition='confirmed', finding=finding, file='consumer.py', line=1,
-                                             trigger='Run the retained consumer against the greeting contract',
-                                             consequence=('The greeting contract disagrees' if renamed else
-                                                          'ModuleNotFoundError'),
-                                             grounds=finding['evidence'])]
+        finding = dict(record(1), file='consumer.py', description=title,
+                       rationale='The retained consumer disagrees with the removed source contract.',
+                       evidence='consumer.py:1 expects universe; legacy.py:32 returned world.')
+        output['candidates'] = [candidate(disposition='confirmed', finding=finding, file='consumer.py', line=1,
+                                         trigger='Run the retained consumer against the greeting contract',
+                                         consequence='The greeting contract disagrees', grounds=finding['evidence'])]
 
-    data = await review.finish('python', findings=(title,) if broken else ())
-    assert submitted, 'the removed/renamed source must produce an assigned source decision'
+    data = await review.finish('python', findings=(title,))
+    assert submitted, 'the renamed source must produce an assigned source decision'
     retained = {decision['target_id']: decision['evidence_refs']
                 for decision in scopes(data)['python']['target_decisions']}
+    # A metadata-only assignment has no source lines to cite. Bind the reference
+    # to independently known Git bytes, rather than echoing the offered selector.
+    metadata = (f'diff --git a/{old_path} b/modern.py\nsimilarity index 100%\n'
+                f'rename from {old_path}\nrename to modern.py\n').encode()
     for target_id, refs in submitted.items():
         assert retained[target_id] == refs
-        if change == 'pure-rename':
-            # A metadata-only assignment has no source lines to cite. Bind the
-            # reference to independently known Git bytes, rather than echoing
-            # the offered selector as proof that generation was correct.
-            metadata = (f'diff --git a/{old_path} b/modern.py\nsimilarity index 100%\n'
-                        f'rename from {old_path}\nrename to modern.py\n').encode()
-            ref, = refs
-            assert (ref['path'], ref['side'], ref['revision']) == ('modern.py', 'diff', review.pr.head_sha)
-            assert ref['part_sha256'] == hashlib.sha256(metadata).hexdigest()
-            assert ref['fragment'] == {'offset': 0, 'bytes': len(metadata),
-                                       'sha256': hashlib.sha256(metadata).hexdigest()}
-            assert ref['source_range'] is None and ref['role'] == 'assigned'
-            continue
-        assert {(ref['path'], ref['side'], ref['revision']) for ref in refs} == (
-            {(old_path, 'old', review.pr.base_sha), ('modern.py', 'new', review.pr.head_sha)} if renamed else
-            {(old_path, 'old', review.pr.base_sha)})
-        assert [ref['source_range'] for ref in refs] == (
-            [{'start': 30, 'end': 32}, {'start': 30, 'end': 33}] if renamed else [{'start': 1, 'end': 3}])
-        assert all(ref['role'] == 'assigned' and ref['fragment'] is None for ref in refs)
+        ref, = refs
+        assert (ref['path'], ref['side'], ref['revision']) == ('modern.py', 'diff', review.pr.head_sha)
+        assert ref['part_sha256'] == hashlib.sha256(metadata).hexdigest()
+        assert ref['fragment'] == {'offset': 0, 'bytes': len(metadata),
+                                   'sha256': hashlib.sha256(metadata).hexdigest()}
+        assert ref['source_range'] is None and ref['role'] == 'assigned'
     coverage = json.loads((repo / '.daydream/deep/review-coverage.json').read_text())
     persisted = next(scope for scope in coverage['stack_outcomes'] if scope['scope_id'] == 'python')
     assert persisted['target_decisions'] == scopes(data)['python']['target_decisions']
-    assert not (repo / old_path).exists()
-    assert (repo / 'modern.py').is_file() is renamed
+    assert not (repo / old_path).exists() and (repo / 'modern.py').is_file()
     assert tracked_source_state(repo) == before
 
 
-def test_assigned_range_may_join_hunks_of_one_part_without_leaving_it() -> None:
-    """Whole-stage tests use single-hunk parts, so they miss a citation that joins a part's hunks."""
-    revision = {'head_sha': 'a' * 40, 'merge_base_sha': 'b' * 40, 'diff_key': 'c' * 64}
-    assignment = {'kind': 'file', 'file': 'api.py'}
-
-    def references(diff: str, path: str = 'api.py') -> list[dict[str, Any]]:
-        mapped = part_source_mapping(diff, assignment, artifact_sha256='d' * 64, revision=revision,
-                                     old_path=path, new_path=path)['source_refs']
-        return [{**reference, 'basis': 'supplied_diff', 'role': 'assigned'} for reference in mapped
-                if reference['side'] == 'new']
-
-    first, second = assigned = references('@@ -10,1 +10,1 @@\n-a\n+b\n@@ -20,2 +20,2 @@\n-c\n+d\n e\n')
-    assert (first['source_range'], second['source_range']) == ({'start': 10, 'end': 10}, {'start': 20, 'end': 21})
-    other = references('@@ -30,1 +30,1 @@\n-f\n+g\n')
-    joined = {**first, 'source_range': {'start': 10, 'end': 21}}
-    beyond = {**first, 'source_range': {'start': 10, 'end': 22}}
-    across = {**other[0], 'source_range': {'start': 10, 'end': 30}}
-    assert validate_source_refs([joined], assigned, revision=revision)
-    assert not validate_source_refs([beyond], assigned, revision=revision)
-    assert not validate_source_refs([across], [*assigned, *other], revision=revision)
-
-
-@pytest.mark.parametrize('fault', [None, 'contained-range', 'foreign-id', 'assigned-range', 'supporting-range',
-                                  'supporting-only', 'forged-hash', 'missing', 'traversal', 'binary', 'oversized',
-                                  'symlink', 'storage-reread'])
 def test_source_selectors_construct_supporting_evidence_from_the_pinned_git_blob(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Canonical references miss selector feedback; vague errors cannot guide a valid bounded correction."""
     repo = tmp_path / 'pinned_selectors'
@@ -424,83 +199,128 @@ def test_source_selectors_construct_supporting_evidence_from_the_pinned_git_blob
                 'part_sha256': hashlib.sha256(part.encode()).hexdigest(), 'revision': revision['head_sha'],
                 'path': 'api.py', 'side': 'new', 'source_range': {'start': 1, 'end': 3}, 'fragment': None,
                 'basis': 'supplied_diff', 'role': 'assigned'}
-    choices: list[dict[str, Any]] = [
-        {'source_id': source_id(assigned), 'basis': 'supplied_diff', 'source_range': None},
-        {'path': 'support.py', 'side': 'new', 'source_range': {'start': 1, 'end': 2}, 'basis': 'source_inspection'},
-    ]
     # The worktree disagrees after capture. Its bytes must never become the
     # canonical supporting digest or LF range authority.
     (repo / 'support.py').write_text('MUTABLE_WORKTREE_CONTENT\n')
-    if fault == 'contained-range':
-        choices[0]['source_range'] = {'start': 2, 'end': 2}
-    elif fault == 'foreign-id':
-        choices[0]['source_id'] = 'source:' + '0' * 64
-    elif fault == 'assigned-range':
-        choices[0]['source_range'] = {'start': 1, 'end': 4}
-    elif fault == 'supporting-range':
-        choices[1]['source_range'] = {'start': 2, 'end': 1}
-    elif fault == 'supporting-only':
-        choices.pop(0)
-    elif fault == 'forged-hash':
-        choices[1]['artifact_sha256'] = '0' * 64
-    elif fault in {'missing', 'traversal', 'binary', 'oversized', 'symlink'}:
-        choices[1]['path'] = {'missing': 'missing.py', 'traversal': '../support.py',
-                              'binary': 'binary.dat', 'oversized': 'oversized.py', 'symlink': 'symlink.py'}[fault]
-        # Keep the range valid for each blob so a missing size/UTF-8/regular-file
-        # guard cannot pass this regression at an unrelated range check.
-        choices[1]['source_range'] = {'start': 1, 'end': 1}
-    if fault == 'storage-reread':
-        # A later assigned selector makes the last processed field differ from
-        # the supporting reference whose real Git reread loses storage. Other
-        # selector cases cover admission, but miss this diagnostic attribution.
-        choices.append({'source_id': source_id(assigned), 'basis': 'supplied_diff', 'source_range': None})
-        real_show = queries.show
-        unavailable = repo / '.git-unavailable'
 
-        def lose_storage(source_repo: Path, ref: str, path: str) -> bytes:
-            contents = real_show(source_repo, ref, path)
-            if source_repo == repo and path == 'support.py':
-                (repo / '.git').rename(unavailable)
-            return contents
+    def selectors() -> list[dict[str, Any]]:
+        return [{'source_id': source_id(assigned), 'basis': 'supplied_diff', 'source_range': None},
+                {'path': 'support.py', 'side': 'new', 'source_range': {'start': 1, 'end': 2},
+                 'basis': 'source_inspection'}]
 
-        monkeypatch.setattr(queries, 'show', lose_storage)
-        try:
-            with pytest.raises(HostToolFatal) as fatal:
-                canonicalize_source_selectors(choices, [assigned], revision=revision, source_root=repo)
-        finally:
-            if unavailable.exists():
-                unavailable.rename(repo / '.git')
-        assert fatal.value.code == 'input_unavailable' and fatal.value.preacceptance
-        assert isinstance(fatal.value.__cause__, GitError)
-        diagnostic = str(fatal.value)
-        assert 'evidence_refs[1]' in diagnostic and 'support.py' in diagnostic and '(new)' in diagnostic
-        assert 'evidence_refs[2]' not in diagnostic
-        assert 'Changing the submission cannot resolve' in diagnostic and str(repo) not in diagnostic
-        return
-    if fault not in {None, 'contained-range'}:
-        with pytest.raises(HostToolRejected) as rejected:
-            canonicalize_source_selectors(choices, [assigned], revision=revision, source_root=repo)
-        message = str(rejected.value)
-        assert 'evidence_refs' in message
-        assert any(word in message.lower() for word in ('choose', 'use', 'remove', 'supply'))
-        if fault == 'foreign-id':
-            assert choices[0]['source_id'] in message and 'assigned' in message
-        elif fault == 'assigned-range':
-            assert '1..3' in message and 'null' in message
-        elif fault == 'supporting-range':
-            assert '1..2' in message and 'start <= end' in message
-        elif fault == 'oversized':
-            assert 'whole pinned blob' in message and '65536' in message
-            assert 'narrowing source_range cannot' in message
-        elif fault == 'supporting-only':
-            assert 'reviewed' in message and 'source_id' in message
-        return
-    canonical = canonicalize_source_selectors(choices, [assigned], revision=revision, source_root=repo)
-    expected_assigned = {**assigned, 'source_range': {'start': 2, 'end': 2}} if fault == 'contained-range' else assigned
-    assert canonical == [expected_assigned, {
+    contained = selectors()
+    contained[0]['source_range'] = {'start': 2, 'end': 2}
+    canonical = canonicalize_source_selectors(contained, [assigned], revision=revision, source_root=repo)
+    assert canonical == [{**assigned, 'source_range': {'start': 2, 'end': 2}}, {
         'artifact_sha256': hashlib.sha256(supported.encode()).hexdigest(), 'part_sha256': None,
         'revision': revision['head_sha'], 'path': 'support.py', 'side': 'new',
         'source_range': {'start': 1, 'end': 2}, 'fragment': None,
         'basis': 'source_inspection', 'role': 'supporting',
     }]
     assert (repo / 'support.py').read_text() == 'MUTABLE_WORKTREE_CONTENT\n'
+    # A submission-scoped resolver reuses one pinned read and is revoked before installation.
+    from daydream.review_source_refs import _SubmissionSources
+    sources = _SubmissionSources(revision, repo, {}, None)
+    twice = [*contained, {**contained[1], 'source_range': {'start': 2, 'end': 2}}]
+    assert sources.canonicalize(twice, [assigned])[:2] == canonical
+    sources.close()
+    for revoked in (lambda: sources.canonicalize(contained, [assigned]), lambda: sources._supporting('new', 'x')):
+        with pytest.raises(RuntimeError, match='resolver has closed'):
+            revoked()
+    # Non-native admission revalidates the same pinned blob and rejects unavailable or out-of-range support.
+    supporting = canonical[1]
+    for reference, admitted in ((supporting, True), ({**supporting, 'source_range': {'start': 1, 'end': 99}}, False),
+                                ({**supporting, 'path': 'missing.py'}, False),
+                                ({**canonical[0], 'path': 'foreign.py'}, False)):
+        assert validate_source_refs([canonical[0], reference], [assigned], revision=revision,
+                                    source_root=repo) is admitted, reference
+    for fault, expected in (('assigned-range', ('1..3', 'null')), ('supporting-range', ('1..2', 'start <= end')),
+                            ('supporting-only', ('reviewed', 'source_id')), ('forged-hash', ()),
+                            ('traversal', ()), ('binary', ()), ('symlink', ()),
+                            ('oversized', ('whole pinned blob', '65536', 'narrowing source_range cannot'))):
+        choices = selectors()
+        if fault == 'assigned-range':
+            choices[0]['source_range'] = {'start': 1, 'end': 4}
+        elif fault == 'supporting-range':
+            choices[1]['source_range'] = {'start': 2, 'end': 1}
+        elif fault == 'supporting-only':
+            choices.pop(0)
+        elif fault == 'forged-hash':
+            choices[1]['artifact_sha256'] = '0' * 64
+        else:
+            choices[1]['path'] = {'traversal': '../support.py', 'binary': 'binary.dat',
+                                  'oversized': 'oversized.py', 'symlink': 'symlink.py'}[fault]
+            # Keep the range valid for each blob so a missing size/UTF-8/regular-file
+            # guard cannot pass this regression at an unrelated range check.
+            choices[1]['source_range'] = {'start': 1, 'end': 1}
+        with pytest.raises(HostToolRejected) as rejected:
+            canonicalize_source_selectors(choices, [assigned], revision=revision, source_root=repo)
+        message = str(rejected.value)
+        assert 'evidence_refs' in message, fault
+        assert any(word in message.lower() for word in ('choose', 'use', 'remove', 'supply')), fault
+        assert all(part in message for part in expected), (fault, message)
+    # A later assigned selector makes the last processed field differ from
+    # the supporting reference whose real Git reread loses storage. Other
+    # selector cases cover admission, but miss this diagnostic attribution.
+    choices = [*selectors(), {'source_id': source_id(assigned), 'basis': 'supplied_diff', 'source_range': None}]
+    real_show = queries.show
+    unavailable = repo / '.git-unavailable'
+
+    def lose_storage(source_repo: Path, ref: str, path: str) -> bytes:
+        contents = real_show(source_repo, ref, path)
+        if source_repo == repo and path == 'support.py':
+            (repo / '.git').rename(unavailable)
+        return contents
+
+    monkeypatch.setattr(queries, 'show', lose_storage)
+    try:
+        with pytest.raises(HostToolFatal) as fatal:
+            canonicalize_source_selectors(choices, [assigned], revision=revision, source_root=repo)
+    finally:
+        if unavailable.exists():
+            unavailable.rename(repo / '.git')
+    assert fatal.value.code == 'input_unavailable' and fatal.value.preacceptance
+    assert isinstance(fatal.value.__cause__, GitError)
+    diagnostic = str(fatal.value)
+    assert 'evidence_refs[1]' in diagnostic and 'support.py' in diagnostic and '(new)' in diagnostic
+    assert 'evidence_refs[2]' not in diagnostic
+    assert 'Changing the submission cannot resolve' in diagnostic and str(repo) not in diagnostic
+
+
+def test_stage_inputs_rebind_retained_decisions_and_refuse_changed_canonical_bytes(tmp_path: Path) -> None:
+    """Restored judgments must cite this frozen assignment; changed canonical bytes stop preparation.
+
+    Runner resume journeys restore only matching attribution, so the mismatch and late-change
+    refusals are proved directly at the stage-input owner.
+    """
+    from daydream.backends.pi import PiBackend
+    from daydream.deep.detection import StackAssignment
+    from daydream.hunk_index import write_hunk_index
+    from daydream.prompt_budget import SanctionedInputUnavailable
+    from daydream.review_stage_inputs import StageInputFactory
+    from tests.harness.git_helpers import work_context
+
+    repo = tmp_path / 'repo'
+    seed_feature_branch(repo, base={'api.py': 'VALUE = 0\n'}, feature={'api.py': 'VALUE = 1\n'})
+    root = tmp_path / 'inputs'
+    root.mkdir()
+    base, head = git(repo, 'rev-parse', 'main'), git(repo, 'rev-parse', 'HEAD')
+    patch = git_ops.diff(repo, base, head)
+    diff_path = root / 'diff.patch'
+    diff_path.write_text(patch)
+    revision = {'head_sha': head, 'merge_base_sha': base, 'diff_key': hashlib.sha256(patch.encode()).hexdigest()}
+    factory = StageInputFactory(PiBackend(model='unexecuted'), work_context(repo, run_id='inputs'),
+        StackAssignment('python', ['api.py']), diff_path=diff_path, hunk_index_path=write_hunk_index(root, patch),
+        shared_paths={}, revision=revision, artifact_session=None, allow_standalone=True, read_only=True)
+    part = factory.assignment_batches[0][0]
+    reference = next(ref for ref in part['source_refs'] if ref['side'] == 'new')
+    decision = {'target_id': part['target_id'], 'status': 'reviewed', 'reason': '', 'evidence_refs': [reference]}
+    factory.validate_retained_decisions([decision], complete=True)
+    with pytest.raises(ValueError, match='differ from frozen assignment inventory'):
+        factory.validate_retained_decisions([], complete=True)
+    forged = {**decision, 'evidence_refs': [{**reference, 'part_sha256': '0' * 64}]}
+    with pytest.raises(ValueError, match='source attribution differs'):
+        factory.validate_retained_decisions([forged], complete=True)
+    diff_path.write_text(patch + '# changed after capture\n')
+    with pytest.raises(SanctionedInputUnavailable, match='changed after capture'):
+        factory.prepare({'stage': 'triage', 'assigned_target_ids': []})

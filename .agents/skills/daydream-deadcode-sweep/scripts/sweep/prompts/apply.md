@@ -37,8 +37,8 @@ prefer the largest well-supported changes that can be finished and verified.
 File moves, whitespace removal, compressed statements, fixture minification, and
 documentation cuts that conceal code growth do not qualify as simplification.
 
-New implementation code, helpers, and meaningful tests are allowed when required
-for the smaller design. Preserve supported behavior; feature removal is outside
+New implementation code and helpers are allowed when required for the smaller
+design; new tests must meet AGENTS.md's testing standard. Preserve supported behavior; feature removal is outside
 scope. Migrate callers completely and remove the old path rather than keeping an
 unnecessary compatibility alias. Afterward inspect newly orphaned imports, types,
 parameters, tests, fixtures, schemas, configuration, and dependencies.
@@ -73,8 +73,8 @@ line, to __APPLY_DIR__/tests-__CHUNK_LABEL__.txt. Include unchanged consumers of
 changed production code/shared helpers. Exclude deleted files. The root and
 rl/daydream_review projects use separate environments.
 
-Run the smallest meaningful affected tests while implementing. Add characterization
-tests when a substantial refactor lacks evidence for an important existing behavior.
+Run the smallest meaningful affected tests while implementing. When a substantial
+refactor lacks evidence for an important existing behavior, extend an existing test.
 The coordinator follows the skill's verification procedure, including the final
 make check.
 Normal pre-push hooks still run make check; avoid duplicating the entire suite per

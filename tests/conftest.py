@@ -5,7 +5,6 @@ import os
 import re
 import sys
 import tempfile
-import tomllib
 from collections.abc import Callable, Iterator
 from functools import wraps
 from pathlib import Path
@@ -47,6 +46,16 @@ os.environ.update({
     "GIT_CONFIG_KEY_0": "commit.gpgsign", "GIT_CONFIG_VALUE_0": "false",
     "GIT_CONFIG_KEY_1": "core.excludesFile", "GIT_CONFIG_VALUE_1": "/dev/null",
 })
+
+
+
+def _fsync_without_durability(fd: Any) -> None:
+    """Keep fsync's bad-descriptor failure; no test can observe power-loss durability."""
+    os.fstat(fd if isinstance(fd, int) else fd.fileno())
+
+
+# Fsync is a large share of a real-path run. Fault tests patch over this seam.
+os.fsync = _fsync_without_durability
 
 # Real-Git fixtures share tests.harness.git_helpers.
 
@@ -217,12 +226,6 @@ def improve_branch_target(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def improve_branch_two_services_target(tmp_path: Path) -> Path:
-    """Improve monorepo whose feature branch changes billing AND catalog."""
-    return _improve_monorepo(tmp_path, "improve_branch_two", with_web=False, branch_changes=("billing", "catalog"))
-
-
-@pytest.fixture
 def multi_stack_target(tmp_path: Path) -> Path:
     """Feature-branch diff with one Python, React, and Markdown file."""
     return _feature_repo(tmp_path, "multi_stack", {
@@ -234,16 +237,6 @@ def multi_stack_target(tmp_path: Path) -> Path:
         "App.tsx": 'import React from "react"; export const App = () => <div>universe</div>;\n',
         "README.md": "# Project\n\nUpdated.\n",
     })
-
-
-@pytest.fixture
-def shard_many_python_target(tmp_path: Path) -> Path:
-    """Three changed Python files plus docs, allowing max_files to force sharding."""
-    before = {f"mod{i}.py": f"def f{i}():\n    return {i}\n" for i in range(3)}
-    before["README.md"] = "# Project\n"
-    after = {f"mod{i}.py": f"def f{i}():\n    return 'x{i}'\n" for i in range(3)}
-    after["README.md"] = "# Project\n\nUpdated.\n"
-    return _feature_repo(tmp_path, "shard_many", before, after)
 
 
 @pytest.fixture
@@ -265,18 +258,6 @@ def sibling_frontier_target(tmp_path: Path) -> Path:
     }
     after["core.py"] = "def core_helper():\n    return 1\n# v2\n"
     return _feature_repo(tmp_path, "canary", before, after)
-
-
-@pytest.fixture
-def rust_wire_target(tmp_path: Path) -> Path:
-    """Rust and Markdown diff exercising Rust and generic wire-contract prompts."""
-    return _feature_repo(tmp_path, "rust_wire", {
-        "src/main.rs": "fn main() {\n    println!(\"hi\");\n}\n",
-        "README.md": "# Project\n",
-    }, {
-        "src/main.rs": "fn main() {\n    println!(\"hello from wire\");\n}\n",
-        "README.md": "# Project\n\nUpdated.\n",
-    })
 
 
 @pytest.fixture
@@ -406,12 +387,8 @@ def _isolate_github_app_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_github_cli_env(
-    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Hide host gh credentials; explicit test auth and live opt-ins remain available."""
-    if request.node.get_closest_marker("live_gh") is not None:
-        return
+def _isolate_github_cli_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hide host gh credentials; explicit test auth remains available."""
     for name in (
         "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST", "GH_REPO",
     ):
@@ -607,26 +584,6 @@ def no_ci_remote(fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     harness.finish()
 
 
-def improve_fixture_service(apps_dir: Path) -> str:
-    """Choose the first service whose pyproject starts with [project].
-
-    Host evidence quotes line 1 verbatim, so reject a scaffold with no service
-    or an incompatible first line instead of silently changing attribution."""
-    service_entries: list[Path] = []
-    if apps_dir.is_dir():
-        service_entries = sorted(p for p in apps_dir.iterdir() if p.is_dir() and (p / "pyproject.toml").is_file())
-    if not service_entries:
-        raise AssertionError("improve_monorepo_target fixture must contain at least one "
-            "service directory under apps/"
-        )
-    chosen = service_entries[0]
-    if chosen.joinpath("pyproject.toml").read_text(encoding="utf-8").splitlines()[:1] != ["[project]"]:
-        raise AssertionError(f"improve_monorepo_target service {chosen.name!r} must declare "
-            "'[project]' on pyproject.toml line 1 to anchor host evidence"
-        )
-    return chosen.name
-
-
 # Harbor assets use bare verifier_core imports without a daydream dependency.
 # Load the canonical module under that name, matching compiled-task resolution.
 _TEMPLATES = Path(__file__).resolve().parents[1] / "daydream" / "benchmark" / "harbor" / "templates"
@@ -658,19 +615,3 @@ def sr_module() -> Any:
 
 
 
-def improve_fixture_test_command_anchor(pyproject: Path) -> int:
-    """Find the exact test-command key after validating its TOML value.
-
-    The value must be uv run pytest; prefix matches such as test-command-timeout
-    must not provide the evidence anchor."""
-    cfg = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    if cfg.get("tool", {}).get("daydream", {}).get("test-command") != "uv run pytest":
-        raise AssertionError("improve_monorepo_target fixture must declare test command "
-            "'uv run pytest' in its root pyproject.toml"
-        )
-    for line_number, line in enumerate(pyproject.read_text(encoding="utf-8").splitlines(), 1):
-        if line.strip().split("=", 1)[0].strip() == "test-command":
-            return line_number
-    raise AssertionError("improve_monorepo_target fixture must declare test command "
-        "'uv run pytest' in its root pyproject.toml"
-    )

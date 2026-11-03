@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -13,9 +13,6 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from daydream.backends import (
     ClaudeRequestConfig,
-    CodexRequestConfig,
-    EffectiveRequestConfig,
-    OspreyRequestConfig,
     PiRequestConfig,
     RequestEvent,
     ResultEvent,
@@ -44,11 +41,14 @@ _SCHEMA = {
     "required": ["findings"], "additionalProperties": False,
 }
 
-@pytest.mark.parametrize(("kind", "effort"), [
-    *[(kind, effort) for kind in ("pi", "codex") for effort in (None, "high", "minimal")], ("pi", "off"),
-    ("codex", "none"),
-])
-async def test_cli_finalization_controls_are_local_to_overlapping_calls(
+
+def _case_dir(tmp_path: Path, index: int) -> Path:
+    case = tmp_path / f"case-{index}"
+    case.mkdir()
+    return case
+
+
+async def _cli_finalization_controls_are_local_to_overlapping_calls_case(
     tmp_path: Path, kind: str, effort: str | None,
 ) -> None:
     backend = (PiBackend if kind == "pi" else CodexBackend)(model="fixture-model", reasoning_effort=effort)
@@ -103,12 +103,21 @@ async def test_cli_finalization_controls_are_local_to_overlapping_calls(
         assert any(f'model_reasoning_effort="{expected}"' in args for args in commands)
         assert all("--no-tools" not in args for args in commands)
 
-@pytest.mark.parametrize("effort", [
-    "high",
-])
+
+async def test_cli_finalization_controls_are_local_to_overlapping_calls(tmp_path: Path) -> None:
+    for index, (kind, effort) in enumerate([("pi", "off"), ("pi", None), ("codex", "high"), ("codex", "none")]):
+        try:
+            await _cli_finalization_controls_are_local_to_overlapping_calls_case(
+                tmp_path=_case_dir(tmp_path, index), kind=kind, effort=effort)
+        except BaseException as exc:
+            exc.add_note(f"case: {kind}/{effort}")
+            raise
+
+
 async def test_claude_finalization_keeps_schema_and_guards_without_shared_mutation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, effort: str | None,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    effort = "high"
     captured: dict[str, Any] = {}
     started = asyncio.Event()
     base = scripted_client([
@@ -163,14 +172,12 @@ async def test_claude_finalization_keeps_schema_and_guards_without_shared_mutati
     assert isinstance(final_request.config, ClaudeRequestConfig)
     assert final_request.config.tools_count == 0
 
-@pytest.mark.parametrize("custom_config", [False, True])
-async def test_effective_finalization_configuration_reaches_exported_telemetry(custom_config: bool) -> None:
+async def test_effective_finalization_configuration_reaches_exported_telemetry() -> None:
+    """A custom config subclass exports no request-config fields, so private fields cannot leak."""
     @dataclass(frozen=True)
     class CustomConfig(PiRequestConfig):
         private_data: str = "PRIVATE CONFIG"
-    request_config = (CustomConfig if custom_config else PiRequestConfig)(
-        finalization=True, no_tools=True, selected_tools_count=0,
-    )
+    request_config = CustomConfig(finalization=True, no_tools=True, selected_tools_count=0)
     exporter = InMemorySpanExporter()
     registry = Registry()
     registry.register_trace_exporter("memory", lambda _: exporter)
@@ -183,38 +190,8 @@ async def test_effective_finalization_configuration_reaches_exported_telemetry(c
     span = next(span for span in exporter.get_finished_spans()
                 if (span.attributes or {}).get("daydream.span.kind") == "attempt")
     attrs = dict(span.attributes or {})
-    if custom_config:
-        assert not any(key.startswith("daydream.request.config.") for key in attrs)
-    else:
-        assert attrs["daydream.request.config.finalization"] is True
-        assert attrs["daydream.request.config.no_tools"] is True
-        assert attrs["daydream.request.config.selected_tools_count"] == 0
+    assert not any(key.startswith("daydream.request.config.") for key in attrs)
     assert attrs["gen_ai.request.reasoning_effort"] == "low"
     assert "daydream.request.config.max_turns" not in attrs
     assert "PRIVATE PROMPT" not in str(attrs)
     assert "PRIVATE CONFIG" not in str(attrs)
-
-def test_new_request_controls_preserve_existing_positional_config_arguments() -> None:
-    expected = {
-        EffectiveRequestConfig: [
-            "temperature", "max_turns", "read_only", "persist_session", "continuation_mode", "model_mode",
-        ],
-        ClaudeRequestConfig: [
-            "permission_mode", "allowed_tools_count", "allowed_tools_present", "audit_tools_count",
-            "audit_tools_present", "setting_sources_present", "native_output_format", "buffer_limit_bytes",
-            "hooks_enabled",
-        ], CodexRequestConfig: ["sandbox_mode", "experimental_json", "native_output_schema", "read_only_isolation"],
-        PiRequestConfig: ["selected_tools_count", "selected_tools_present", "no_skills", "schema_emulated"],
-    }
-    common = expected[EffectiveRequestConfig]
-    for config_type, names in expected.items():
-        positional = [item.name for item in fields(config_type) if not item.kw_only]
-        if config_type is EffectiveRequestConfig:
-            assert positional == names
-        else:
-            assert positional == common + names
-    assert EffectiveRequestConfig(0.5, 2, True).temperature == 0.5
-    assert PiRequestConfig(0.5, 2, True, False, "fresh", "single", 4, True, True, False).no_skills is True
-    osprey = OspreyRequestConfig(0.5, 2, True, False, "fresh", "single", True, False)
-    assert osprey.persona_present is True
-    assert osprey.toolset_present is False

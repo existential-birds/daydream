@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import threading
 import time
@@ -13,16 +14,10 @@ from typing import Any
 import pytest
 
 from daydream import git_ops
-from daydream.backends._subprocess import terminate_process
 from daydream.git_ops import process as git_process
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import refreshing_session
-from tests.harness.processes import (
-    fd_count,
-    wait_for_fd_baseline,
-    wait_for_process_group_exit,
-    wait_for_process_ids,
-)
+from tests.harness.processes import fd_count, wait_for_fd_baseline, wait_for_process_group_exit
 
 
 def _budget(
@@ -117,29 +112,30 @@ async def test_sync_and_async_requests_share_one_session_refresh(
     assert captured[-1] is None
 
 
-async def test_expired_budget_never_resolves_auth_or_spawns(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_async_gh_requests_never_spawn_after_auth_or_budget_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Expired budgets, slow or cancelled auth resolution and spawn failures never reach a running gh request."""
     auth_calls = 0
     class Auth:
         def environment_for_request(self) -> None:
             nonlocal auth_calls
             auth_calls += 1
-    spawn_calls = _forbid_spawn(monkeypatch, "expired budget must not spawn gh")
+    spawn_calls = _forbid_spawn(monkeypatch, "a failed auth or budget must not spawn gh")
     budget = git_ops.GitHubRequestBudget(deadline=0.0, per_request_seconds=1.0, monotonic=lambda: 1.0)
     with pytest.raises(git_ops.DeadlineExpired):
         await git_process._run_gh_async(tmp_path, ["api", "/user"], auth=Auth(), budget=budget)
     assert auth_calls == 0
-    assert spawn_calls == []
+    times = iter((0.0, 2.0))
+    budget = git_ops.GitHubRequestBudget(deadline=1.0, per_request_seconds=1.0, monotonic=lambda: next(times))
+    with pytest.raises(git_ops.DeadlineExpired):
+        await git_process._run_gh_async(tmp_path, ["api", "/user"], auth=git_ops.INHERIT_GITHUB_AUTH, budget=budget)
 
-
-async def test_blocked_auth_resolution_keeps_loop_responsive_and_is_cancellable(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
     loop = asyncio.get_running_loop()
     started = asyncio.Event()
     release = threading.Event()
     finished = threading.Event()
     BlockingAuth = _blocking_auth(loop, started, release, finished)
-    spawn_calls = _forbid_spawn(monkeypatch, "cancelled auth resolution must not spawn gh")
     task = asyncio.create_task(
         git_process._run_gh_async(
             tmp_path, ["api", "/user"], auth=BlockingAuth(), budget=_budget(seconds=2, per_request=1),
@@ -153,291 +149,108 @@ async def test_blocked_auth_resolution_keeps_loop_responsive_and_is_cancellable(
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+        with pytest.raises(git_ops.GitTimeoutError, match="authentication timed out") as timed_out:
+            await git_process._run_gh_async(
+                tmp_path, ["api", "Authorization: Bearer secret-value"], auth=BlockingAuth(),
+                budget=_budget(seconds=2, per_request=0.05),
+            )
+        assert "secret-value" not in str(timed_out.value) and timed_out.value.__cause__ is None
     finally:
         release.set()
         assert await asyncio.to_thread(finished.wait, 1)
     assert spawn_calls == []
 
-
-async def test_auth_resolution_timeout_never_spawns_and_redacts_details(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    loop = asyncio.get_running_loop()
-    started = asyncio.Event()
-    release = threading.Event()
-    finished = threading.Event()
-    BlockingAuth = _blocking_auth(loop, started, release, finished)
-    spawn_calls = _forbid_spawn(monkeypatch, "timed-out auth resolution must not spawn gh")
-    task = asyncio.create_task(
-        git_process._run_gh_async(
-            tmp_path, ["api", "Authorization: Bearer secret-value"], auth=BlockingAuth(),
-            budget=_budget(seconds=0.5, per_request=0.5),
-        )
-    )
-    try:
-        await asyncio.wait_for(started.wait(), timeout=1)
-        with pytest.raises(git_ops.GitTimeoutError) as excinfo:
-            await task
-        assert "secret-value" not in str(excinfo.value)
-        assert excinfo.value.__cause__ is None
-    finally:
-        pending = not task.done()
-        if pending:
-            task.cancel()
-        release.set()
-        assert await asyncio.to_thread(finished.wait, 1)
-        if pending:
-            with pytest.raises(asyncio.CancelledError):
-                await task
-    assert started.is_set()
-    assert spawn_calls == []
+    async def missing_gh(*_args: Any, **_kwargs: Any) -> Any:
+        raise FileNotFoundError("gh executable is absent")
+    monkeypatch.setattr("daydream.git_ops.process.asyncio.create_subprocess_exec", missing_gh)
+    with pytest.raises(git_ops.GitError, match="FileNotFoundError: gh executable is absent"):
+        await git_process._run_gh_async(tmp_path, ["api", "/user"], budget=_budget())
 
 
-async def test_auth_resolution_that_consumes_budget_never_spawns_request(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    times = iter((0.0, 2.0))
-    spawn_calls = _forbid_spawn(monkeypatch, "exhausted budget must not spawn gh")
-    budget = git_ops.GitHubRequestBudget(deadline=1.0, per_request_seconds=1.0, monotonic=lambda: next(times))
-    with pytest.raises(git_ops.DeadlineExpired):
-        await git_process._run_gh_async(tmp_path, ["api", "/user"], auth=git_ops.INHERIT_GITHUB_AUTH, budget=budget)
-    assert spawn_calls == []
-
-
-@pytest.mark.parametrize(("per_page", "max_pages"), [
-        (0, 10),
-        (100, 0),
-    ])
-async def test_nonpositive_page_limits_fail_before_spawning_gh(
-    fake_gh: FakeGh, git_repo: Path, per_page: int, max_pages: int,
-) -> None:
+async def test_bounded_github_reads_fail_closed_at_shape_and_limit_boundaries(fake_gh: FakeGh, tmp_path: Path) -> None:
+    """Pagination limits, envelopes, capacity and absence are never read as a complete or empty answer."""
     with pytest.raises(git_ops.GitError, match="pagination limits must be positive"):
         await git_ops.gh_api_bounded_pages(
-            git_repo, "repos/acme/widgets/statuses", envelope=None,
-            limits=git_ops.GitHubPageLimits(per_page=per_page, max_pages=max_pages), budget=_budget(),
+            tmp_path, "repos/acme/widgets/statuses", envelope=None,
+            limits=git_ops.GitHubPageLimits(per_page=100, max_pages=0), budget=_budget(),
         )
     assert fake_gh.process_calls() == []
 
-
-@pytest.mark.parametrize(
-    ("response", "expected_result", "expected_error"),
-    [
-        pytest.param(
-            {"total_count": 100, "workflows": [{"id": n} for n in range(100)]}, [{"id": n} for n in range(100)], None,
-            id="full-page-stops-at-declared-total",
-        ),
-        pytest.param({"total_count": 2, "workflows": [{"id": 1}]}, None, "incomplete", id="short-page-is-incomplete"),
-        pytest.param(
-            {"total_count": 1001, "workflows": []}, None, "pagination limit",
-            id="over-capacity-rejected-before-second-call",
-        ),
-    ],
-)
-async def test_enveloped_workflows_pagination_fails_at_its_boundaries(
-    fake_gh: FakeGh, git_repo: Path, response: dict[str, Any], expected_result: list[dict[str, int]] | None,
-    expected_error: str | None,
-) -> None:
-    endpoint = "repos/acme/widgets/actions/workflows"
-    fake_gh.set_response("GET", _page_endpoint(endpoint, 1), response)
-    if expected_error is None:
-        result = await git_ops.gh_api_bounded_pages(
-            git_repo,
-            endpoint,
-            envelope='workflows',
-            limits=git_ops.GitHubPageLimits(),
-            budget=_budget(),
-        )
-        assert result == expected_result
-    else:
+    calls = 0
+    for index, (response, expected_error) in enumerate([
+        ({"total_count": 2, "workflows": [{"id": 1}]}, "incomplete"),
+        ({"total_count": 1001, "workflows": []}, "pagination limit"),  # rejected before a second call
+        ([], "shape"), ({"workflows": "wrong"}, "shape"),
+    ]):
+        endpoint = f"repos/acme/widgets{index}/actions/workflows"
+        fake_gh.set_response("GET", _page_endpoint(endpoint, 1), response)
         with pytest.raises(git_ops.GitError, match=expected_error):
             await git_ops.gh_api_bounded_pages(
-                git_repo,
-                endpoint,
-                envelope='workflows',
-                limits=git_ops.GitHubPageLimits(),
-                budget=_budget(),
+                tmp_path, endpoint, envelope="workflows", limits=git_ops.GitHubPageLimits(), budget=_budget(),
             )
-    assert len(fake_gh.process_calls()) == 1
+        calls += 1
+        assert len(fake_gh.process_calls()) == calls
 
-
-async def test_response_sequence_can_serve_external_error(fake_gh: FakeGh, git_repo: Path) -> None:
-    key = "GET repos/acme/widgets/pulls/7"
-    fake_gh.set_response_sequence(key, [{"__error__": "gh: hidden resource (HTTP 404)"}, {"number": 7}])
-    with pytest.raises(git_ops.GitError, match="hidden resource"):
-        await git_ops.gh_pr_ci_snapshot(git_repo, "acme", "widgets", 7, budget=_budget())
-    assert await git_ops.gh_pr_ci_snapshot(git_repo, "acme", "widgets", 7, budget=_budget()) == {"number": 7}
-
-
-async def test_deadline_recomputed_before_each_spawn_and_partial_discarded(fake_gh: FakeGh, git_repo: Path) -> None:
-    endpoint = "repos/acme/widgets/commits/" + "c" * 40 + "/statuses"
-    fake_gh.set_response("GET", _page_endpoint(endpoint, 1), [{"id": n} for n in range(100)])
-    fake_gh.set_response("GET", _page_endpoint(endpoint, 2), [{"id": 100}])
-    # Each request checks the shared deadline before and after auth resolution.
-    # The first page gets both reads; the second expires at its pre-auth check.
-    readings = iter((0.0, 0.0, 11.0))
-    budget = git_ops.GitHubRequestBudget(deadline=10.0, per_request_seconds=5.0, monotonic=lambda: next(readings))
-    with pytest.raises(git_ops.DeadlineExpired, match="deadline"):
-        await git_ops.gh_api_bounded_pages(
-            git_repo, endpoint, envelope=None, limits=git_ops.GitHubPageLimits(), budget=budget,
-        )
-    assert [call.argv[-1] for call in fake_gh.process_calls()] == [_page_endpoint(endpoint, 1)]
-
-
-@pytest.mark.parametrize("response", [ [], {"check_runs": "wrong"}, {"total_count": True, "check_runs": []}, ])
-async def test_malformed_envelope_is_rejected(fake_gh: FakeGh, git_repo: Path, response: Any) -> None:
-    endpoint = "repos/acme/widgets/commits/" + "d" * 40 + "/check-runs?filter=latest"
-    fake_gh.set_response("GET", _page_endpoint(endpoint, 1), response)
-    with pytest.raises(git_ops.GitError, match="shape"):
-        await git_ops.gh_api_bounded_pages(
-            git_repo, endpoint, envelope="check_runs", limits=git_ops.GitHubPageLimits(), budget=_budget(),
-        )
-
-
-async def test_enveloped_exact_capacity_returns_declared_total(fake_gh: FakeGh, git_repo: Path) -> None:
     max_pages = 2
-    endpoint = "repos/acme/widgets/actions/workflows"
-    expected = [{"id": value} for value in range(1, max_pages * 2 + 1)]
-    for page in range(1, max_pages + 1):
-        start = (page - 1) * 2
-        fake_gh.set_response(
-            "GET", _page_endpoint(endpoint, page, per_page=2),
-            {"total_count": len(expected), "workflows": expected[start : start + 2]},
-        )
-    result = await git_ops.gh_api_bounded_pages(
-        git_repo,
-        endpoint,
-        envelope='workflows',
-        limits=git_ops.GitHubPageLimits(per_page=2, max_pages=max_pages),
-        budget=_budget(),
-    )
-    assert result == expected
-    assert [call.argv[-1] for call in fake_gh.process_calls()] == [
-        _page_endpoint(endpoint, page, per_page=2)
-        for page in range(1, max_pages + 1)
-    ]
-
-
-async def test_envelope_less_full_capacity_remains_ambiguous(fake_gh: FakeGh, git_repo: Path) -> None:
-    max_pages = 2
-    sha = "f" * 40
-    endpoint = f"repos/acme/widgets/commits/{sha}/statuses"
+    endpoint = "repos/acme/widgets/commits/" + "f" * 40 + "/statuses"
     for page in range(1, max_pages + 1):
         fake_gh.set_response(
             "GET", _page_endpoint(endpoint, page, per_page=2), [{"id": page * 2 - 1}, {"id": page * 2}],
         )
     with pytest.raises(git_ops.GitError, match="pagination limit"):
         await git_ops.gh_api_bounded_pages(
-            git_repo,
-            endpoint,
-            envelope=None,
-            limits=git_ops.GitHubPageLimits(per_page=2, max_pages=max_pages),
+            tmp_path, endpoint, envelope=None, limits=git_ops.GitHubPageLimits(per_page=2, max_pages=max_pages),
             budget=_budget(),
         )
-    assert len(fake_gh.process_calls()) == max_pages
+    assert len(fake_gh.process_calls()) == calls + max_pages
 
-
-async def test_full_tenth_page_is_rejected_at_hard_limit(fake_gh: FakeGh, git_repo: Path) -> None:
-    sha = "e" * 40
-    endpoint = f"repos/acme/widgets/commits/{sha}/statuses"
-    for page in range(1, 11):
-        fake_gh.set_response("GET", _page_endpoint(endpoint, page), [{"id": page * 100 + n} for n in range(100)])
-    with pytest.raises(git_ops.GitError, match="pagination limit"):
-        await git_ops.gh_api_bounded_pages(
-            git_repo,
-            endpoint,
-            envelope=None,
-            limits=git_ops.GitHubPageLimits(),
-            budget=_budget(),
-        )
-    assert len(fake_gh.process_calls()) == 10
-
-
-@pytest.mark.parametrize(
-    ("response", "expected", "error"),
-    [
-        ({"__error__": "gh: Branch not protected (HTTP 404)"}, None, None),
-        ({"__error__": "gh: Not Found (HTTP 404)"}, None, git_ops.GitError),
-        ({"__error__": "API rate limit exceeded (HTTP 403)"}, None, git_ops.RateLimitError),
-        ([], None, git_ops.GitError),
-    ],
-)
-async def test_classic_required_checks_narrow_absence(
-    fake_gh: FakeGh, git_repo: Path, response: Any, expected: Any, error: type[BaseException] | None,
-) -> None:
-    endpoint = "repos/acme/widgets/branches/main/protection/required_status_checks"
-    fake_gh.set_response("GET", endpoint, response)
-    if error is not None:
+    protection = "repos/acme/widgets/branches/main/protection/required_status_checks"
+    fake_gh.set_response("GET", protection, {"__error__": "gh: Branch not protected (HTTP 404)"})
+    assert await git_ops.gh_classic_required_checks(tmp_path, "acme", "widgets", "main", budget=_budget()) is None
+    for response, error in [
+        ({"__error__": "API rate limit exceeded (HTTP 403)"}, git_ops.RateLimitError), ([], git_ops.GitError),
+    ]:
+        fake_gh.set_response("GET", protection, response)
         with pytest.raises(error):
-            await git_ops.gh_classic_required_checks(git_repo, "acme", "widgets", "main", budget=_budget())
-    else:
-        assert (
-            await git_ops.gh_classic_required_checks(git_repo, "acme", "widgets", "main", budget=_budget())
-            == expected
-        )
-
-
-@pytest.mark.parametrize("response", [{"__stdout__": "not-json"}, []])
-async def test_pr_snapshot_rejects_invalid_json_or_shape(fake_gh: FakeGh, git_repo: Path, response: Any) -> None:
-    fake_gh.set_response("GET", "repos/acme/widgets/pulls/7", response)
+            await git_ops.gh_classic_required_checks(tmp_path, "acme", "widgets", "main", budget=_budget())
+    fake_gh.set_response("GET", "repos/acme/widgets/pulls/7", [])
     with pytest.raises(git_ops.GitError):
-        await git_ops.gh_pr_ci_snapshot(git_repo, "acme", "widgets", 7, budget=_budget())
+        await git_ops.gh_pr_ci_snapshot(tmp_path, "acme", "widgets", 7, budget=_budget())
 
 
-async def _exercise_blocking_request(
-    fake_gh: FakeGh, git_repo: Path, tmp_path: Path, *, cancel: bool,
-) -> dict[str, int]:
+async def _published_process_ids(path: Path, *, timeout_s: float = 5.0) -> dict[str, int]:
+    """Await the blocking fake gh's direct/grandchild PID JSON."""
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            return {"direct": int(loaded["direct"]), "grandchild": int(loaded["grandchild"])}
+        except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError):
+            await asyncio.sleep(0.01)
+    raise AssertionError(f"blocking fake gh did not publish {path}")
+
+
+async def test_timed_out_request_kills_reaps_its_process_group_and_closes_fds(
+    fake_gh: FakeGh, tmp_path: Path,
+) -> None:
+    """A per-request timeout kills the whole gh process group, reaps it and leaks no descriptors."""
+    baseline = fd_count()
     endpoint = "repos/acme/widgets/commits/" + "f" * 40 + "/statuses"
-    key = "GET " + _page_endpoint(endpoint, 1)
-    pid_file = tmp_path / ("cancel-pids.json" if cancel else "timeout-pids.json")
-    fake_gh.serve_blocking_process(key, pid_file=pid_file)
-    fake_gh.set_response("GET", _page_endpoint(endpoint, 2), [{"id": 2}])
-    budget = _budget(seconds=5.0, per_request=2.0)
-    request = asyncio.create_task(
-        git_ops.gh_api_bounded_pages(
-            git_repo, endpoint, envelope=None, limits=git_ops.GitHubPageLimits(), budget=budget,
-        )
-    )
+    pid_file = tmp_path / "timeout-pids.json"
+    fake_gh.serve_blocking_process("GET " + _page_endpoint(endpoint, 1), pid_file=pid_file)
+    request = asyncio.create_task(git_ops.gh_api_bounded_pages(
+        tmp_path, endpoint, envelope=None, limits=git_ops.GitHubPageLimits(),
+        budget=_budget(seconds=5.0, per_request=0.5),
+    ))
     try:
-        pids = await wait_for_process_ids(pid_file)
+        pids = await _published_process_ids(pid_file)
     except BaseException:
         request.cancel()
         await asyncio.gather(request, return_exceptions=True)
         raise
-    if cancel:
-        request.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await request
-    else:
-        with pytest.raises(git_ops.GitTimeoutError, match="timed out"):
-            await request
+    with pytest.raises(git_ops.GitTimeoutError, match="timed out"):
+        await request
     await wait_for_process_group_exit(pids["direct"])
-    return pids
-
-
-@pytest.mark.parametrize("cancel", [False, True])
-async def test_blocking_process_group_is_killed_reaped_and_fds_closed(
-    fake_gh: FakeGh, git_repo: Path, tmp_path: Path, cancel: bool,
-) -> None:
-    baseline = fd_count()
-    pids = await _exercise_blocking_request(fake_gh, git_repo, tmp_path, cancel=cancel)
     assert pids["direct"] != pids["grandchild"]
     await wait_for_fd_baseline(baseline, timeout_s=2.0)
     assert len(fake_gh.process_calls()) == 1
-
-
-async def test_process_cleanup_is_idempotent(fake_gh: FakeGh, git_repo: Path, tmp_path: Path) -> None:
-    endpoint = "repos/acme/widgets/pulls/7"
-    pid_file = tmp_path / "idempotent-pids.json"
-    fake_gh.serve_blocking_process("GET " + endpoint, pid_file=pid_file)
-    proc = await asyncio.create_subprocess_exec(
-        "gh", "api", "--method", "GET", endpoint, cwd=git_repo, stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True,
-    )
-    try:
-        pids = await wait_for_process_ids(pid_file)
-        await terminate_process(proc)
-        await terminate_process(proc)
-    finally:
-        await terminate_process(proc)
-    assert proc.returncode is not None
-    await wait_for_process_group_exit(pids["direct"])

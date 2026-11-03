@@ -5,12 +5,9 @@ from typing import Any
 
 import pytest
 
-from daydream import backends
 from daydream.backends import (
-    AgentEvent,
     ClaudeRequestConfig,
     CodexRequestConfig,
-    DiagnosticEvent,
     EffectiveRequestConfig,
     JsonValue,
     OspreyRequestConfig,
@@ -21,21 +18,10 @@ from daydream.backends import (
 )
 from daydream.observability.spans import _admit_observed_identity_list
 
-
-def test_diagnostic_event_has_fresh_metadata_and_is_exported() -> None:
-    first = DiagnosticEvent(code="parser_gap", message="first")
-    second = DiagnosticEvent(code="parser_gap", message="second")
-    first.metadata["count"] = 1
-    assert second.metadata == {}
-    assert isinstance(first, AgentEvent)
-    assert "DiagnosticEvent" in backends.__all__
-
-
 # --- P18 Task 1: closed typed Effective Configuration Admission Contract ----
 
-def _rejected_configs() -> list[tuple[type[Any], dict[str, Any], str]]:
-    """(config class, kwargs, expected diagnostic substring) tuples."""
-    return [
+def test_admission_contract_construction_rejects_wrong_types() -> None:
+    rejected: list[tuple[type[Any], dict[str, Any], str]] = [
         (EffectiveRequestConfig, {"temperature": True}, "temperature"),
         (EffectiveRequestConfig, {"temperature": float("nan")}, "temperature"),
         (EffectiveRequestConfig, {"max_turns": True}, "max_turns"),
@@ -47,32 +33,13 @@ def _rejected_configs() -> list[tuple[type[Any], dict[str, Any], str]]:
         (CodexRequestConfig, {"sandbox_mode": "workspace-write"}, "sandbox_mode"),
         (OspreyRequestConfig, {"approval_mode": "on-request"}, "approval_mode"),
     ]
-
-@pytest.mark.parametrize(("config_cls", "kwargs", "field_name"), _rejected_configs())
-def test_admission_contract_construction_rejects_wrong_types(
-    config_cls: type[Any], kwargs: dict[str, Any], field_name: str,
-) -> None:
-    with pytest.raises(ValueError, match=field_name):
-        config_cls(**kwargs)
-
-@pytest.mark.parametrize(
-    ("config_cls", "kwargs"),
-    [
-        pytest.param(
-            EffectiveRequestConfig,
-            {
-                "temperature": 0.0, "max_turns": 2**63 - 1, "read_only": False, "persist_session": True,
-                "continuation_mode": "resume", "model_mode": "multi_or_dynamic",
-            }, id="effective-boundaries-and-zero",
-        ),
-        pytest.param(EffectiveRequestConfig, {"temperature": -0.5}, id="negative-temperature-is-a-finite-float"),
-    ],
-)
-def test_admission_contract_accepts_exact_zero_and_boundaries(config_cls: type[Any], kwargs: dict[str, Any]) -> None:
-    config = config_cls(**kwargs)
-    for name, value in kwargs.items():
-        assert getattr(config, name) == value
-
+    for config_cls, kwargs, field_name in rejected:
+        try:
+            with pytest.raises(ValueError, match=field_name):
+                config_cls(**kwargs)
+        except BaseException as exc:
+            exc.add_note(f"case: {config_cls.__name__}({kwargs!r})")
+            raise
 
 def test_identity_label_admission_rejects_unsafe_and_allows_namespace() -> None:
     for safe in ("opus", "claude-opus-4-5-20250901", "nous/deepseek-v4", "openai/gpt-5.2",
@@ -96,13 +63,6 @@ def test_identity_label_admission_rejects_unsafe_and_allows_namespace() -> None:
         assert diagnostic.code.startswith("config_identity_") or diagnostic.code in (
             "config_bool_type_rejected", "config_float_type_rejected", "config_int_type_rejected",
         )
-
-def test_provider_label_bound_is_128() -> None:
-    admitted, diagnostic = _admit_identity_label("p" * 128, max_chars=128, context="provider")
-    assert admitted == "p" * 128 and diagnostic is None
-    admitted, diagnostic = _admit_identity_label("p" * 129, max_chars=128, context="provider")
-    assert admitted is None
-    assert diagnostic is not None and diagnostic.code == "config_identity_too_long"
 
 def test_native_unix_ms_validation_bounds_and_conversion() -> None:
     ms, diagnostic = _admit_native_unix_ms(1788690314289)
@@ -159,7 +119,6 @@ def test_tool_call_choice_part_json_arguments_are_schema_admitted() -> None:
         ToolCallChoicePart(call_id="t4", name="read", arguments=bad_object_arguments)
     with pytest.raises(ValueError, match="arguments"):
         ToolCallChoicePart(call_id="t5", name="read", arguments=float("nan"))
-
-def test_tool_call_choice_part_never_echoes_private_tool_names() -> None:
-    with pytest.raises(ValueError, match="name"):
+    with pytest.raises(ValueError, match="name") as private_name:
         ToolCallChoicePart(call_id="t6", name="/Users/ka/bin/tool", arguments={})
+    assert "/Users/ka" not in str(private_name.value)

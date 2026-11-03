@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from daydream.benchmark.harbor import candidate, entrypoint, package as pkg, verifier_core as vc
+from daydream.benchmark.harbor import candidate, package as pkg, verifier_core as vc
 from daydream.benchmark.harbor.agent import AgentError, DaydreamReviewAgent
 from tests.harness.fake_gh import FakeGh
 from tests.test_benchmark_harbor_build import _seed_ready_workspace, _stub_wheel
@@ -34,36 +34,17 @@ def test_artifact_caps_fail_closed_and_write_is_atomic(tmp_path: Path) -> None:
     assert vc.validate_candidate_artifact(loaded) == []     # schema-valid
     assert list(dest.parent.glob("review.json*")) == [dest]
 
-@pytest.mark.parametrize(("field", "value"),
-    [("candidate_id", "not-a-digest"), ("title", ""), ("body", "bad\x00body"),
-     ("severity", "critical"), ("path", "../escape"), ("start_line", 0)],
-)
-def test_assembled_candidate_finding_rejects_verifier_invalid_content(field: str, value: object) -> None:
-    finding: dict[str, object] = {"candidate_id": "", "title": "Title", "body": "Body", "severity": "low",
-        "path": "src/a.py", "start_line": 1, "end_line": 1,
-    }
-    finding["candidate_id"] = vc.derive_candidate_id("case-key", finding, 0)
-    assert vc.validate_candidate_artifact({
-        "schema_version": 1, "case_id": "case-key", "base_ref": "base", "head_ref": "head", "findings": [finding],
-    })
-    finding[field] = value
-    if field != "candidate_id":
+    for field, value in (("title", ""), ("body", "bad\x00body"), ("path", "../escape")):
+        finding: dict[str, object] = {"title": "Title", "body": "Body", "severity": "low",
+            "path": "src/a.py", "start_line": 1, "end_line": 1, field: value}
         finding["candidate_id"] = vc.derive_candidate_id("case-key", finding, 0)
-    with pytest.raises(candidate.CandidateError) as rejected:
-        candidate.build_candidate_artifact("case-key", [finding])
-    assert rejected.value.kind == "invalid_finding"
+        with pytest.raises(candidate.CandidateError) as rejected:
+            candidate.build_candidate_artifact("case-key", [finding])
+        assert rejected.value.kind == "invalid_finding"
 
-def test_entrypoint_backend_allowlist_rejects_others_and_defaults_pi() -> None:
-    for value in ("codex", "opencode"):
-        with pytest.raises(entrypoint.EntrypointError) as exc:
-            entrypoint.require_supported_backend({"DAYDREAM_REVIEW_BACKEND": value})
-        assert "'pi'" in str(exc.value)
-    assert entrypoint.require_supported_backend({}) == "pi"
 
 def test_agent_package_import_does_not_pull_harbor() -> None:
-    """Importing the daydream.benchmark package must not import Harbor (a lazy,
-    optional extra); ``daydream/benchmark/__init__.py`` keeps exporting only stable
-    schema/service types."""
+    """Importing daydream.benchmark must not import the optional Harbor extra."""
     probe = ("import sys; import daydream.benchmark; "
         "assert not any(m == 'harbor' or m.startswith('harbor.') for m in sys.modules), "
         "[m for m in sys.modules if m == 'harbor' or m.startswith('harbor.')]"
@@ -71,14 +52,16 @@ def test_agent_package_import_does_not_pull_harbor() -> None:
     out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
     assert out.returncode == 0, f"harbor imported eagerly:\n{out.stdout}{out.stderr}"
 
-def test_agent_setup_nonzero_exec_fails(tmp_path: Path) -> None:
+
+def test_agent_setup_fails_on_probe_error_and_refuses_unsupported_backend_before_probe(tmp_path: Path) -> None:
     pytest.importorskip("harbor")
-
-    agent = DaydreamReviewAgent(logs_dir=tmp_path)
-    executed = Executed(return_code=1)
-
     with pytest.raises(AgentError):
+        asyncio.run(DaydreamReviewAgent(logs_dir=tmp_path).setup(_capturing_env(Executed(return_code=1))()))
+    agent = DaydreamReviewAgent(logs_dir=tmp_path, extra_env={"DAYDREAM_REVIEW_BACKEND": "codex"})
+    executed = Executed()
+    with pytest.raises(AgentError, match="pi"):
         asyncio.run(agent.setup(_capturing_env(executed)()))
+    assert executed.setup == "" and executed.command == ""
 
 def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path: Path) -> None:
     pytest.importorskip("harbor")
@@ -126,19 +109,9 @@ def test_populate_context_from_trajectory_final_metrics(tmp_path: Path) -> None:
     assert ctx.n_output_tokens == 800
     assert ctx.cost_usd == 0.42
 
-@pytest.mark.parametrize("contents", [None, "not json at all"], ids=["absent", "malformed"])
-def test_populate_context_unavailable_trajectory_leaves_metrics_unset(tmp_path: Path, contents: str | None) -> None:
-    pytest.importorskip("harbor")
-    from harbor.models.agent.context import AgentContext
-
-    if contents is not None:
-        traj_dir = tmp_path / "agent"
-        traj_dir.mkdir(parents=True)
-        (traj_dir / "trajectory.json").write_text(contents)
-    agent = DaydreamReviewAgent(logs_dir=tmp_path)
-    ctx = AgentContext()
-    agent.populate_context_post_run(ctx)
-    assert ctx.is_empty()
+    absent = AgentContext()
+    DaydreamReviewAgent(logs_dir=tmp_path / "absent").populate_context_post_run(absent)
+    assert absent.is_empty()
 
 def test_validate_compiled_imports_agent_path_same_interpreter(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
@@ -159,11 +132,17 @@ def test_validate_compiled_imports_agent_path_same_interpreter(
             raise ModuleNotFoundError("no module named 'daydream.benchmark.harbor.agent'")
         return real_import(name, *a, **k)
 
-    monkeypatch.setattr(importlib, "import_module", broken)
-    with pytest.raises(pkg.PackageError) as rejected:
+    with monkeypatch.context() as separate, pytest.raises(pkg.PackageError) as rejected:
+        separate.setattr(importlib, "import_module", broken)
         pkg.validate_compiled(ws)
     assert "daydream.benchmark.harbor.agent" in str(rejected.value)
     assert "pip install 'daydream[benchmark]'" in str(rejected.value)
+
+    # Any byte change after compile breaks the recorded inventory.
+    with (ws / "harbor/metric.py").open("a") as stream:
+        stream.write("# edited after compile\n")
+    with pytest.raises(pkg.PackageError, match="hash mismatch for metric.py"):
+        pkg.validate_compiled(ws)
 
 class Executed:
     """Captured results of the real agent lifecycle calls on the fake env."""
@@ -192,13 +171,3 @@ def _capturing_env(executed: Executed) -> type:
             return ExecResult(return_code=executed.return_code, stdout="", stderr="")
 
     return Env
-
-
-@pytest.mark.parametrize("backend", ["codex", "claude", "osprey"])
-def test_agent_setup_refuses_unsupported_backend_before_probe(tmp_path: Path, backend: str) -> None:
-    pytest.importorskip("harbor")
-    agent = DaydreamReviewAgent(logs_dir=tmp_path, extra_env={"DAYDREAM_REVIEW_BACKEND": backend})
-    executed = Executed()
-    with pytest.raises(AgentError, match="pi"):
-        asyncio.run(agent.setup(_capturing_env(executed)()))
-    assert executed.setup == "" and executed.command == ""

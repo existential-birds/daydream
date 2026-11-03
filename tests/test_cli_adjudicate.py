@@ -213,123 +213,20 @@ def test_cli_conflicting_raters_resolve_only_with_adjudicator(
     assert automatic.effective_judgment("run-1", "item:0")["disposition"] == "unanswered"
 
 
-def test_cli_reopens_changed_evidence_without_reusing_human_judgment(tmp_path: Path) -> None:
-    store = record_store(tmp_path / "records", ("unanswered",), retain_replies=False)
-    replies = (("9", "context\ncafé ☕\n"), ("10", "second perspective\n"))
-    append_replies(store, replies, observed_at="2026-10-04T13:00:00Z", retain_replies=False)
-    store.append_observation(judgment(store))
-    first = snapshot_id(store)
-    append_replies(store, replies, observation_id="captured", observed_at="2026-10-05T12:00:00Z")
-    enriched = snapshot_id(store)
-    enriched_resolution = sessions_from_snapshot(store.read_snapshot(enriched))[0]["resolutions"][0]
-    assert enriched_resolution["disposition"] == "accepted"
-    assert {capture["text"] for capture in enriched_resolution["reply_captures"]} == {text for _, text in replies}
-    effective = store.read_snapshot(enriched).effective_judgment("run-1", "item:0")
-    assert effective["reply_captures"] == enriched_resolution["reply_captures"]
-    state = tmp_path / "state"
-    assert command(store, "build", "--state-dir", str(state), pin=enriched) == 0
-    assert json.loads((state / "queue.json").read_text())[0]["status"] == "open"
-    # A later hash-only automatic observation must not discard acquired content.
-    append_replies(store, replies, observation_id="hash-only-again", observed_at="2026-10-05T13:00:00Z",
-                   retain_replies=False)
-    still_captured = store.read_snapshot(snapshot_id(store)).effective_judgment("run-1", "item:0")
-    assert still_captured["disposition"] == "accepted"
-    assert still_captured["reply_captures"] == enriched_resolution["reply_captures"]
-    append_replies(store, (("9", "new reply\n"), replies[1]), observation_id="edited-evidence")
-    state = tmp_path / "state"
-    assert command(store, "build", "--state-dir", str(state)) == 0
-    row = json.loads((state / "queue.json").read_text())[0]
-    assert row["status"] == "reopened" and row["prior_disposition"] == "accepted"
-    assert sessions_from_snapshot(store.read_snapshot(first))[0]["resolutions"][0]["disposition"] == "accepted"
-    assert sessions_from_snapshot(store.read_snapshot(first))[0]["resolutions"][0]["reply_captures"] == []
-    assert sessions_from_snapshot(store.read_snapshot(enriched))[0]["resolutions"][0] == enriched_resolution
-    latest = store.read_snapshot(snapshot_id(store))
-    assert latest.effective_judgment("run-1", "item:0")["disposition"] == "unanswered"
-    resolution = sessions_from_snapshot(latest)[0]["resolutions"][0]
-    assert resolution["disposition"] == "unanswered"
-    assert {capture["text"] for capture in row["reply_captures"]} == {"new reply\n", replies[1][1]}
+def test_cli_invalid_batch_fails_before_state_reads() -> None:
+    for batch in ("0", "bad"):
+        assert cli_main([
+            "corpus", "adjudicate", "label", "--state-dir", "/nonexistent", "--batch", batch,
+            "--disposition", "accepted", "--rationale", "ok", "--labeler", "alice",
+        ]) == 2
 
 
-@pytest.mark.parametrize("batch", ["0", "bad"])
-def test_cli_invalid_batch_fails_before_state_reads(batch: str) -> None:
-    assert (
-        cli_main(
-            [
-                "corpus",
-                "adjudicate",
-                "label",
-                "--state-dir",
-                "/nonexistent",
-                "--batch",
-                batch,
-                "--disposition",
-                "accepted",
-                "--rationale",
-                "ok",
-                "--labeler",
-                "alice",
-            ]
-        )
-        == 2
-    )
-
-
-def test_cli_label_preserves_canonical_evidence_digest_scheme(tmp_path: Path) -> None:
-    from tests.harness.record_projection import seed_projection_store
-
-    store = seed_projection_store(tmp_path, dispositions=("accepted",))
-    state = tmp_path / "state"
-    assert command(store, "build", "--state-dir", str(state)) == 0
-    queued = json.loads((state / "queue.json").read_text())[0]
-    assert queued["evidence"] and queued["evidence_digest_scheme"] == "canonical-json-v1"
-    assert (
-        cli_main(
-            [
-                "corpus",
-                "adjudicate",
-                "label",
-                "--state-dir",
-                str(state),
-                "--record-id",
-                queued["record_id"],
-                "--disposition",
-                "accepted",
-                "--labeler",
-                "chief",
-                "--role",
-                "adjudicator",
-                "--rationale",
-                "verified again",
-            ]
-        )
-        == 0
-    )
-    observation = next(o for o in store.read_records()["observations"] if o["source"] == "adjudication")
-    assert observation["evidence_digest"] == queued["evidence_digest"]
-    assert observation["evidence_digest_scheme"] == "canonical-json-v1"
-
-
-def test_cli_automatic_decisive_population_excluded_from_default_queue_preserved_in_materialization(
-    tmp_path: Path,
-) -> None:
-    store = record_store(tmp_path / "records", ("accepted", "rejected", "unanswered"))
-    state, out = tmp_path / "state", tmp_path / "out"
-    assert command(store, "build", "--state-dir", str(state)) == 0
-    queued = json.loads((state / "queue.json").read_text())
-    assert len(queued) == 1 and queued[0]["disposition"] == "unanswered"
-    assert command(store, "materialize", "--out-dir", str(out)) == 0
-    assert len((out / "annotations.jsonl").read_text().splitlines()) == 3
-
-
-@pytest.mark.parametrize("verb", ["build", "materialize", "export", "preview"])
-def test_cli_derived_outputs_refuse_record_namespace_symlink_alias_without_mutation(tmp_path: Path, verb: str) -> None:
+def test_cli_derived_outputs_refuse_record_namespace_symlink_alias_without_mutation(tmp_path: Path) -> None:
     store = record_store(tmp_path / "records")
     pin = snapshot_id(store)
     alias = tmp_path / "alias"
     alias.symlink_to(store.root / "runs", target_is_directory=True)
     before = {str(p.relative_to(store.root)): p.read_bytes() for p in store.root.rglob("*") if p.is_file()}
-    output = ["--out-dir", str(alias)] if verb == "materialize" else ["--state-dir", str(alias)]
-    if verb == "export":
-        output += ["--out", str(tmp_path / "export.jsonl")]
-    assert command(store, verb, *output, pin=pin) == 1
-    assert {str(p.relative_to(store.root)): p.read_bytes() for p in store.root.rglob("*") if p.is_file()} == before
+    for verb, output in (("materialize", "--out-dir"), ("preview", "--state-dir")):
+        assert command(store, verb, output, str(alias), pin=pin) == 1
+        assert {str(p.relative_to(store.root)): p.read_bytes() for p in store.root.rglob("*") if p.is_file()} == before

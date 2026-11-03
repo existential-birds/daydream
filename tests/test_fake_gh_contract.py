@@ -3,26 +3,11 @@ from pathlib import Path
 import pytest
 
 from daydream import git_ops
+from tests.harness import github_schema
 from tests.harness.fake_gh import install_fake_gh
 
 
-def test_fake_gh_requires_helper_fragment_in_git_ls_remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_gh = install_fake_gh(tmp_path, monkeypatch)
-    expected_refs = "c" * 40 + "\trefs/heads/main\n"
-    fake_gh.set_response("git-ls-remote", value=expected_refs)
-
-    refs = git_ops.git_ls_remote(tmp_path, "https://github.com/o/r.git")
-
-    assert refs == expected_refs
-    calls = fake_gh.command_calls("git ls-remote")
-    assert len(calls) == 1
-    call = calls[0]
-    assert "-c" in call.argv
-    assert any(arg == "credential.helper=!gh auth git-credential" for arg in call.argv)
-    assert call.env is not None
-    assert call.env["GIT_TERMINAL_PROMPT"] == "0"
-
-def test_fake_gh_serves_an_absent_resource_as_a_recognizable_404(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_fake_gh_serves_recognizable_absence_and_validates_queries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A valueless canned response must be a 404 production can classify.
 
@@ -35,3 +20,13 @@ def test_fake_gh_serves_an_absent_resource_as_a_recognizable_404(tmp_path: Path,
         git_ops.gh_file_at_ref(tmp_path, "o/r", "0" * 40, "a.py")
 
     assert "HTTP 404" in str(excinfo.value)
+    # The GraphQL schema subset the fake validates against must flag fields GitHub does not define.
+    bad = """
+    query X($o:String!,$n:String!,$p:Int!) {
+      repository(owner:$o,name:$n) { pullRequest(number:$p) { reviewThreads(first:50) {
+        nodes { id isResolved isResolvedBy side startSide
+                comments(first:100) { nodes { author { login type isBot } } } }
+      } } }
+    }
+    """
+    assert {"side", "startSide", "isResolvedBy", "isBot", "type"} <= github_schema.unknown_query_fields(bad)

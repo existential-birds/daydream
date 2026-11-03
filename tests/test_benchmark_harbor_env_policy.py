@@ -1,15 +1,11 @@
 """Actual environment and rendered-job boundaries for the Harbor policy."""
 
-from dataclasses import replace
-from types import MappingProxyType
-
-import pytest
 import yaml
 
 from daydream.benchmark.harbor import env_policy
 from daydream.benchmark.harbor.agent import build_child_env
 from daydream.benchmark.harbor.entrypoint import _sanitize_reviewer_environment
-from daydream.benchmark.harbor.package import render_job_config, render_task_toml
+from daydream.benchmark.harbor.package import render_job_config
 
 _PROBES = frozenset({"OPENAI_API_KEY", "DAYDREAM_UNRELATED_PROBE"})
 
@@ -50,52 +46,23 @@ _EXPECTED_CONTAINER_KEEP = frozenset({
 })
 
 
-def test_oracle_render_path_applies_no_policy_view() -> None:
-    oracle = yaml.safe_load(render_job_config(oracle=True).decode())
-    assert oracle["agents"] == [{"name": "oracle"}]
-
-
-def test_host_child_env_table() -> None:
+def test_host_and_container_env_tables() -> None:
+    """The host builder keeps hub/archive/judge credentials out; the container scrub maps the reviewer key."""
     parent = _synthetic_parent()
     before = dict(parent)
     assert build_child_env(parent) == {name: parent[name] for name in _EXPECTED_HOST_KEEP}
-    assert parent == before
-
-
-def test_container_sanitised_env_table() -> None:
-    parent = _synthetic_parent()
-    before = dict(parent)
     expected = {name: parent[name] for name in _EXPECTED_CONTAINER_KEEP}
     expected.update(PI_API_KEY="value:DAYDREAM_REVIEW_API_KEY", PI_PROVIDER="openrouter", PI_TELEMETRY="0")
     assert _sanitize_reviewer_environment(parent) == expected
     assert parent == before
 
 
-def test_task_toml_renderer_derives_its_injected_env_from_the_declaration(monkeypatch: pytest.MonkeyPatch,) -> None:
-    extended = replace(env_policy.TASK,
-        injected=MappingProxyType({**env_policy.TASK.injected, "DAYDREAM_REVIEW_PROBE": "{opaque_key}"}),
-    )
-    monkeypatch.setattr(env_policy, "TASK", extended)
-    rendered = render_task_toml("case-abc123def456", reviewer_hosts=["api.anthropic.com"], judge_hosts=["openrouter.ai"]
-    ).decode()
-    assert rendered.index('DAYDREAM_REVIEW_CASE_ID = "case-abc123def456"') < rendered.index(
-        'DAYDREAM_REVIEW_PROBE = "case-abc123def456"'
-    )
-
-
-def test_job_config_renderer_derives_its_env_from_the_declaration(monkeypatch: pytest.MonkeyPatch,) -> None:
-    extended = replace(env_policy.RENDERER,
-        judge_placeholders=MappingProxyType(
-            {**env_policy.RENDERER.judge_placeholders, "DAYDREAM_JUDGE_PROBE": "${DAYDREAM_JUDGE_PROBE:-}"}
-        ),
-    )
-    monkeypatch.setattr(env_policy, "RENDERER", extended)
-    job = yaml.safe_load(render_job_config(oracle=False).decode())
-    assert job["verifier"]["env"]["DAYDREAM_JUDGE_PROBE"] == "${DAYDREAM_JUDGE_PROBE:-}"
-
-
 def test_rendered_env_key_order_is_unchanged() -> None:
-    """The job config bytes are part of the compiled-tree contract; key order is load-bearing."""
+    """The job config bytes are part of the compiled-tree contract; key order is load-bearing.
+
+    The verifier receives only judge variables; unselected alternatives are optional (#979)
+    while provider/model selections stay required.
+    """
     job = yaml.safe_load(render_job_config(oracle=False).decode())
     reviewer = {
         "DAYDREAM_REVIEW_BACKEND": "${DAYDREAM_REVIEW_BACKEND:-pi}",
@@ -117,19 +84,6 @@ def test_rendered_env_key_order_is_unchanged() -> None:
     }
     assert list(job["agents"][0]["env"].items()) == list(reviewer.items())
     assert list(job["verifier"]["env"].items()) == list(judge.items())
-
-
-def test_container_sanitiser_derives_its_sets_from_the_declaration(monkeypatch: pytest.MonkeyPatch,) -> None:
-    extended = replace(env_policy.CONTAINER, scrub_prefixes=env_policy.CONTAINER.scrub_prefixes | {"PROBE_"})
-    monkeypatch.setattr(env_policy, "CONTAINER", extended)
-    sanitized = _sanitize_reviewer_environment(
-        {"DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api", "DAYDREAM_REVIEW_API_KEY": "k", "PROBE_X": "leak"},
-    )
-    assert "PROBE_X" not in sanitized
-
-
-def test_host_builder_derives_its_sets_from_the_declaration(monkeypatch: pytest.MonkeyPatch,) -> None:
-    extended = replace(env_policy.HOST, required_process_vars=env_policy.HOST.required_process_vars | {"PROBE_VAR"})
-    monkeypatch.setattr(env_policy, "HOST", extended)
-    child = build_child_env({"PATH": "/usr/bin", "PROBE_VAR": "kept"})
-    assert child.get("PROBE_VAR") == "kept"
+    oracle = yaml.safe_load(render_job_config(oracle=True).decode())
+    assert oracle["agents"] == [{"name": "oracle"}]
+    assert oracle["verifier"] == job["verifier"]

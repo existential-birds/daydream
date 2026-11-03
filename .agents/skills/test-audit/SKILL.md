@@ -8,18 +8,14 @@ description: Use when writing, changing, reviewing, or sweeping Daydream tests, 
 Three modes share one value bar: **authoring** gates new or changed tests;
 **audit** removes low-value coverage in a focused batch; **campaign** examines
 one subsystem's whole test surface. Before a campaign, read
-[CAMPAIGN.md](CAMPAIGN.md). Optimize for confidence and maintenance cost, not
-deletion count.
+[CAMPAIGN.md](CAMPAIGN.md). Optimize for a fast gate with no coverage or
+unique-contract gap: deletion is the default, then merging into an existing test,
+then replacing with a faster one.
 
 Read [AGENTS.md](../../../AGENTS.md), [CONTRIBUTING.md](../../../CONTRIBUTING.md),
 and applicable scoped agent instructions first. AGENTS.md's testing standard is
-authoritative: choose the boundary that owns the observable behavior or independent
-contract. Unit, integration, and end-to-end tests are valid according to behavior
-and risk. Preserve real filesystem, Git, and event-loop behavior when those are
-part of the contract, and assert observable outcomes.
-For terminal findings, inject faults at actual filesystem read/write/install
-operations as required by AGENTS.md; preserve the real path around the
-fault rather than replacing the publication pipeline with a mock.
+authoritative for the deletion rules, the time budget, and boundary choice. Assert
+observable outcomes.
 
 ## Authoring gate
 
@@ -27,10 +23,10 @@ Before adding or changing a test, answer:
 
 1. What observable behavior, invariant, or independent contract does it protect?
 2. What credible regression makes it fail?
-3. Why does existing coverage miss that regression? Name the primary owner test
-   at the owning boundary. Another layer needs a distinct risk, such as
-   transport decoding, cancellation, or persistence failure. Prefer extending
-   `pytest.mark.parametrize` or an existing fixture over duplicating setup.
+3. Why can no existing test be extended to catch that regression? Name the
+   primary owner test at the owning boundary. Another layer needs a distinct
+   risk, such as transport decoding, cancellation, or persistence failure. A new
+   `pytest.mark.parametrize` row must reach a branch the other rows miss.
 4. Does it require a production export, flag, wrapper, or injection hook solely
    to expose implementation? Test the real boundary instead. Preserve legitimate
    `Backend` / `create_backend`, extension, and external-process boundaries.
@@ -67,30 +63,27 @@ Use this checklist for authoring and discovery:
 
 ## Retention bar
 
-Keep independent proof of CLI/config/defaults, extension APIs, backend event
-streams, ATIF/trajectory emission, archive and corpus storage, security and
-redaction, workspace confinement, cancellation/process cleanup, artifact
-ownership, and release/package/workflow contracts. Preserve typed review
-coverage, snapshot binding, and atomic publication from the
-[terminal findings contract](../../../docs/runtime.md#terminal-review-findings-contract).
+These contracts are each proved once, by the fastest test that can prove them.
+This list names contracts, not test styles to keep in every variant:
 
-Static, slow, or mock-backed is not by itself a deletion reason. In particular:
+- fix-loop changes assert retained fixes and trajectory state;
+- terminal findings keep typed coverage, snapshot binding, and atomic publication
+  under the [terminal findings contract](../../../docs/runtime.md#terminal-review-findings-contract),
+  with faults injected at actual filesystem read/write/install operations around
+  the real publication path;
+- backend success, cancellation, and replay rules keep one proof per distinct
+  adapter rule, not per adapter;
+- security and redaction, workspace confinement, and artifact ownership keep one
+  proof per enforced boundary.
 
-- retain ordering when it affects delivered events, frozen evidence, or cleanup;
-- retain source/byte inspection when shipped prompts, packaged templates,
-  schemas, or sandbox asset parity are the independent contract;
-- retain distinct backend transport/replay cases even when shared event-handling
-  coverage exists;
-- retain real temporary SQLite/filesystem and fault-path tests where mocked
-  state cannot prove persistence, atomicity, or recovery;
-- reproduce baseline failures and distinguish environment, test, and product
-  defects. Repair the owner when warranted; never delete a failure to turn green.
+Reproduce baseline failures and distinguish environment, test, and product
+defects. Repair the owner when warranted; never delete a failure to turn green.
 
-Read the complete test, parametrized rows, fixture chain, production owner,
-entrypoint, callers, sibling implementations, overlapping tests, CI routing,
-and relevant history before judging a candidate. Inspect dependency source or
-types when a claim depends on SDK behavior. `daydream/atif/` is vendored with a
-mechanical-update-only policy; pruning is not permission to hand-edit it.
+For an individual candidate, read the complete test, parametrized rows, fixture
+chain, production owner, callers, overlapping tests, and relevant history. Inspect
+dependency source or types when a claim depends on SDK behavior. `daydream/atif/`
+is vendored with a mechanical-update-only policy; pruning is not permission to
+hand-edit it.
 
 ## Discovery and evidence
 
@@ -99,7 +92,7 @@ can fan out into production-owner lanes: runner/CLI/deep flows; backends and
 Git/GitHub transport; artifacts/trajectory/archive/corpus; improve/extensions;
 benchmark/tooling/workflows; and the separately locked RL project if in scope.
 Assign each agent explicit paths and keep shared harness ownership with one
-coordinator. Outside campaigns, prefer a few proven candidates.
+coordinator.
 
 Record all fields before deleting or consolidating a candidate:
 
@@ -112,6 +105,11 @@ Record all fields before deleting or consolidating a candidate:
 - relevant history and why the test or seam exists;
 - production/test-support deletion unlocked;
 - risk and the focused validation command.
+
+For bulk deletions, mechanical evidence replaces this per-candidate record: a
+per-test coverage map (`--cov-context=test`) showing the deleted test's branch arcs
+are a subset of the kept tests', plus a contract check that names any keeper the
+arcs cannot show. Record one ledger line per test function.
 
 For example, deleting a helper-call assertion about declining fixes requires a
 keeper that enters the real runner, declines the gate, and observes unchanged
@@ -164,8 +162,9 @@ preserving existing user changes.
    separately. If runtime reduction is claimed, compare identical selections,
    workers, coverage settings, and environments, including fixture setup cost.
 
-Live CLI/GitHub and Docker-dependent proof has separate prerequisites. Inspect
-the relevant markers and harness; record skipped/unavailable proof explicitly.
+The gate has no live or opt-in tests: prove live CLI, GitHub, and Docker
+boundaries through the files, arguments, and output we own. Record any
+platform-specific skip and confirm the Linux gate runs it.
 A narrow green run, coverage percentage, or live smoke test cannot establish
 every retained contract.
 

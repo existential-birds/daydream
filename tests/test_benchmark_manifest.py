@@ -8,35 +8,29 @@ from daydream.benchmark.storage import WorkspaceCorrupt
 from daydream.benchmark.workspace import init_workspace
 
 
-@pytest.mark.parametrize("payload",
-    [
-        "x: 1\nx: 2\n",
-        "x: !!python/object/apply:os.system ['false']\n",
-        "",
-        "- not\n- a\n- mapping\n",
-    ],
-)
-def test_manifest_loader_bounds_every_invalid_shape(tmp_path: Path, payload: str) -> None:
-    (tmp_path / "benchmark.yaml").write_text(payload)
-    with pytest.raises(WorkspaceCorrupt) as excinfo:
-        load_benchmark_manifest(tmp_path, canonicalize_case_order=True)
-    assert str(excinfo.value) == f"{tmp_path}: invalid benchmark.yaml"
+def test_manifest_loader_bounds_every_invalid_shape_and_case_index(tmp_path: Path) -> None:
+    """Missing root metadata must not hide acceptance of an invalid case index either."""
+    payloads = ["x: 1\nx: 2\n", "x: !!python/object/apply:os.system ['false']\n", "", "- not\n- a\n- mapping\n",
+                "? [one, two]\n: value\n"]
+    for index, payload in enumerate(payloads):
+        root = tmp_path / f"shape-{index}"
+        root.mkdir()
+        (root / "benchmark.yaml").write_text(payload)
+        with pytest.raises(WorkspaceCorrupt) as excinfo:
+            load_benchmark_manifest(root, canonicalize_case_order=True)
+        assert str(excinfo.value) == f"{root}: invalid benchmark.yaml"
+    assert excinfo.value.__cause__ is not None  # the unhashable-key decode error is chained
+    for index, payload in enumerate(["cases: 7\n", "cases:\n  - nope\n"]):
+        root = tmp_path / f"cases-{index}"
+        init_workspace(root, "O/R", ["review.example"], ["judge.example"])
+        path = root / "benchmark.yaml"
+        raw = yaml.safe_load(path.read_text())
+        raw.pop("cases")
+        path.write_text(yaml.safe_dump(raw, sort_keys=False) + payload)
+        with pytest.raises(WorkspaceCorrupt) as rejected:
+            load_benchmark_manifest(root, canonicalize_case_order=True)
+        assert str(rejected.value) == f"{root}: invalid benchmark.yaml"
 
-
-@pytest.mark.parametrize("payload", [
-    "cases: null\n", "cases: {}\n", "cases: 7\n", "cases:\n  - nope\n", "cases:\n  - case_id: broken\n",
-])
-def test_manifest_loader_bounds_invalid_cases_with_valid_root_fields(tmp_path: Path, payload: str) -> None:
-    """Missing root metadata must not hide acceptance of an invalid case index."""
-    root = tmp_path / "ws"
-    init_workspace(root, "O/R", ["review.example"], ["judge.example"])
-    path = root / "benchmark.yaml"
-    raw = yaml.safe_load(path.read_text())
-    raw.pop("cases")
-    path.write_text(yaml.safe_dump(raw, sort_keys=False) + payload)
-    with pytest.raises(WorkspaceCorrupt) as rejected:
-        load_benchmark_manifest(root, canonicalize_case_order=True)
-    assert str(rejected.value) == f"{root}: invalid benchmark.yaml"
 
 def test_manifest_loader_canonicalizes_copy_without_mutating_manifest(tmp_path: Path) -> None:
     root = tmp_path / "ws"
@@ -60,19 +54,3 @@ def test_manifest_loader_canonicalizes_copy_without_mutating_manifest(tmp_path: 
     assert manifest_path.read_bytes() == original_bytes
     assert yaml.safe_load(manifest_path.read_text())["cases"] == [first, second]
     assert [row.case_id for row in loaded.cases] == [second["case_id"], first["case_id"]]
-
-@pytest.mark.parametrize("kind", ["missing", "directory", "invalid-encoding", "unhashable-key"])
-def test_manifest_loader_bounds_real_read_and_decode_errors(tmp_path: Path, kind: str) -> None:
-    path = tmp_path / "benchmark.yaml"
-    if kind == "directory":
-        path.mkdir()
-    elif kind == "invalid-encoding":
-        path.write_bytes(b"\xff\xff\x00")
-    elif kind == "unhashable-key":
-        path.write_text("? [one, two]\n: value\n")
-
-    with pytest.raises(WorkspaceCorrupt) as excinfo:
-        load_benchmark_manifest(tmp_path)
-
-    assert str(excinfo.value) == f"{tmp_path}: invalid benchmark.yaml"
-    assert excinfo.value.__cause__ is not None

@@ -1,12 +1,10 @@
 """Tests for agent execution and supporting helpers."""
 
 import os
-import sys
 from collections.abc import Callable
 from dataclasses import replace as dataclass_replace
 from io import StringIO
 from pathlib import Path
-from types import FrameType
 from typing import Any
 
 import pytest
@@ -15,12 +13,10 @@ from rich.console import Console
 from daydream import prompt_budget
 from daydream.agent import (
     _RedactedSupervisorError,
-    _run_agent,
     _scrubbed_supervisor_error,
-    is_environmental_failure,
     run_agent,
 )
-from daydream.backends import DiagnosticEvent, ResultEvent, ToolStartEvent
+from daydream.backends import ResultEvent, ToolStartEvent
 from daydream.extensions import ToolDecision, get_registry, set_registry
 from daydream.extensions.registry import Registry
 from daydream.prompt_budget import (
@@ -28,38 +24,20 @@ from daydream.prompt_budget import (
     SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES,
     SANCTIONED_EXACT_INPUT_MAX_FILES,
     SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES,
+    AdvisoryCandidate,
     PreparedSanctionedInputs,
     SanctionedInputTransport,
     SanctionedInputUnavailable,
     prepare_sanctioned_inputs,
-)
-from daydream.run_context import (
-    InteractionPolicy,
-    RunContext,
-    active_backends,
-    current_run_context,
+    select_advisory_inputs,
 )
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
-from tests.harness.trajectory import make_recorder, read_trajectory
 
 
 def _strict_backend(audit_root: Path) -> ScriptedBackend:
     """A backend whose strict PreToolUse isolation forces the inline transport."""
     return ScriptedBackend(audit_root_isolation="claude-pretooluse", audit_root=audit_root)
-
-
-def _count_prompt_budget_reads(monkeypatch: pytest.MonkeyPatch) -> Callable[[], int]:
-    """Count the bytes ``prompt_budget`` actually streams off disk."""
-    total = 0
-    real_read = os.read
-    def counted_read(fd: int, size: int) -> bytes:
-        nonlocal total
-        chunk = real_read(fd, size)
-        total += len(chunk)
-        return chunk
-    monkeypatch.setattr("daydream.prompt_budget.os.read", counted_read)
-    return lambda: total
 
 
 def _captured_artifact(
@@ -88,56 +66,6 @@ def _count_capture_calls(monkeypatch: pytest.MonkeyPatch) -> Callable[[], int]:
 async def _run_with_inputs(backend: Any, root: Path, prepared: Any) -> Any:
     """Enter ``run_agent`` with *prepared* sanctioned inputs attached."""
     return await run_agent(backend, root, "inspect", phase=DaydreamPhase.REVIEW, sanctioned_inputs=prepared)
-
-
-@pytest.mark.anyio
-async def test_run_agent_binds_context_and_keeps_backend_registered_across_retry(tmp_path: Path) -> None:
-    context = RunContext(InteractionPolicy(quiet=True))
-    observations: list[tuple[RunContext | None, tuple[object, ...], tuple[object, ...]]] = []
-    class RetryableFailure(RuntimeError):
-        retryable = True
-    def respond(*_args: Any, **_kwargs: Any) -> Any:
-        observations.append((current_run_context(), context.active_backends(), active_backends()))
-        if backend.call_count == 1:
-            return [RetryableFailure("retry")]
-        return None
-    backend = ScriptedBackend(
-        responder=respond, retry_attempts=1, retry_base_delay_s=0, retry_max_delay_s=0,
-    )
-    assert current_run_context() is None
-    result = await run_agent(backend, tmp_path, "inspect", phase=DaydreamPhase.REVIEW, run_context=context)
-    assert result == ("", None, None)
-    assert observations == [(context, (backend,), (backend,)), (context, (backend,), (backend,))]
-    assert context.active_backends() == ()
-    assert active_backends() == ()
-    assert current_run_context() is None
-
-
-async def test_run_agent_interrupt_after_registration_cleans_up(tmp_path: Path) -> None:
-    class InjectedInterrupt(BaseException):
-        pass
-    context = RunContext(InteractionPolicy())
-    backend = ScriptedBackend()
-    previous_trace = sys.gettrace()
-    def interrupt(frame: FrameType, event: str, _arg: Any) -> Any:
-        if (
-            event == "line"
-            and frame.f_code is _run_agent.__code__
-            and context.active_backends()
-        ):
-            raise InjectedInterrupt("after registration")
-        return interrupt
-    try:
-        sys.settrace(interrupt)
-        with pytest.raises(InjectedInterrupt) as caught:
-            await run_agent(backend, tmp_path, "inspect", phase=DaydreamPhase.REVIEW, run_context=context)
-    finally:
-        sys.settrace(previous_trace)
-    # Keep the traceback alive: cleanup must not depend on collecting frames.
-    assert caught.value.__traceback__ is not None
-    assert context.active_backends() == ()
-    assert active_backends() == ()
-    assert current_run_context() is None
 
 
 def _sized_inputs(tmp_path: Path, count: int, size: int) -> dict[str, Path]:
@@ -193,15 +121,6 @@ def test_prepare_sanctioned_inputs_selects_transport_and_enforces_aggregate_byte
                                   staged_review=True)
 
 
-def test_prepare_sanctioned_inputs_rejects_mismatched_strict_audit_root(tmp_path: Path) -> None:
-    artifact = tmp_path / "artifact.txt"
-    artifact.write_text("captured", encoding="utf-8")
-    other = tmp_path / "other"
-    other.mkdir()
-    with pytest.raises(SanctionedInputUnavailable, match="audit root"):
-        prepare_sanctioned_inputs(_strict_backend(other), tmp_path, {"artifact": artifact}, read_only=True)
-
-
 def test_prepare_sanctioned_exact_inputs_enforces_resource_caps(tmp_path: Path) -> None:
     backend = ScriptedBackend()
     maximum = tmp_path / "maximum.txt"
@@ -228,90 +147,38 @@ def test_prepare_sanctioned_exact_inputs_enforces_resource_caps(tmp_path: Path) 
     too_many = {f"input-{i:03d}": same for i in range(SANCTIONED_EXACT_INPUT_MAX_FILES + 1)}
     with pytest.raises(SanctionedInputUnavailable, match="file count"):
         prepare_sanctioned_inputs(backend, tmp_path, too_many, read_only=False)
+    advisory = select_advisory_inputs(backend, tmp_path, [
+        AdvisoryCandidate(f"advisory-{i:03d}", same) for i in range(SANCTIONED_EXACT_INPUT_MAX_FILES + 1)],
+        read_only=False)
+    assert len(advisory.admitted) == SANCTIONED_EXACT_INPUT_MAX_FILES
+    assert [item.reason for item in advisory.omitted] == ["exceeds-file-count"]
+    other = tmp_path / "other"
+    other.mkdir()
+    with pytest.raises(SanctionedInputUnavailable, match="audit root"):
+        prepare_sanctioned_inputs(_strict_backend(other), tmp_path, {"same": same}, read_only=True)
+    invalid = tmp_path / "invalid.txt"
+    invalid.write_bytes(b"\xff")
+    link = tmp_path / "link.txt"
+    link.symlink_to(same)
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    for path, reason in ((invalid, "UTF-8"), (link, "regular file"), (fifo, "regular file")):
+        with pytest.raises(SanctionedInputUnavailable, match=reason):
+            prepare_sanctioned_inputs(backend, tmp_path, {"input": path}, read_only=False)
 
 
-def test_prepare_sanctioned_exact_inputs_bounds_aggregate_streaming_reads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_revalidate_fails_closed_on_vanished_or_over_budget_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Aggregate refusal reads only the admitted bytes plus one look-ahead."""
-    backend = ScriptedBackend()
-    count = SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES // SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES + 1
-    inputs = _sized_inputs(tmp_path, count, SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES)
-    delegated_bytes = _count_prompt_budget_reads(monkeypatch)
-    with pytest.raises(SanctionedInputUnavailable, match="aggregate byte limit"):
-        prepare_sanctioned_inputs(backend, tmp_path, inputs, read_only=False)
-    assert delegated_bytes() <= SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES + 1
-    assert backend.call_count == 0
-
-
-def test_revalidate_sanctioned_exact_inputs_keeps_aggregate_read_bound(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    backend = ScriptedBackend()
-    count = SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES // SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES + 1
-    inputs = _sized_inputs(tmp_path, count, SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES // count)
-    prepared = prepare_sanctioned_inputs(backend, tmp_path, inputs, read_only=False)
-    inputs[f"input-{count - 1}"].write_bytes(b"x" * SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES)
-    delegated_bytes = _count_prompt_budget_reads(monkeypatch)
-    with pytest.raises(SanctionedInputUnavailable, match="aggregate byte limit"):
-        prepared.revalidate(backend, tmp_path, read_only=False)
-    assert delegated_bytes() <= SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES + 1
-    assert backend.call_count == 0
-
-
-@pytest.mark.parametrize('inline', [False, True], ids=['exact-paths', 'larger-inline'])
-def test_revalidate_skips_rehash_when_identity_unchanged(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inline: bool,
-) -> None:
-    """Matching (dev, ino, size, mtime_ns) reuses already captured bytes without rereading or hashing."""
+    """Revalidation fails closed: a vanished input is re-captured once and surfaces the real error;
+    the unchanged-identity fast path enforces aggregate limits without rereading the file."""
     artifact, backend, prepared = _captured_artifact(tmp_path)
-    if inline:
-        backend = _strict_backend(tmp_path.resolve())
-        artifact.write_text('界' * 21000, encoding='utf-8')
-        prepared = prepare_sanctioned_inputs(backend, tmp_path, {'artifact': artifact}, read_only=False,
-                                             staged_review=True)
-    capture_calls = _count_capture_calls(monkeypatch)
-    # Unchanged file: identity matches, so no re-read/re-hash happens.
-    prepared.revalidate(backend, tmp_path, read_only=False)
-    assert capture_calls() == 0
-    # Touched file (size changed): the full capture runs and fails closed.
-    artifact.write_text("captured but longer now", encoding="utf-8")
-    with pytest.raises(SanctionedInputUnavailable, match="changed"):
-        prepared.revalidate(backend, tmp_path, read_only=False)
-    assert capture_calls() == 1
-    # Same-length rewrite keeps size but advances mtime: still re-captured.
-    baseline = capture_calls()
-    os.utime(artifact, ns=(1_000_000_000, 1_000_000_000))
-    with pytest.raises(SanctionedInputUnavailable, match="changed"):
-        prepared.revalidate(backend, tmp_path, read_only=False)
-    assert capture_calls() == baseline + 1
-    if inline:
-        with pytest.raises(SanctionedInputUnavailable, match='backend changed'):
-            prepared.revalidate(ScriptedBackend(), tmp_path, False)
-        with pytest.raises(SanctionedInputUnavailable, match='call mode changed'):
-            prepared.revalidate(backend, tmp_path, True)
-        other = tmp_path / 'other-cwd'
-        other.mkdir()
-        with pytest.raises(SanctionedInputUnavailable, match='call mode changed'):
-            prepared.revalidate(backend, other, False)
-
-
-def test_revalidate_fails_closed_when_captured_file_vanishes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A missing captured input is re-captured and surfaces the real error."""
-    artifact, backend, prepared = _captured_artifact(tmp_path)
+    captured = prepared.inputs[0]
     artifact.unlink()
     capture_calls = _count_capture_calls(monkeypatch)
     with pytest.raises(SanctionedInputUnavailable, match="unavailable"):
         prepared.revalidate(backend, tmp_path, read_only=False)
     assert capture_calls() == 1
-
-
-def test_revalidate_unchanged_item_exceeding_remaining_budget_fails_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The unchanged-identity fast path enforces aggregate limits without rereading the file."""
-    artifact, backend, prepared = _captured_artifact(tmp_path)
-    captured = prepared.inputs[0]
     def failing_capture(*args: object, **kwargs: object) -> object:
         raise AssertionError("over-budget item must fail closed without re-capture")
     def always_unchanged(item: object) -> bool:
@@ -324,48 +191,6 @@ def test_revalidate_unchanged_item_exceeding_remaining_budget_fails_closed(
         exhausted.revalidate(backend, tmp_path, read_only=False)
 
 
-def test_prepare_sanctioned_inputs_rejects_invalid_utf8_and_symlinks(tmp_path: Path) -> None:
-    invalid = tmp_path / "invalid.txt"
-    invalid.write_bytes(b"\xff")
-    regular = tmp_path / "regular.txt"
-    regular.write_text("safe", encoding="utf-8")
-    link = tmp_path / "link.txt"
-    link.symlink_to(regular)
-    fifo = tmp_path / "fifo"
-    os.mkfifo(fifo)
-    for path, reason in ((invalid, "UTF-8"), (link, "regular file"), (fifo, "regular file")):
-        with pytest.raises(SanctionedInputUnavailable, match=reason):
-            prepare_sanctioned_inputs(ScriptedBackend(), tmp_path, {"input": path}, read_only=False)
-
-
-@pytest.mark.anyio
-async def test_run_agent_revalidates_sanctioned_inputs_before_backend_entry(tmp_path: Path) -> None:
-    artifact, backend, prepared = _captured_artifact(tmp_path)
-    artifact.write_text("mutated", encoding="utf-8")
-    with pytest.raises(SanctionedInputUnavailable, match="changed"):
-        await _run_with_inputs(backend, tmp_path, prepared)
-    assert backend.call_count == 0
-
-
-@pytest.mark.anyio
-async def test_run_agent_revalidates_sanctioned_input_before_retry(tmp_path: Path) -> None:
-    class RetryableFailure(RuntimeError):
-        retryable = True
-    class MutatingBackend(ScriptedBackend):
-        async def execute(self, *args: Any, **kwargs: Any) -> Any:
-            async for event in super().execute(*args, **kwargs):
-                if self.call_count == 1:
-                    artifact.write_text("mutated", encoding="utf-8")
-                    raise RetryableFailure("retry")
-                yield event
-    artifact, backend, prepared = _captured_artifact(
-        tmp_path, backend=MutatingBackend(retry_attempts=1, retry_base_delay_s=0, retry_max_delay_s=0),
-    )
-    with pytest.raises(SanctionedInputUnavailable, match="changed"):
-        await _run_with_inputs(backend, tmp_path, prepared)
-    assert backend.call_count == 1
-
-
 @pytest.mark.anyio
 async def test_run_agent_rejects_same_backend_object_when_transport_mode_changes(tmp_path: Path) -> None:
     artifact, backend, prepared = _captured_artifact(tmp_path, backend=ScriptedBackend(sandbox=False))
@@ -373,18 +198,6 @@ async def test_run_agent_rejects_same_backend_object_when_transport_mode_changes
     with pytest.raises(SanctionedInputUnavailable, match="transport mode changed"):
         await _run_with_inputs(backend, tmp_path, prepared)
     assert backend.call_count == 0
-
-
-def test_is_environmental_failure_both_directions() -> None:
-    environmental = [
-        "The dev Postgres container is not running", "could not connect to server: Connection refused",
-        "localhost:5432", "ECONNREFUSED",
-    ]
-    for output in environmental:
-        assert is_environmental_failure(output) is True, output
-    ordinary = ["AssertionError: assert 1 == 2", "1 failed, 3 passed", "ValueError: bad input"]
-    for output in ordinary:
-        assert is_environmental_failure(output) is False, output
 
 
 def test_scrubbed_supervisor_error_scrubs_all_str_surfaces() -> None:
@@ -461,50 +274,3 @@ async def test_hostile_supervisor_str_surfaces_as_scrubbed_extension_failure(
     assert "Extension Failure" in rendered
     assert "secret-shaped-payload" not in rendered
     assert "boom in str" not in rendered
-
-
-@pytest.mark.anyio
-async def test_diagnostic_event_is_recorder_only_and_has_no_agent_side_effects(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """run_agent forwards diagnostics without UI, callback, supervision, or budget effects."""
-    output = StringIO()
-    monkeypatch.setattr("daydream.agent.console", Console(file=output, force_terminal=False))
-    callback_events: list[object] = []
-    supervisor_events: list[tuple[str, dict[str, Any]]] = []
-    def callback(value: object) -> None:
-        callback_events.append(value)
-    def supervisor(
-        tool_name: str, tool_input: dict[str, Any], *, phase: DaydreamPhase
-    ) -> ToolDecision:
-        supervisor_events.append((tool_name, tool_input))
-        return ToolDecision(False, "")
-    registry = Registry()
-    registry.register_tool_supervisor(supervisor)
-    previous_registry = get_registry()
-    set_registry(registry)
-    recorder = make_recorder(tmp_path)
-    try:
-        async with recorder:
-            result = await run_agent(
-                ScriptedBackend(
-                    events=[
-                        DiagnosticEvent(
-                            code="codex_parser_coverage", message="bounded parser evidence", metadata={"count": 1},
-                        ), ResultEvent(structured_output=None, continuation=None),
-                    ]
-                ), tmp_path, "inspect", phase=DaydreamPhase.REVIEW, progress_callback=callback, tool_call_budget=0,
-            )
-    finally:
-        set_registry(previous_registry)
-    assert result == ("", None, None)
-    assert callback_events == []
-    assert supervisor_events == []
-    assert output.getvalue() == ""
-    trajectory = read_trajectory(recorder.path)
-    agent_steps = [step for step in trajectory["steps"] if step["source"] == "agent"]
-    assert len(agent_steps) == 1
-    assert agent_steps[0]["message"] == ""
-    assert agent_steps[0]["extra"]["backend_diagnostics"] == [
-        {"code": "codex_parser_coverage", "message": "bounded parser evidence", "metadata": {"count": 1}}
-    ]

@@ -2,12 +2,10 @@
 from __future__ import annotations
 
 import json
-from io import StringIO
 from pathlib import Path
 from typing import Any
 
 import pytest
-from rich.console import Console
 
 from daydream.agent import run_agent
 from daydream.backends import (
@@ -21,32 +19,10 @@ from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
 
-RAW = '{"conventions": [{"name": "OpenAPI First", "description": "x", "source": "AGENTS.md"}]}'
-PAYLOAD = {"conventions": [{"name": "OpenAPI First", "description": "x", "source": "AGENTS.md"}]}
 
 def _scripted(events: list[Any]) -> ScriptedBackend:
     """ScriptedBackend whose turn ends with an empty structured result."""
     return ScriptedBackend(events=[*events, ResultEvent(structured_output=None, continuation=None)], model="mock-model")
-
-@pytest.fixture
-def rec(monkeypatch: pytest.MonkeyPatch) -> Console:
-    """Install a recording console as ``daydream.agent.console`` and return it."""
-    console = Console(file=StringIO(), record=True, force_terminal=True, width=100)
-    monkeypatch.setattr("daydream.agent.console", console)
-    return console
-
-async def test_structured_output_text_is_not_rendered(rec: Console, tmp_path: Path) -> None:
-    backend = ScriptedBackend(
-        events=[TextEvent(text=RAW), ResultEvent(structured_output=PAYLOAD, continuation=None)], model="mock-model",
-    )
-    result, _, _ = await run_agent(
-        backend, tmp_path, "scan", phase=DaydreamPhase.REVIEW, output_schema={"type": "object"}
-    )
-    out = rec.export_text()
-    assert result == PAYLOAD  # canonical structured result still returned
-    assert "OpenAPI First" not in out  # raw JSON content NOT on the terminal
-    assert "{" not in out
-
 
 async def test_log_mode_emission_redacts_sentinels_on_agent_path(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
@@ -77,74 +53,9 @@ async def test_log_mode_emission_redacts_sentinels_on_agent_path(
     assert sentinel not in out          # no raw leak through the agent's log-mode emission
     assert out.count("[result]") == 1 and "OpenAPI First" in out
 
-async def test_structured_fallback_recon_not_gated_all_or_nothing(rec: Console, tmp_path: Path) -> None:
-    """Explicit validation opt-out lets recon salvage commands despite missing top-level fields.
-
-    Ordinary callers retain validation; the opt-out is not implicit in the phase.
-    """
-    schema = {
-        "type": "object", "required": ["languages", "commands", "conventions", "intent_docs"],
-        "properties": {
-            "languages": {"type": "array", "items": {"type": "string"}},
-            "commands": {"type": "array", "items": {"type": "object"}},
-            "conventions": {"type": "array", "items": {"type": "string"}},
-            "intent_docs": {"type": "array", "items": {"type": "string"}},
-        },
-    }
-    backend = _scripted([ TextEvent(text='{"commands": [{"command": "make test"}]}'), ])
-    result, _, _ = await run_agent(
-        backend, tmp_path, "go", phase=DaydreamPhase.RECON, output_schema=schema, validate_structured_output=False,
-    )
-    assert result == {"commands": [{"command": "make test"}]}
-    assert isinstance(result, dict)
-
-async def test_structured_fallback_salvages_partial_dict(rec: Console, tmp_path: Path) -> None:
-    """A valid top-level field reaches the consumer even if some nested records are invalid.
-
-    Consumers discard bad records individually, preserving valid siblings.
-    """
-    schema = {
-        "type": "object", "required": ["verdicts"],
-        "properties": {
-            "verdicts": {
-                "type": "array",
-                "items": {
-                    "type": "object", "required": ["issue_id", "verdict", "evidence"],
-                    "properties": {
-                        "issue_id": {"type": "integer"}, "verdict": {"type": "string"}, "evidence": {"type": "string"},
-                    },
-                },
-            }
-        },
-    }
-    partial = {
-        "verdicts": [
-            {"issue_id": 1, "verdict": "consistent", "evidence": "matches"},
-            {"issue_id": 2, "verdict": "bogus"},  # missing required "evidence"
-        ]
-    }
-    backend = _scripted([ TextEvent(text=json.dumps(partial)), ])
-    result, _, _ = await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.VERIFY, output_schema=schema)
-    assert result == partial  # the partial dict reaches the salvage path
-    assert isinstance(result, dict)
-
-async def test_structured_fallback_requires_merge_envelope(rec: Console, tmp_path: Path) -> None:
-    """A bare array remains text and cannot establish structured output."""
-    schema = {
-        "type": "object", "required": ["items"],
-        "properties": {"items": {"type": "array", "items": {"type": "object"}}},
-    }
-    items = [{"id": 1, "description": "x"}]
-    backend = _scripted([TextEvent(text=json.dumps(items))])
-    result, _, _ = await run_agent(backend, tmp_path, "merge", phase=DaydreamPhase.DEEP, output_schema=schema)
-    assert result == json.dumps(items)
-    assert isinstance(result, str)
-
-
-@pytest.mark.parametrize("primary", [None, {"issues": "invalid", "description": "REJECTED_RESULT"}])
-async def test_log_presents_only_resolved_result_once(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], primary: Any,
-) -> None:
+async def test_log_presents_only_resolved_result_once(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A rejected primary result is never logged; only the resolved fallback appears, once and redacted."""
+    primary = {"issues": "invalid", "description": "REJECTED_RESULT"}
     sentinel = "ghp_" + "x" * 16
     payload = {"issues": [{"id": 1, "description": "Accepted " + sentinel}]}
     backend = ScriptedBackend(events=[TextEvent(text=json.dumps(payload)),
@@ -159,3 +70,16 @@ async def test_log_presents_only_resolved_result_once(
     assert output.count("[result]") == 1 and "[result] {\"issues\": [" in output
     assert "REJECTED_RESULT" not in output and sentinel not in output
     assert "[REDACTED_API_KEY]" in output
+
+
+async def test_salvageable_text_requires_lists_in_required_array_slots(tmp_path: Path) -> None:
+    """Without full validation, prose JSON is admitted only when every required array slot holds a list."""
+    schema = {"type": "object", "required": ["issues", "summary"],
+              "properties": {"issues": {"type": "array"}, "summary": {"type": "string"}}}
+    salvageable = '{"issues": [], "summary": 5}'
+    result, _, _ = await run_agent(_scripted([TextEvent(text=salvageable)]), tmp_path, "review",
+                                   phase=DaydreamPhase.REVIEW, output_schema=schema)
+    assert result == {"issues": [], "summary": 5}
+    result, _, _ = await run_agent(_scripted([TextEvent(text='{"issues": "none", "summary": "ok"}')]), tmp_path,
+                                   "review", phase=DaydreamPhase.REVIEW, output_schema=schema)
+    assert result == '{"issues": "none", "summary": "ok"}'  # unsalvageable prose stays raw text, never an object

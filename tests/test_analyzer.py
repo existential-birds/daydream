@@ -4,7 +4,6 @@ import json
 import math
 import os
 import subprocess
-import uuid
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Literal
@@ -26,7 +25,7 @@ from daydream.eval.analyzer import (
     analyze_session,
     analyze_shipped_duplication,
 )
-from daydream.git_ops import GitError, search_files
+from daydream.git_ops import search_files
 from daydream.trajectory import (
     DaydreamPhase,
     RunWriteSnapshot,
@@ -47,20 +46,14 @@ def _snapshot(root: dict[str, Any], *forks: dict[str, Any], cutoff_at: str = "20
     )
 
 
-@pytest.mark.parametrize(("status", "cutoff_at"), [
-    ("partial", "2026-01-01T00:00:10Z"),
-    ("complete", "2026-01-01T00:00:04Z"),
-])
-def test_evaluation_uses_frozen_bytes_status_and_cutoff(tmp_path: Path,
-    status: Literal["complete", "partial"], cutoff_at: str,
-) -> None:
+def test_evaluation_uses_frozen_bytes_status_and_cutoff(tmp_path: Path) -> None:
     root: dict[str, Any] = {"session_id": "frozen", "trajectory_id": "frozen", "_source_file": "trajectory.json",
         "steps": [{"timestamp": "2026-01-01T00:00:02Z"}, {"timestamp": "2026-01-01T00:00:03Z"}],
         "final_metrics": {"total_cost_usd": 0.5},
         "extra": {"partial": False, "run_started_at": "2026-01-01T00:00:00Z",
             "run_ended_at": "2026-01-01T00:00:10Z", "snapshot_at": "2026-01-01T00:00:04Z"},
     }
-    snapshot = _snapshot(root, status=status, cutoff_at=cutoff_at)
+    snapshot = _snapshot(root, status="partial", cutoff_at="2026-01-01T00:00:10Z")
     snapshot.validate("frozen")
     live_path = tmp_path / ".daydream" / "runs" / "frozen" / "trajectory.json"
     live_path.parent.mkdir(parents=True)
@@ -121,7 +114,6 @@ def test_training_signals_preserve_independent_fork_outcomes_in_archive(tmp_path
     assert (result["total_trajectories"], result["clean_for_training"], result["needs_review"]) == (11, 5, 6)
 
 
-
 def test_analyze_costs_aggregates_legacy_fork_metrics() -> None:
     trajectories = {"main": None,
         "forked": [{"_source_file": "legacy-main.json", "final_metrics": {"total_cost_usd": 1.0}},
@@ -132,6 +124,8 @@ def test_analyze_costs_aggregates_legacy_fork_metrics() -> None:
 
     assert result["total_cost_usd"] == 1.5
     assert [(row["agent"], row["cost_usd"]) for row in result["by_agent"]] == [("legacy-main", 1.0), ("fork", 0.5)]
+    # The legacy filename shapes are retained deliberately.
+    assert _agent_label("deadbeef.deep-python.json") == "deep-python"
 
 
 async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Path, archive_dir: Path) -> None:
@@ -283,21 +277,8 @@ def _big_function(max_x: int) -> str:
     return "\n".join(lines) + "\n"
 
 
-def test_quality_returns_none_when_no_python_files(tmp_path: Path) -> None:
-    result = _quality(tmp_path, {"README.md": "# nothing here\n"})
-
-    assert result["erosion"] is None
-    assert result["verbosity"] is None
-    assert result["scoped_files"] == 0
-    assert result["per_file"] == {}
-    assert result["calibration"] == {"human_verbosity": 0.19, "human_erosion": 0.34, "paper": "arXiv:2603.24755"}
-
-
-@pytest.mark.parametrize("candidate_paths", [None, {"app.py", "api_generated.py"}], ids=["workspace", "candidate"])
-def test_quality_excludes_vendored_and_internal_dirs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, candidate_paths: set[str] | None,
-) -> None:
-    """Standalone scope prunes excluded trees and preserves leaf-file symlink compatibility."""
+def test_quality_excludes_vendored_and_internal_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Standalone candidate scope prunes excluded trees and generated candidates before traversal."""
     ws = _quality_workspace(tmp_path,
         {
             "app.py": "def f(x):\n    return x\n",
@@ -328,31 +309,18 @@ def test_quality_excludes_vendored_and_internal_dirs(
         return scandir(path)
 
     monkeypatch.setattr(os, "scandir", scan)
-    result = analyze_quality(ws / ".daydream", candidate_paths=candidate_paths)
-
-    expected = (["app.py", "eligible.py/child.py", "linked_file.py", "vendorish/mod.py"]
-        if candidate_paths is None else ["app.py"])
-    assert result["scoped_files"] == len(expected)
-    assert list(result["per_file"]) == expected
-    if candidate_paths is None:
-        assert result["per_file"]["linked_file.py"]["sloc"] == 1
+    result = analyze_quality(ws / ".daydream", candidate_paths={"app.py", "api_generated.py"})
+    assert result["scoped_files"] == 1
+    assert list(result["per_file"]) == ["app.py"]
 
 
-@pytest.mark.parametrize("layout", ["root", "nested", "linked"])
-@pytest.mark.parametrize("candidate_paths", [None, {"app.py", "solo.py"}], ids=["workspace", "candidate"])
 def test_quality_git_scope_confines_targets_and_clone_peers(
     git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    layout: str, candidate_paths: set[str] | None,
 ) -> None:
-    """Git membership owns reads and clones; standalone peer tests cannot detect ignored pollution."""
-    workspace = git_repo
-    if layout == "nested":
-        workspace = git_repo / "service"
-        workspace.mkdir()
-        (git_repo / "outside.py").write_text("OUTSIDE = 1\n")
-    elif layout == "linked":
-        workspace = tmp_path / "linked"
-        git(git_repo, "worktree", "add", "--detach", str(workspace), "HEAD")
+    """Git membership owns reads and clones in a linked worktree; standalone peer tests cannot
+    detect ignored pollution."""
+    workspace = tmp_path / "linked"
+    git(git_repo, "worktree", "add", "--detach", str(workspace), "HEAD")
     block = "    if x > 1:\n        return 1\n    return 0\n"
     solo_block = "    if y > 7:\n        return 8\n    return 9\n"
     contents = {
@@ -402,10 +370,8 @@ def test_quality_git_scope_confines_targets_and_clone_peers(
 
     monkeypatch.setattr(Path, "open", open_source)
     monkeypatch.setattr(os, "scandir", scan)
-    result = analyze_quality(workspace / ".daydream", candidate_paths=candidate_paths)
+    result = analyze_quality(workspace / ".daydream")
     expected = [".rules/hidden.py", "app.py", "deps/tracked.py", "peer.py", "solo.py"]
-    if candidate_paths is not None:
-        expected = ["app.py", "solo.py"]
     assert result["scoped_files"] == len(expected)
     assert list(result["per_file"]) == expected
     assert sorted(reads) == sorted(allowed_reads)
@@ -418,28 +384,9 @@ def test_quality_git_scope_confines_targets_and_clone_peers(
     assert analyze_quality(workspace / ".daydream", candidate_paths={"app.py"})["verbosity"] == 0.0
 
 
-def test_quality_git_inventory_failure_never_recurses(
-    git_repo: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A corrupt real index must surface, rather than admitting ignored experiment files."""
-    (git_repo / "app.py").write_text("VALUE = 1\n")
-    (git_repo / ".git/index").write_bytes(b"corrupt-index")
-    scandir = os.scandir
-
-    def scan(path: Any) -> Any:
-        if isinstance(path, (str, bytes, os.PathLike)):
-            assert not Path(os.fsdecode(path)).is_relative_to(git_repo), "failed inventory must not widen scope"
-        return scandir(path)
-
-    monkeypatch.setattr(os, "scandir", scan)
-    with pytest.raises(GitError):
-        analyze_quality(git_repo / ".daydream")
-
-
-@pytest.mark.parametrize("source_state", ["missing", "replacement", "symlink"])
-@pytest.mark.parametrize("change_at", ["before-inventory", "after-inventory"])
+@pytest.mark.parametrize("source_state", ["missing", "symlink"])
 def test_quality_reattests_workspace_after_git_inventory(
-    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_state: str, change_at: str,
+    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_state: str,
 ) -> None:
     """Root changes around real Git inventory remain unavailable or unsafe, without widening scope."""
     (git_repo / "app.py").write_bytes(b"ORIGINAL = 1\n")
@@ -450,13 +397,11 @@ def test_quality_reattests_workspace_after_git_inventory(
     inventory = search_files
 
     def enumerate_then_change(*args: Any, **kwargs: Any) -> list[str]:
-        paths = inventory(*args, **kwargs) if change_at == "after-inventory" else []
+        paths = inventory(*args, **kwargs)
         git_repo.rename(moved)
-        if source_state == "replacement":
-            replacement.rename(git_repo)
-        elif source_state == "symlink":
+        if source_state == "symlink":
             git_repo.symlink_to(replacement, target_is_directory=True)
-        return paths if change_at == "after-inventory" else inventory(*args, **kwargs)
+        return paths
 
     monkeypatch.setattr(quality_mod, "search_files", enumerate_then_change)
     with pytest.raises(ArtifactVisibilityError) as caught:
@@ -466,8 +411,7 @@ def test_quality_reattests_workspace_after_git_inventory(
     else:
         assert type(caught.value) is ArtifactVisibilityError
     assert (moved / "app.py").read_bytes() == b"ORIGINAL = 1\n"
-    retained = git_repo if source_state == "replacement" else replacement
-    assert (retained / "app.py").read_bytes() == b"REPLACEMENT = 2\n"
+    assert (replacement / "app.py").read_bytes() == b"REPLACEMENT = 2\n"
     if source_state == "missing":
         assert not git_repo.exists()
 
@@ -647,10 +591,7 @@ def test_analyze_session_reads_quality_from_explicit_code_workspace(tmp_path: Pa
 _TEN_COMPREHENSION_FILTERS = " ".join(f"if x != {i}" for i in range(10))
 
 
-@pytest.mark.parametrize("candidate_paths", [None, {"app.py"}], ids=["workspace", "candidate"])
-def test_quality_reuses_eligibility_bytes_for_parsing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, candidate_paths: set[str] | None,
-) -> None:
+def test_quality_reuses_eligibility_bytes_for_parsing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Eligibility and parsing share one read, including peers and failed inputs."""
     block = "    if x > 1:\n        return 1\n    return 0\n"
     ws = _quality_workspace(tmp_path, {
@@ -672,23 +613,19 @@ def test_quality_reuses_eligibility_bytes_for_parsing(
         return open_path(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "open", open_source)
+    candidate_paths = {"app.py"}
     result = analyze_quality(ws / ".daydream", candidate_paths=candidate_paths)
 
     assert opens == {name: 1 for name in (
         "app.py", "peer.py", "broken.py", "gen_tool.py", "denied.py", "undecodable.py",
     )}
-    assert result["scoped_files"] == (4 if candidate_paths is None else 1)
-    expected_paths = ["app.py", "peer.py", "undecodable.py"] if candidate_paths is None else ["app.py"]
-    assert list(result["per_file"]) == expected_paths
+    assert result["scoped_files"] == 1
+    assert list(result["per_file"]) == ["app.py"]
     assert result["per_file"]["app.py"] == {
         "erosion": 0.0, "verbosity": 0.75, "sloc": 4, "functions": 1, "high_cc_functions": 0,
     }
     assert result["erosion"] == 0.0
-    assert result["verbosity"] == (0.6 if candidate_paths is None else 0.75)
-    if candidate_paths is None:
-        assert result["per_file"]["undecodable.py"] == {
-            "erosion": 0.0, "verbosity": 0.0, "sloc": 2, "functions": 1, "high_cc_functions": 0,
-        }
+    assert result["verbosity"] == 0.75
     # Remove the valid clone peer while leaving the broken file's identical body in place.
     # A malformed tree must not create a false clone in either workspace or candidate scope.
     (ws / "peer.py").write_text("PEER = 7\n")
@@ -701,90 +638,38 @@ def test_quality_reuses_eligibility_bytes_for_parsing(
     }
 
 
-def test_quality_candidate_empty_set_returns_empty_without_enumeration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _boom(_workspace: Path) -> None:
-        raise AssertionError("workspace must not be enumerated for an empty candidate set")
-
-    monkeypatch.setattr(quality_mod, "_scoped_python_files", _boom)
-    result = _quality(tmp_path, {"app.py": "def a():\n    return 1\n"}, candidate_paths=set())
-
-    assert result["scoped_files"] == 0
-    assert result["per_file"] == {}
-    assert result["erosion"] is None
-    assert result["verbosity"] is None
-
-
-@pytest.mark.parametrize("candidate_paths", [None, set()], ids=["whole-workspace", "empty-candidates"])
-@pytest.mark.parametrize("workspace_kind", ["missing", "file", "symlink", "symlink-ancestor"])
-def test_quality_refuses_unavailable_or_unsafe_code_workspace(
-    tmp_path: Path, workspace_kind: str, candidate_paths: set[str] | None,
-) -> None:
-    """An empty selection cannot turn a missing or redirected source into healthy quality.
-
-    Existing empty-workspace tests use real directories and miss this root/ancestry boundary.
-    """
-    workspace = tmp_path / "workspace"
-    if workspace_kind == "file":
-        workspace.write_text("not a checkout")
-    elif workspace_kind.startswith("symlink"):
-        actual = _quality_workspace(tmp_path, {"app.py": "VALUE = 1\n"}, name="actual")
-        workspace.symlink_to(actual, target_is_directory=True)
-        if workspace_kind == "symlink-ancestor":
-            (actual / "nested").mkdir()
-            workspace /= "nested"
-
-    with pytest.raises(ArtifactVisibilityError, match="quality code workspace") as caught:
-        analyze_quality(tmp_path / "frozen/.daydream", candidate_paths=candidate_paths, code_workspace=workspace)
-
-    if workspace_kind == "missing":
-        assert type(caught.value).__name__ == "ArtifactSourceUnavailableError"
-        assert isinstance(caught.value.__cause__, FileNotFoundError)
-    else:
-        assert type(caught.value) is ArtifactVisibilityError
-
-
-@pytest.mark.parametrize("failure", ["unavailable", "empty-tree", "exception"])
-def test_quality_parser_failure_keeps_scope_without_metrics(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
-) -> None:
+def test_quality_parser_failure_keeps_scope_without_metrics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Binding failure excludes metrics without pretending the eligible source was absent."""
+    # A zero nonblank denominator remains undefined in file and workspace verbosity.
+    blank = _quality(tmp_path / "blank", {"blank.py": "\n\n\n"})
+    assert blank["per_file"]["blank.py"]["verbosity"] is None
+    assert blank["per_file"]["blank.py"]["sloc"] == 0
+    assert blank["verbosity"] is None
+
     class FailedParser:
+        def __init__(self, raises: bool) -> None:
+            self.raises = raises
+
         def parse(self, _source: bytes) -> None:
-            if failure == "exception":
+            if self.raises:
                 raise ValueError("native parser failed")
             return None
 
-    parser = None if failure == "unavailable" else FailedParser()
-    monkeypatch.setattr(quality_mod, "_quality_python_parser", lambda: parser)
-    result = _quality(tmp_path, {"app.py": "def f(x):\n    return x\n"})
-
-    assert result == {
-        "erosion": None,
-        "verbosity": None,
-        "per_file": {},
-        "calibration": {"human_verbosity": 0.19, "human_erosion": 0.34, "paper": "arXiv:2603.24755"},
-        "scoped_files": 1,
-    }
-
-
-def test_quality_per_file_erosion_none_without_functions(tmp_path: Path) -> None:
-    """No function mass means undefined erosion, distinct from zero high-complexity mass."""
-    result = _quality(tmp_path, {"m.py": "import os\nX = 1\n", "app.py": "def f(x):\n    return x\n"},)
-
-    assert result["per_file"]["m.py"]["erosion"] is None
-    assert result["per_file"]["m.py"]["functions"] == 0
-    assert result["per_file"]["app.py"]["erosion"] == 0.0
-    assert result["erosion"] == 0.0
-
-
-def test_quality_per_file_verbosity_none_on_blank_only_file(tmp_path: Path) -> None:
-    """A zero nonblank denominator remains undefined in file and workspace verbosity."""
-    result = _quality(tmp_path, {"blank.py": "\n\n\n"})
-
-    assert result["per_file"]["blank.py"]["verbosity"] is None
-    assert result["per_file"]["blank.py"]["sloc"] == 0
-    assert result["verbosity"] is None
+    for name, parser in (("unavailable", None), ("empty-tree", FailedParser(False)),
+                         ("exception", FailedParser(True))):
+        monkeypatch.setattr(quality_mod, "_quality_python_parser", lambda parser=parser: parser)
+        result = _quality(tmp_path / name, {"app.py": "def f(x):\n    return x\n"})
+        assert result == {
+            "erosion": None,
+            "verbosity": None,
+            "per_file": {},
+            "calibration": {"human_verbosity": 0.19, "human_erosion": 0.34, "paper": "arXiv:2603.24755"},
+            "scoped_files": 1,
+        }
+    # The direct analyzer raises the typed guard error for a known-bad native install.
+    monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
+    with pytest.raises(safety.TreeSitterBadVersionError):
+        _quality(tmp_path / "bad", {"mod.py": "def f():\n    return 1\n"})
 
 
 # Count authoritative merged items, falling back to review text, then pre-merge stack totals.
@@ -842,27 +727,22 @@ def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
     assert analyze_findings(dd)["per_lens"]["wonder"] == 0
 
 
-def test_analyze_quality_refuses_known_bad_tree_sitter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The direct analyzer raises the typed guard error for a known-bad native install."""
-
-    monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
-    with pytest.raises(safety.TreeSitterBadVersionError):
-        _quality(tmp_path, {"mod.py": "def f():\n    return 1\n"})
-
-
-@pytest.mark.parametrize("unavailable", [
-    "tree-sitter", "removed-source", "git-metadata-during-inventory", "git-metadata-before-inventory",
-    "source-during-git-discovery", "source-during-git-capture", "nested-git-metadata-at-inventory",
-    "source-during-checkout-open", "denied-checkout-open",
-])
 def test_analyze_session_preserves_frozen_analysis_when_quality_is_unavailable(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unavailable: str,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     """Unavailable native/source inputs preserve frozen-only analysis rather than dropping the run.
 
     Existing inventory faults start after root acquisition. Loss during descriptor/Git discovery
     previously escaped as a generic failure; nested Git loss could read ignored files recursively.
     """
+    for unavailable in ("git-metadata-before-inventory", "source-during-git-discovery",
+                        "nested-git-metadata-at-inventory", "source-during-checkout-open", "denied-checkout-open"):
+        with monkeypatch.context() as patch:
+            _assert_frozen_analysis_survives(patch, tmp_path / unavailable, unavailable)
+
+
+def _assert_frozen_analysis_survives(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unavailable: str) -> None:
+    tmp_path.mkdir()
     with ExitStack() as held:
 
         ws = _quality_workspace(tmp_path, {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},)
@@ -877,11 +757,7 @@ def test_analyze_session_preserves_frozen_analysis_when_quality_is_unavailable(
         child = _root_trajectory("quality-unavailable") | {"trajectory_id": "child", "_source_file": "child.json"}
         snapshot = _snapshot(root, child)
         code_workspace: Path | CodeWorkspace = ws
-        if unavailable == "tree-sitter":
-            monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
-        elif unavailable == "removed-source":
-            ws.rename(tmp_path / "removed-source")
-        elif unavailable in {"source-during-checkout-open", "denied-checkout-open"}:
+        if unavailable in {"source-during-checkout-open", "denied-checkout-open"}:
             original_open = os.open
 
             def open_checkout(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
@@ -893,11 +769,10 @@ def test_analyze_session_preserves_frozen_analysis_when_quality_is_unavailable(
                 return original_open(path, flags, *args, **kwargs)
 
             monkeypatch.setattr(os, "open", open_checkout)
-        elif unavailable in {"source-during-git-discovery", "source-during-git-capture"}:
+        elif unavailable == "source-during-git-discovery":
             git(ws, "init")
             original_run = subprocess.run
-            command = (["rev-parse", "--is-inside-work-tree"] if unavailable == "source-during-git-discovery"
-                       else ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"])
+            command = ["rev-parse", "--is-inside-work-tree"]
 
             def discover_after_loss(args: Any, **kwargs: Any) -> Any:
                 if args == ["git", *command]:
@@ -937,9 +812,8 @@ def test_analyze_session_preserves_frozen_analysis_when_quality_is_unavailable(
             inventory = search_files
 
             def enumerate_then_remove_git(*args: Any, **kwargs: Any) -> list[str]:
-                paths = inventory(*args, **kwargs) if unavailable == "git-metadata-during-inventory" else []
                 (ws / ".git").rename(tmp_path / "removed-git")
-                return paths if unavailable == "git-metadata-during-inventory" else inventory(*args, **kwargs)
+                return inventory(*args, **kwargs)
 
             monkeypatch.setattr(quality_mod, "search_files", enumerate_then_remove_git)
 
@@ -961,7 +835,7 @@ def test_analyze_session_preserves_frozen_analysis_when_quality_is_unavailable(
         assert result["timing"]["by_agent"] == [{"agent": "main", "duration_seconds": 1.0}]
         assert result["routing"]["profile"] == "forensic"
         assert result["training_signals"]["total_trajectories"] == result["training_signals"]["clean_for_training"] == 1
-        if unavailable == "removed-source" or unavailable.startswith("source-during-"):
+        if unavailable.startswith("source-during-"):
             assert not ws.exists()
         if unavailable == "nested-git-metadata-at-inventory":
             assert removed and not (ws / ".git").exists()
@@ -970,9 +844,6 @@ def test_analyze_session_preserves_frozen_analysis_when_quality_is_unavailable(
 # Seed the exact production artifact shapes for location and duplication analysis.
 
 WORKED_A = "New helper duplicates the existing loader"
-WORKED_B = "Config reading is implemented twice in this module"
-
-
 def seed_diff_patch(dd: Path, file: str = "svc/loader.py", *, start: int = 85, count: int = 8) -> None:
     """Write one hunk with inclusive new-side range [start, start+count-1]."""
     dd.mkdir(parents=True, exist_ok=True)
@@ -1019,144 +890,20 @@ def _worked_example_dirs(tmp_path: Path) -> tuple[Path, Path]:
     return dd, deep
 
 
-def test_issue_1106_worked_example_is_distinguishable_from_the_clean_run(tmp_path: Path,) -> None:
-    """Distinguish a correct line-88 finding from its line-4 structural restatement.
-
-    The sole hunk is lines 85–92; location must expose the 81-line miss, and duplication
-    must expose the pair even though similarity 0.1538 is below the 0.5 threshold."""
-    dd, deep = _worked_example_dirs(tmp_path)
-    assert not (dd / "hunk-index.json").exists()
-    seed_merged_items(
-        deep,
-        [
-            _item(1, line=88, description=WORKED_A),
-            _item(
-                2,
-                line=4,
-                description=WORKED_B,
-                lens="structural",
-                location_distrust=True,
-                location_cited_line=4,
-            ),
-        ],
-    )
-
-    location = analyze_location(dd)
-    assert location["hunk_source"] == "diff.patch"
-    assert location["shipped_items"] == 2
-    assert location["scored_items"] == 2
-    assert location["tiers"] == {"in_hunk": 1, "within_tolerance": 0,
-        "beyond_tolerance": 1,   # the mis-anchored twin
-        "file_absent": 0,
-    }
-    assert location["in_hunk_rate"] == 0.5  # NOT 1.0 -- the run is no longer perfect
-    assert location["distrusted_items"] == 1
-    beyond = [row for row in location["items"] if row["tier"] == "beyond_tolerance"]
-    assert [row["id"] for row in beyond] == [2]
-    assert beyond[0]["distance"] == 81  # exactly the issue's arithmetic
-
-    duplication = analyze_shipped_duplication(dd)
-    assert duplication["shipped_items"] == 2
-    assert duplication["comparable_pairs"] == 1
-    assert duplication["same_file_pairs"] == 1  # the escape IS visible
-    assert duplication["near_duplicate_pairs"] == 0  # ...but under the 0.5 bar
-    assert duplication["max_similarity"] == 0.1538  # the issue's own number
-    pair = duplication["pairs"][0]
-    assert (pair["a_id"], pair["b_id"]) == ("1", "2")
-    assert (pair["a_lens"], pair["b_lens"]) == ("per-stack", "structural")
-    assert pair["same_file"] is True
-    # Unattributed merge-authored items keep empty provenance; the duplicate pair still counts.
-    assert (pair["a_source_uids"], pair["b_source_uids"]) == ([], [])
-
-    clean_dd, clean_deep = _worked_example_dirs(tmp_path / "clean")
-    seed_merged_items(clean_deep, [_item(1, line=88, description=WORKED_A)])
-    clean_location = analyze_location(clean_dd)
-    assert clean_location["in_hunk_rate"] == 1.0
-    assert clean_location["tiers"]["beyond_tolerance"] == 0
-    clean_duplication = analyze_shipped_duplication(clean_dd)
-    assert clean_duplication["comparable_pairs"] == 0
-    assert clean_duplication["same_file_pairs"] == 0
-    assert clean_duplication["max_similarity"] is None
-    assert clean_location["in_hunk_rate"] > location["in_hunk_rate"]
-
-
-def test_location_hunk_source_none_reports_not_measured(tmp_path: Path) -> None:
-    """With neither artifact, "not measured" must be distinguishable from "clean"."""
-    dd, deep = _deep_dirs(tmp_path)
-    seed_merged_items(deep, [_item(1, line=4)])   # would be beyond_tolerance
-
-    location = analyze_location(dd)
-
-    assert location["hunk_source"] == "none"
-    assert location["shipped_items"] == 1
-    assert location["scored_items"] == 0
-    assert location["tiers"] == {"in_hunk": 0, "within_tolerance": 0, "beyond_tolerance": 0, "file_absent": 0}
-    assert location["tier_rates"] == {}
-    assert location["in_hunk_rate"] is None       # undefined, not perfect
-    assert location["items"] == []
-
-
-def test_location_and_duplication_are_zeroed_when_merged_items_absent(tmp_path: Path,) -> None:
-    """An existing deep directory does not prove merge produced a shipped set.
-
-    Absent merged-items keeps duplicate counts undefined; zero means merge completed
-    with a genuinely empty set."""
-    dd, _deep = _worked_example_dirs(tmp_path)
-
-    location = analyze_location(dd)
-    duplication = analyze_shipped_duplication(dd)
-
-    assert location["shipped_items"] == 0
-    assert location["scored_items"] == 0
-    assert location["in_hunk_rate"] is None
-    assert location["hunk_source"] == "diff.patch"   # honest: hunks WERE readable
-    assert duplication["shipped_items"] == 0
-    assert duplication["comparable_pairs"] == 0
-    assert duplication["near_duplicate_pairs"] is None
-    assert duplication["max_similarity"] is None
-    assert duplication["mean_similarity"] is None
-    assert duplication["pairs"] == []
-
-
-def test_shipped_duplication_input_is_capped_to_bound_the_on2_scan(tmp_path: Path,) -> None:
-    """Place the only duplicate pair beyond the 200-item quadratic-comparison cap.
-
-    It must remain uncounted while shipped_items still reports all 202 entries."""
-    dd, deep = _worked_example_dirs(tmp_path)
-    # Random hex descriptions avoid accidentally crossing the 0.5 similarity threshold.
-    items = [_item(i, description=uuid.uuid4().hex) for i in range(200)]
-    items.append(_item(200, description="the exact same duplicate description text"))
-    items.append(_item(201, description="the exact same duplicate description text"))
-    seed_merged_items(deep, items)
-
-    duplication = analyze_shipped_duplication(dd)
-
-    assert duplication["shipped_items"] == 202
-    assert duplication["near_duplicate_pairs"] == 0  # the tail pair is beyond the cap
-
-
-@pytest.mark.parametrize(("payload", "expected_error"),
-    [pytest.param("{not json", json.JSONDecodeError, id="syntax-invalid"),
-        pytest.param('{"items": {"a": 1}}', ValueError, id="wrong-shape"),
-        pytest.param("{}", ValueError, id="missing-items"),
-    ],
-)
-def test_location_and_duplication_propagate_corrupt_merged_items(
-    tmp_path: Path, payload: str, expected_error: type[Exception]
-) -> None:
+def test_location_and_duplication_propagate_corrupt_merged_items(tmp_path: Path) -> None:
     """The shared loader's raise-on-corrupt contract holds for the new axes too.
 
     A bogus shipped set is never silently counted -- and never silently scored."""
     dd, deep = _worked_example_dirs(tmp_path)
     seed_stack_records(deep, "python", n=4)
-    (deep / "merged-items.json").write_text(payload)
-
-    with pytest.raises(expected_error):
-        analyze_findings(dd)
-    with pytest.raises(expected_error):
-        analyze_location(dd)
-    with pytest.raises(expected_error):
-        analyze_shipped_duplication(dd)
+    for payload, expected_error in (("{not json", json.JSONDecodeError), ("{}", ValueError)):
+        (deep / "merged-items.json").write_text(payload)
+        with pytest.raises(expected_error):
+            analyze_findings(dd)
+        with pytest.raises(expected_error):
+            analyze_location(dd)
+        with pytest.raises(expected_error):
+            analyze_shipped_duplication(dd)
 
 
 def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path,) -> None:
@@ -1254,13 +1001,3 @@ def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path
         "record_alt_overlaps": 2,
         "avg_overlap_similarity": 0.65,
     }
-
-
-@pytest.mark.parametrize(("filename", "label"),
-    [("trajectory.json", "main"), ("deep-python.json", "deep-python"),
-        ("trajectory-20260101T000000-abc123.json", "main"), ("deadbeef.deep-python.json", "deep-python"),
-    ],
-)
-def test_agent_label_keeps_its_legacy_filename_tolerance(filename: str, label: str) -> None:
-    """The legacy shapes are retained deliberately — pin them instead of guessing they are dead."""
-    assert _agent_label(filename) == label

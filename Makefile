@@ -1,7 +1,8 @@
-.PHONY: install lint typecheck test test-scripts actionlint rl-check check lockcheck package-check hooks deadcode coverage-report check-naming
+.PHONY: install lint typecheck test test-scripts actionlint rl-check check static lockcheck package-check hooks deadcode coverage-report check-naming
 
-# CI can overlap I/O-heavy Git/subprocess tests while local runs use CPU count.
-PYTEST_WORKERS ?= auto
+# One worker per logical CPU: `auto` counts physical cores, which halves the
+# workers on hyperthreaded cloud runners. CI shards set their own count.
+PYTEST_WORKERS ?= logical
 # Optional reporting on this invocation only; nested pytest subprocesses do not
 # inherit these flags through PYTEST_ADDOPTS.
 PYTEST_REPORT_ARGS ?=
@@ -23,22 +24,22 @@ typecheck:
 # Whole-project dead-code detection (#935). Both projects' scans live in their
 # own [tool.vulture]; pass --config explicitly so each project's pyproject.toml
 # is resolved. Scan pkg+tests together (one process) so test references keep
-# package symbols alive. Exit 0 == clean.
+# package symbols alive. Exit 0 == clean. The RL scan uses the root environment
+# because syncing RL's own environment only to parse its source costs far more.
 deadcode:
 	uv run vulture --config pyproject.toml daydream tests
-	cd rl/daydream_review && uv run vulture --config pyproject.toml daydream_review tests
+	uv run vulture --config rl/daydream_review/pyproject.toml rl/daydream_review/daydream_review rl/daydream_review/tests
 
 # Coverage flags live here (not in global addopts) so targeted runs like
 # `uv run pytest tests/foo.py` stay plain and never trip the floor enforced by
 # [tool.coverage.report] fail_under in pyproject.toml (#336).
 # CI reaches these flags through `make test`; xdist parallelism stays via
-# the PYTEST_WORKERS override (auto locally). No --no-cov-on-fail so coverage.xml survives
+# the PYTEST_WORKERS override (logical CPUs locally). No --no-cov-on-fail so coverage.xml survives
 # a failed run for the coverage-report / CI artifact upload.
 test:
 	uv run pytest -n $(PYTEST_WORKERS) --cov --cov-branch --cov-report=term-missing --cov-report=xml $(PYTEST_REPORT_ARGS)
-	$(MAKE) test-scripts
 
-# Also run independently in CI's static job while pytest runs across shards.
+# Part of the gate's parallel `static` step; CI runs it in its static job.
 test-scripts:
 	uv run python -m unittest discover -s .agents/skills/daydream-trace-analysis/scripts -p 'test_*.py'
 
@@ -90,7 +91,15 @@ lockcheck:
 # `shutil.which` guard skips it. As a `check` dependency it therefore failed the
 # pre-push gate on changes that never touch rl/. Run `make rl-check` when you
 # change rl/daydream_review; its vulture scan still runs here via `deadcode`.
-check: lockcheck install lint deadcode typecheck package-check test actionlint coverage-report check-naming
+check: lockcheck install static test coverage-report
+
+# Independent static checks run in parallel, so the gate pays for the slowest
+# one rather than their sum. Run `make check` itself without -j so pytest starts
+# only after them: a loaded host starves its real-Git timing windows.
+STATIC_CHECKS = lint deadcode typecheck package-check actionlint check-naming test-scripts
+
+static:
+	$(MAKE) -j $(words $(STATIC_CHECKS)) $(STATIC_CHECKS)
 
 # Naming grep-gate (#1093): fails when a project-owned versioned identifier
 # reappears anywhere in tracked files. External tool-protocol version strings

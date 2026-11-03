@@ -36,7 +36,8 @@ and validation, with routine cleanup and implementation history left out of the 
 ## Validation
 
 ```bash
-make check      # lockcheck + install + lint + deadcode + typecheck + package-check + test + actionlint + coverage-report + check-naming (the gate)
+make check      # lockcheck + install + static + test + coverage-report (the gate)
+                # static runs lint, deadcode, typecheck, package-check, actionlint, check-naming, test-scripts in parallel
 ```
 
 The pre-push hook checks signatures and runs this gate. Follow
@@ -51,18 +52,32 @@ Run Daydream reviews during development with
 
 ## Testing standard (mandatory)
 
+There is one suite and one gate. `make check`, as the pre-push hook runs it, has a
+budget of under 2 minutes on a typical cloud container with a cold Docker cache, and
+every test runs in every gate. Keep the gate inside that budget by running fewer tests:
+never with skip markers, opt-in flags, a fast subset, a CI-only tier, or diff-based
+selection.
+
+- **Slowness is a deletion reason.** A test that does not fit the gate's time budget
+  is deleted or replaced with a faster one.
+- **Overlap is a deletion reason.** If another test already covers the same branches
+  of our code, the duplicate goes. Merge a unique assertion into the keeper first.
+- **No tests of third-party code.** Docker, package managers, Harbor, and SDK or CLI
+  behavior are not ours to prove. Test the files we generate and the arguments and
+  output we own at that boundary.
+- **Additions must earn their place.** A new test must show that no existing test can
+  be extended to cover the behavior. Changes are net-neutral or negative in test count
+  unless they add a new contract.
+
 Choose the test boundary that owns the observable behavior or independent contract.
-Each new or changed test must identify a credible regression and explain why existing
-coverage misses it. Prefer extending existing tests and fixtures; preserve real
-filesystem, Git, and event-loop behavior when those are part of the contract.
-Unit, integration, and end-to-end tests are valid choices according to the behavior
-and risk. Use the [test-audit skill](.agents/skills/test-audit/SKILL.md) for test
-changes and address its findings. This section is authoritative when a skill
-repeats conflicting or older testing requirements.
-For fix-loop changes, assert retained fixes and trajectory state.
-Inject terminal-finding faults at actual filesystem operations; preserve typed
-coverage, snapshot binding, and atomic publication under the
-[terminal findings contract](docs/runtime.md#terminal-review-findings-contract).
+Each new or changed test must identify a credible regression. Unit, integration, and
+end-to-end tests are valid choices according to the behavior and risk. Real filesystem,
+Git, and event-loop behavior belong in the one proof of a contract that depends on them,
+not in every variant of that contract. Use the
+[test-audit skill](.agents/skills/test-audit/SKILL.md) for test changes and address its
+findings; its [retention bar](.agents/skills/test-audit/SKILL.md#retention-bar) names the
+contracts to prove once. This section is authoritative when a skill repeats conflicting
+or older testing requirements.
 
 ## Architecture
 

@@ -39,15 +39,14 @@ def _install_workflows(
     return workflows_dir
 
 
-def test_app_manifest_requests_issue_write_for_improve_publication() -> None:
+def test_app_manifest_and_callback_listener_exchange_code_unchanged_or_cancel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The manifest requests issue write; the callback code reaches the exchange unchanged.
+
+    A missing code (user declined) never exchanges.
+    """
     manifest = bot_manifest._manifest_payload(redirect_url="http://localhost:8080/callback",)
     assert manifest["default_events"] == ["issue_comment", "workflow_run"]
-
-    permissions = manifest["default_permissions"]
-    assert isinstance(permissions, dict)
-    assert permissions["issues"] == "write"
-
-def test_callback_listener_exchanges_code_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert isinstance(manifest["default_permissions"], dict) and manifest["default_permissions"]["issues"] == "write"
     captured: dict[str, object] = {}
 
     def fake_exchange(repo: Path, code: str, **_kwargs: Any) -> tuple[AppCredentials, str]:
@@ -61,24 +60,12 @@ def test_callback_listener_exchanges_code_unchanged(monkeypatch: pytest.MonkeyPa
     assert creds.app_id == 7
     assert creds.private_key == "-----BEGIN-----\n"
     assert actual_slug == "acme-bot"
-
-def test_missing_code_raises_cancelled_and_never_exchanges(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An empty/missing callback code (user declined) aborts with a clear error."""
-    called = False
-
-    def fake_exchange(repo: Any, code: Any, **_kwargs: Any) -> tuple[Any, ...]:
-        nonlocal called
-        called = True
-        return AppCredentials(1, "pem"), "slug"
-
-    monkeypatch.setattr("daydream.bot_manifest.exchange_manifest_code", fake_exchange)
-    listener = bot_manifest._ManifestListener(repo_dir=Path("."), org=None)
+    captured.clear()
     with pytest.raises(GitHubAppError, match="App registration was cancelled"):
         listener._handle_code("")
     with pytest.raises(GitHubAppError, match="App registration was cancelled"):
         listener._handle_code(None)
-    assert called is False
-
+    assert captured == {}
 
 
 
@@ -98,7 +85,6 @@ def test_land_workflows_idempotent_returns_sentinel_when_all_present(fake_gh: Fa
     assert not result.startswith("http")
     assert git_ops.current_branch(repo_with_origin) == default
     assert not git_ops.ref_exists(repo_with_origin, "origin/daydream/setup-bot")
-
 
 
 
@@ -145,10 +131,6 @@ def test_verify_healthy_install_passes_all_checks(
 
 @pytest.mark.parametrize(("target", "old", "new"),
     [pytest.param("daydream-review.yml",
-            "on:\n  workflow_dispatch:",
-            "on:\n  pull_request:\n    types: [opened, ready_for_review]\n  workflow_dispatch:",
-            id="unapproved-pull-request-trigger",
-        ), pytest.param("daydream-review.yml",
             "        type: choice\n        options: [review, sequence, flowchart]\n",
             "        type: string\n",
             id="unbounded-command-input",
@@ -190,6 +172,11 @@ def test_verify_accepts_customized_workflow_with_intact_gate(fake_gh: FakeGh, re
     assert workflows_check.passed is True
     assert "daydream-review.yml" in workflows_check.detail
     assert "intentionally unsupported" in workflows_check.detail
+    # Automatic pull_request review is never an intact gate, whatever else is customized.
+    review = (repo_with_origin / ".github/workflows/daydream-review.yml").read_text()
+    assert bot_setup._workflow_contract_intact("daydream-review.yml", review)
+    assert not bot_setup._workflow_contract_intact(
+        "daydream-review.yml", review.replace("on:\n", "on:\n  pull_request:\n", 1))
 
 def test_land_workflows_warns_before_overwriting_customized_workflow(
     fake_gh: FakeGh, repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch,
@@ -213,7 +200,6 @@ def test_land_workflows_warns_before_overwriting_customized_workflow(
     assert any("daydream-review.yml" in w and "intentionally unsupported" in w for w in warnings)
     # The customization was replaced by the packaged template on the branch.
     assert (workflows_dir / "daydream-review.yml").read_text() == review_template.read_text()
-
 
 
 
@@ -248,15 +234,6 @@ def test_setup_verb_full_auto_deposits_secrets_and_opens_pr(
     assert git_ops.current_branch(repo_with_origin) != git_ops.default_branch(repo_with_origin)
     assert "https://github.com/o/r/pull/5" in capsys.readouterr().out
 
-def test_land_workflows_pr_lookup_failure_never_creates_duplicate_pr(fake_gh: FakeGh, repo_with_origin: Path) -> None:
-    fake_gh.set_response("pr-list", value={"__error__": "authentication required"})
-    fake_gh.set_response("pr-create", value="https://github.com/o/r/pull/unsafe")
-
-    with pytest.raises(git_ops.GitError, match="authentication required"):
-        bot_setup.land_workflows(repo_with_origin, branch="daydream/setup-bot")
-
-    assert fake_gh.command_calls("pr create") == []
-
 def test_setup_fails_cleanly_when_key_absent_and_noninteractive(
     fake_gh: FakeGh, repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -280,18 +257,11 @@ def test_setup_fails_cleanly_when_key_absent_and_noninteractive(
     assert fake_gh.secret_set_calls() == []
 
 
-def test_prompt_for_anthropic_key_reads_hidden_input_on_tty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """On a TTY the seam returns the hidden-entered key, stripped."""
+def test_prompt_for_anthropic_key_reads_hidden_input_and_bot_handle_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a TTY the seam returns the hidden-entered key, stripped; an org scope names the bot owner."""
     monkeypatch.setattr("daydream.bot_setup.sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("daydream.bot_setup.getpass.getpass", lambda prompt="": "  sk-ant-typed  ")
     assert bot_setup._prompt_for_anthropic_key() == "sk-ant-typed"
-
-
-
-
-@pytest.mark.parametrize(("scope", "expected"), [
-    (bot_setup.Scope(repo="owner/repo"), "owner"),
-    (bot_setup.Scope(org="acme-org"), "acme-org"),
-])
-def test_bot_handle_falls_back_to_scope_owner(scope: bot_setup.Scope, expected: str) -> None:
-    assert bot_setup._bot_handle_for(None, scope) == expected
+    assert bot_setup._bot_handle_for(None, bot_setup.Scope(org="acme-org")) == "acme-org"

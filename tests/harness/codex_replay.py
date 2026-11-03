@@ -9,7 +9,6 @@ that ``CodexBackend.execute`` drives via
 from pathlib import Path
 
 from tests.harness.process_replay import (
-    GapThenBlockingStdout as GapThenBlockingStdout,
     bind_replay,
 )
 

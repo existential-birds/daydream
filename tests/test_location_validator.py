@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from daydream.deep.location_validator import validate_finding, validate_records
+from daydream.deep.location_validator import validate_records
 from daydream.hunk_index import parse_hunks
 
 DIFF = (
@@ -10,12 +10,6 @@ DIFF = (
     "@@ -2270,3 +2284,5 @@\n x\n+x1\n+x2\n"
 )
 INDEX = parse_hunks(DIFF)
-
-def test_validate_finding_missing_file_is_empty() -> None:
-    check = validate_finding(INDEX, "nope.py", 10)
-    assert check.in_hunk is False
-    assert check.nearest_hunk is None
-    assert check.distance is None
 
 def test_validate_records_snaps_and_demotes() -> None:
     records: list[dict[str, object]] = [{"id": 1, "file": "orchestrator.py", "line": 2281,

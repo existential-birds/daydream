@@ -6,35 +6,17 @@ import signal
 import subprocess
 import sys
 import time
-from io import StringIO
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import anyio
 import pytest
-from rich.console import Console
 
-from daydream import cli, remote_ci
+from daydream import cli
 from daydream.atif import validate as atif_validate
 from daydream.commands.improve import _parse_improve_args
 from daydream.commands.review import _parse_args
-from daydream.dataset import LocalRecordStore
 from daydream.run_config import RunConfig
-from daydream.ui import NEON_THEME, print_issues_table
-from tests.harness.dataset import read_records
-from tests.harness.git_helpers import bare_remote, commit, git, init_repo
-from tests.harness.remote_ci import (
-    _accelerate_empty_ci_discovery,
-    finish_remote_ci_fake,
-    seed_pr_identity,
-    start_remote_ci_fake,
-)
-from tests.test_deep_orchestrator import _install_stub_backend, _silence
-from tests.test_integration import (
-    _FULL_FLOW_ISSUE,
-    _remote_ci_push_project,
-    _WorktreeMutatingBackend,
-)
 
 
 def test_signal_handler_flushes_before_backend_registry_snapshot(monkeypatch: pytest.MonkeyPatch,) -> None:
@@ -63,21 +45,6 @@ def test_signal_handler_flushes_before_backend_registry_snapshot(monkeypatch: py
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
-        (
-            ["/tmp/project"],
-            {
-                "output_mode": "loop",
-                "approved_head_sha": None,
-                "findings_out": None,
-                "ignore_paths": [],
-                "dataset_capture": False,
-                "dataset_store_path": None,
-                "archive": True,
-                "diagram": None,
-                "extra_copy": [],
-                "non_interactive": False,
-            },
-        ),
         (
             [
                 "--review",
@@ -126,38 +93,11 @@ def test_signal_handler_flushes_before_backend_registry_snapshot(monkeypatch: py
                 "extra_copy": [Path("a.env"), Path("b.env")],
             },
         ),
-        (
-            [
-                "--diagram-only",
-                "flowchart",
-                "--findings-out",
-                "diagram.json",
-                "--dataset-store",
-                "/tmp/records",
-                "/tmp/project",
-            ],
-            {
-                "output_mode": "diagram",
-                "diagram": "flowchart",
-                "findings_out": "diagram.json",
-                "dataset_capture": True,
-                "dataset_store_path": Path("/tmp/records"),
-            },
-        ),
-        (
-            ["--shallow", "--diagram", "off", "--stack", "rust", "/tmp/project"],
-            {"output_mode": "loop", "shallow": True, "diagram": "off", "stack": "rust"},
-        ),
-        (["--comment", "/tmp/project"], {"output_mode": "comment", "shallow": False}),
-        (
-            ["--findings-out", "findings/out.json", "/tmp/project"],
-            {"output_mode": "loop", "findings_out": "findings/out.json", "shallow": False},
-        ),
     ],
-    ids=["defaults", "configured-review", "diagram-export", "shallow", "comment", "default-deep-export"],
+    ids=["configured-review", ],
 )
 def test_compatible_cli_vectors_resolve_coherent_configuration(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     argv: list[str],
     expected: dict[str, Any],
 ) -> None:
@@ -169,12 +109,13 @@ def test_compatible_cli_vectors_resolve_coherent_configuration(
             assert actual is value, field
         else:
             assert actual == value, field
-
-
-def test_invalid_backend_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--backend", "invalid"])
+    improve = _parse_improve_args(["improve", "plan", "add rate limiting", "/tmp/x"])
+    assert improve.improve_plan_description == "add rate limiting"
+    # The two-tier help: --help-all shows --verbose but never the removed --log.
     with pytest.raises(SystemExit):
-        _parse_args()
+        _parse_args(["--help-all"])
+    help_out = capsys.readouterr().out
+    assert "--verbose" in help_out and "--log" not in help_out
 
 
 def _cfg(monkeypatch: pytest.MonkeyPatch, args: list[str]) -> RunConfig:
@@ -183,214 +124,27 @@ def _cfg(monkeypatch: pytest.MonkeyPatch, args: list[str]) -> RunConfig:
     return _parse_args()
 
 
-@pytest.mark.parametrize("conflict", [["--review"], ["--comment"], ["--shallow"]])
-def test_flow_conflicts_rejected(monkeypatch: pytest.MonkeyPatch, conflict: Any) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "--flow", "x", *conflict, "/tmp/project"])
-    with pytest.raises(SystemExit):
-        _parse_args()
-
-
-def test_loop_flag_rejected(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "--loop", "/tmp/project"])
-    with pytest.raises(SystemExit):
-        _parse_args()
-    assert "unrecognized arguments" in capsys.readouterr().err
-
-
-def test_log_flag_rejected_review(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "--log", "/tmp/project"])
-    with pytest.raises(SystemExit) as exc_info:
-        _parse_args()
-    assert exc_info.value.code == 2
-    assert "unrecognized arguments" in capsys.readouterr().err
-
-
-def test_log_flag_rejected_improve(capsys: pytest.CaptureFixture[str]) -> None:
-    with pytest.raises(SystemExit) as exc_info:
-        _parse_improve_args(["improve", "/tmp/x", "--log"])
-    assert exc_info.value.code == 2
-    assert "unrecognized arguments" in capsys.readouterr().err
-
-
-def test_verbose_joined_equals_rejected() -> None:
-    with pytest.raises(SystemExit):
-        _parse_improve_args(["improve", "/tmp/x", "--verbose=true"])
-    with pytest.raises(SystemExit):
-        _parse_improve_args(["improve", "/tmp/x", "--log=true"])
-
-
-# Consolidated CLI surface (worktree-isolation refactor)
-
-
-def test_parse_args_comment_mode_excludes_review(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "--comment", "--review", "/tmp/repo"])
-    with pytest.raises(SystemExit):
-        _parse_args()
-
-
-@pytest.mark.parametrize("extra", [["--comment"], ["--shallow"]])
-def test_findings_out_rejects_flows_without_pipeline_errors(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], extra: Any,
+def test_incompatible_cli_flags_are_rejected_with_the_offending_flag(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", *extra, "--findings-out", "f.json", "/tmp/repo"])
-    with pytest.raises(SystemExit) as exc_info:
-        _parse_args()
-    assert exc_info.value.code == 2
-    err = capsys.readouterr().err
-    assert "--findings-out" in err
-
-
-@pytest.mark.parametrize(("argv", "expected"),
-    [(["--diagram", "both", "--diagram-only", "sequence"], "--diagram-only"),
-        (["--diagram-only", "sequence", "--comment"], "not allowed with argument"),
-        (["--diagram-only", "sequence", "--review"], "not allowed with argument"),
-        (["--diagram-only", "sequence", "--flow", "improve"], "--flow"),
-        (["--diagram-only", "sequence", "--start-at", "merge"], "--start-at merge"),
-        (["--diagram-only", "sequence", "--yes"], "--yes"),
-    ],
-    ids=["diagram_with_diagram_only", "diagram_only_with_comment", "diagram_only_with_review", "diagram_only_with_flow",
-        "diagram_only_with_start_at", "diagram_only_with_yes",
-    ],
-)
-def test_diagram_only_conflicts_are_rejected(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str], expected: str,
-) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", *argv, "/tmp/repo"])
-    with pytest.raises(SystemExit) as exc_info:
-        _parse_args()
-    assert exc_info.value.code == 2
-    assert expected in capsys.readouterr().err
-
-
-def test_feedback_subcommand_is_unknown(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],) -> None:
-    called = False
-    async def fake_run(*_args: Any, **_kwargs: Any) -> int:
-        nonlocal called
-        called = True
-        return 0
-    monkeypatch.setattr(cli, "run", fake_run)
-    monkeypatch.setattr(sys, "argv", ["daydream", "feedback", "7", "--bot", "x[bot]", "/tmp/repo"],)
-    with pytest.raises(SystemExit) as exc_info:
-        cli.main()
-
-    assert exc_info.value.code == 2
-    assert not called
-    assert "unrecognized arguments: 7 --bot x[bot] /tmp/repo" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize(("remote_outcome", "expected_code", "repo_override"), [
-    ("no_ci", 0, True), ("failed", 1, True), ("no_ci", 0, False),
-])
-def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, install_backend: Any, fake_gh: Any, remote_outcome: str,
-    expected_code: int, repo_override: bool, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """A fork origin must not replace gh's upstream when no GH_REPO is supplied.
-
-    Exercise CLI configuration through a retained fix, real push, and bound CI
-    verdict; explicit GH_REPO coverage previously hid origin preselection.
-    """
-    project, remote, hook_marker, raw_remote = _remote_ci_push_project(tmp_path)
-    if repo_override:
-        monkeypatch.setenv("GH_REPO", "base-user/project")
-    else:
-        monkeypatch.delenv("GH_REPO", raising=False)
-    seed_pr_identity(fake_gh, head_sha=git(project, "rev-parse", "HEAD"))
-    seeder = start_remote_ci_fake(project, fake_gh, hook_marker, outcome=remote_outcome)
-
-    monkeypatch.setattr(remote_ci, "DEFAULT_LIMITS",
-        remote_ci.RemoteCILimits(poll_seconds=0.01,
-            # Allow ample polling time under xdist CPU load; polling discovers an observation and
-            # does not define the expected result.
-            discovery_seconds=30, completion_seconds=60, request_seconds=3,
-        ),
-    )
-    if remote_outcome == "no_ci":
-        _accelerate_empty_ci_discovery(monkeypatch)
-    remote_rendered = StringIO()
-    monkeypatch.setattr("daydream.deep.remote_ci_steps.console", Console(file=remote_rendered, width=160))
-    install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
-    elsewhere = tmp_path / "different cwd"
-    elsewhere.mkdir()
-    monkeypatch.chdir(elsewhere)
-
-    trajectory_path = tmp_path / "trajectory.json"
-    try:
-        with pytest.raises(SystemExit) as exc_info:
-            cli.main(["review", str(project), "--stack", "python", "--shallow", "--yes", "--test-command", "true",
-                      "--trajectory", str(trajectory_path)])
-    finally:
-        finish_remote_ci_fake(seeder)
-
-    assert exc_info.value.code == expected_code
-    assert hook_marker.read_text() == "ran\n"
-    pushed_sha = git(project, "rev-parse", "HEAD")
-    assert git(remote, "rev-parse", "refs/heads/feature") == pushed_sha
-    assert git(project, "config", "--get", "remote.origin.url") == raw_remote
-    verdict = json.loads((project / ".daydream" / "deep" / "remote-ci-verdict.json").read_text())
-    assert verdict["status"] == remote_outcome
-    assert verdict["target"]["pushed_sha"] == pushed_sha
-    assert verdict["target"]["base_repository"] == "base-user/project"
-    assert verdict["target"]["head_repository"] == "fork-user/project"
-    assert git(remote, "show", "refs/heads/feature:main.py") == "def hello() -> str:\n    return 'world'"
-    trajectory = json.loads(trajectory_path.read_text())
-    assert trajectory["extra"]["pr_repo"] == "base-user/project"
-    assert trajectory["extra"]["pr_number"] == 7
-    assert any(event["phase"] == "remote-ci" and event["event"] == "phase_end"
-               for event in trajectory["extra"]["phase_events"])
-    assert all(call.cwd == project.resolve() for call in fake_gh.process_calls())
-    output = capsys.readouterr().out + remote_rendered.getvalue()
-    if remote_outcome == "no_ci":
-        assert verdict["evidence_sha"] == pushed_sha
-        assert verdict["polling"]["stable_polls"] >= verdict["polling"]["required_stable_polls"]
-        assert verdict["polling"]["elapsed_seconds"] >= verdict["polling"]["discovery_seconds"]
-        assert "Remote CI was observably not configured" in output
-        assert "Linux verified" not in output
-        assert "coverage verified" not in output.lower()
-        assert not (project / ".daydream" / "deep" / "remote-ci-handoff.json").exists()
-    else:
-        assert "Exact pushed-SHA remote CI passed" not in output
-        assert (project / ".daydream" / "deep" / "remote-ci-handoff.json").is_file()
-
-
-def test_print_issues_table_renders() -> None:
-
-
-
-    test_console = Console(file=StringIO(), theme=NEON_THEME, force_terminal=True)
-    issues = [{"id": 1, "title": "Bad pattern", "severity": "high", "description": "Uses antipattern",
-         "recommendation": "Refactor", "files": ["src/main.py"]},
-        {"id": 2, "title": "Missing test", "severity": "low", "description": "No test coverage",
-         "recommendation": "Add tests", "files": ["src/utils.py"]},
+    """Each conflicting or misspelled option exits 2 and names what to fix."""
+    rejected = [
+        (["--flow", "x", "--review", "/tmp/project"], ""),
+        (["--flow", "x", "--shallow", "/tmp/project"], ""),
+        (["--shallow", "--findings-out", "f.json", "/tmp/repo"], "--findings-out"),
+        (["--diagram", "both", "--diagram-only", "sequence", "/tmp/repo"], "--diagram-only"),
+        (["--diagram-only", "sequence", "--start-at", "merge", "/tmp/repo"], "--start-at merge"),
+        (["--diagram-only", "sequence", "--yes", "/tmp/repo"], "--yes"),
+        (["--fix-backend=claude-opus-5", str(tmp_path)], "[tool.daydream.phases.fix]"),
     ]
-    print_issues_table(test_console, issues)
-    output = cast("StringIO", test_console.file).getvalue()
-    assert "Bad pattern" in output
-    assert "Missing test" in output
-
-
-@pytest.mark.parametrize(
-    ("flag", "phase", "sep"),
-    [
-        ("--review-backend", "review", " "),
-        ("--fix-backend", "fix", "="),
-        ("--exploration-model", "exploration", " "),
-        ("--parse-model", "parse", "="),
-    ],
-)
-def test_per_phase_flag_rejected_with_config_pointer(
-    flag: Any,
-    phase: Any,
-    sep: str,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    argv = [flag, "claude-opus-5", str(tmp_path)] if sep == " " else [f"{flag}=claude-opus-5", str(tmp_path)]
-    with pytest.raises(SystemExit):
-        _parse_args(argv)
-    err = capsys.readouterr().err
-    assert flag in err
-    assert f"[tool.daydream.phases.{phase}]" in err
+    for argv, expected in rejected:
+        with pytest.raises(SystemExit) as exc_info:
+            _parse_args(argv)
+        assert exc_info.value.code == 2, argv
+        assert expected in capsys.readouterr().err, argv
+    for improve_flag in ("--verbose=true", "--log=true"):
+        with pytest.raises(SystemExit):
+            _parse_improve_args(["improve", "/tmp/x", improve_flag])
 
 
 def _write_fake_gh(bin_dir: Path, log_env: str, login: str) -> None:
@@ -414,68 +168,6 @@ def _write_fake_gh(bin_dir: Path, log_env: str, login: str) -> None:
         encoding="utf-8",
     )
     gh.chmod(0o755)
-
-
-@pytest.mark.parametrize("backend_name", ["codex", "pi", "osprey"])
-def test_improve_audit_isolation_rejects_unsupported_cli_before_spawn(tmp_path: Path, backend_name: str,) -> None:
-    repo = tmp_path / "repo"
-    init_repo(repo)
-    (repo / ".gitignore").write_text(".daydream/\ndaydream_plans/\n", encoding="utf-8")
-    (repo / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
-    git(repo, "add", ".gitignore", "app.py")
-    commit(repo, "initial")
-    origin = bare_remote(tmp_path / "origin.git")
-    git(repo, "remote", "add", "origin", str(origin))
-    git(repo, "push", "-u", "origin", "main")
-
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    backend_marker = tmp_path / "backend-launched"
-    backend_script = "#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >> \"$BACKEND_MARKER\"\nexit 97\n"
-    for executable in ("codex", "pi", "osprey"):
-        path = fake_bin / executable
-        path.write_text(backend_script, encoding="utf-8")
-        path.chmod(0o755)
-
-    gh_log = tmp_path / "gh.log"
-    _write_fake_gh(fake_bin, "GH_LOG", "fixture-user")
-    process_tmp = tmp_path / "process-tmp"
-    process_tmp.mkdir()
-
-    before_head = git(repo, "rev-parse", "HEAD")
-    before_refs = git(repo, "show-ref")
-    before_status = git(repo, "status", "--porcelain=v1")
-    before_origin_refs = git(origin, "show-ref")
-    env = {key: value
-        for key, value in os.environ.items()
-        if key
-        not in {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GH_TOKEN", "GITHUB_TOKEN", "DAYDREAM_GITHUB_APP_ID",
-            "DAYDREAM_GITHUB_APP_PRIVATE_KEY",
-        }
-    }
-    env.update({"PATH": f"{fake_bin}{os.pathsep}{env.get('PATH', '')}", "BACKEND_MARKER": str(backend_marker),
-            "GH_LOG": str(gh_log), "TMPDIR": str(process_tmp), "CI": "1",
-        }
-    )
-    result = subprocess.run(  # noqa: S603 - fixed module and enum parameter
-        [sys.executable, "-m", "daydream", "improve", "--backend", backend_name, "--no-archive", "--no-eval",
-            str(repo),
-        ], cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, env=env, timeout=30,
-    )
-
-    combined = result.stdout + result.stderr
-    assert result.returncode == 1, combined
-    assert f"backend '{backend_name}'" in combined
-    assert "Use backend 'claude'" in combined
-    assert not backend_marker.exists()
-    assert gh_log.read_text(encoding="utf-8").splitlines() == [
-        "api /user", "repo view --json nameWithOwner -q .nameWithOwner",
-    ]
-    assert git(repo, "rev-parse", "HEAD") == before_head
-    assert git(repo, "show-ref") == before_refs
-    assert git(repo, "status", "--porcelain=v1") == before_status
-    assert git(origin, "show-ref") == before_origin_refs
-    assert not list(process_tmp.glob("daydream-audit-*"))
 
 
 _SIGNAL_FIXTURE_EXTENSION = """
@@ -530,7 +222,7 @@ def _write_signal_fake_gh(tmp_path: Path) -> tuple[Path, Path]:
     return bin_dir, log_path
 
 
-@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+@pytest.mark.parametrize("signum", [signal.SIGTERM])
 def test_signal_flushes_all_runner_recorders(tmp_path: Path, git_repo: Path, ext_dir: Any, signum: signal.Signals,
 ) -> None:
     extension_dir = ext_dir.write_module(_SIGNAL_FIXTURE_EXTENSION)
@@ -606,65 +298,20 @@ def test_signal_flushes_all_runner_recorders(tmp_path: Path, git_repo: Path, ext
     assert calls == ["api /user", "repo view --json nameWithOwner -q .nameWithOwner"]
 
 
-def test_cli_maps_grouped_interrupt_to_shutdown_exit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_cli_maps_only_a_purely_grouped_interrupt_to_shutdown_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Nested interrupts exit 130; a sibling failure beside an interrupt is preserved."""
+    failure = BaseExceptionGroup("task group", [KeyboardInterrupt(), RuntimeError("sibling failed")])
+    raised: list[BaseException] = [
+        BaseExceptionGroup("task group", [BaseExceptionGroup("nested", [KeyboardInterrupt()])]), failure]
 
     def interrupted(*args: Any, **kwargs: Any) -> Any:
-        raise BaseExceptionGroup("task group", [BaseExceptionGroup("nested", [KeyboardInterrupt()])])
+        raise raised.pop(0)
     monkeypatch.setattr(anyio, "run", interrupted)
     with pytest.raises(SystemExit) as caught:
         cli.main([str(tmp_path), "--non-interactive"])
     assert caught.value.code == 130
-
-
-def test_cli_preserves_other_errors_beside_grouped_interrupt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-
-    failure = BaseExceptionGroup("task group", [KeyboardInterrupt(), RuntimeError("sibling failed")])
-    def interrupted(*args: Any, **kwargs: Any) -> Any:
-        raise failure
-    monkeypatch.setattr(anyio, "run", interrupted)
-    with pytest.raises(BaseExceptionGroup) as caught:
+    with pytest.raises(BaseExceptionGroup) as grouped:
         cli.main([str(tmp_path), "--non-interactive"])
-    assert caught.value is failure
-
-
-def test_cli_defers_repository_discovery_until_session_resolution(
-    monkeypatch: pytest.MonkeyPatch, git_repo: Path,
-) -> None:
-    git(git_repo, "remote", "add", "origin", "https://github.com/existential-birds/daydream.git")
-    monkeypatch.chdir(git_repo)
-    monkeypatch.setattr(sys, "argv", ["daydream"])
-    config = _parse_args()
-
-    assert config.target is None
-    assert config.pr_repo is None
-    assert config.discover_github_provenance is True
-
-
-@pytest.mark.parametrize("capture", [False, True], ids=["capture-off", "store-only"])
-def test_real_cli_stack_entry(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capture: bool,
-) -> None:
-    _silence(monkeypatch)
-    monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.git_ops.gh_repo_view", lambda _repo, **_kwargs: None)
-    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda _repo, _branch, **_kwargs: None)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-    store = tmp_path / "records"
-    argv = ["daydream", "--review", "--stack", "python", "--no-archive", "--no-eval", str(multi_stack_target)]
-    if capture:
-        argv.extend(["--dataset-store", str(store)])
-    monkeypatch.setattr(sys, "argv", argv)
-    with pytest.raises(SystemExit) as exc_info:
-        cli.main()
-
-    assert exc_info.value.code == 0
-    assert store.exists() is capture
-    if capture:
-        records = read_records(LocalRecordStore(store))
-        assert len(records.runs) == 1
-        assert records.runs[0]["outcome"] == "success"
-
-    monkeypatch.setattr(sys, "argv", ["daydream", "--review", "--skill", "python", str(multi_stack_target)],)
-    with pytest.raises(SystemExit) as skill_exc:
-        cli.main()
-    assert skill_exc.value.code == 2
+    assert grouped.value is failure

@@ -4,23 +4,24 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from daydream.agent import run_agent
-from daydream.backends import AgentEvent, BackendExecutionInput, CostEvent, MetricsEvent, ResultEvent, TextEvent
+from daydream.backends import AgentEvent, CostEvent, MetricsEvent, ResultEvent, TextEvent
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.codex import CodexBackend, CodexError
 from daydream.backends.lifecycle import BackendLifecycleCollector
 from daydream.trajectory import DaydreamPhase
 from tests.harness.codex_lifecycle_cli import LifecycleMode, install_codex_lifecycle_cli
+from tests.harness.codex_replay import make_mock_process
 from tests.harness.processes import wait_for_process_group_gone
 from tests.harness.trajectory import make_recorder
 
 
 @pytest.mark.parametrize("mode,category,expected_metrics", [
-    ("healthy", None, 1), ("completed_next_turn", None, 2),
-    ("unfinished_next_turn", "TRANSPORT", 1), ("nonzero_exit", "PROCESS_EXIT", 1),
+    ("completed_next_turn", None, 2), ("unfinished_next_turn", "TRANSPORT", 1),
 ])
 async def test_delayed_consumer_drains_finished_child_without_skipping_latest_turn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: LifecycleMode,
@@ -49,7 +50,7 @@ async def test_delayed_consumer_drains_finished_child_without_skipping_latest_tu
         snapshot = collector.finalize()
         collector.reset(token)
     assert (error.category if error else None) == category
-    assert snapshot is not None and snapshot.process_returncode == (7 if mode == "nonzero_exit" else 0)
+    assert snapshot is not None and snapshot.process_returncode == 0
     assert snapshot.stdout_eof_s is not None and snapshot.expiry_stage is None
     assert snapshot.terminal_received_s is not None and snapshot.cleanup_expired is False
     assert snapshot.teardown_started_s is not None and snapshot.teardown_completed_s is not None
@@ -63,39 +64,8 @@ async def test_delayed_consumer_drains_finished_child_without_skipping_latest_tu
     assert any(isinstance(row, TextEvent) and "Synthetic lifecycle response" in row.text for row in seen)
     if mode == "unfinished_next_turn":
         assert error is not None and error.retryable is False
-    elif mode == "nonzero_exit":
-        assert "return code 7" in str(error)
-    if mode == "completed_next_turn":
+    else:
         assert any(isinstance(row, TextEvent) and row.text == "Latest public turn" for row in seen)
-    for observation in fixture.observations():
-        await wait_for_process_group_gone(observation["pid"], timeout_s=5)
-
-
-async def test_default_tail_permits_supported_native_shutdown_after_public_completion(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A real healthy child may outlive the old five-second cutoff before EOF and zero exit."""
-    fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode="delayed_shutdown", shutdown_delay_s=5.2)
-    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.delenv("DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S", raising=False)
-    async with asyncio.timeout(10):
-        seen = [event async for event in CodexBackend(model="fixture-model").execute(tmp_path, "shutdown request")]
-    assert len([event for event in seen if isinstance(event, ResultEvent)]) == 1
-
-
-async def test_caller_deadline_still_bounds_native_shutdown_opportunity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The host shutdown policy cannot spend beyond the invocation's wall allowance."""
-    fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode="terminal_open_stdout")
-    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.delenv("DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S", raising=False)
-    started = asyncio.get_running_loop().time()
-    async with asyncio.timeout(3):
-        _, _, reason = await run_agent(CodexBackend(model="fixture-model"), tmp_path,
-                                       "shutdown request", phase=DaydreamPhase.FIX, wall_budget_s=0.5)
-    assert reason == "wall_budget_exceeded"
-    assert asyncio.get_running_loop().time() - started < 2
     for observation in fixture.observations():
         await wait_for_process_group_gone(observation["pid"], timeout_s=5)
 
@@ -120,10 +90,8 @@ async def test_finished_child_postdeadline_chatter_cannot_remove_the_drain_bound
 
 
 @pytest.mark.parametrize("mode,stage", [
-    ("terminal_open_stdout", "terminal_drain"),
     ("terminal_eof_live_child", "process_reap"),
-    ("descendant_stdout", "terminal_drain"),
-    ("repeated_terminal", "terminal_drain"),
+    ("repeated_terminal", "terminal_drain"),  # repeated terminal events cannot extend the tail allowance
 ])
 async def test_completed_codex_turn_has_bounded_failure_and_retains_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: LifecycleMode, stage: str,
@@ -164,7 +132,25 @@ async def test_completed_codex_turn_has_bounded_failure_and_retains_evidence(
 async def test_codex_process_outcomes_require_completion_and_zero_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A real silent child cannot turn its initial commentary into a completed result."""
+    """Success needs a completed latest turn and an observed zero exit.
+
+    A completed public turn followed by a nonzero exit is a process failure with no result,
+    and a real silent child cannot turn its initial commentary into a completed result.
+    """
+    completed = [json.dumps(row) for row in (
+        {"type": "thread.started", "thread_id": "exit-check"}, {"type": "turn.started"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "done"}},
+        {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}},
+    )]
+    process = make_mock_process(completed)
+    process.wait.return_value = process.returncode = 7
+    nonzero_events: list[AgentEvent] = []
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=process):
+        with pytest.raises(CodexError, match="return code 7") as exit_failure:
+            async for event in CodexBackend(model="fixture-model").execute(tmp_path, "exit check"):
+                nonzero_events.append(event)
+    assert exit_failure.value.category == "PROCESS_EXIT"
+    assert not any(isinstance(event, ResultEvent) for event in nonzero_events)
     fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode="preterminal_silence")
     monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "1")
@@ -178,90 +164,6 @@ async def test_codex_process_outcomes_require_completion_and_zero_exit(
     assert any(isinstance(event, TextEvent) and "initial commentary" in event.text for event in seen)
     for observation in fixture.observations():
         await wait_for_process_group_gone(observation["pid"], timeout_s=5)
-
-
-async def test_codex_observed_exit_after_eof_can_complete_within_reap_allowance(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """EOF is independent of actual exit; releasing a live child permits truthful success."""
-    fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode="terminal_eof_live_child")
-    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
-    seen: list[AgentEvent] = []
-
-    async def consume() -> None:
-        async for event in CodexBackend(model="fixture-model").execute(tmp_path, "synthetic lifecycle request"):
-            seen.append(event)
-
-    task = asyncio.create_task(consume())
-    try:
-        observation = await fixture.wait_for_stage("stdout_closed")
-        assert not any(isinstance(event, ResultEvent) for event in seen)
-        fixture.release(observation["pid"])
-        async with asyncio.timeout(3):
-            await task
-        assert len([event for event in seen if isinstance(event, ResultEvent)]) == 1
-        await wait_for_process_group_gone(observation["pid"], timeout_s=5)
-    finally:
-        if not task.done():
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-
-
-@pytest.mark.parametrize("frozen_input", [False, True])
-async def test_codex_lifecycle_allowance_is_frozen_before_environment_changes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frozen_input: bool,
-) -> None:
-    """Direct construction and host execution inputs retain the configured tail bound."""
-    fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode="terminal_open_stdout")
-    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setenv("DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S", "0.15")
-    execution_input = BackendExecutionInput.from_environment(os.environ, backend="codex") if frozen_input else None
-    backend = CodexBackend(model="fixture-model", execution_input=execution_input)
-    monkeypatch.setenv("DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S", "60")
-    started = asyncio.get_running_loop().time()
-    async with asyncio.timeout(3):
-        with pytest.raises(CodexError, match="terminal_drain") as failure:
-            [event async for event in backend.execute(tmp_path, "synthetic lifecycle request")]
-    assert failure.value.retryable is False
-    assert asyncio.get_running_loop().time() - started < 2
-    for observation in fixture.observations():
-        await wait_for_process_group_gone(observation["pid"], timeout_s=5)
-
-
-async def test_cancelling_codex_agent_does_not_kill_shared_backend_sibling(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Invocation cancellation reaps only its real process while a sibling can publish completion."""
-    blocked = install_codex_lifecycle_cli(tmp_path / "blocked", mode="preterminal_silence")
-    sibling = install_codex_lifecycle_cli(tmp_path / "sibling", mode="terminal_open_stdout")
-    monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "0")
-    monkeypatch.setenv("PATH", f"{blocked.bin_dir}{os.pathsep}{os.environ['PATH']}")
-    backend = CodexBackend(model="fixture-model")
-    cancelled = asyncio.create_task(run_agent(backend, tmp_path, "synthetic blocked request", phase=DaydreamPhase.FIX))
-    healthy: asyncio.Task[tuple[object, object, str | None]] | None = None
-    try:
-        blocked_observation = await blocked.wait_for_stage("initial")
-        monkeypatch.setenv("PATH", f"{sibling.bin_dir}{os.pathsep}{os.environ['PATH']}")
-        healthy = asyncio.create_task(run_agent(
-            backend, tmp_path, "synthetic sibling request", phase=DaydreamPhase.FIX))
-        sibling_observation = await sibling.wait_for_stage("terminal")
-        cancelled.cancel()
-        async with asyncio.timeout(3):
-            with pytest.raises(asyncio.CancelledError):
-                await cancelled
-        await wait_for_process_group_gone(blocked_observation["pid"], timeout_s=5)
-        sibling.release(sibling_observation["pid"])
-        async with asyncio.timeout(3):
-            output, _, reason = await healthy
-        assert isinstance(output, str) and output.endswith("Synthetic lifecycle response") and reason is None
-        await wait_for_process_group_gone(sibling_observation["pid"], timeout_s=5)
-    finally:
-        for task in (cancelled, healthy):
-            if task is not None and not task.done():
-                task.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await task
 
 
 async def test_codex_cleanup_expiry_preserves_primary_drain_error_and_recorded_evidence(

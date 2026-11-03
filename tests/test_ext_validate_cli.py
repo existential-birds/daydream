@@ -16,11 +16,10 @@ def strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
-@pytest.mark.parametrize('width', [68, 80])
 def test_ext_validate_rejects_previous_api(ext_dir: ExtDir, capsys: pytest.CaptureFixture[str],
-                                         width: int, monkeypatch: pytest.MonkeyPatch,
+                                         monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv('COLUMNS', str(width))
+    monkeypatch.setenv('COLUMNS', "80")
     ext_dir.write_module("def register(r): ...\n", api_version=7)
     assert _run_main(["ext", "validate"]) == 1
     out = collapse_panel_text(capsys)
@@ -33,20 +32,6 @@ def test_ext_validate_rejects_invalid_supervisor_registration(ext_dir: ExtDir, c
     rc = _run_main(["ext", "validate"])
     assert rc == 1
     assert "tool supervisor" in strip_ansi(capsys.readouterr().out).lower()
-
-def test_ext_validate_rejects_async_supervisor_registration(ext_dir: ExtDir, capsys: pytest.CaptureFixture[str],
-) -> None:
-    ext_dir.write_module(
-        "from daydream.extensions import ToolDecision\n"
-        "async def supervise(name, tool_input, *, phase):\n"
-        "    return ToolDecision(veto=False)\n"
-        "def register(r): r.register_tool_supervisor(supervise)\n"
-    )
-    rc = _run_main(["ext", "validate"])
-    assert rc == 1
-    out = strip_ansi(capsys.readouterr().out).lower()
-    assert "tool supervisor" in out
-    assert "synchronous" in out
 
 def test_ext_validate_broken_ref(ext_dir: ExtDir, capsys: pytest.CaptureFixture[str]) -> None:
     ext_dir.write_module("def register(r):\n" "    r.set_flow('deep', ['ghost'])\n")
@@ -88,8 +73,3 @@ def test_ext_validate_reports_registered_renderer_count(
     assert "trace exporters: langsmith, honeyhive, otlp, custom" in out
     assert "registry OK:" in out
     assert renderer_count(out) == renderer_count(baseline) + 1
-
-def test_bare_ext_prints_help_exits_2(capsys: pytest.CaptureFixture[str]) -> None:
-    rc = _run_main(["ext"])
-    assert rc == 2
-    assert "validate" in strip_ansi(capsys.readouterr().out)

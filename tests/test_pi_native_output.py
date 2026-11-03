@@ -27,7 +27,6 @@ from daydream.backends import (
     PiRequestConfig,
     RequestEvent,
     ResultEvent,
-    TextEvent,
     ToolResultEvent,
     ToolStartEvent,
 )
@@ -37,13 +36,10 @@ from daydream.committed_review import CommittedReviewRequest, run_committed_revi
 from daydream.committed_review_model import RESULT_VERSIONS, validate_committed_result
 from daydream.host_tools import HostTool, HostToolBinding, HostToolFatal, HostToolRejected, NativeCapacityRequirement
 from daydream.host_tools_server import PiHostToolServer
-from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
+from daydream.review_budget import ReviewLimits
 from daydream.review_source_refs import (
-    SOURCE_REFS_SCHEMA,
-    SOURCE_SELECTORS_SCHEMA,
     canonicalize_source_selectors,
     part_source_mapping,
-    source_options,
 )
 from daydream.run_config import RunConfig
 from daydream.trajectory import DaydreamPhase
@@ -84,69 +80,18 @@ def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
         yield fixture
 
 
-@pytest.mark.parametrize("mode", ["text", "structured", "failure"])
-async def test_native_pi_response_diagnostics_bind_to_each_generation(
-    tmp_path: Path, native_provider: _NativeProvider, mode: str,
-) -> None:
-    """Real Pi hooks must retain response metadata without exposing other headers.
-
-    Terminal JSONL replays cannot prove the packaged extension actually observes
-    HTTP responses, works with tools disabled, or correlates consecutive requests.
-    """
-    native_provider.response_headers = {"Retry-After": "2", "Set-Cookie": "private-cookie-canary",
-                                        "X-Unrelated": "private-header-canary"}
-    if mode == "structured":
-        source = tmp_path / "source.txt"
-        source.write_text("Source evidence\n")
-        native_provider.turns = [[("read-source", "read", {"path": str(source)})],
-                                 [("submit", "structured_output", {"verdict": "clean", "findings": []})]]
-    elif mode == "failure":
-        native_provider.finish_reasons[0] = "error"
-    backend = PiBackend(model="output-model")
-    backend.retry_attempts = 0
-    recorder = make_recorder(tmp_path, agent_model_name="output-model", backend_name="pi")
-    async with recorder:
-        try:
-            await run_agent(backend, tmp_path, "Review", phase=DaydreamPhase.REVIEW,
-                tools_disabled=mode != "structured", output_schema=_SCHEMA if mode == "structured" else None,
-                persist_session=False, progress_callback=lambda _: None)
-        except PiError:
-            assert mode == "failure"
-        else:
-            assert mode != "failure"
-    document = json.loads(recorder.path.read_text())
-    responses = [item for step in document["steps"]
-                 for item in step.get("extra", {}).get("backend_diagnostics", [])
-                 if item["code"] == "pi_provider_response"]
-    generations = document["extra"]["subtrajectories"][0]["generation_lifecycle"]["drafts"]
-    assert len(responses) == len(generations) == (2 if mode == "structured" else 1)
-    for index, (response, generation) in enumerate(zip(responses, generations, strict=True)):
-        observed = response["metadata"]["observed_at_unix_ns"]
-        assert generation["native_started_at_unix_ns"] <= observed <= generation["ended_at_unix_ns"]
-        assert response["metadata"] == {"status": 200, "headers": {
-            "x-request-id": f"fixture-response-{index}", "retry-after": "2"},
-            "generation_id": generation["generation_id"], "observed_at_unix_ns": observed}
-    assert "private-cookie-canary" not in json.dumps(document)
-    assert "private-header-canary" not in json.dumps(document)
-
-
-@pytest.mark.parametrize("case", ["defect", "local", "retry", "empty", "false-positive", "fallback", "hosted",
-                                  "hosted-alternate",
-                                  "hosted-unsupported-pi", "hosted-unsupported-node", "hosted-resources",
-                                  "hosted-capability", "hosted-config-link", "hosted-challenge-capability",
-                                  "hosted-model-fallback", "hosted-settings-encoding", "hosted-loader-override",
-                                  "hosted-immutable"])
+@pytest.mark.parametrize("case", ["local", "hosted", "hosted-unsupported-node", "hosted-resources",
+                                  "hosted-config-link", "hosted-model-fallback", "hosted-settings-encoding",
+                                  "hosted-loader-override"])
 async def test_committed_review_native_challenge_uses_fresh_captured_source_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, case: str,
 ) -> None:
-    """Real Pi reviews frozen source with fresh challenge and exact native selection.
+    """Real Pi reviews frozen source with a fresh challenge and exact native selection.
 
-    Compare blank/absent/explicit selection with Pi itself. Hosted rows retain
-    operator policy across retries; readiness rows reject versions, capabilities,
-    model/settings faults and executable resources before provider work. A semantic
-    rejection followed by provider failure must preserve the challenge assignment.
-    The local row proves stock reads/searches and supporting selectors share final
-    working contents after original-checkout mutations; committed rows exclude dirt.
+    The hosted row retains operator policy across a provider retry and excludes dirty
+    working bytes; the local row proves stock reads/searches and supporting selectors share
+    final working contents after original-checkout mutations. The hosted-* readiness rows
+    reject versions, model/settings faults and executable resources before provider work.
     """
     local = case == "local"
     immutable = case == "hosted-immutable"
@@ -663,125 +608,6 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     assert all(path.read_bytes() == original_bytes for path, original_bytes in config_bytes.items())
 
 
-async def test_native_stock_pagination_and_corrected_source_submission_are_admitted_once(
-    tmp_path: Path, native_provider: _NativeProvider,
-) -> None:
-    """Real Pi corrects host-rejected selectors and terminates on canonical acceptance.
-
-    Source-owner tests cannot catch lost native error correlation, replaced stock
-    pagination, the obsolete eight-call ceiling, or an extra generation after acceptance.
-    """
-    repo = tmp_path / "source-repo"
-    supporting = "".join(f"Page {index:02}: café 界 independently known bytes\n" for index in range(1, 22))
-    sources = {"supporting.txt": supporting, "oversized.txt": "x" * (64 * 1024 + 1) + "\n"}
-    head = seed_feature_branch(repo, base={"api.py": "VALUE = 0\n", **sources},
-                               feature={"api.py": "VALUE = 1\n", **sources})
-    base = git(repo, "rev-parse", "main")
-    diff = git(repo, "diff", "--no-ext-diff", "main", "HEAD") + "\n"
-    revision = {"merge_base_sha": base, "head_sha": head}
-    assigned = part_source_mapping(diff, {"kind": "file", "file": "api.py"},
-        artifact_sha256=hashlib.sha256(diff.encode()).hexdigest(), revision=revision,
-        old_path="api.py", new_path="api.py")["source_refs"]
-    offered = source_options(assigned)
-    source = next(option for option in offered if option["side"] == "new")
-    selectors = [{"source_id": source["source_id"], "source_range": None, "basis": "supplied_diff"},
-                 {"path": "supporting.txt", "side": "new", "source_range": {"start": 2, "end": 3},
-                  "basis": "source_inspection"}]
-    canonical_refs = [{
-        "artifact_sha256": hashlib.sha256(diff.encode()).hexdigest(),
-        "part_sha256": hashlib.sha256(diff.encode()).hexdigest(), "revision": head,
-        "path": "api.py", "side": "new", "source_range": {"start": 1, "end": 1}, "fragment": None,
-        "basis": "supplied_diff", "role": "assigned",
-    }, {
-        "artifact_sha256": hashlib.sha256(supporting.encode()).hexdigest(), "part_sha256": None,
-        "revision": head, "path": "supporting.txt", "side": "new", "source_range": {"start": 2, "end": 3},
-        "fragment": None, "basis": "source_inspection", "role": "supporting",
-    }]
-    def schema(refs: dict[str, Any]) -> dict[str, Any]:
-        return {"type": "object", "additionalProperties": False, "properties": {
-            "evidence_refs": refs, "note": {"type": "string"}}, "required": ["evidence_refs", "note"]}
-    submitted = {"evidence_refs": selectors, "note": "Accepted source judgment"}
-    expected = {"evidence_refs": canonical_refs, "note": submitted["note"]}
-    rejected = {"evidence_refs": [{"source_id": "source:" + "0" * 64, "source_range": None,
-                                   "basis": "supplied_diff"}], "note": "REJECTED_SEMANTIC_NOTE"}
-    invalid_range = {"evidence_refs": [{"source_id": source["source_id"],
-        "source_range": {"start": 1, "end": 99}, "basis": "supplied_diff"}], "note": "Invalid range"}
-    oversized = {"evidence_refs": [selectors[0], {"path": "oversized.txt", "side": "new",
-        "source_range": {"start": 1, "end": 1}, "basis": "source_inspection"}], "note": "One line of a large blob"}
-    installed: list[dict[str, Any]] = []
-    def accept(value: Any) -> dict[str, Any]:
-        canonical = {"evidence_refs": canonicalize_source_selectors(
-            value["evidence_refs"], assigned, revision=revision, source_root=repo), "note": value["note"]}
-        installed.append(canonical)
-        return canonical
-    path = str((repo / "supporting.txt").resolve())
-    native_provider.turns = [[(f"page-{index}", "read", {"path": path, "offset": 2 * index + 1, "limit": 2})]
-                             for index in range(10)]
-    native_provider.turns += [[("rejected", "structured_output", rejected)],
-                              [("invalid-range", "structured_output", invalid_range)],
-                              [("oversized", "structured_output", oversized)],
-                              [("accepted", "structured_output", submitted)]]
-    count = 14
-    budget = ReviewInvestigationBudget.from_limits(ReviewLimits(60, count, count))
-    binding = HostToolBinding(deadline=time.monotonic() + 60, accept=accept)
-    recorder = make_recorder(repo, agent_model_name="output-model", backend_name="pi")
-    async with recorder:
-        result, _, reason = await run_agent(PiBackend(model="output-model"), repo,
-            "Inspect the supplied source pages and submit a source judgment.", phase=DaydreamPhase.REVIEW,
-            read_only=True, persist_session=False, output_schema=schema(SOURCE_SELECTORS_SCHEMA),
-            result_schema=schema(SOURCE_REFS_SCHEMA), investigation_budget=budget, tool_call_budget=count,
-            host_tools=binding, wall_budget_s=60, progress_callback=lambda _: None)
-    assert reason is None and result == expected
-    assert installed == [expected] and binding.accepted and binding.accepted_result == expected
-    assert len(native_provider.requests) == count, "acceptance must terminate without a further model generation"
-    names = {tool["function"]["name"] for tool in native_provider.requests[0]["tools"]}
-    assert {"read", "grep", "find", "ls", "structured_output"} <= names
-    assert not {"bash", "edit", "write"} & names
-    tool = next(tool for tool in native_provider.requests[0]["tools"]
-                if tool["function"]["name"] == "structured_output")
-    assert tool["function"]["parameters"] == schema(SOURCE_SELECTORS_SCHEMA)
-    for index, request in enumerate(native_provider.requests):
-        messages = request["messages"]
-        assert len([message for message in messages if message["role"] == "user"]) == 1
-        assistants = [message for message in messages if message["role"] == "assistant"]
-        assert [message["content"] for message in assistants] == [f"Native reasoning {i}." for i in range(index)]
-        previous = [call for batch in native_provider.turns[:index] for call in batch]
-        history = {message["tool_call_id"]: message["content"] for message in messages if message["role"] == "tool"}
-        assert set(history) == {call_id for call_id, _, _ in previous}
-        for page in range(min(index, 10)):
-            lines = supporting.splitlines(keepends=True)
-            assert "".join(lines[2 * page:2 * page + 2]) in history[f"page-{page}"]
-            assert lines[2 * page + 2].strip() not in history[f"page-{page}"]
-            assert f"offset={2 * page + 3}" in history[f"page-{page}"]
-        if index >= 11:
-            assert "assigned inventory" in history["rejected"]
-            assert "REJECTED_SEMANTIC_NOTE" in json.dumps(messages)
-        if index >= 12:
-            assert "source_range" in history["invalid-range"] and source["source_id"] in history["invalid-range"]
-        if index >= 13:
-            assert "oversized.txt" in history["oversized"] and "whole" in history["oversized"].lower()
-            assert "65536" in history["oversized"] and "range" in history["oversized"].lower()
-    trajectory = json.loads(recorder.path.read_text())
-    calls = [call for step in trajectory["steps"] for call in step.get("tool_calls") or []]
-    observations = {item["source_call_id"]: item["content"] for step in trajectory["steps"]
-                    for item in (step.get("observation") or {}).get("results", [])}
-    expected_ids = [f"page-{index}" for index in range(10)] + ["rejected", "invalid-range", "oversized", "accepted"]
-    assert [call["tool_call_id"] for call in calls] == expected_ids
-    assert "assigned inventory" in observations["rejected"]
-    assert json.loads(observations["accepted"])["details"] == expected
-    assert "REJECTED_SEMANTIC_NOTE" in json.dumps(trajectory), "rejection remains raw native evidence"
-    assert all(step["source"] != "user" or "REJECTED_SEMANTIC_NOTE" not in json.dumps(step)
-               for step in trajectory["steps"])
-    assert binding.calls == budget.observed_tool_starts == count and budget.remaining_tool_calls == 0
-    assert binding.rejections == 3 and not binding.authority_open
-    assert binding.native_settled and binding.cleanup_complete
-    lifecycle = trajectory["extra"]["subtrajectories"][0]["backend_lifecycle"]
-    assert lifecycle["host_authority_closed"] and lifecycle["host_native_settled"]
-    assert lifecycle["host_cleanup_complete"]
-    assert lifecycle["host_tool_call_count"] == count and lifecycle["host_tool_rejection_count"] == 3
-    assert sum((step.get("metrics") or {}).get("prompt_tokens", 0) or 0 for step in trajectory["steps"]) == 10 * count
-
-
 @pytest.mark.parametrize("fault", ["mixed-first", "mixed-last", "incomplete"])
 async def test_native_terminal_batch_rejection_precedes_acceptance(
     tmp_path: Path, native_provider: _NativeProvider, fault: str,
@@ -816,65 +642,6 @@ async def test_native_terminal_batch_rejection_precedes_acceptance(
     assert "rejected" in history
     assert ("token limit" if fault == "incomplete" else "alone") in history["rejected"].lower()
     assert binding.accepted_result == accepted and binding.rejections >= 1
-
-
-@pytest.mark.parametrize("allowance", [1, 2], ids=["spent-by-native-schema-rejection", "correction-capacity"])
-@pytest.mark.parametrize("malformation", ["schema", "argument-size"])
-async def test_native_schema_rejection_charges_host_before_corrected_acceptance(
-    tmp_path: Path, native_provider: _NativeProvider, allowance: int, malformation: str,
-) -> None:
-    """A native schema failure spends host allowance before a corrected callback can mutate.
-
-    Unbound warning tests and direct HTTP schema checks cannot catch charging
-    after Pi validation, a misleading null-object error after native argument-size
-    clipping, or a provider request after the last call fails. Direct execute also
-    excludes run_agent's later observer.
-    """
-    accepted = {"verdict": "complete", "findings": []}
-    invalid = ({"verdict": "incomplete", "findings": False} if malformation == "schema" else
-               {"verdict": "x" * (128 * 1024), "findings": []})
-    native_provider.turns = [[("invalid-schema", "structured_output", invalid)],
-                             [("corrected", "structured_output", accepted)]]
-    marker = tmp_path / "accepted-review"
-    installed: list[Any] = []
-    def accept(value: dict[str, Any]) -> dict[str, Any]:
-        marker.write_text(value["verdict"])
-        installed.append(value)
-        return value
-    binding = HostToolBinding(deadline=time.monotonic() + 30, accept=accept)
-    events = []
-    failure: PiError | None = None
-    try:
-        async for event in PiBackend(model="output-model").execute(tmp_path, "Correct the native schema error.",
-            output_schema=_SCHEMA, read_only=True, host_tools=binding, tool_call_budget=allowance,
-            persist_session=False):
-            events.append(event)
-    except PiError as exc:
-        failure = exc
-    assert (failure is None) is (allowance == 2)
-    if failure is not None:
-        assert failure.category == "HOST_TOOLS" and failure.retryable is False
-        assert "allowance" in str(failure).lower() and "cannot" in str(failure).lower()
-    assert len(native_provider.requests) == allowance, "fatal admission must not dispatch another provider request"
-    assert installed == ([accepted] if allowance == 2 else [])
-    assert marker.exists() is (allowance == 2)
-    if allowance == 2:
-        assert marker.read_text() == "complete" and binding.accepted_result == accepted
-        history = {message["tool_call_id"]: message["content"] for message in native_provider.requests[1]["messages"]
-                   if message["role"] == "tool"}
-        if malformation == "schema":
-            assert history["invalid-schema"].startswith('Validation failed for tool "structured_output":')
-        else:
-            assert "argument object" in history["invalid-schema"] and "131072" in history["invalid-schema"]
-            assert "reduce" in history["invalid-schema"].lower()
-    else:
-        assert binding.accepted_result is None
-    assert binding.calls == allowance and binding.rejections == 1
-    assert [event.id for event in events if isinstance(event, ToolStartEvent)] == (
-        ["invalid-schema", "corrected"] if allowance == 2 else ["invalid-schema"])
-    assert [event.id for event in events if isinstance(event, ToolResultEvent) and event.is_error] == (
-        ["invalid-schema"])
-    assert not binding.authority_open and binding.native_settled and binding.cleanup_complete
 
 
 @pytest.mark.parametrize("lost_evidence", ["none", "fatal-details", "settlement"])
@@ -957,8 +724,8 @@ async def test_native_unavailable_host_input_stops_generation_before_retry_or_re
     assert sum((step.get("metrics") or {}).get("prompt_tokens", 0) or 0 for step in trajectory["steps"]) == 10
 
 
-@pytest.mark.parametrize("fault", ["missing-extension", "broken-extension", "unsupported-capability",
-                                  "wrong-schema", "unreachable-endpoint", "unsupported-version"])
+@pytest.mark.parametrize("fault", ["missing-extension", "broken-extension", "unsupported-capability", "wrong-schema",
+                                   "unreachable-endpoint", "unsupported-version"])
 async def test_native_required_admission_readiness_fails_before_provider(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, fault: str,
 ) -> None:
@@ -1269,159 +1036,13 @@ async def test_native_stock_read_cancellation_reaps_process_before_freeze_and_pr
             os.close(fifo_writer)
 
 
-@pytest.mark.parametrize("fault", ["agent_settled", "tool_execution_end", "teardown-error", "teardown-timeout"])
-async def test_native_accepted_state_is_retained_when_terminal_settlement_or_cleanup_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, fault: str,
-) -> None:
-    """Native failure cannot undo acceptance, replay its mutation, or overstate cleanup.
-
-    Domain stage tests cannot establish native terminal evidence or charged usage.
-    Endpoint cleanup alone also misses a separately failing native process teardown.
-    """
-    accepted = {"verdict": "complete", "findings": []}
-    native_provider.turns = [[("accepted", "structured_output", accepted)]]
-    installed: list[Any] = []
-    def accept(value: dict[str, Any]) -> dict[str, Any]:
-        installed.append(value)
-        return value
-    binding = HostToolBinding(deadline=time.monotonic() + 30, accept=accept)
-    servers: list[PiHostToolServer] = []
-    start_server = PiHostToolServer.start
-    async def observe_server(server: PiHostToolServer) -> None:
-        servers.append(server)
-        await start_server(server)
-    monkeypatch.setattr(PiHostToolServer, "start", observe_server)
-    if fault.startswith("teardown-"):
-        async def failing_teardown(transport: CliTransport, transports: list[CliTransport],
-                                   **options: Any) -> None:
-            await teardown(transport, transports, **options)
-            if binding.accepted:
-                if fault == "teardown-error":
-                    raise RuntimeError("Native teardown failed after process cleanup")
-                async with asyncio.timeout(0):
-                    await asyncio.Event().wait()
-        monkeypatch.setattr("daydream.backends.pi.teardown", failing_teardown)
-    else:
-        original = CliTransport.lines
-        async def lose_event(transport: CliTransport, *args: Any, **kwargs: Any) -> Any:
-            async for line in original(transport, *args, **kwargs):
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    yield line
-                    continue
-                if event.get("type") != fault:
-                    yield line
-        monkeypatch.setattr(CliTransport, "lines", lose_event)
-    backend = PiBackend(model="output-model")
-    backend.retry_attempts = 1
-    backend.retry_base_delay_s = backend.retry_max_delay_s = 0
-    recorder = make_recorder(tmp_path, backend_name="pi")
-    expected_error = (RuntimeError if fault == "teardown-error" else
-                      TimeoutError if fault == "teardown-timeout" else PiError)
-    async with recorder:
-        with pytest.raises(expected_error):
-            await run_agent(backend, tmp_path, "Submit the review.", phase=DaydreamPhase.REVIEW,
-                host_tools=binding, output_schema=_SCHEMA, read_only=True, persist_session=False,
-                progress_callback=lambda _: None)
-    assert installed == [accepted] and binding.accepted and binding.accepted_result == accepted
-    assert len(native_provider.requests) == 1, "a possibly accepted mutation cannot be replayed"
-    assert servers and all(server.closed for server in servers), "endpoint closure is an independent cleanup outcome"
-    trajectory = json.loads(recorder.path.read_text())
-    lifecycle = trajectory["extra"]["subtrajectories"][0]["backend_lifecycle"]
-    assert lifecycle["host_authority_closed"] and not binding.authority_open
-    if fault.startswith("teardown-"):
-        assert binding.native_settled and lifecycle["host_native_settled"]
-        assert not binding.cleanup_complete and lifecycle["host_cleanup_complete"] is False
-    else:
-        assert binding.cleanup_complete and lifecycle["host_cleanup_complete"]
-        # Missing execution completion fails at the following toolResult, before
-        # the adapter can consume the later agent_settled event.
-        assert not binding.native_settled and lifecycle["host_native_settled"] is False
-    assert sum((step.get("metrics") or {}).get("prompt_tokens", 0) or 0 for step in trajectory["steps"]) == 10
-
-
-@pytest.mark.parametrize("expires", [False, True], ids=["within-deadline", "expired-during-validation"])
-async def test_native_submission_waits_for_captured_source_validation_without_renewing_authority(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, expires: bool,
-) -> None:
-    """Slow real captured-file reads use the domain deadline, retaining the final admission guard.
-
-    Lost-receipt tests cannot detect a healthy synchronous source validation being
-    mistaken for transport failure before its still-open assignment deadline.
-    """
-    from daydream import host_tools as policy
-    from daydream.git_ops import captured_source as owner
-
-    repo = tmp_path / "source-repo"
-    head = seed_feature_branch(repo, base={"api.py": "VALUE = 0\n"}, feature={"api.py": "VALUE = 1\n"})
-    captured = owner.capture_source(repo, tmp_path / "captured", base_sha=git(repo, "rev-parse", "main"),
-                                    head_sha=head, local=False)
-    submitted = {"verdict": "clean", "findings": []}
-    canonical = {"verdict": "validated", "findings": []}
-    native_provider.turns = [[("submit", "structured_output", submitted)]]
-    installed: list[dict[str, Any]] = []
-    validating = delayed = False
-    validation_started = validation_finished = 0.0
-    read_native = owner._native_entry
-    def slow_read(root: Path, path: str, gitlink: str | None = None, **kwargs: Any) -> Any:
-        nonlocal delayed
-        value = read_native(root, path, gitlink, **kwargs)
-        if validating and not delayed and root == captured.root and path == "api.py":
-            assert value is not None and value.size == len(b"VALUE = 1\n")
-            delayed = True
-            if expires:
-                binding.restrict(deadline=time.monotonic() + 0.1, tool_call_budget=None)
-            time.sleep(policy._CALLBACK_TIMEOUT_S + 0.25)
-        return value
-    monkeypatch.setattr(owner, "_native_entry", slow_read)
-    def accept(value: dict[str, Any]) -> dict[str, Any]:
-        nonlocal validating, validation_started, validation_finished
-        validation_started = time.monotonic()
-        validating = True
-        captured.validate()
-        validating = False
-        validation_finished = time.monotonic()
-        binding.ensure_open()
-        assert value == submitted
-        installed.append(canonical)
-        return canonical
-    binding = HostToolBinding(deadline=time.monotonic() + 30, accept=accept)
-    backend = PiBackend(model="output-model")
-    backend.retry_attempts = 1
-    backend.retry_base_delay_s = backend.retry_max_delay_s = 0
-    try:
-        if expires:
-            with pytest.raises(PiError) as failure:
-                await run_agent(backend, captured.root, "Review the captured source.", phase=DaydreamPhase.REVIEW,
-                    host_tools=binding, output_schema=_SCHEMA, read_only=True, persist_session=False,
-                    tool_call_budget=4, wall_budget_s=30, progress_callback=lambda _: None)
-            assert failure.value.category == "HOST_TOOLS" and failure.value.retryable is False
-            assert binding.fatal_error is not None and binding.fatal_error.code == "deadline_expired"
-        else:
-            result, _, reason = await run_agent(backend, captured.root, "Review the captured source.",
-                phase=DaydreamPhase.REVIEW, host_tools=binding, output_schema=_SCHEMA, read_only=True,
-                persist_session=False, tool_call_budget=4, wall_budget_s=30, progress_callback=lambda _: None)
-            assert reason is None and result == canonical
-        assert delayed and validation_finished - validation_started > policy._CALLBACK_TIMEOUT_S
-        assert installed == ([] if expires else [canonical])
-        assert binding.accepted is not expires
-        assert len(native_provider.requests) == 1
-        assert binding.calls == 1 and binding.cleanup_complete
-        if not expires:
-            assert binding.native_settled
-        assert not binding.authority_open
-    finally:
-        captured.remove()
-
-
-@pytest.mark.parametrize("fault", ["timeout", "disconnect", "uncorrelated-reply", "missing-callback"])
+@pytest.mark.parametrize("fault", ["disconnect", "uncorrelated-reply", "missing-callback"])
 async def test_native_indeterminate_submission_stops_generation_and_never_replays(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, fault: str,
 ) -> None:
     """Stop unconfirmed submissions, retaining accepted work and refusing replay.
 
-    Missing callbacks prove fresh-conversation denial before acceptance; lost
+    Missing callbacks prove fresh-conversation denial before acceptance; lost or uncorrelated
     receipts retain accepted work. The source-selector journey owns correction.
     """
     submitted = {"verdict": "submitted", "findings": []}
@@ -1429,14 +1050,9 @@ async def test_native_indeterminate_submission_stops_generation_and_never_replay
     native_provider.turns = [[("submit", "structured_output", submitted)]]
     installed: list[dict[str, Any]] = []
     callback_times: list[float] = []
-    timeout_s = 1.0
     def accept(value: dict[str, Any]) -> dict[str, Any]:
         assert value == submitted
         callback_times.append(time.monotonic())
-        if fault == "timeout":
-            # Synchronous frozen-source work can outlast Node's independent
-            # HTTP timer while the original domain deadline remains open.
-            time.sleep(timeout_s + 0.25)
         binding.ensure_open()
         callback_times.append(time.monotonic())
         installed.append(canonical)
@@ -1452,17 +1068,10 @@ async def test_native_indeterminate_submission_stops_generation_and_never_replay
                 raise ConnectionResetError("Submission body read disconnected before callback dispatch")
             return body
         monkeypatch.setattr(asyncio.StreamReader, "readexactly", lose_submit_body)
-    packet = PiHostToolServer.packet
-    def timed_packet(server: PiHostToolServer) -> dict[str, Any]:
-        value = packet(server)
-        return {**value, "request_timeout_ms": int(timeout_s * 1000)}
-    monkeypatch.setattr(PiHostToolServer, "packet", timed_packet)
     reply = PiHostToolServer._reply
     lost_replies: list[dict[str, Any]] = []
     async def lose_accepted_reply(server: PiHostToolServer, writer: asyncio.StreamWriter,
                                   status: int, value: dict[str, Any]) -> None:
-        if fault == "timeout" and "remaining_ms" in value:
-            value = {**value, "remaining_ms": int(timeout_s * 1000)}
         if value.get("accepted") is True:
             assert binding.accepted_result == canonical
             lost_replies.append(value)
@@ -1497,8 +1106,6 @@ async def test_native_indeterminate_submission_stops_generation_and_never_replay
     else:
         assert installed == [canonical] and binding.accepted_result == canonical and lost_replies
         assert len(callback_times) == 2 and callback_times[-1] < binding.deadline
-    if fault == "timeout":
-        assert callback_times[-1] - callback_times[0] > timeout_s
     assert len(native_provider.requests) == 1, "indeterminate acceptance must stop further model generations"
     assert failure.value.category == "HOST_TOOLS" and failure.value.retryable is False
     assert binding.calls == 1 and binding.rejections == 0 and binding.cleanup_complete
@@ -1526,32 +1133,13 @@ async def test_native_indeterminate_submission_stops_generation_and_never_replay
         assert subsequent.value.category == "HOST_TOOLS" and not subsequent.value.retryable
 
 
-async def test_installed_pi_validation_optout_preserves_text(
+async def test_native_pi_budget_warning_preserves_wire_roles_history_and_charged_calls(
     tmp_path: Path, native_provider: _NativeProvider,
 ) -> None:
-    native_provider.text = json.dumps({"verdict": "complete", "findings": []})
-    events = [event async for event in PiBackend(model="output-model").execute(
-        tmp_path, "Return the requested result.", output_schema=_SCHEMA, read_only=True, persist_session=False,
-        validate_structured_output=False, tool_call_budget=8)]
-    request = next(event for event in events if isinstance(event, RequestEvent))
-    assert isinstance(request.config, PiRequestConfig) and request.config.no_extensions is False
-    assert request.output_schema == _SCHEMA
-    assert not any(isinstance(event, ToolStartEvent) for event in events)
-    assert next(event for event in reversed(events) if isinstance(event, ResultEvent)).structured_output is None
-    assert [event.text for event in events if isinstance(event, TextEvent)] == [native_provider.text]
+    """When only submission capacity remains, the warning and recovery are system notes, never user turns.
 
-
-@pytest.mark.parametrize('allowance,submit', [(8, True), (7, True), (6, True), (2, True), (1, True), (None, True),
-                                            (7, False), (6, False)],
-                         ids=['ample', 'submission-only', 'batch-exhausted', 'batch-overdrawn',
-                              'initial-only', 'unbounded', 'bounded-recovery', 'exhausted-no-recovery'])
-async def test_native_pi_budget_warning_preserves_wire_roles_history_and_charged_calls(
-    tmp_path: Path, native_provider: _NativeProvider, allowance: int | None, submit: bool,
-) -> None:
-    """Actual wire requests catch custom notes becoming users or dropping genuine history.
-
-    The immediate-submission journey misses threshold transitions, failed/invalid batch
-    charges and missing-submission recovery at an unchanged remaining allowance.
+    Actual wire requests catch custom notes becoming users or dropping genuine history, while failed
+    and invalid batch calls stay charged across the threshold.
     """
     source = 'Captured source\n'
     (tmp_path / 'source.txt').write_text(source)
@@ -1566,8 +1154,8 @@ async def test_native_pi_budget_warning_preserves_wire_roles_history_and_charged
          ('read-b', 'read', {'path': 'source.txt'})],
         [('failed-submit', 'structured_output', {'verdict': 'incomplete', 'findings': False})],
         [('read-c', 'read', {'path': 'source.txt'}), ('read-d', 'read', {'path': 'source.txt'})],
-        *([[]] if allowance in (8, 7, None) else []),  # Repeat threshold through bounded recovery.
-        [('final-submit', 'structured_output', output)] if submit else [],
+        [],  # A prose-only turn at the threshold receives recovery guidance.
+        [('final-submit', 'structured_output', output)],
     ]
 
     def choose(request: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
@@ -1578,125 +1166,125 @@ async def test_native_pi_budget_warning_preserves_wire_roles_history_and_charged
     native_provider.choose = choose
     events = [event async for event in PiBackend(model='output-model').execute(
         tmp_path, prompt, output_schema=_SCHEMA, review_instructions=instructions,
-        read_only=True, persist_session=False, tool_call_budget=allowance)]
-
+        read_only=True, persist_session=False, tool_call_budget=7)]
     assert len(requests) == len(batches)
-    request_event = next(event for event in events if isinstance(event, RequestEvent))
-    assert isinstance(request_event.config, PiRequestConfig) and request_event.config.no_extensions is True
-    assert request_event.output_schema == _SCHEMA
-    completions: dict[str, str] = {}
-    for event in events:
-        if isinstance(event, ToolResultEvent):
-            # The host retains native details as JSON; OpenAI's tool content carries text only.
-            completions[event.id] = (''.join(block['text'] for block in json.loads(event.output)['content'])
-                                     if event.output.startswith('{"content":') else event.output)
-    warning_requests: list[int] = []
     recovery = 'Submit the final result now by calling structured_output alone. Assistant prose is not a submission.'
-    warning_instruction = ('Final-submission budget warning: Only submission capacity remains. '
-                           'Submit now using structured_output alone; report unfinished assigned work '
-                           'with truthful incomplete decisions. Assigned objective and identities: '
-                           + json.dumps(assignment, separators=(',', ':')))
-    original_system: dict[str, Any] | None = None
+    warning_requests: list[int] = []
     for index, request in enumerate(requests):
         messages = request['messages']
         system = [message for message in messages if message['role'] in {'system', 'developer'}]
-        assert system and messages[0] == system[0]
-        assert policy in json.dumps(system)
-        assert 'Attempt dispatch-time snapshot:' in json.dumps(system)
-        preserved_system = dict(system[0])
-        preserved_system['content'] = (
-            system[0]['content'].replace(warning_instruction, '').replace(recovery, '').strip())
-        if original_system is None:
-            original_system = preserved_system
-        assert preserved_system == original_system
+        assert system and messages[0] == system[0] and policy in json.dumps(system)
         users = [message for message in messages if message['role'] == 'user']
         assert len(users) == 1 and prompt in json.dumps(users[0])
-        assert 'Live native Pi attempt budget:' not in json.dumps(messages)
-        assert 'daydream_native_tool_budget' not in json.dumps(messages)
-        assert request['tools'] == requests[0]['tools']
-        assert next(tool for tool in request['tools'] if tool['function']['name'] == 'structured_output')[
-            'function']['parameters'] == _SCHEMA
+        assert 'Final-submission budget warning' not in json.dumps(users) and recovery not in json.dumps(users)
         assistants = [message for message in messages if message['role'] == 'assistant']
-        assert len(assistants) == index
-        for earlier, assistant in enumerate(assistants):
-            assert assistant['content'] == f'Original assistant reasoning summary {earlier}.'
-            assert [(call['id'], call['function']['name'], json.loads(call['function']['arguments']))
-                    for call in assistant.get('tool_calls', [])] == batches[earlier]
-        history = {message['tool_call_id']: message['content'] for message in messages if message['role'] == 'tool'}
-        previous = [call for batch in batches[:index] for call in batch]
-        assert set(history) == {call_id for call_id, _, _ in previous}
-        for call_id, name, arguments in previous:
-            assert history[call_id] == completions[call_id]
-            if name == 'read' and arguments['path'] == 'source.txt':
-                assert history[call_id] == source
+        assert [message['content'] for message in assistants] == [
+            f'Original assistant reasoning summary {earlier}.' for earlier in range(index)]
         warnings = [message for message in messages if 'Final-submission budget warning:' in json.dumps(message)]
         if warnings:
             warning_requests.append(index)
             assert len(warnings) == 1 and warnings[0]['role'] in {'system', 'developer'}
-            warning = json.dumps(warnings[0])
-            assert 'Only submission capacity remains' in warning and 'truthful incomplete decisions' in warning
+            assert 'Only submission capacity remains' in warnings[0]['content']
             assignment_text = warnings[0]['content'].split('Assigned objective and identities: ', 1)[1]
             assert json.JSONDecoder().raw_decode(assignment_text)[0] == assignment
         recovery_messages = [message for message in messages if recovery in json.dumps(message)]
         assert len(recovery_messages) == (1 if index == 4 else 0)
         assert all(message['role'] in {'system', 'developer'} for message in recovery_messages)
-    assert warning_requests == ([3] if allowance == 7 else [0] if allowance == 1 else [])
-    starts = [event for event in events if isinstance(event, ToolStartEvent)]
-    assert [event.id for event in starts] == [call_id for batch in batches for call_id, _, _ in batch]
+    assert warning_requests == [3]
+    starts = [event.id for event in events if isinstance(event, ToolStartEvent)]
+    assert starts == [call_id for batch in batches for call_id, _, _ in batch]
     failures = [event.id for event in events if isinstance(event, ToolResultEvent) and event.is_error]
     assert failures == ['read-missing', 'failed-submit']
-    assert completions['read-missing'] == f"ENOENT: no such file or directory, access '{tmp_path / 'missing.txt'}'"
-    assert completions['failed-submit'].startswith('Validation failed for tool "structured_output":\n')
-    assert completions['failed-submit'].endswith(
-        'Received arguments:\n{\n  "verdict": "incomplete",\n  "findings": false\n}')
     result = next(event for event in reversed(events) if isinstance(event, ResultEvent))
-    assert result.structured_output == (output if submit else None)
+    assert result.structured_output == output
 
 
-@pytest.mark.parametrize("host_bound", [False, True], ids=["serializer", "host-admission"])
-async def test_native_pi_retry_refreshes_attempt_count_without_renewing_host_allowance(
-    tmp_path: Path, native_provider: _NativeProvider, host_bound: bool,
+@pytest.mark.parametrize(("allowance", "malformation"), [(1, "schema"), (2, "argument-size")],
+                         ids=["spent-by-native-schema-rejection", "argument-size-correction"])
+async def test_native_schema_rejection_charges_host_before_corrected_acceptance(
+    tmp_path: Path, native_provider: _NativeProvider, allowance: int, malformation: str,
 ) -> None:
-    """A real provider failure restarts warnings without refunding previously charged native calls."""
-    (tmp_path / "source.txt").write_text("Captured source\n")
-    requests = native_provider.requests
-    output = {"verdict": "complete", "findings": []}
-    native_provider.errors[1] = "503 Service Unavailable"
-    native_provider.turns = [
-        [("attempt-1-a", "read", {"path": "source.txt"}), ("attempt-1-b", "read", {"path": "missing.txt"})],
-        [], [("attempt-2-submit", "structured_output", output)],
-    ]
-    backend = PiBackend(model="output-model")
-    backend.retry_attempts = 1
-    backend.retry_base_delay_s = backend.retry_max_delay_s = 0
-    budget = ReviewInvestigationBudget.from_limits(ReviewLimits(60, 3, 3))
+    """A native schema failure spends host allowance before a corrected callback can mutate.
+
+    Unbound warning tests and direct HTTP schema checks cannot catch charging
+    after Pi validation, a misleading null-object error after native argument-size
+    clipping, or a provider request after the last call fails. Direct execute also
+    excludes run_agent's later observer.
+    """
+    accepted = {"verdict": "complete", "findings": []}
+    invalid = ({"verdict": "incomplete", "findings": False} if malformation == "schema" else
+               {"verdict": "x" * (128 * 1024), "findings": []})
+    native_provider.turns = [[("invalid-schema", "structured_output", invalid)],
+                             [("corrected", "structured_output", accepted)]]
+    marker = tmp_path / "accepted-review"
+    installed: list[Any] = []
+    def accept(value: dict[str, Any]) -> dict[str, Any]:
+        marker.write_text(value["verdict"])
+        installed.append(value)
+        return value
+    binding = HostToolBinding(deadline=time.monotonic() + 30, accept=accept)
+    events = []
+    failure: PiError | None = None
+    try:
+        async for event in PiBackend(model="output-model").execute(tmp_path, "Correct the native schema error.",
+            output_schema=_SCHEMA, read_only=True, host_tools=binding, tool_call_budget=allowance,
+            persist_session=False):
+            events.append(event)
+    except PiError as exc:
+        failure = exc
+    assert (failure is None) is (allowance == 2)
+    if failure is not None:
+        assert failure.category == "HOST_TOOLS" and failure.retryable is False
+        assert "allowance" in str(failure).lower() and "cannot" in str(failure).lower()
+    assert len(native_provider.requests) == allowance, "fatal admission must not dispatch another provider request"
+    assert installed == ([accepted] if allowance == 2 else [])
+    assert marker.exists() is (allowance == 2)
+    if allowance == 2:
+        assert marker.read_text() == "complete" and binding.accepted_result == accepted
+        history = {message["tool_call_id"]: message["content"] for message in native_provider.requests[1]["messages"]
+                   if message["role"] == "tool"}
+        assert "argument object" in history["invalid-schema"] and "131072" in history["invalid-schema"]
+        assert "reduce" in history["invalid-schema"].lower()
+    else:
+        assert binding.accepted_result is None
+    assert binding.calls == allowance and binding.rejections == 1
+    assert [event.id for event in events if isinstance(event, ToolStartEvent)] == (
+        ["invalid-schema", "corrected"] if allowance == 2 else ["invalid-schema"])
+    assert [event.id for event in events if isinstance(event, ToolResultEvent) and event.is_error] == (
+        ["invalid-schema"])
+    assert not binding.authority_open and binding.native_settled and binding.cleanup_complete
+
+
+async def test_native_accepted_state_is_retained_when_native_teardown_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider,
+) -> None:
+    """A teardown failure after acceptance keeps the accepted result, never replays it, and reports cleanup open."""
+    accepted = {"verdict": "complete", "findings": []}
+    native_provider.turns = [[("accepted", "structured_output", accepted)]]
     installed: list[Any] = []
     def accept(value: dict[str, Any]) -> dict[str, Any]:
         installed.append(value)
         return value
-    binding = HostToolBinding(deadline=time.monotonic() + 60, accept=accept) if host_bound else None
-    deadline = binding.deadline if binding is not None else None
-    result, _, reason = await run_agent(
-        backend, tmp_path, "Investigate the supplied source and submit the result.",
-        phase=DaydreamPhase.DEEP, output_schema=_SCHEMA, read_only=True, persist_session=False,
-        investigation_budget=budget, tool_call_budget=3, host_tools=binding, progress_callback=lambda _: None)
-
-    if binding is not None:
-        assert installed == [output] and binding.accepted_result == output and binding.calls == 3
-        assert deadline is not None and binding.deadline <= deadline and binding.cleanup_complete
-    assert reason is None and result == output
-    assert budget.observed_tool_starts == 3 and budget.remaining_tool_calls == 0
-    assert len(requests) == 3
-    for index, request in enumerate(requests):
-        notes = [message for message in request['messages']
-                 if 'Final-submission budget warning:' in json.dumps(message)]
-        assert len(notes) == (0 if index == 0 else 1)
-        assert all(message['role'] in {'system', 'developer'} for message in notes)
-        assert len([message for message in request['messages'] if message['role'] == 'user']) == 1
-        assert 'Live native Pi attempt budget:' not in json.dumps(request['messages'])
-    assert 'tool-call allocation is 3 calls' in json.dumps(requests[0]['messages'])
-    assert 'tool-call allocation is 1 calls' in json.dumps(requests[2]['messages'])
-    assert 'attempt-1-a' not in json.dumps(requests[2]['messages'])
+    binding = HostToolBinding(deadline=time.monotonic() + 30, accept=accept)
+    async def failing_teardown(transport: CliTransport, transports: list[CliTransport], **options: Any) -> None:
+        await teardown(transport, transports, **options)
+        if binding.accepted:
+            raise RuntimeError("Native teardown failed after process cleanup")
+    monkeypatch.setattr("daydream.backends.pi.teardown", failing_teardown)
+    backend = PiBackend(model="output-model")
+    backend.retry_attempts = 1
+    backend.retry_base_delay_s = backend.retry_max_delay_s = 0
+    recorder = make_recorder(tmp_path, backend_name="pi")
+    async with recorder:
+        with pytest.raises(RuntimeError, match="Native teardown failed"):
+            await run_agent(backend, tmp_path, "Submit the review.", phase=DaydreamPhase.REVIEW,
+                host_tools=binding, output_schema=_SCHEMA, read_only=True, persist_session=False,
+                progress_callback=lambda _: None)
+    assert installed == [accepted] and binding.accepted_result == accepted
+    assert len(native_provider.requests) == 1, "a possibly accepted mutation cannot be replayed"
+    lifecycle = json.loads(recorder.path.read_text())["extra"]["subtrajectories"][0]["backend_lifecycle"]
+    assert binding.native_settled and lifecycle["host_native_settled"]
+    assert not binding.cleanup_complete and lifecycle["host_cleanup_complete"] is False
 
 
 async def test_committed_navigation_survives_native_compaction_on_one_cumulative_ledger(

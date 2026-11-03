@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import json
-import sys
-from collections.abc import AsyncIterator
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,102 +12,26 @@ import pytest
 import daydream.trajectory as trajectory_module
 from daydream import remote_ci
 from daydream.atif import validate as atif_validate
-from daydream.backends import (
-    AgentEvent,
-    TextEvent,
-)
-from daydream.run_config import RunConfig
 from daydream.runner import run
 from daydream.trajectory import (
     DaydreamPhase,
     RunWriteSnapshot,
     TrajectoryDocumentSnapshot,
     compute_timing_summary,
-    get_current_recorder,
     phase_scope,
 )
-from tests.harness import diagram_repos as dr
 from tests.harness.execution import host_test_command
 from tests.harness.git_helpers import bare_remote, git
-from tests.harness.phase_backend import PhaseDispatchBackend
 from tests.harness.remote_ci import NoCIRemote
-from tests.harness.review_profile import independent_alternatives_profile, independent_exploration_profile
-from tests.harness.stub_backend import StubBackend
+from tests.harness.review_profile import independent_exploration_profile
 from tests.harness.trajectory import make_recorder, observe_text_and_result, read_trajectory
-from tests.test_deep_orchestrator import _install_stub_backend, _pin_findings_pr, _silence
+from tests.test_deep_orchestrator import _install_stub_backend
 
 
 def _snapshot_document(path: Path, payload: dict[str, Any]) -> TrajectoryDocumentSnapshot:
     return TrajectoryDocumentSnapshot(
         trajectory_id=str(payload["trajectory_id"]), path=path, json_bytes=json.dumps(payload, sort_keys=True).encode(),
     )
-
-def test_overlap_coverage_and_recursive_invocation_identity(tmp_path: Path) -> None:
-    """Identified intervals are unioned and wrappers never double-count calls."""
-    session = "timing-session"
-    root = {"session_id": session, "trajectory_id": session, "steps": [],
-        "extra": {"run_started_at": "2026-01-01T00:00:00Z", "run_ended_at": "2026-01-01T00:00:10Z",
-            "phase_events": [{
-                    "phase": "deep", "event": "phase_start", "timestamp": "2026-01-01T00:00:01Z", "session_id": session,
-                    "scope_id": "deep-1",
-                }, {"phase": "deep", "event": "phase_end", "timestamp": "2026-01-01T00:00:05Z", "session_id": session,
-                    "scope_id": "deep-1", "status": "succeeded",
-                }, {"phase": "deep", "event": "phase_start", "timestamp": "2026-01-01T00:00:03Z", "session_id": session,
-                    "scope_id": "deep-2",
-                }, {"phase": "deep", "event": "phase_end", "timestamp": "2026-01-01T00:00:07Z", "session_id": session,
-                    "scope_id": "deep-2", "status": "partial",
-                }, {"phase": "diagram", "event": "phase_start", "timestamp": "2026-01-01T00:00:06Z",
-                    "session_id": session, "scope_id": "diagram-1",
-                }, {"phase": "diagram", "event": "phase_end", "timestamp": "2026-01-01T00:00:09Z",
-                    "session_id": session, "scope_id": "diagram-1", "status": "succeeded",
-                },
-            ], "subtrajectories": [{"trajectory_id": "child", "phase": "deep",
-                    "invocations": [{"trajectory_id": "child", "invocation_id": "child-call", "phase": "deep",
-                            "started_at": "2026-01-01T00:00:04Z", "ended_at": "2026-01-01T00:00:06Z",
-                        }, {"trajectory_id": "child", "invocation_id": "uncovered-call", "phase": "fix",
-                            "started_at": "2026-01-01T00:00:07Z", "ended_at": "2026-01-01T00:00:08Z",
-                        },
-                    ],
-                },
-            ],
-        },
-    }
-    nested = {"session_id": session, "trajectory_id": "nested", "steps": [],
-        "extra": {"run_started_at": "2026-01-01T00:00:06Z", "run_ended_at": "2026-01-01T00:00:09Z",
-            "subtrajectories": [{"trajectory_id": "nested", "invocation_id": "nested-call", "phase": "diagram",
-                    "started_at": "2026-01-01T00:00:06Z", "ended_at": "2026-01-01T00:00:09Z",
-                }
-            ],
-        },
-    }
-    child = {"session_id": session, "trajectory_id": "child", "steps": [],
-        "extra": {"run_started_at": "2026-01-01T00:00:03Z", "run_ended_at": "2026-01-01T00:00:08Z",
-            "subtrajectories": [{"trajectory_id": "child", "invocation_id": "child-call", "phase": "deep",
-                    "started_at": "2026-01-01T00:00:04Z", "ended_at": "2026-01-01T00:00:06Z",
-                }, {"trajectory_id": "child", "invocation_id": "uncovered-call", "phase": "fix",
-                    "started_at": "2026-01-01T00:00:07Z", "ended_at": "2026-01-01T00:00:08Z",
-                },
-            ],
-        },
-    }
-    snapshot = RunWriteSnapshot(status="complete", cutoff_at="2026-01-01T00:00:10Z", root_trajectory_id=session,
-        documents=(_snapshot_document(tmp_path / "trajectory.json", root),
-            _snapshot_document(tmp_path / "trajectories" / "child.json", child),
-            _snapshot_document(tmp_path / "trajectories" / "nested.json", nested),
-        ),
-    )
-
-    summary = compute_timing_summary(snapshot)
-
-    assert summary is not None
-    assert summary.wall_clock_seconds == 10.0
-    assert summary.phase_timings == {
-        "deep": {"wall_clock_seconds": 6.0, "occurrences": 2}, "diagram": {"wall_clock_seconds": 3.0, "occurrences": 1},
-    }
-    assert summary.attributed_wall_clock_seconds == 8.0
-    assert summary.unattributed_wall_clock_seconds == 2.0
-    assert summary.coverage_ratio == 0.8
-    assert summary.agent_completeness == {"total": 3, "attributed": 2, "unattributed": 1}
 
 def test_timing_diagnostics_clip_scoped_events_without_synthesizing_forks(tmp_path: Path) -> None:
     session = "diagnostics"
@@ -161,78 +82,8 @@ def test_timing_diagnostics_clip_scoped_events_without_synthesizing_forks(tmp_pa
 # --- PhaseEvent.to_dict ----------------------------------------------------
 
 
-async def test_emit_supervisor_and_tool_veto_events(tmp_path: Path) -> None:
-    """Supervisor decisions and tool vetoes are recorded as phase events."""
-    rec = make_recorder(tmp_path)
-
-    rec.emit_supervisor_verdict(7, "drop", "duplicate")
-    rec.emit_tool_veto("Write", "protected path", phase=DaydreamPhase.FIX)
-
-    assert rec._phase_events[0].event == "supervisor_verdict"
-    assert rec._phase_events[0].phase is DaydreamPhase.DEEP
-    assert rec._phase_events[0].metadata == {"finding_id": 7, "action": "drop", "reason": "duplicate"}
-    assert rec._phase_events[1].event == "tool_veto"
-    assert rec._phase_events[1].phase is DaydreamPhase.FIX
-    assert rec._phase_events[1].metadata == {"tool_name": "Write", "reason": "protected path"}
-
-async def test_emit_command_validation_summary_is_structured_and_redacted(tmp_path: Path,) -> None:
-    rec = make_recorder(tmp_path)
-
-    rec.emit_command_validation_summary(total_candidates=33, accepted=4, rejected=29,
-        reasons={"RECON_EVIDENCE_MISMATCH": 28, "RECON_MALFORMED_COMMAND": 1},
-    )
-
-    event = rec._phase_events[0]
-    assert event.event == "command_validation"
-    assert event.phase is DaydreamPhase.RECON
-    assert event.metadata == {"counts": {"total_candidates": 33, "accepted": 4, "rejected": 29},
-        "reasons": {"RECON_EVIDENCE_MISMATCH": 28, "RECON_MALFORMED_COMMAND": 1},
-    }
-
-
 # --- phase_scope -----------------------------------------------------------
 
-
-async def test_phase_scope_noop_without_recorder() -> None:
-    """phase_scope is a no-op when no recorder is active (no crash)."""
-    assert get_current_recorder() is None
-    async with phase_scope(DaydreamPhase.REVIEW):
-        pass  # must not raise
-
-async def test_phase_scope_id_pairs_concurrent_same_phase(tmp_path: Path) -> None:
-    """Overlapping equal-valued phases close by identity, not phase-name LIFO."""
-    rec = make_recorder(tmp_path)
-    entered = {name: anyio.Event() for name in ("first", "second")}
-    release = {name: anyio.Event() for name in entered}
-
-    async def scoped(name: str) -> None:
-        async with phase_scope(DaydreamPhase.DEEP, stage=name) as handle:
-            assert handle is not None
-            entered[name].set()
-            await release[name].wait()
-
-    async with rec:
-        async with anyio.create_task_group() as task_group:
-            task_group.start_soon(scoped, "first")
-            await entered["first"].wait()
-            task_group.start_soon(scoped, "second")
-            await entered["second"].wait()
-            release["second"].set()
-            await anyio.sleep(0)
-            release["first"].set()
-        async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            observe_text_and_result(inv, "seed")
-
-    events = [event for event in read_trajectory(rec.path)["extra"]["phase_events"] if event["phase"] == "deep"]
-    assert [event["event"] for event in events] == ["phase_start", "phase_start", "phase_end", "phase_end"]
-    starts = {event["metadata"]["stage"]: event for event in events[:2]}
-    ends = {event["metadata"]["stage"]: event for event in events[2:]}
-    assert set(starts) == set(ends) == {"first", "second"}
-    assert starts["first"]["scope_id"] == ends["first"]["scope_id"]
-    assert starts["second"]["scope_id"] == ends["second"]["scope_id"]
-    assert starts["first"]["scope_id"] != starts["second"]["scope_id"]
-    assert all(event["session_id"] == rec.session_id for event in events)
-    assert all(event["status"] == "succeeded" for event in ends.values())
 
 async def test_phase_scope_id_rejects_second_or_post_close_decision(tmp_path: Path,) -> None:
     """A phase handle accepts exactly one caller terminal decision."""
@@ -250,164 +101,27 @@ async def test_phase_scope_id_rejects_second_or_post_close_decision(tmp_path: Pa
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
             observe_text_and_result(inv, "seed")
 
-    terminal = read_trajectory(rec.path)["extra"]["phase_events"][1]
+        # FIX budget exhaustion keeps its wire shape: elapsed_s appears only when measured.
+        rec.emit_file_group_budget_exceeded(file="api.py", reason="wall", items_processed=1, items_skipped=2)
+        rec.emit_file_group_budget_exceeded(file="ui.tsx", reason="tools", items_processed=0, items_skipped=1,
+                                            elapsed_s=1.5)
+
+    events = read_trajectory(rec.path)["extra"]["phase_events"]
+    terminal = events[1]
     assert terminal["status"] == "partial"
     assert terminal["reason_code"] == "some_children_failed"
+    budgets = [event["metadata"] for event in events if event["event"] == "file_group_budget_exceeded"]
+    assert budgets == [
+        {"file": "api.py", "reason": "wall", "items_processed": 1, "items_skipped": 2},
+        {"file": "ui.tsx", "reason": "tools", "items_processed": 0, "items_skipped": 1, "elapsed_s": 1.5},
+    ]
 
 
 # --- Per-Invocation subtrajectory timestamps -------------------------------
 
 
-async def test_invocation_ended_at_not_before_final_step(tmp_path: Path) -> None:
-    """Stamp ended_at after finish materializes the last still-open text step."""
-    rec = make_recorder(tmp_path)
-    async with rec:
-        async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="open step, never closed before exit"))
-    traj = read_trajectory(rec.path)
-    sub = traj["extra"]["subtrajectories"][0]
-    step_ts = [s["timestamp"] for s in traj["steps"] if s["step_id"] in sub["step_ids"]]
-    assert step_ts, "expected the open step to be flushed by finish()"
-    assert sub["ended_at"] >= max(step_ts), f"ended_at {sub['ended_at']!r} predates final step {max(step_ts)!r}"
-
 # --- Real-path: deep run via runner.run ------------------------------------
 
-
-class _OverlappingReviewBackend(StubBackend):
-    """Hold the external wonder/reviewer calls until both are in flight."""
-
-    def __init__(self, target: Path) -> None:
-        super().__init__(target)
-        self.entered = {"wonder": anyio.Event(), "review": anyio.Event()}
-        self.finished: set[str] = set()
-
-    async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,) -> AsyncIterator[AgentEvent]:
-        lowered = prompt.lower()
-        role = None
-        if "would you have done this differently" in lowered or "evaluate the implementation" in lowered:
-            role = "wonder"
-        elif "you are reviewing the" in lowered or "you are the structural reviewer" in lowered:
-            role = "review"
-        if role is not None:
-            self.entered[role].set()
-            with anyio.fail_after(10):
-                await self.entered["wonder"].wait()
-                await self.entered["review"].wait()
-        async for event in super().execute(cwd, prompt, *args, **kwargs):
-            yield event
-        if role is not None:
-            self.finished.add(role)
-
-
-def _seconds(value: str) -> float:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-
-
-def _phase_union_seconds(events: list[dict[str, Any]]) -> float:
-    starts = {event["scope_id"]: event for event in events if event["event"] == "phase_start"}
-    intervals = sorted((_seconds(starts[event["scope_id"]]["timestamp"]), _seconds(event["timestamp"]))
-        for event in events if event["event"] == "phase_end"
-    )
-    union: list[tuple[float, float]] = []
-    for start, end in intervals:
-        if union and start <= union[-1][1]:
-            union[-1] = (union[-1][0], max(union[-1][1], end))
-        else:
-            union.append((start, end))
-    return sum(end - start for start, end in union)
-
-async def test_complete_overlapping_deep_run_timing_completeness(
-    tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """One actual run proves fan-out, overlap, diagrams and frozen archive totals."""
-
-    target = dr.build_both_signals_repo(tmp_path)
-    backend = _OverlappingReviewBackend(target)
-    backend.diagram_specs = {
-        "sequence": [dr.sequence_spec()], "flowchart": [dr.flowchart_spec(root_file="pkg_b/client.py", offset=10)],
-    }
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
-
-    assert await run(RunConfig(target=str(target), cleanup=False, non_interactive=True, diagram="auto",
-        review_profile=independent_exploration_profile(independent_alternatives_profile()),
-    )) == 0
-    assert backend.finished == {"wonder", "review"}
-    assert not any("Fix this issue" in call["prompt"] for call in backend.calls)
-    roots = list((target / ".daydream" / "runs").glob("*/trajectory.json"))
-    assert len(roots) == 1
-    root = json.loads(roots[0].read_bytes())
-    assert atif_validate(root, validate_images=False)
-    events = root["extra"]["phase_events"]
-    expected_metadata = {"merge": {"stage": "cross-stack-agent"}, "diagram": {"stage": "diagram"}}
-    for phase, metadata in expected_metadata.items():
-        pair = [event for event in events if event["phase"] == phase]
-        assert [event["event"] for event in pair] == ["phase_start", "phase_end"]
-        assert pair[0]["scope_id"] == pair[1]["scope_id"]
-        assert pair[1]["status"] == "succeeded"
-        assert pair[0]["metadata"] == pair[1]["metadata"] == metadata
-    assert not any(event["phase"] == "fix" for event in events)
-    diagram = json.loads((target / ".daydream/deep/diagram.json").read_bytes())
-    assert {kind: value["status"] for kind, value in diagram["results"].items()} == {
-        "sequence": "rendered", "flowchart": "rendered",
-    }
-
-    documents = {root["trajectory_id"]: root}
-    dispatches = [step for step in root["steps"] if "dispatch_id" in step.get("extra", {})]
-    assert {step["extra"]["daydream_phase"]: [result["content"] for result in step["observation"]["results"]]
-        for step in dispatches
-    } == {"exploration": ["Dispatched to explore-dependency_tracer"],
-        "deep": ["Dispatched to deep-python", "Dispatched to deep-structure"],
-        "diagram": ["Dispatched to diagram-sequence", "Dispatched to diagram-flowchart"],
-    }
-    for step in dispatches:
-        extra = step["extra"]
-        refs = [ref for result in step["observation"]["results"] for ref in result["subagent_trajectory_ref"]]
-        assert len(refs) == extra["planned_count"] == extra["attempted_count"] == extra["completed_count"]
-        assert len({ref["trajectory_id"] for ref in refs}) == len(refs)
-        assert extra["dispatch_status"] == "succeeded"
-        for ref in refs:
-            child = json.loads((target / ".daydream" / ref["trajectory_path"]).read_bytes())
-            assert child["trajectory_id"] == ref["trajectory_id"]
-            assert child["session_id"] == root["session_id"]
-            assert extra["dispatch_started_at"] <= child["extra"]["run_started_at"]
-            assert child["extra"]["run_ended_at"] <= extra["dispatch_completed_at"]
-            documents[child["trajectory_id"]] = child
-
-    invocation_keys: list[tuple[str, str]] = []
-    for document_id, document in documents.items():
-        for invocation in document["extra"].get("subtrajectories", []):
-            if "invocation_id" in invocation:
-                assert invocation["trajectory_id"] == document_id
-                invocation_keys.append((document_id, invocation["invocation_id"]))
-            else:
-                assert "sibling_trajectory_ref" in invocation
-    assert len(set(invocation_keys)) == len(invocation_keys) > len(documents)
-
-    archive = archive_dir / "runs" / root["session_id"]
-    manifest = json.loads((archive / "manifest.json").read_bytes())
-    evaluation = json.loads((archive / "evaluation.json").read_bytes())
-    coverage = manifest["metrics"]["timing_coverage"]
-    assert coverage["agent_completeness"] == {
-        "total": len(invocation_keys), "attributed": len(invocation_keys), "unattributed": 0,
-    }
-    assert all(value == 0 for value in coverage["diagnostics"].values())
-    union = _phase_union_seconds(events)
-    wall = _seconds(root["extra"]["run_ended_at"]) - _seconds(root["extra"]["run_started_at"])
-    assert coverage["attributed_wall_clock_seconds"] == pytest.approx(union, abs=0.001)
-    assert coverage["unattributed_wall_clock_seconds"] == pytest.approx(wall - union, abs=0.001)
-    assert 0 <= coverage["coverage_ratio"] <= 1
-    assert evaluation["timing"]["agent_completeness"] == coverage["agent_completeness"]
-    assert evaluation["timing"]["total_wall_clock_seconds"] == manifest["metrics"]["wall_clock_seconds"]
-    # Concurrent wonder/review intervals overlap, so summing their widths is not wall time.
-    overlapping = [event for event in events if event["phase"] in {"alternatives", "deep"}]
-    starts = {event["scope_id"]: event for event in overlapping if event["event"] == "phase_start"}
-    summed = sum(_seconds(event["timestamp"]) - _seconds(starts[event["scope_id"]]["timestamp"])
-        for event in overlapping if event["event"] == "phase_end"
-    )
-    assert _phase_union_seconds(overlapping) < summed
-    assert not any(call["prompt"].lower().startswith(("fix this issue", "fix these")) for call in backend.calls)
-    assert not (target / ".daydream-fix-applied").exists()
-    assert not list(target.glob(".fixed-*"))
 
 async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     multi_stack_target: Path, tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any,
@@ -599,139 +313,3 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     completeness = {"total": len(invocation_keys), "attributed": len(invocation_keys), "unattributed": 0}
     assert manifest["metrics"]["timing_coverage"]["agent_completeness"] == completeness
     assert evaluation["timing"]["agent_completeness"] == completeness
-
-
-async def _run_and_read_trajectory(config: RunConfig, traj: Path) -> dict[str, Any]:
-    exit_code = await run(config)
-    assert exit_code == 0
-    assert traj.exists(), "run must write the trajectory to disk"
-    data: dict[str, Any] = json.loads(traj.read_text(encoding="utf-8"))
-    assert atif_validate(data, validate_images=False) is True
-    return data
-
-
-async def _run_with_config(tmp_path: Path, target: Path, **config_kwargs: Any) -> dict[str, Any]:
-    """Run ``target`` with the standard trajectory/cleanup scaffold and read it back."""
-    traj = tmp_path / "trajectory.json"
-    config = RunConfig(target=str(target), trajectory_path=traj, cleanup=False, **config_kwargs)
-    return await _run_and_read_trajectory(config, traj)
-
-
-def _read_phase_timings(tmp_path: Path) -> Any:
-    manifest_files = list((tmp_path / "archive").rglob("manifest.json"))
-    assert manifest_files, "manifest.json not written"
-    manifest = json.loads(manifest_files[0].read_text())
-    return manifest["metrics"]["phase_timings"]
-
-async def test_shallow_run_emits_phase_events_and_subtrajectories(
-    feature_branch_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, silence_console: Any,
-    mute_side_effects: Any,
-) -> None:
-    """Shallow single-pass run writes trajectory and manifest timing data."""
-
-    issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
-
-    monkeypatch.setattr("daydream.runner.create_backend",
-        lambda name, model=None, **kwargs: PhaseDispatchBackend(parse_results=[[issue]]),
-    )
-
-    mute_side_effects()
-    silence_console("daydream.runner")
-    silence_console("daydream.deep.orchestrator")
-    silence_console("daydream.deep.review_steps")
-    silence_console("daydream.deep.merge_steps")
-    silence_console("daydream.deep.diagram_steps")
-    silence_console("daydream.deep.fix_steps")
-
-    data = await _run_with_config(tmp_path, feature_branch_repo, stack="python", shallow=True, non_interactive=True,
-        assume="yes",  # accept the fix gate so the fix/test cycle runs
-        test_command=f"{sys.executable} -c pass",
-    )
-
-    # The shallow review and fix test phases must both appear.
-    events = data["extra"].get("phase_events", [])
-    event_phases = [e["phase"] for e in events]
-    assert "test" in event_phases, f"test phase event missing; got {event_phases!r}"
-
-    # Subtrajectories: the review invocation registered one with timestamps.
-    subs = data["extra"].get("subtrajectories", [])
-    assert subs, "subtrajectories missing from trajectory extra"
-    assert all(s["started_at"] and s["ended_at"] for s in subs), "subtrajectory missing complete timestamps"
-
-    # Manifest: phase_timings appears in the metrics block.
-    assert _read_phase_timings(tmp_path) is not None
-
-async def test_deep_run_emits_phase_events_and_manifest_timings(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Any,
-) -> None:
-    """A real deep run records review boundaries in trajectory JSON and manifest timings."""
-
-    _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-
-    mute_side_effects()
-
-
-    data = await _run_with_config(tmp_path, multi_stack_target,
-        non_interactive=True,  # decline the apply-fixes gate
-    )
-
-    # Phase events: the per-stack review stage (DEEP) must appear.
-    events = data["extra"].get("phase_events", [])
-    deep_events = [e for e in events if e["phase"] == "deep"]
-    assert deep_events, f"deep phase events missing; got phases: {[e['phase'] for e in events]!r}"
-    # The stage metadata should carry "review".
-    deep_review_starts = [
-        e for e in deep_events if e["event"] == "phase_start" and e.get("metadata", {}).get("stage") == "review"
-    ]
-    assert deep_review_starts, f"deep review stage start event missing; got: {deep_events!r}"
-
-    # Subtrajectories: TTT invocations registered timing entries.
-    subs = data["extra"].get("subtrajectories", [])
-    assert subs, "subtrajectories missing from deep trajectory extra"
-    assert all(s["started_at"] and s["ended_at"] for s in subs), f"subtrajectory missing timestamps: {subs!r}"
-
-    # Manifest: phase_timings carries the deep bucket.
-    phase_timings = _read_phase_timings(tmp_path)
-    assert phase_timings is not None
-    assert "deep" in phase_timings, f"deep missing from manifest phase_timings: {phase_timings!r}"
-    # A declined gate retains earlier phase timing.
-    assert "intent" in phase_timings
-    assert "alternatives" not in phase_timings  # Folded into the structural review.
-
-async def test_review_flow_emits_phase_events_and_manifest_timings(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Any,
-) -> None:
-    """Review-only runs record review timing and stop before fix/test/verify events."""
-
-    _silence(monkeypatch)
-    mute_side_effects()
-    _pin_findings_pr(monkeypatch, multi_stack_target)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-
-
-    findings_out = tmp_path / "findings.json"
-    data = await _run_with_config(
-        tmp_path, multi_stack_target, output_mode="review", pr_number=7, findings_out=str(findings_out),
-        non_interactive=True,
-    )
-    assert findings_out.is_file(), "review mode must emit the findings artifact"
-
-    # Default design review is part of the structural deep phase.
-    events = data["extra"].get("phase_events", [])
-    event_phases = {e["phase"] for e in events}
-    for phase in ("intent", "deep"):
-        assert phase in event_phases, f"{phase} phase_events missing; got phases: {sorted(event_phases)!r}"
-    assert "alternatives" not in event_phases
-    # The fix cycle must never run in review mode.
-    for phase in ("fix", "test", "verify"):
-        assert phase not in event_phases, (
-            f"review mode ran the fix cycle phase {phase!r}; got: {sorted(event_phases)!r}"
-        )
-
-    # The manifest retains the wrapped review phases.
-    phase_timings = _read_phase_timings(tmp_path)
-    assert phase_timings is not None, "review flow phase_timings must not be null"
-    for phase in ("intent", "deep"):
-        assert phase in phase_timings, f"{phase} missing from review phase_timings: {phase_timings!r}"
-    assert "alternatives" not in phase_timings

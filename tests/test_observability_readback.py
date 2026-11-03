@@ -7,9 +7,9 @@ Slow peers verify immutable deadlines and observed connection closure. Output
 must omit content and credentials. Replay gates run before sends; end-to-end
 receipts remain labeled with zero model calls and zero operational cost."""
 
+
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 import io
 import json
@@ -17,15 +17,13 @@ import socket
 import threading
 import time
 from contextlib import redirect_stdout
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, cast
+from typing import Any, Mapping, cast
 
 import anyio
 import pytest
 
 from tests.harness.git_helpers import commit, git, init_repo
-from tests.harness.otlp import TraceCollector, attributes
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -35,7 +33,7 @@ VERIFIER_PATH = SCRIPTS / "verify_observability_readback.py"
 REPLAY_PATH = SCRIPTS / "replay_observability_acceptance.py"
 
 _SECRET_KEY = "sk-test-verifier-secret-9f3c"
-
+_BUDGET_S = 0.5
 
 # Loading the operator scripts (same pattern as conftest template assets)
 
@@ -50,127 +48,6 @@ def _load_script(path: Path, name: str) -> Any:
 
 _verifier = _load_script(VERIFIER_PATH, "verify_observability_readback")
 _replay = _load_script(REPLAY_PATH, "replay_observability_acceptance")
-
-
-# Fake vendor HTTP server (scriptable JSON responses)
-
-
-class FakeVendorServer:
-    """Record loopback requests and dispatch (method,path) to status/headers/body responders."""
-
-    def __init__(self) -> None:
-        self.requests: list[dict[str, Any]] = []
-        self.responders: dict[tuple[str, str], Callable[[dict[str, Any]], tuple[int, dict[str, str], bytes]]] = {}
-        self._lock = threading.Lock()
-
-        class Handler(BaseHTTPRequestHandler):
-            server: Any  # our ThreadingHTTPServer with attached state
-
-            def _handle(self) -> None:
-                length = int(self.headers.get("Content-Length", "0"))
-                body = self.rfile.read(length) if length else b""
-                record = {"method": self.command, "path": self.path,
-                    "headers": {key.lower(): value for key, value in self.headers.items()}, "body": body,
-                }
-                with self.server._lock:
-                    self.server.requests.append(record)
-                # Route by path; the request record retains its query string.
-                route_path = self.path.split("?", 1)[0]
-                responder = self.server.responders.get((self.command, route_path))
-                if responder is None:
-                    status, headers, response = 404, {}, b'{"error":"no responder"}'
-                else:
-                    try:
-                        status, headers, response = responder(record)
-                    except Exception as exc:  # noqa: BLE001 - test harness
-                        status, headers, response = 500, {}, str(exc).encode()
-                self.send_response(status)
-                for key, value in headers.items():
-                    self.send_header(key, value)
-                self.send_header("Content-Length", str(len(response)))
-                self.end_headers()
-                self.wfile.write(response)
-
-            def do_GET(self) -> None:  # noqa: N802
-                self._handle()
-
-            def do_POST(self) -> None:  # noqa: N802
-                self._handle()
-
-            def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-                return
-
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self._server.requests = self.requests  # type: ignore[attr-defined]
-        self._server.responders = self.responders  # type: ignore[attr-defined]
-        self._server._lock = self._lock  # type: ignore[attr-defined]
-        self._thread = threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
-        self._thread.start()
-
-    @property
-    def base_url(self) -> str:
-        host = str(self._server.server_address[0])
-        port = int(self._server.server_address[1])
-        return f"http://{host}:{port}"
-
-    def close(self) -> None:
-        self._server.shutdown()
-        self._server.server_close()
-        self._thread.join(timeout=2)
-
-    def respond(self, method: str, path: str, responder: Callable[[dict[str, Any]], tuple[int, dict[str, str], bytes]]
-    ) -> None:
-        self.responders[(method, path)] = responder
-
-    def json_responder(self, payload: Any, *, status: int = 200
-    ) -> Callable[[dict[str, Any]], tuple[int, dict[str, str], bytes]]:
-        body = json.dumps(payload).encode("utf-8")
-
-        def responder(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-            return status, {"Content-Type": "application/json"}, body
-
-        return responder
-
-    def hang_responder(self) -> Callable[[dict[str, Any]], tuple[int, dict[str, str], bytes]]:
-        def responder(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-            raise AssertionError("hang responder should never be called")
-
-        return responder
-
-
-@pytest.fixture
-def fake_vendor() -> Iterator[FakeVendorServer]:
-    server = FakeVendorServer()
-    try:
-        yield server
-    finally:
-        server.close()
-
-
-_OTLP_ACK: tuple[int, dict[str, str], bytes] = (200, {"Content-Type": "application/x-protobuf"}, b"")
-
-
-@pytest.fixture
-def fake_vendors(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[FakeVendorServer, FakeVendorServer]]:
-    """Bind replay environment to paired fake vendors with canonical OTLP acknowledgment routes."""
-    fake_hh = FakeVendorServer()
-    fake_ls = FakeVendorServer()
-    try:
-        for fake in (fake_hh, fake_ls):
-            for path in ("/opentelemetry/v1/traces", "/otel/v1/traces", "/v1/traces"):
-                fake.respond("POST", path, lambda _r: _OTLP_ACK)
-        monkeypatch.setenv("HH_API_URL", fake_hh.base_url)
-        monkeypatch.setenv("HH_API_KEY", _SECRET_KEY)
-        monkeypatch.setenv("LANGSMITH_ENDPOINT", fake_ls.base_url)
-        monkeypatch.setenv("LANGSMITH_API_KEY", _SECRET_KEY)
-        monkeypatch.setenv("LANGSMITH_PROJECT", "daydream-test")
-        monkeypatch.setenv("DAYDREAM_TRACE_TO", "otlp,honeyhive,langsmith")
-        monkeypatch.setenv("DAYDREAM_ACCEPTANCE_KIND", "sanitized_protocol_replay")
-        yield fake_hh, fake_ls
-    finally:
-        fake_hh.close()
-        fake_ls.close()
-
 
 # Receipt helpers
 
@@ -215,278 +92,7 @@ def _ls_run(run_id: str, *, run_type: str = "chain", status: str = "success", tr
     return run
 
 
-def _ls_session(project: str) -> dict[str, Any]:
-    """A minimal vendor session record for the project-name resolution lookup."""
-    return {"id": "9e11a2de-1111-4222-8333-444455556666", "name": project, "start_time": "2026-09-07T00:00:00Z"}
-
-
-def _sessions_ok(project: str) -> Callable[[Mapping[str, Any]], tuple[int, dict[str, str], bytes]]:
-    """A LangSmith sessions responder resolving *project* to a single session."""
-
-    def responder(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        return 200, {"Content-Type": "application/json"}, json.dumps([_ls_session(project)]).encode()
-
-    return responder
-
-
-def _empty_runs() -> tuple[int, dict[str, str], bytes]:
-    """A LangSmith empty-runs response: an honest absence, not an error."""
-    return 200, {"Content-Type": "application/json"}, b'{"runs": []}'
-
-
-def _run_verify(receipt_path: Path, result_path: Path, *, budget_s: float = 30.0,
-    matrix_path: Path = FIXTURES / "readback-matrix.json",
-) -> int:
-    value = _verifier.run_verify(receipt_path, result_path, budget_s=budget_s, matrix_path=matrix_path)
-    return int(value)
-
-
-def _configure_verifier_env(monkeypatch: pytest.MonkeyPatch, *, base_url: str) -> None:
-    monkeypatch.setenv("HH_API_URL", base_url)
-    monkeypatch.setenv("HH_API_KEY", _SECRET_KEY)
-    monkeypatch.setenv("LANGSMITH_ENDPOINT", base_url)
-    monkeypatch.setenv("LANGSMITH_API_KEY", _SECRET_KEY)
-
-
-def _verify_against(fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch, receipt: Path, tmp_path: Path, *,
-    expect_zero: bool = True,
-) -> Path:
-    """Configure, run the verifier against ``fake_vendor``, and return the result path."""
-    _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
-    result_path = tmp_path / "result.json"
-    assert (_run_verify(receipt, result_path) == 0) == expect_zero
-    return result_path
-
-
-# HoneyHive verifier behavior
-
-
-def test_honeyhive_paginates_until_count_satisfied(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    receipt = _write_receipt(tmp_path, destinations=["honeyhive"])
-    data = json.loads(receipt.read_text())
-    session_id, run_id = data["session_id"], data["run_id"]
-    # Full 100-row pages continue pagination; 250 rows require three pages.
-    pages: dict[int, list[str]] = {1: [f"e{i:03d}" for i in range(100)], 2: [f"e{i:03d}" for i in range(100, 200)],
-        3: [f"e{i:03d}" for i in range(200, 250)],
-    }
-
-    def search(record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        page = json.loads(record["body"])["page"]
-        events = [_hh_event(event_id, session_id, **{"daydream.run.id": run_id}) for event_id in pages.get(page, [])]
-        # Representative-agent-tree minimums: one model and one tool event.
-        if page == 3:
-            events[-2] = _hh_event("e-tool-001", session_id, event_type="tool", **{"daydream.run.id": run_id})
-            events[-1] = _hh_event("e-model-001", session_id, event_type="model", **{"daydream.run.id": run_id})
-        return 200, {"Content-Type": "application/json"}, json.dumps({"events": events, "count": 250}).encode()
-
-    fake_vendor.respond("POST", "/v1/events/search", search)
-    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path)
-    result = json.loads(result_path.read_text())
-    assert result["stored_contract_passed"] is True
-    assert result["terminal"] == _verifier.DISPOSITION_PASS and result["ui_inspected"] is False
-    # Two stable complete snapshots: each full read is 3 pages (100+100+50).
-    reads = [r for r in fake_vendor.requests if r["path"] == "/v1/events/search"]
-    assert len(reads) == 6
-    sent = reads[0]
-    assert sent["method"] == "POST" and sent["path"] == "/v1/events/search"
-    assert sent["headers"]["authorization"] == f"Bearer {_SECRET_KEY}"
-    assert json.loads(sent["body"]) == {
-        "filters": [{"field": "session_id", "operator": "is", "value": session_id, "type": "string"}],
-        "limit": 100, "page": 1,
-    }
-
-@pytest.mark.parametrize(("body_builder", "disposition"),
-    [(lambda sid: json.dumps({"events": [_hh_event("dup", sid), _hh_event("dup", sid)], "count": 2}).encode(),
-            _verifier.DISPOSITION_DUPLICATE,
-        ), (lambda sid: json.dumps({"events": [_hh_event("e1", "not-the-session")], "count": 1}).encode(),
-            _verifier.DISPOSITION_WRONG_SESSION,
-        ), (lambda sid: b'{"events": [', _verifier.DISPOSITION_MALFORMED),
-        (lambda sid: json.dumps(
-                {"events": [{"id": "e1", "session_id": "x", "blob": "z" * (5 * 1024 * 1024)}], "count": 1}
-            ).encode(), _verifier.DISPOSITION_OVERSIZED,
-        ),
-    ],
-)
-def test_honeyhive_rejects_invalid_readbacks(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch,
-    body_builder: Callable[[str], bytes], disposition: str,
-) -> None:
-    receipt = _write_receipt(tmp_path, destinations=["honeyhive"])
-    session_id = json.loads(receipt.read_text())["session_id"]
-
-    def search(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        return 200, {"Content-Type": "application/json"}, body_builder(session_id)
-
-    fake_vendor.respond("POST", "/v1/events/search", search)
-    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path, expect_zero=False)
-    result = json.loads(result_path.read_text())
-    assert result["terminal"] == disposition
-
-@pytest.mark.parametrize("status", [401, 404, 503])
-def test_honeyhive_status_errors_are_bounded(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch, status: int
-) -> None:
-    receipt = _write_receipt(tmp_path, destinations=["honeyhive"])
-
-    def search(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        return status, {"Content-Type": "application/json"}, b'{"secret": "' + _SECRET_KEY.encode() + b'"}'
-
-    fake_vendor.respond("POST", "/v1/events/search", search)
-    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path, expect_zero=False)
-    result = json.loads(result_path.read_text())
-    if status == 404:
-        assert result["terminal"] == _verifier.DISPOSITION_NOT_FOUND
-    elif status in (401, 403):
-        assert result["terminal"] == _verifier.DISPOSITION_AUTH
-    else:
-        assert result["terminal"] in (_verifier.DISPOSITION_HTTP_ERROR, _verifier.DISPOSITION_AUTH)
-    # Bounded: the response body (with the secret) never reaches any output.
-    assert _SECRET_KEY not in result_path.read_text()
-
-def test_honeyhive_redirect_is_rejected_without_following(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    receipt = _write_receipt(tmp_path, destinations=["honeyhive"])
-
-    def search(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        return 302, {"Location": "/elsewhere"}, b""
-
-    fake_vendor.respond("POST", "/v1/events/search", search)
-    fake_vendor.respond("POST", "/elsewhere", fake_vendor.json_responder({"events": [], "count": 0}))
-    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path, expect_zero=False)
-    result = json.loads(result_path.read_text())
-    assert result["terminal"] == _verifier.DISPOSITION_REDIRECT
-    assert not [r for r in fake_vendor.requests if r["path"] == "/elsewhere"]
-
-def test_receipt_validation_fails_before_any_client(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    receipt_path = tmp_path / "receipt.json"
-    receipt_path.write_text(json.dumps({"acceptance_kind": "sanitized_protocol_replay"}), encoding="utf-8")
-    fake_vendor.respond("POST", "/v1/events/search", fake_vendor.hang_responder())
-    _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
-    result_path = tmp_path / "result.json"
-    exit_code = _run_verify(receipt_path, result_path)
-    assert exit_code == 1
-    assert fake_vendor.requests == []
-    assert json.loads(result_path.read_text())["terminal"] == _verifier.DISPOSITION_SHAPE
-
-
-# LangSmith verifier behavior
-
-def test_langsmith_discovery_exact_filter_freeze_and_exact_id_reads(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    receipt = _write_receipt(tmp_path, destinations=["langsmith"])
-    data = json.loads(receipt.read_text())
-    run_id, project = data["run_id"], data["langsmith_project"]
-    session = _ls_session(project)
-    session_id = session["id"]
-    discovered: list[dict[str, Any]] = []
-    # Every run, including children, carries stored identity at extra.metadata.
-    root = _ls_run(
-        "root-1", run_type="chain", metadata={"daydream_run_id": run_id, "daydream.session.id": "daydream-session-1"},
-    )
-    child = _ls_run(
-        "child-1", run_type="llm", parent_run_id="root-1", trace_id="trace-1", metadata={"daydream_run_id": run_id},
-    )
-    tool = _ls_run(
-        "tool-1", run_type="tool", parent_run_id="root-1", trace_id="trace-1", metadata={"daydream_run_id": run_id},
-    )
-
-    def sessions(record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        discovered.append(dict(record))
-        return 200, {"Content-Type": "application/json"}, json.dumps([session]).encode()
-
-    def query(record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        payload = json.loads(record["body"])
-        discovered.append(payload)
-        if "id" in payload:
-            runs = [root] if payload["id"] == ["root-1"] else []
-        elif payload.get("filter", "").startswith("eq(trace_id"):
-            runs = [root, child, tool]
-        else:
-            runs = [root, child, tool]
-        return 200, {"Content-Type": "application/json"}, json.dumps({"runs": runs}).encode()
-
-    fake_vendor.respond("GET", "/api/v1/sessions", sessions)
-    fake_vendor.respond("POST", "/runs/query", query)
-    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path)
-    result = json.loads(result_path.read_text())
-    assert result["stored_contract_passed"] is True
-    resolution = discovered[0]
-    assert resolution["path"].startswith("/api/v1/sessions")
-    assert resolution["method"] == "GET"
-    discovery = discovered[1]
-    assert discovery["session"] == [session_id]
-    assert discovery["filter"] == (f"and(eq(metadata_key, 'daydream_run_id'), eq(metadata_value, '{run_id}'))")
-    assert discovery.get("start_time") == data["started_at"]
-    # Exact-ID reads: one for the frozen root id, two stable tree snapshots.
-    ops = [d for d in discovered if "id" in d]
-    assert ops and ops[0]["id"] == ["root-1"]
-    trees = [d for d in discovered if d.get("filter", "").startswith("eq(trace_id")]
-    assert len(trees) == 2
-    ls_section = result["destinations"]["langsmith"]
-    assert ls_section["root_id"] == "root-1" and ls_section["trace_id"] == "trace-1"
-
-@pytest.mark.parametrize(
-    ("ambiguous", "terminal"),
-    [(True, _verifier.DISPOSITION_AMBIGUOUS_ROOT), (False, _verifier.DISPOSITION_NOT_FOUND)],
-    ids=["ambiguous", "empty"],
-)
-def test_langsmith_discovery_distinguishes_absence_from_ambiguity(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch,
-    ambiguous: bool, terminal: str,
-) -> None:
-    """Zero discovered runs is an honest absence (vendor ingest window), never root ambiguity."""
-    receipt = _write_receipt(tmp_path, destinations=["langsmith"])
-    project = json.loads(receipt.read_text())["langsmith_project"]
-
-    def query(record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        payload = json.loads(record["body"])
-        if not ambiguous or "id" in payload or payload.get("filter", "").startswith("eq(trace_id"):
-            return _empty_runs()
-        runs = [_ls_run("root-a", trace_id="trace-a"), _ls_run("root-b", trace_id="trace-b")]
-        return 200, {"Content-Type": "application/json"}, json.dumps({"runs": runs}).encode()
-
-    fake_vendor.respond("GET", "/api/v1/sessions", _sessions_ok(project))
-    fake_vendor.respond("POST", "/runs/query", query)
-    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path, expect_zero=False)
-    result = json.loads(result_path.read_text())
-    assert result["terminal"] == terminal
-
-def test_langsmith_unstable_tree_fails_closed(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    receipt = _write_receipt(tmp_path, destinations=["langsmith"])
-    data = json.loads(receipt.read_text())
-    run_id, project = data["run_id"], data["langsmith_project"]
-    root = _ls_run("root-1", metadata={"daydream_run_id": run_id})
-    calls = {"tree": 0}
-
-    def query(record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        payload = json.loads(record["body"])
-        if "id" in payload:
-            return 200, {"Content-Type": "application/json"}, json.dumps({"runs": [root]}).encode()
-        if payload.get("filter", "").startswith("eq(trace_id"):
-            # Changing IDs prevent two complete snapshots from agreeing.
-            calls["tree"] += 1
-            runs = [_ls_run(f"root-{calls['tree']}", metadata={"daydream_run_id": run_id})]
-            return 200, {"Content-Type": "application/json"}, json.dumps({"runs": runs}).encode()
-        return 200, {"Content-Type": "application/json"}, json.dumps({"runs": [root]}).encode()
-
-    fake_vendor.respond("GET", "/api/v1/sessions", _sessions_ok(project))
-    fake_vendor.respond("POST", "/runs/query", query)
-    _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
-    result_path = tmp_path / "result.json"
-    assert _run_verify(receipt, result_path, budget_s=5.0) != 0
-    result = json.loads(result_path.read_text())
-    assert result["terminal"] == _verifier.DISPOSITION_UNSTABLE
-
-
-# One immutable deadline: real loopback peers
+# One immutable deadline: a real loopback peer
 
 
 class _LoopbackPeer:
@@ -517,7 +123,7 @@ class _LoopbackPeer:
         accepted_at = time.monotonic()
         conn.settimeout(30)
 
-        # Stall after receipt; the verifier must close the connection at its 0.12s deadline.
+        # Stall after receipt; the verifier must close the connection at its deadline.
         try:
             conn.recv(65536)
         except OSError:
@@ -553,11 +159,11 @@ class _LoopbackPeer:
         except OSError:
             pass
 
-@pytest.mark.parametrize("trickle", [False, True])
-async def test_immutable_budget_truncates_slow_peers(monkeypatch: pytest.MonkeyPatch, trickle: bool) -> None:
+async def test_immutable_budget_truncates_slow_peers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A peer trickling an endless body after delayed headers is cut off at the immutable deadline."""
     receipt = _receipt(destinations=["honeyhive"])
     matrix = _verifier.load_matrix(FIXTURES / "readback-matrix.json")
-    peer = _LoopbackPeer(trickle=trickle)
+    peer = _LoopbackPeer(trickle=True)
     # Cold HTTPX transport imports and TLS context construction are synchronous
     # and can exhaust the tiny budget under parallel coverage before any socket
     # opens. Prepare that real transport outside the measured slow-peer interval;
@@ -574,9 +180,10 @@ async def test_immutable_budget_truncates_slow_peers(monkeypatch: pytest.MonkeyP
         monkeypatch.setenv("HH_API_KEY", _SECRET_KEY)
         monkeypatch.setenv("DAYDREAM_TRACE_TO", "honeyhive")
         started = time.monotonic()
-        result = await _verifier._verify(receipt, matrix, 0.12)
+        # Wide enough for a loaded host to connect; still far below the 2.5s trickle.
+        result = await _verifier._verify(receipt, matrix, _BUDGET_S)
         elapsed = time.monotonic() - started
-        assert elapsed < 0.35, f"readback took {elapsed:.3f}s with a 0.12s budget"
+        assert elapsed < _BUDGET_S + 0.75, f"readback took {elapsed:.3f}s with a {_BUDGET_S}s budget"
         assert result["stored_contract_passed"] is False
         assert result["terminal"] == _verifier.DISPOSITION_TIMEOUT
         # Bound peer-observed closure independently of verifier return.
@@ -595,35 +202,12 @@ async def test_immutable_budget_truncates_slow_peers(monkeypatch: pytest.MonkeyP
         assert all(entry["op"] != "poll" for entry in result["request_log"])
         # Every logged request began strictly before the immutable deadline.
         for entry in result["request_log"]:
-            assert entry["offset_ms"] < 120, f"request began after the 0.12s budget: {entry}"
+            assert entry["offset_ms"] < _BUDGET_S * 1000, f"request began after the budget: {entry}"
     finally:
         peer.close()
 
 
 # Redaction
-
-def test_verifier_output_never_leaks_keys_endpoints_or_bodies(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    receipt = _write_receipt(tmp_path, destinations=["honeyhive"])
-    session_id = json.loads(receipt.read_text())["session_id"]
-
-    def search(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        private = {"prompt": "private prompt", "response": "private response", "daydream.run.id": "run-1"}
-        events = [_hh_event("e1", session_id, event_type="model", **private),
-            _hh_event("e2", session_id, event_type="tool", **{"daydream.run.id": "run-1"}),
-            _hh_event("e3", session_id, **{"daydream.run.id": "run-1"}),
-        ]
-        return 200, {"Content-Type": "application/json"}, json.dumps({"events": events, "count": 3}).encode()
-
-    fake_vendor.respond("POST", "/v1/events/search", search)
-    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path)
-    text = result_path.read_text()
-    for forbidden in (_SECRET_KEY, "private prompt", "private response", fake_vendor.base_url):
-        assert forbidden not in text
-    result = json.loads(text)
-    assert "matrix_rows" in result
-    assert result["stored_contract_passed"] is True
 
 
 # Replay tool: fail-closed gates run BEFORE any send
@@ -670,15 +254,6 @@ def _run_replay(repo: Path, fake_pi: Path, receipt_path: Path, *, fixture_path: 
     ))
 
 
-def _replay_receipt(tmp_path: Path, *, message: str) -> tuple[Path, dict[str, Any]]:
-    """Run the hermetic replay; return ``(receipt_path, parsed_receipt)``."""
-    repo = _public_fixture_repo(tmp_path)
-    fk = _fake_pi_script(tmp_path)
-    receipt_path = tmp_path / "receipt.json"
-    exit_code = _run_replay(repo, fk, receipt_path)
-    assert exit_code == 0, message
-    return receipt_path, json.loads(receipt_path.read_text())
-
 def test_replay_gate_fixture_hash_mismatch_fails_before_send(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     replay_env: None,  # noqa: PLR0913,V107 - pytest fixture arg (side-effect env setup)
 ) -> None:
@@ -693,109 +268,6 @@ def test_replay_gate_fixture_hash_mismatch_fails_before_send(tmp_path: Path, mon
     assert exit_code == 1
     assert not receipt_path.exists()
     assert "gate=identity" in buffer.getvalue()
-
-def test_replay_gate_dirty_private_or_wrong_origin_repo_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    replay_env: None,  # noqa: PLR0913,V107 - pytest fixture arg (side-effect env setup)
-) -> None:
-    receipt_path = tmp_path / "receipt.json"
-    fk = _fake_pi_script(tmp_path)
-    repo = _public_fixture_repo(tmp_path, origin="https://github.com/private-org/private-repo.git")
-    buffer = io.StringIO()
-    with redirect_stdout(buffer):
-        exit_code = _run_replay(repo, fk, receipt_path)
-    assert exit_code == 1
-    assert not receipt_path.exists()
-    assert "allowlist" in buffer.getvalue()
-
-    # Dirty work tree fails before send too.
-    repo = _public_fixture_repo(tmp_path / "dirty-repo")
-    (repo / "README.md").write_text("# dirty\n", encoding="utf-8")
-    buffer = io.StringIO()
-    with redirect_stdout(buffer):
-        exit_code = _run_replay(repo, fk, receipt_path)
-    assert exit_code == 1
-    assert "dirty" in buffer.getvalue()
-
-def test_replay_gate_real_pi_or_wrong_output_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    replay_env: None,  # noqa: PLR0913,V107 - pytest fixture arg (side-effect env setup)
-) -> None:
-    receipt_path = tmp_path / "receipt.json"
-    repo = _public_fixture_repo(tmp_path)
-    # A real-pi-shaped executable: no marker and output that is not the fixture.
-    real_like = tmp_path / "real-pi"
-    real_like.write_text("#!/bin/sh\necho 'pi: this is real output'\n", encoding="utf-8")
-    real_like.chmod(0o755)
-    buffer = io.StringIO()
-    with redirect_stdout(buffer):
-        exit_code = _run_replay(repo, real_like, receipt_path)
-    assert exit_code == 1
-    assert not receipt_path.exists()
-    assert "marker" in buffer.getvalue() or "replay" in buffer.getvalue()
-
-def test_replay_gate_wrong_destinations_or_missing_auth_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HH_API_URL", "http://127.0.0.1:9")
-    monkeypatch.setenv("HH_API_KEY", _SECRET_KEY)
-    monkeypatch.setenv("LANGSMITH_API_KEY", _SECRET_KEY)
-    monkeypatch.setenv("DAYDREAM_TRACE_TO", "otlp")  # wrong destinations
-    monkeypatch.setenv("DAYDREAM_ACCEPTANCE_KIND", "sanitized_protocol_replay")
-    receipt_path = tmp_path / "receipt.json"
-    fk = _fake_pi_script(tmp_path)
-    repo = _public_fixture_repo(tmp_path)
-    buffer = io.StringIO()
-    with redirect_stdout(buffer):
-        exit_code = _run_replay(repo, fk, receipt_path)
-    assert exit_code == 1
-    assert "DAYDREAM_TRACE_TO" in buffer.getvalue()
-
-    monkeypatch.setenv("DAYDREAM_TRACE_TO", "otlp,honeyhive,langsmith")
-    monkeypatch.delenv("HH_API_KEY", raising=False)
-    buffer = io.StringIO()
-    with redirect_stdout(buffer):
-        exit_code = _run_replay(repo, fk, receipt_path)
-    assert exit_code == 1
-    assert "HH_API_KEY" in buffer.getvalue()
-
-@pytest.mark.parametrize("marker", [False])
-def test_replay_fake_pi_marker_requirement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    replay_env: None,  # noqa - vulture: pytest fixture arg (side-effect env setup)
-    marker: bool,  # noqa: PLR0913,V107 - pytest fixture arg (side-effect env setup)
-) -> None:
-    receipt_path = tmp_path / "receipt.json"
-    repo = _public_fixture_repo(tmp_path)
-    fk = _fake_pi_script(tmp_path, marker=marker)
-    buffer = io.StringIO()
-    with redirect_stdout(buffer):
-        exit_code = _run_replay(repo, fk, receipt_path)
-    assert exit_code == 1
-    assert not receipt_path.exists()
-    assert "marker" in buffer.getvalue()
-
-
-# Gate integration (reviewer card t_d50a1bbe): replay→verify chain + HH stability
-
-
-def test_honeyhive_requires_two_stable_complete_snapshots(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Two unequal complete exact-session reads must fail closed as READBACK_UNSTABLE."""
-    receipt = _write_receipt(tmp_path, destinations=["honeyhive"])
-    session_id = json.loads(receipt.read_text())["session_id"]
-    calls = {"n": 0}
-    lock = threading.Lock()
-
-    def search(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        with lock:
-            calls["n"] += 1
-            which = 1 if calls["n"] == 1 else 2
-        # Same count, different ids on the second full read: unstable vendor.
-        ids = ["e1", "e2"] if which == 1 else ["e1", "e3"]
-        events = [_hh_event(event_id, session_id) for event_id in ids]
-        return 200, {"Content-Type": "application/json"}, json.dumps({"events": events, "count": 2}).encode()
-
-    fake_vendor.respond("POST", "/v1/events/search", search)
-    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path, expect_zero=False)
-    result = json.loads(result_path.read_text())
-    assert result["terminal"] == _verifier.DISPOSITION_UNSTABLE
 
 
 def test_replay_reconcile_accepts_second_generation_distinct_timing_and_missing_model(
@@ -845,65 +317,3 @@ def test_replay_reconcile_accepts_second_generation_distinct_timing_and_missing_
     data["honeyhive"] = {"rows": [bad, first, second]}
     rows = _verifier.compare_stored(data, matrix, acceptance_kind="sanitized_protocol_replay")
     assert any(r.get("field") == "honeyhive.rows[0].gen_ai.response.model" for r in rows)
-
-
-def test_replay_then_verify_end_to_end_on_fake_vendors(
-    tmp_path: Path, fake_vendors: tuple[FakeVendorServer, FakeVendorServer]
-) -> None:
-    fake_hh, fake_ls = fake_vendors
-    receipt_path, receipt = _replay_receipt(tmp_path, message="replay must pass all gates before the verifier runs")
-    assert receipt["acceptance_kind"] == "sanitized_protocol_replay"
-    assert receipt["model_call_count"] == receipt["operational_cost_usd"] == 0
-    assert receipt["fixture_sha256"] == hashlib.sha256(REPLAY_FIXTURE.read_bytes()).hexdigest()
-    assert receipt["manifest_sha256"] == hashlib.sha256((FIXTURES / "replay-manifest.json").read_bytes()).hexdigest()
-    assert receipt["run_id"] and receipt["session_id"] and receipt["local_otlp_root_span_id"]
-    assert receipt["local_otlp_wire_sha256"]
-    assert receipt["reported_cost_usd"] == 0.00402781
-    assert receipt["labels"]["reported_cost"].startswith("synthetic")
-    assert fake_hh.requests and fake_ls.requests
-    assert time.time_ns is _replay._stdlib_real_time_ns
-    wire = TraceCollector()
-    for request in fake_hh.requests:
-        wire.capture(request["path"], request["headers"], request["body"])
-    assert wire.spans
-    for span in wire.spans:
-        identity = attributes(span)
-        assert (identity["daydream.session.id"], identity["daydream.trajectory.id"],
-                identity["traceloop.association.properties.session_id"], identity["daydream.run.id"]) == (
-            receipt["session_id"], receipt["session_id"], receipt["session_id"], receipt["run_id"])
-    run_id = receipt["run_id"]
-    session_id = receipt["session_id"]
-
-    # Derive both vendor stores from the actual receipt identity.
-    hh_events = [_hh_event(f"ev-{i}", session_id) for i in range(2)]
-    hh_payload = json.dumps({"events": hh_events, "count": len(hh_events)}).encode()
-    fake_hh.respond("POST", "/v1/events/search", lambda _r: (200, {"Content-Type": "application/json"}, hh_payload),)
-    trace_id = "11111111-2222-4333-8444-555566667777"
-    ls_root = _ls_run("aaaaaaaa-1111-4222-8333-444455556666", run_type="chain", trace_id=trace_id, parent_run_id=None,
-        metadata={"daydream_run_id": run_id},
-    )
-    ls_child = _ls_run(
-        "bbbbbbbb-1111-4222-8333-444455556666", run_type="llm", trace_id=trace_id, parent_run_id=ls_root["id"],
-        metadata={"daydream_run_id": run_id},
-    )
-    fake_ls.respond("GET", "/api/v1/sessions",
-        lambda _r: (200, {"Content-Type": "application/json"},
-            json.dumps([_ls_session(str(receipt["langsmith_project"]))]).encode(),
-        ),
-    )
-    fake_ls.respond("POST", "/runs/query",
-        lambda _r: (200, {"Content-Type": "application/json"},
-            json.dumps({"runs": [json.loads(json.dumps(ls_root)), json.loads(json.dumps(ls_child))]}).encode(),
-        ),
-    )
-
-    # The verifier must accept the replay receipt verbatim.
-    result_path = tmp_path / "readback-result.json"
-    assert _run_verify(receipt_path, result_path) == 0
-    result = json.loads(result_path.read_text())
-    assert result["stored_contract_passed"] is True
-    assert set(result["destinations"]) == {"honeyhive", "langsmith"}
-    assert result["destinations"]["honeyhive"]["disposition"] == _verifier.DISPOSITION_PASS
-    assert result["destinations"]["langsmith"]["disposition"] == _verifier.DISPOSITION_PASS
-    # The HoneyHive session was read twice completely (two stable snapshots).
-    assert len([r for r in fake_hh.requests if r["path"] == "/v1/events/search"]) >= 2

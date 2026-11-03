@@ -10,10 +10,12 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-import pytest
 import yaml
+
+from daydream import config
+from tests.harness.workflows import job_steps, load_workflow, workflow_triggers
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = _REPO_ROOT / "daydream" / "templates" / "workflows"
@@ -21,28 +23,6 @@ REPO_WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
 _PINNED_ACTION_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
 _EVENT_INTERP = re.compile(r"\$\{\{[^}]*github\.event\.(comment|issue|pull_request|workflow_run|review)[^}]*\}\}")
-
-
-def load_workflow(path: Path) -> dict[str, Any]:
-    """Parse a workflow template into its YAML tree."""
-    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-    assert isinstance(loaded, dict), f"{path.name} did not parse to a mapping"
-    return loaded
-
-
-def job_steps(wf: dict[str, Any], job: str) -> list[dict[str, Any]]:
-    """Return the steps list for ``job``."""
-    steps = wf["jobs"][job]["steps"]
-    assert isinstance(steps, list) and steps
-    return steps
-
-
-def _wf_triggers(wf: dict[str, Any]) -> dict[str, Any]:
-    """Return the ``on:`` trigger map, normalizing PyYAML's boolean key."""
-    on: Any = wf.get("on")
-    if on is None:
-        on = cast(dict[Any, Any], wf).get(True)
-    return on if isinstance(on, dict) else {}
 
 
 def has_checkout(job: dict[str, Any]) -> bool:
@@ -103,13 +83,13 @@ def _assert_execution_policy(*workflows: dict[str, Any]) -> None:
             assert reference.startswith("./") or _PINNED_ACTION_RE.fullmatch(reference), reference
 
 
-@pytest.mark.parametrize(
-    ("directory", "credential"),
-    [(TEMPLATES_DIR, "ANTHROPIC_API_KEY"), (REPO_WORKFLOWS_DIR, "OPENAI_API_KEY")],
-    ids=["packaged", "live"],
-)
-def test_split_bundle_binds_approval_review_artifacts_and_posting(directory: Path, credential: str) -> None:
+def test_split_bundle_binds_approval_review_artifacts_and_posting() -> None:
     """Each installed three-file bundle joins immutable approval to unprivileged review and App-only posting."""
+    for directory, credential in ((TEMPLATES_DIR, "ANTHROPIC_API_KEY"), (REPO_WORKFLOWS_DIR, "OPENAI_API_KEY")):
+        _assert_split_bundle(directory, credential)
+
+
+def _assert_split_bundle(directory: Path, credential: str) -> None:
     texts = {role: (directory / f"daydream-{role}.yml").read_text() for role in ("command", "review", "post")}
     command, review, post = (
         load_workflow(directory / f"daydream-{role}.yml") for role in ("command", "review", "post")
@@ -123,8 +103,8 @@ def test_split_bundle_binds_approval_review_artifacts_and_posting(directory: Pat
     assert review["permissions"] == {"contents": "read"}
     assert "actions/checkout" not in texts["command"]
     assert not any(has_checkout(job) for job in post["jobs"].values())
-    assert "pull_request" not in _wf_triggers(review)
-    assert _wf_triggers(post)["workflow_run"]["workflows"] == [review["name"]] == ["Daydream Review"]
+    assert "pull_request" not in workflow_triggers(review)
+    assert workflow_triggers(post)["workflow_run"]["workflows"] == [review["name"]] == ["Daydream Review"]
 
     # The dispatched values must arrive at the same bundle's bounded review inputs.
     dispatch_steps = job_steps(command, "dispatch")
@@ -140,7 +120,7 @@ def test_split_bundle_binds_approval_review_artifacts_and_posting(directory: Pat
     assert dispatch_steps.index(dispatch) < dispatch_steps.index(ack)
     assert not any(fn in ack.get("if", "") for fn in ("always()", "failure()", "cancelled()"))
     assert "continue-on-error" not in dispatch
-    inputs = _wf_triggers(review)["workflow_dispatch"]["inputs"]
+    inputs = workflow_triggers(review)["workflow_dispatch"]["inputs"]
     assert {"approved_head_sha", "approved_at"} <= inputs.keys()
     assert {key: inputs["command"][key] for key in ("type", "options", "default", "required")} == {
         "type": "choice",
@@ -232,8 +212,10 @@ def test_single_bundle_joins_gate_analyze_and_privileged_publication() -> None:
     text = path.read_text()
     wf = load_workflow(path)
     _assert_execution_policy(wf)
-    assert "pull_request" not in _wf_triggers(wf)
-    assert set(_SECRET_REF_RE.findall(text)) == {"ANTHROPIC_API_KEY", "DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY"}
+    assert "pull_request" not in workflow_triggers(wf)
+    # `daydream setup` provisions exactly the secrets and handle variable this template reads.
+    assert set(_SECRET_REF_RE.findall(text)) == set(config.SETUP_SECRET_NAMES)
+    assert f"vars.{config.BOT_HANDLE_VAR}" in text
     gate, analyze = wf["jobs"]["gate"], wf["jobs"]["analyze"]
     assert {"approved_head_sha", "approved_at"} <= gate["outputs"].keys()
     assert gate["outputs"]["command"] == "${{ steps.match.outputs.command }}"
@@ -276,42 +258,39 @@ _MATCH_STEP_SOURCES = [
 ]
 
 # Empty expected command means no run. Plurals, spacing, handle boundaries and casing matter.
-_MATCH_CASES = [
-    pytest.param("@bot review", "bot", "review", id="review"),
-    pytest.param("@bot add sequence diagram", "bot", "sequence", id="sequence-full"),
-    pytest.param("@bot add sequence", "bot", "sequence", id="sequence-alias"),
-    pytest.param("@bot add flowchart", "bot", "flowchart", id="flowchart"),
-    pytest.param("@bot add  flowchart", "bot", "flowchart", id="flowchart-extra-space"),
-    pytest.param("@bot add sequence\tdiagram", "bot", "sequence", id="sequence-tab"),
-    pytest.param("@bot add sequence diagram please", "bot", "sequence", id="sequence-trailing-text"),
-    pytest.param("@bot review please", "bot", "review", id="review-trailing-text"),
-    pytest.param("please @bot review", "bot", "review", id="review-leading-text"),
-    pytest.param(
-        "some context\n@bot add flowchart\n" + "🌐" * 30_000, "bot", "flowchart", id="flowchart-large-unicode-body"
-    ),
-    pytest.param("@bot add flowchart\r\n", "bot", "flowchart", id="flowchart-crlf"),
+_MATCH_CASES: list[tuple[str, str, str]] = [
+    ("@bot review", "bot", "review"),
+    ("@bot add sequence diagram", "bot", "sequence"),
+    ("@bot add sequence", "bot", "sequence"),
+    ("@bot add flowchart", "bot", "flowchart"),
+    ("@bot add  flowchart", "bot", "flowchart"),
+    ("@bot add sequence\tdiagram", "bot", "sequence"),
+    ("@bot add sequence diagram please", "bot", "sequence"),
+    ("@bot review please", "bot", "review"),
+    ("please @bot review", "bot", "review"),
+    ("some context\n@bot add flowchart\n" + "🌐" * 30_000, "bot", "flowchart"),
+    ("@bot add flowchart\r\n", "bot", "flowchart"),
     # grep is line-oriented, so a mention split across lines falls back to the
     # `add sequence` alias rather than matching nothing.
-    pytest.param("@bot add sequence\ndiagram", "bot", "sequence", id="sequence-alias-across-newline"),
+    ("@bot add sequence\ndiagram", "bot", "sequence"),
     # Branch precedence is review > sequence > flowchart.
-    pytest.param("@bot review\n@bot add flowchart", "bot", "review", id="review-wins-over-flowchart"),
+    ("@bot review\n@bot add flowchart", "bot", "review"),
     # Regex metacharacters in handles must match literally.
-    pytest.param("@my.bot+1 review", "my.bot+1", "review", id="metachar-handle-review"),
-    pytest.param("@zzz add flowchart", ".*", "", id="metachar-handle-not-a-wildcard"),
-    pytest.param("@bot reviews", "bot", "", id="no-reviews-plural"),
-    pytest.param("@bot add flowcharts", "bot", "", id="no-flowcharts-plural"),
-    pytest.param("@bot add sequence diagrams", "bot", "", id="no-sequence-diagrams-plural"),
-    pytest.param("@bot add sequence diagrams please", "bot", "", id="no-sequence-diagrams-plural-trailing"),
-    pytest.param("@bot addflowchart", "bot", "", id="no-missing-space"),
-    pytest.param("x@bot add flowchart", "bot", "", id="no-handle-mid-word"),
-    pytest.param("@bot ADD FLOWCHART", "bot", "", id="no-uppercase"),
+    ("@my.bot+1 review", "my.bot+1", "review"),
+    ("@zzz add flowchart", ".*", ""),
+    ("@bot reviews", "bot", ""),
+    ("@bot add flowcharts", "bot", ""),
+    ("@bot add sequence diagrams", "bot", ""),
+    ("@bot add sequence diagrams please", "bot", ""),
+    ("@bot addflowchart", "bot", ""),
+    ("x@bot add flowchart", "bot", ""),
+    ("@bot ADD FLOWCHART", "bot", ""),
     # The sequence veto covers the whole body: a malformed mention vetoes a valid one too.
-    pytest.param("@bot add sequence\n@bot add sequence diagrams", "bot", "", id="sequence-veto-fails-closed"),
+    ("@bot add sequence\n@bot add sequence diagrams", "bot", ""),
 ]
 
 
-@pytest.fixture(scope="module")
-def command_match_script() -> str:
+def test_match_step_recognizes_exactly_the_three_bot_commands(tmp_path: Path) -> None:
     """Byte and shell parity make every behavioral assertion cover all shipped copies."""
     scripts = []
     for path, job in _MATCH_STEP_SOURCES:
@@ -322,36 +301,18 @@ def command_match_script() -> str:
         assert step.get("shell", job_shell) is None, path
         scripts.append(step["run"])
     assert scripts[0] == scripts[1] == scripts[2]
-    return str(scripts[0])
-
-
-@pytest.mark.parametrize(("body", "handle", "expected"), _MATCH_CASES)
-def test_match_step_recognizes_exactly_the_three_bot_commands(
-    command_match_script: str,
-    body: str,
-    handle: str,
-    expected: str,
-    tmp_path: Path,
-) -> None:
     # GitHub's unspecified shell is `bash -e {0}`. Explicit `shell: bash` adds
     # pipefail, which can turn grep's successful early exit into a false match.
+    script = tmp_path / "match.sh"
+    script.write_text(scripts[0], encoding="utf-8")
     out = tmp_path / "gh-output"
-    script = out.with_suffix(".sh")
-    script.write_text(command_match_script, encoding="utf-8")
-    out.write_text("", encoding="utf-8")
-    subprocess.run(
-        ["bash", "-e", str(script)],
-        env={"PATH": os.environ["PATH"], "BODY": body, "BOT_HANDLE": handle, "GITHUB_OUTPUT": str(out)},
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    parsed: dict[str, str] = {}
-    for line in out.read_text(encoding="utf-8").splitlines():
-        if not line:
-            continue
-        key, _, value = line.partition("=")
-        parsed[key] = value
-    # Command is always written for the single-file job output; matched remains the downstream gate.
-    assert parsed["command"] == expected
-    assert parsed["matched"] == ("true" if expected else "false")
+    for body, handle, expected in _MATCH_CASES:
+        out.write_text("", encoding="utf-8")
+        subprocess.run(
+            ["bash", "-e", str(script)],
+            env={"PATH": os.environ["PATH"], "BODY": body, "BOT_HANDLE": handle, "GITHUB_OUTPUT": str(out)},
+            check=True, capture_output=True, text=True,
+        )
+        parsed = dict(line.partition("=")[::2] for line in out.read_text(encoding="utf-8").splitlines() if line)
+        # Command is always written for the single-file job output; matched remains the downstream gate.
+        assert (parsed["command"], parsed["matched"]) == (expected, "true" if expected else "false"), body[:60]

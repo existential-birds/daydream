@@ -39,8 +39,6 @@ def test_cache_refetches_stale_response(tmp_path: Path) -> None:
                      ("org/repo", "repos/org/repo/pulls/42")]
 
 
-
-
 def test_completed_sessions_resume(tmp_path: Path) -> None:
     """One progress population admits only fresh current-policy records, then appends new completions."""
     current = labeler_versions.LABELER_POLICY_VERSION

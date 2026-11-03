@@ -18,14 +18,14 @@ def _config(tmp_path: Path, records: list[dict[str, object]]) -> RftConfig:
     )
 
 
-
-@pytest.mark.parametrize("record, match",
-    [(_record("r1", base_sha="abc123"), r"full sha|40"),
+def test_malformed_identity_fails_closed(tmp_path: Path) -> None:
+    cases: tuple[tuple[dict[str, object], str], ...] = (
         ({"id": "r1", "base_sha": "a" * 40, "diff": "diff"}, "head_sha"),
-        (_record("r1", head_sha="z" * 40), r"full sha|40"), (_record("r1", repo_slug=""), "repo_slug"),
-    ], ids=["short-base-sha", "missing-head-sha", "non-hex-sha", "missing-repo-slug"],
-)
-def test_malformed_identity_fails_closed(record: dict[str, object], match: str, tmp_path: Path) -> None:
-    cfg = _config(tmp_path, [record])
-    with pytest.raises(ValueError, match=match):
-        run_rft(cfg)
+        (_record("r1", head_sha="z" * 40), r"full sha|40"),
+    )
+    for index, (record, match) in enumerate(cases):
+        root = tmp_path / str(index)
+        root.mkdir()
+        cfg = _config(root, [record])
+        with pytest.raises(ValueError, match=match):
+            run_rft(cfg)

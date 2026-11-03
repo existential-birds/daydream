@@ -67,7 +67,7 @@ from daydream.host_tools import (
 from daydream.hosted_review import HOSTED_PI_TOOLS, HostedReviewPolicy, UnsupportedHostedPolicy
 from daydream.hunk_index import write_hunk_index
 from daydream.immutable_review import ImmutableReviewInput
-from daydream.json_utils import canonical_json
+from daydream.json_utils import canonical_json, validate_json_schema
 from daydream.prompt_budget import SanctionedInputUnavailable
 from daydream.retry_policy import RetryRecoveryBudget
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
@@ -592,7 +592,7 @@ class Review:
                         touched.append(uid)
                     retained = list(claims.values())
                     try:
-                        jsonschema.validate(retained, retained_claims)
+                        validate_json_schema(retained, retained_claims)
                     except jsonschema.ValidationError as exc:
                         raise HostToolRejected(
                             "claims: canonical retention limit exceeded; reduce optional proposals") from exc

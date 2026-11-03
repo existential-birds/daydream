@@ -14,6 +14,7 @@ from typing import Any
 
 import jsonschema
 
+from daydream.json_utils import validate_json_schema
 from daydream.output_schema import strict_object
 from daydream.redaction import redact_structured_text, redact_text
 from daydream.retry_policy import FailureClass, classify_failure
@@ -170,7 +171,7 @@ class AnalyzedRevision:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> AnalyzedRevision:
-        jsonschema.validate(dict(data), ANALYZED_REVISION_SCHEMA)
+        validate_json_schema(dict(data), ANALYZED_REVISION_SCHEMA)
         return cls(**dict(data))
 
 
@@ -250,7 +251,7 @@ def validate_target_decisions(value: Any, *, analyzed_revision: Mapping[str, Any
     rejects malformed or truncated attribution instead of fabricating completion.
     """
     try:
-        jsonschema.validate(value, _TARGET_DECISIONS_SCHEMA)
+        validate_json_schema(value, _TARGET_DECISIONS_SCHEMA)
     except jsonschema.ValidationError as exc:
         raise ValueError(f'invalid target decisions: {exc.message}') from exc
     identifiers = [decision['target_id'] for decision in value]
@@ -298,7 +299,7 @@ def preserved_target_decisions(value: Any) -> list[dict[str, Any]]:
 def validate_terminal_result(data: Any, *, expected_head_sha: str | None = None) -> None:
     """Reject schema errors and contradictory aggregate/inventory evidence."""
     try:
-        jsonschema.validate(data, TERMINAL_RESULT_SCHEMA)
+        validate_json_schema(data, TERMINAL_RESULT_SCHEMA)
     except jsonschema.ValidationError as exc:
         raise ValueError(f'terminal result schema validation failed: {exc.message}') from exc
     if type(data['schema_version']) is not int or data['schema_version'] != (
@@ -404,7 +405,7 @@ class ReviewCoverage:
         outcome = {**outcomes[key], 'status': status,
                    'reason_codes': sorted({ReasonCode(r).value for r in reasons}), **fields}
         phase = outcomes is self.phases
-        jsonschema.validate(outcome, _PHASE_SCHEMA if phase else _STACK_SCHEMA)
+        validate_json_schema(outcome, _PHASE_SCHEMA if phase else _STACK_SCHEMA)
         _validate_outcome(outcome, phase=phase)
         if diagnostic is not None and not isinstance(diagnostic, str):
             raise TypeError('review diagnostic must be a string or None')
@@ -481,7 +482,7 @@ class ReviewCoverage:
     def from_dict(cls, data: Mapping[str, Any]) -> ReviewCoverage:
         """Restore coverage only after strict structural and semantic validation."""
         try:
-            jsonschema.validate(data, _COVERAGE_SCHEMA)
+            validate_json_schema(data, _COVERAGE_SCHEMA)
         except jsonschema.ValidationError as exc:
             raise ValueError(f'invalid coverage artifact schema: {exc.message}') from exc
         if type(data['schema_version']) is not int:

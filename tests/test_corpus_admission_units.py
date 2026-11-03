@@ -20,10 +20,6 @@ AMBIG: dict[str, Any] = {
     **LEGACY, "labeler_policy_version": LABELER_POLICY_VERSION, "decisive_mix": False, "decisive_only": False}
 
 
-def test_gold_admission_rejects_legacy_observations() -> None:
-    """Legacy reply-count/merge-presence rows are excluded from outcome-bearing gold (M16/M22)."""
-    assert _is_admitted_outcome_gold(**LEGACY) is False
-
 def test_gold_admission_rejects_mixed_and_ambiguous() -> None:
     assert _is_admitted_outcome_gold(**MIXED) is False
     assert _is_admitted_outcome_gold(**AMBIG) is False

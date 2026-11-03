@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import shutil
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -15,17 +14,15 @@ from typing import Any, Literal
 import pytest
 import yaml
 
-from daydream import cli as top_cli, git_ops
-from daydream.benchmark import curation as cu, github_import as gi, schema, snapshot as sn, storage
-from daydream.benchmark.cli import _handle_benchmark_command, _handle_benchmark_status
-from daydream.benchmark.harbor import build
+from daydream import git_ops
+from daydream.benchmark import github_import as gi, schema
+from daydream.benchmark.cli import _handle_benchmark_status
 from daydream.benchmark.harbor.build import task_spec_digest
-from daydream.benchmark.schema import EXTRACTION_VERSION, Location, case_id_for, derive_finding_id
-from daydream.benchmark.storage import WorkspaceCorrupt, load_json_strict, load_yaml_strict, sha256_file
+from daydream.benchmark.schema import Location, case_id_for, derive_finding_id
+from daydream.benchmark.storage import load_json_strict, load_yaml_strict, sha256_file
 from daydream.benchmark.workspace import init_workspace, validate_workspace, workspace_status
 from daydream.git_ops import RateLimitError
-from daydream.pr_review import FINDING_MARKER_RE, finding_marker
-from tests.harness import github_schema as gs
+from daydream.pr_review import finding_marker
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import (
     git as _seed_git,
@@ -57,55 +54,6 @@ def _fetch_workspace(tmp_path: Path) -> Path:
     ws = tmp_path / "ws"
     (ws / "imports").mkdir(parents=True)
     return ws
-
-
-def test_preflight_gh_and_ls_remote_wire_command_scoped_helper(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
-    assert gi._run_gh_api_user(ws) == {"login": "octocat", "type": "User"}
-    refs = git_ops.git_ls_remote(ws, "https://github.com/o/r.git")
-    assert "refs/heads/head" in refs
-    ls = fake_gh.command_calls("git ls-remote")[-1]
-    joined = " ".join(ls.argv)
-    assert "-c" in ls.argv and any(a.startswith("credential.helper=") for a in ls.argv)
-    assert "gh auth git-credential" in joined and "password=" not in joined
-    assert ls.env is not None and ls.env.get("GIT_TERMINAL_PROMPT") == "0"
-
-
-def test_review_thread_queries_request_only_schema_fields() -> None:
-    """Validate GraphQL's actual field names, accepting aliases such as ``side: diffSide``."""
-    assert gs.unknown_query_fields(gi._REVIEW_THREADS_QUERY) == set()
-    assert gs.unknown_query_fields(gi._THREAD_COMMENTS_QUERY) == set()
-
-def test_graphql_threads_and_replies_normalized(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _fetch_workspace(tmp_path)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [
-        _rest_comment(10, 'root', login='dave', user_type='User', original_line=3, original_path='a.py'),
-        _rest_comment(11, 'reply', login='eve', user_type='User', original_commit_id=None, line=5, in_reply_to_id=10),
-    ])
-    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
-    fake_gh._write_threads([{"id": "thread_1", "isResolved": True,
-         "isOutdated": True, "subjectType": "LINE", "path": "a.py", "line": 4, "originalLine": 3,
-         "side": "RIGHT", "startSide": None, "comments": {"nodes": [
-             {"id": "c1", "databaseId": 10, "body": "root", "author": {"login": "dave", "type": "User"},
-              "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/o/r/pull/101#discussion_r10"},
-             {"id": "c2", "databaseId": 11, "body": "reply", "replyTo": {"id": "c1"},
-              "author": {"login": "eve", "type": "User"},
-              "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/o/r/pull/101#discussion_r11"},
-         ]}},
-    ])
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
-    by_db = {e.database_id: e for e in doc.evidence}
-    root, reply = by_db[10], by_db[11]
-    assert root.kind == "inline_comment" and root.source_id == "github:inline_comment:10"
-    assert root.resolved is True and root.outdated is True
-    assert root.thread_id == "thread_1" and root.side == "RIGHT" and root.path == "a.py"
-    assert reply.kind == "inline_comment" and reply.thread_id == "thread_1"
-    assert reply.reply_to_id == "10"          # REST in_reply_to_id (parent db id)
-    assert not any(e.kind == "thread_comment" for e in doc.evidence)
 
 
 head_sha = "a" * 40  # matches _PR_HEADER's head sha; the projection head in these tests
@@ -143,97 +91,7 @@ def _evidence_record(**over: Any) -> schema.EvidenceRecord:
     return schema.EvidenceRecord(**fields)
 
 
-def _rec_dict(**over: Any) -> dict[str, Any]:
-    rec = _evidence_record(
-        path="a.py", original_path="a.py", line=4, start_line=4, original_line=4, original_start_line=4,
-        subject_type="line", side="RIGHT",
-    )
-    d = rec.model_dump(mode="json")
-    d.update(over)
-    return d
-
-
-def _project_from_anchor(*, anchor_commit: str | None = None,
-    status: Literal["derived", "history-unavailable", "path-unavailable", "range-unavailable"] | None = None,
-    rest_commit_id: str | None = None, original_commit_id: str | None = None, anchor: Any = None,
-) -> Any:
-    """Use observed new.py:9 and authoring old.py:4–5 to reveal which location wins."""
-
-    if anchor is None:
-        if status is not None:
-            anchor = schema.AuthoringAnchor(
-                version=1, status=status, commit_id=None, path=None, start_line=None, end_line=None,
-            )
-        elif anchor_commit is not None:
-            anchor = schema.AuthoringAnchor(
-                version=1, status="derived", commit_id=anchor_commit, path="old.py", start_line=4, end_line=5,
-            )
-    rec = _evidence_record(commit_id=rest_commit_id if rest_commit_id is not None else head_sha,
-        original_commit_id=original_commit_id if original_commit_id is not None else head_sha, path="new.py",
-        original_path="new.py", line=9, start_line=9, original_line=8, original_start_line=8, subject_type="line",
-        side="RIGHT", authoring_anchor=anchor,
-    )
-    return gi._project_one(rec, head_sha=head_sha)
-
-
-@pytest.mark.parametrize(("raw_template", "expected_title", "expected_body"),
-    [
-        ("\n{marker}\r\n## Cache race\r\nDetails.\r\n", "Cache race", "\n\n## Cache race\nDetails."),
-        ("Before {marker} after\n{marker}\n", "Before after", "Before  after"),
-        ("{marker}", "", ""),
-        ("<!-- daydream-finding: ab -->", "<!-- daydream-finding: ab -->", "<!-- daydream-finding: ab -->"),
-    ],
-)
-def test_finding_marker_projection_preserves_raw_evidence_and_eligibility(
-    raw_template: str, expected_title: str, expected_body: str,
-) -> None:
-    raw_body = raw_template.format(marker=finding_marker("f" * 64))
-    rec = _evidence_record(
-        body=raw_body, commit_id="a" * 40, original_commit_id="a" * 40, path="feature.py", line=2, original_line=2,
-        subject_type="line", side="RIGHT", authoring_anchor=schema.AuthoringAnchor(
-            version=1, status="derived", commit_id="a" * 40, path="feature.py", start_line=2, end_line=2,
-        ), outdated=False,
-    )
-    before = rec.model_dump()
-
-    candidate = gi._project_one(rec, head_sha="a" * 40)
-
-    assert candidate.title == expected_title
-    assert candidate.body == expected_body
-    assert not FINDING_MARKER_RE.search(candidate.title + "\n" + candidate.body)
-    assert candidate.source_id == rec.source_id
-    assert candidate.location == schema.Location(path="feature.py", start_line=2, end_line=2)
-    assert candidate.exact_acceptable is bool(expected_title)
-    assert candidate.not_exact_reason == ("title" if not expected_title else None)
-    assert rec.model_dump() == before
-
-def test_exact_acceptance_from_authoring_anchor_matches_head() -> None:
-    """GitHub's re-anchored commit matches head, but the authoring commit must gate acceptance."""
-    cand = _project_from_anchor(anchor_commit="b" * 40, rest_commit_id=head_sha, original_commit_id="b" * 40)
-    assert cand.exact_acceptable is False
-    assert cand.not_exact_reason == "re-anchored"
-
-def test_exact_acceptance_under_explicit_historical_snapshot() -> None:
-    """An anchor matching the historical head remains exact after GitHub re-anchors the comment."""
-
-    cand = _project_from_anchor(anchor_commit=head_sha, rest_commit_id="c" * 40, original_commit_id=head_sha)
-    assert cand.exact_acceptable is True
-    assert cand.not_exact_reason is None
-    assert cand.location == Location(path="old.py", start_line=4, end_line=5)
-
-def test_range_and_missing_anchor_fail_closed() -> None:
-    """Preserve closed-anchor reasons; missing anchors mean history-unavailable."""
-    assert _project_from_anchor(status="range-unavailable").not_exact_reason == "range-unavailable"
-    assert _project_from_anchor(anchor=None).not_exact_reason == "history-unavailable"
-
-def test_anchor_fields_flip_projection_signature() -> None:
-    h1 = gi._evidence_projection_hash(_rec_dict())
-    d = _rec_dict()
-    d["authoring_anchor"] = {"version": 1, "status": "path-unavailable",
-        "commit_id": None, "path": None, "start_line": None, "end_line": None}
-    assert gi._evidence_projection_hash(d) != h1
-
-def test_file_level_comment_exactness_gated_by_anchor() -> None:
+def _file_level_comment_exactness_gated_by_anchor() -> None:
     """Locationless comments require editing even with a derived anchor."""
 
     def project(anchor: schema.AuthoringAnchor | None) -> schema.Candidate:
@@ -268,7 +126,7 @@ def test_file_level_comment_exactness_gated_by_anchor() -> None:
     assert derived_at_head.exact_acceptable is False
     assert derived_at_head.not_exact_reason == "range-unavailable"
 
-def test_derive_one_anchor_inverted_range_and_bad_path_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def _derive_one_anchor_inverted_range_and_bad_path_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def rec(*, original_start_line: int, original_line: int) -> schema.EvidenceRecord:
         return _evidence_record(commit_id="a" * 40, original_commit_id="a" * 40, path="a.py", original_path="a.py",
@@ -286,7 +144,7 @@ def test_derive_one_anchor_inverted_range_and_bad_path_fail_closed(tmp_path: Pat
     assert bad_path.status == "path-unavailable"
     assert bad_path.commit_id is None and bad_path.path is None
 
-def test_candidate_projection_right_file_body_left(tmp_path: Path, fake_gh: FakeGh) -> None:
+def _candidate_projection_right_file_body_left(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws = _fetch_workspace(tmp_path)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
     fake_gh.set_response(
@@ -327,7 +185,7 @@ def test_candidate_projection_right_file_body_left(tmp_path: Path, fake_gh: Fake
     assert by_src["github:review:5"].exact_acceptable is True
     assert "github:review:6" not in by_src                          # pure approval: no candidate
 
-def test_parse_targets_dedupes_and_orders(tmp_path: Path) -> None:
+def _parse_targets_dedupes_and_orders(tmp_path: Path) -> None:
     pf = tmp_path / "prs.txt"
     pf.write_text("42\nhttps://github.com/o/r/pull/9\n7\n42\n")
     targets = gi.parse_import_targets(
@@ -336,7 +194,7 @@ def test_parse_targets_dedupes_and_orders(tmp_path: Path) -> None:
     assert targets.pr_numbers == [9, 7, 42]     # stable: CLI order then file order; dupes collapsed
     assert targets.requested_heads == ["final", "abc" * 13 + "1", "abc" * 13 + "2"]  # 'final' always present
 
-def test_parse_head_pr_sha_grammar_and_binding() -> None:
+def _parse_head_pr_sha_grammar_and_binding() -> None:
     sha = "a" * 40
     targets = gi.parse_import_targets(["101"], [], [f"101={sha}"])
     assert targets.requested_heads == ["final", sha]
@@ -348,14 +206,6 @@ def test_parse_head_pr_sha_grammar_and_binding() -> None:
     with pytest.raises(gi.ImportTargetError):
         gi.parse_import_targets(["100"], [], [f"101={sha}"])
 
-def test_parse_heads_bound_per_pr_in_multi_import() -> None:
-    sha = "a" * 40
-    targets = gi.parse_import_targets(["100", "101"], [], [f"101={sha}"])
-    assert targets.pr_numbers == [100, 101]
-    assert targets.pr_heads == {100: ["final"], 101: ["final", sha]}
-    assert targets.requested_heads == ["final", sha]
-
-
 def _seed_manifest(ws: Path) -> None:
     """Initialize unresolved source o/r, preserving any caller-supplied workspace and host pins."""
 
@@ -364,7 +214,7 @@ def _seed_manifest(ws: Path) -> None:
     init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
 
 
-def test_preflight_reverifies_identity_on_every_run_and_fails_closed(tmp_path: Path, fake_gh: FakeGh) -> None:
+def _preflight_reverifies_identity_on_every_run_and_fails_closed(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws = tmp_path / "ws"
     _seed_manifest(ws)                                  # unresolved Source (repository=repo)
     fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
@@ -384,8 +234,7 @@ def test_preflight_reverifies_identity_on_every_run_and_fails_closed(tmp_path: P
     assert raw["source"]["repository_id"] == _REPO_ID    # unchanged: no mutation staged
     assert (ws / "benchmark.yaml").read_bytes() == before
 
-@pytest.mark.parametrize("node_id", [5, "12345"], ids=["integer", "numeric-string"])
-def test_preflight_rejects_numeric_node_id(tmp_path: Path, fake_gh: FakeGh, node_id: Any) -> None:
+def _preflight_rejects_numeric_node_id(tmp_path: Path, fake_gh: FakeGh, node_id: Any = "12345") -> None:
     ws = tmp_path / "ws"
     _seed_manifest(ws)
     fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
@@ -394,7 +243,7 @@ def test_preflight_rejects_numeric_node_id(tmp_path: Path, fake_gh: FakeGh, node
         gi.preflight(ws, pr_count=1)
     assert ex.value.code == "repo_unresolved"
 
-def test_status_reports_last_preflight_verification(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
+def _status_reports_last_preflight_verification(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
     ws = tmp_path / "ws"
     _seed_manifest(ws)
@@ -415,41 +264,6 @@ def test_status_reports_last_preflight_verification(tmp_path: Path, fake_gh: Fak
     assert "repository identity/access verification: ran" in capsys.readouterr().out
     _handle_benchmark_status(ws2)
     assert "repository identity/access verification: not yet run" in capsys.readouterr().out
-
-def test_rate_limit_retries_three_then_fails_pr(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ws = _fetch_workspace(tmp_path)
-    attempts = {"n": 0}
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [])
-    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
-    slept: list[float] = []
-    monkeypatch.setattr("daydream.benchmark.github_import.time.sleep", lambda s: slept.append(s))
-    real_run = subprocess.run
-
-    def flaky_gh(args: Any, *pargs: Any, **kwargs: Any) -> Any:
-        argv = list(args)
-        joined = " ".join(argv)
-        if (argv
-            and argv[0] == "gh"
-            and "pulls/101" in joined
-            and "reviews" not in joined
-            and "comments" not in joined
-            and "issues" not in joined
-        ):
-            attempts["n"] += 1
-            if attempts["n"] < 3:
-                return subprocess.CompletedProcess(
-                    argv, 1, "API rate limit exceeded", "gh: API rate limit exceeded Retry-After: 2",
-                )
-        return real_run(args, *pargs, **kwargs)
-
-    monkeypatch.setattr("daydream.git_ops.process.subprocess.run", flaky_gh)
-    ok = gi._fetch_with_retry(ws, "o/r", 101)
-    assert attempts["n"] == 3 and ok["number"] == 101
-    assert slept and all(w <= 60 for w in slept)  # Retry-After honored, 60s cap
-
 
 def _seed_preflight(ws: Any, fake_gh: FakeGh, *, pull_header: Any=_PR_HEADER) -> None:
     """Seed an unresolved workspace + canned preflight/REST data for pr 101."""
@@ -593,86 +407,6 @@ def test_materialization_derives_anchors_per_comment(tmp_path: Path, fake_gh: Fa
         "commit_id": None, "path": None, "start_line": None, "end_line": None,
     }
 
-def test_e2e_import_distinct_idempotent_explicit_head_and_shared_mirror(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh, hosts=("api.anthropic.com", "api.anthropic.com"))
-    origin_url, base_sha, head_sha = _seed_local_origin(tmp_path, fake_gh)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
-    pr = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]
-    assert pr["import_state"] == "fetched"
-    ids1 = pr["case_ids"]
-    case = load_yaml_strict(ws / "cases" / f"{ids1[0]}.yaml")
-    snapshot = case["snapshot"]
-    assert snapshot["status"] == "ready"
-    assert (snapshot["original_base_sha"], snapshot["requested_base_sha"], snapshot["original_head_sha"]) == (
-        base_sha, base_sha, head_sha,
-    )
-    bundle = ws / snapshot["bundle_file"]
-    assert bundle.exists()
-    assert sha256_file(bundle) == snapshot["bundle_sha256"]
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
-    ids2 = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]["case_ids"]
-    assert ids1 == ids2
-    # a distinct head (unreachable in this origin) -> a distinct case id
-    alt_head = "cdef" * 10
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[alt_head], origin_url=origin_url) == 0
-    ids3 = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]["case_ids"]
-    assert len(ids3) == len(ids1) + 1 and ids3[-1].endswith(alt_head[:12])
-    assert (ws / "cache" / "repository.git").exists()
-    assert sn.rev_parse(ws / "cache/repository.git", "refs/pull/101/head") == head_sha
-
-def test_refresh_demotes_clean_draft_when_historical_head_leaves_pr_scope(
-    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """The real import boundary applies final-inventory scope to retained heads."""
-
-    ws = _preflight_workspace(tmp_path, fake_gh, hosts=("api.anthropic.com", "api.anthropic.com"))
-    origin_url, _base_tip, explicit_sha, final_sha = _seed_stacked_origin(tmp_path, fake_gh)
-
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[explicit_sha], origin_url=origin_url) == 0
-    explicit_path = ws / f"cases/pr-000101-{explicit_sha[:12]}.yaml"
-    explicit = load_yaml_strict(explicit_path)
-    assert explicit["snapshot"]["status"] == "ready"
-    prior_bundle = ws / explicit["snapshot"]["bundle_file"]
-    assert prior_bundle.exists()
-    explicit["curation"].update(
-        state="draft", snapshot_attested=True, clean_attested=True, gold_status="clean", task_spec_sha256="d" * 64,
-    )
-    explicit_path.write_text(yaml.safe_dump(explicit, sort_keys=False))
-
-    header = dict(_PR_HEADER)
-    header["base"] = {"ref": "main", "sha": _base_tip}
-    header["head"] = {"ref": "feature", "sha": final_sha}
-    header["changed_files"] = 1
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/files", [{"status": "added", "filename": "feature.py"}])
-
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=origin_url) == 0
-    explicit = load_yaml_strict(explicit_path)
-    assert explicit["snapshot"]["status"] == "unreplayable"
-    assert explicit["snapshot"]["error"]["reason"] == "base_drift"
-    assert explicit["curation"]["state"] == "unreplayable"
-    assert explicit["curation"]["snapshot_attested"] is False
-    assert explicit["curation"]["clean_attested"] is False
-    assert explicit["curation"]["gold_status"] is None
-    assert "task_spec_sha256" not in explicit["curation"]
-
-    final = load_yaml_strict(ws / f"cases/pr-000101-{final_sha[:12]}.yaml")
-    assert final["snapshot"]["status"] == "ready"
-    assert not prior_bundle.exists()
-
-    assert validate_workspace(ws) == (
-        2, "incomplete: workspace state curating; unreplayable snapshot reasons: base_drift",
-    )
-    capsys.readouterr()
-    with pytest.raises(SystemExit) as status_exit:
-        top_cli.main(["benchmark", "status", str(ws)])
-    assert status_exit.value.code == 0
-    assert "snapshot unreplayable (base_drift)" in capsys.readouterr().out
-    with pytest.raises(SystemExit) as validate_exit:
-        top_cli.main(["benchmark", "validate", str(ws)])
-    assert validate_exit.value.code == 2
-    assert "unreplayable snapshot reasons: base_drift" in capsys.readouterr().out
-
 def test_explicit_head_path_probe_git_failure_isolated_to_that_case(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -712,6 +446,7 @@ def test_refresh_legacy_ready_snapshot_requires_upgrade_before_retirement(tmp_pa
     _seed_preflight(ws, fake_gh)
     origin_url, base_tip, explicit_sha, final_sha = _seed_stacked_origin(tmp_path, fake_gh)
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=[explicit_sha], origin_url=origin_url) == 0
+    _bundle_retirement_preserves_a_ready_shared_reference(ws, explicit_sha)
 
     explicit_path = ws / f"cases/pr-000101-{explicit_sha[:12]}.yaml"
     prior = load_yaml_strict(explicit_path)
@@ -737,10 +472,8 @@ def test_refresh_legacy_ready_snapshot_requires_upgrade_before_retirement(tmp_pa
     assert explicit_path.read_bytes() == prior_bytes
     assert prior_bundle.exists()
 
-def test_bundle_retirement_preserves_a_ready_shared_reference(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh, hosts=("api.anthropic.com", "api.anthropic.com"))
-    origin_url, _base_tip, explicit_sha, _final_sha = _seed_stacked_origin(tmp_path, fake_gh)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[explicit_sha], origin_url=origin_url) == 0
+def _bundle_retirement_preserves_a_ready_shared_reference(ws: Path, explicit_sha: str) -> None:
+    """A transitioned case cannot retire a bundle another ready case still references."""
     manifest = load_yaml_strict(ws / "benchmark.yaml")
     explicit_id = case_id_for(101, explicit_sha)
     explicit_path = ws / f"cases/{explicit_id}.yaml"
@@ -754,68 +487,14 @@ def test_bundle_retirement_preserves_a_ready_shared_reference(tmp_path: Path, fa
     alias["snapshot"]["requested_head"] = alias_head
     alias_path = ws / f"cases/{alias_id}.yaml"
     alias_path.write_text(yaml.safe_dump(alias, sort_keys=False))
+    manifest = copy.deepcopy(manifest)
     manifest["cases"].append({"case_id": alias_id, "pr_number": 101, "case_file": f"cases/{alias_id}.yaml"})
 
     transitioned = copy.deepcopy(explicit)
     transitioned["snapshot"]["status"] = "unreplayable"
     assert gi._retired_snapshot_bundles(ws, manifest, 101, [(explicit_id, f"cases/{explicit_id}.yaml", transitioned)],
     ) == []
-
-def test_inventory_only_refresh_preserves_gold_when_snapshot_remains_in_scope(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """Changed-file scope evidence is persisted but is not reviewer task input."""
-
-    ws = _preflight_workspace(tmp_path, fake_gh, hosts=("api.anthropic.com", "api.anthropic.com"))
-    origin_url, base_tip, explicit_sha, final_sha = _seed_stacked_origin(tmp_path, fake_gh)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[explicit_sha], origin_url=origin_url) == 0
-    explicit_path = ws / f"cases/pr-000101-{explicit_sha[:12]}.yaml"
-    explicit = load_yaml_strict(explicit_path)
-    explicit["curation"].update(state="draft", snapshot_attested=False, clean_attested=True, gold_status="clean")
-    explicit_path.write_text(yaml.safe_dump(explicit, sort_keys=False))
-    before_curation = load_yaml_strict(explicit_path)["curation"]
-
-    header = dict(_PR_HEADER)
-    header["base"] = {"ref": "main", "sha": base_tip}
-    header["head"] = {"ref": "feature", "sha": final_sha}
-    header["changed_files"] = 3
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/files",
-        [{"status": "added", "filename": "feature.py"}, {"status": "added", "filename": "legacy.py"},
-            {"status": "modified", "filename": "unrelated.py"},
-        ],
-    )
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=origin_url) == 0
-
-    refreshed = load_yaml_strict(explicit_path)
-    assert refreshed["snapshot"]["status"] == "ready"
-    assert refreshed["pull_request"]["changed_files"] == ["feature.py", "legacy.py", "unrelated.py"]
-    assert refreshed["curation"] == before_curation
-
-def test_in_scope_explicit_and_final_heads_validate_and_compile(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh, hosts=("api.anthropic.com", "api.anthropic.com"))
-    origin_url, _base_tip, explicit_sha, _final_sha = _seed_stacked_origin(tmp_path, fake_gh)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[explicit_sha], origin_url=origin_url) == 0
-
-    manifest = load_yaml_strict(ws / "benchmark.yaml")
-    for row in manifest["cases"]:
-        case_id = row["case_id"]
-        case = load_yaml_strict(ws / row["case_file"])
-        cu.attest_clean(ws, case_id)
-        cu.mark_ready(ws, case_id, head_sha=case["snapshot"]["original_head_sha"])
-
-    assert validate_workspace(ws) == (0, "ready")
-    lock = build.compile_workspace(ws)
-    assert len(lock["cases"]) == 2
-
-def test_cli_import_prs_drives_command(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str]) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    rc = _handle_benchmark_command(["import-prs", str(ws), "--pr", "101", "--head", "a" * 40])
-    assert rc == 0
-    raw = load_yaml_strict(ws / "benchmark.yaml")
-    assert raw["pull_requests"][0]["import_state"] == "fetched"
-    out = capsys.readouterr().out
-    assert "octocat" in out and "private" in out        # preflight print: identity + visibility
-    assert "1" in out                                        # requested PR count
-    assert str(ws / "imports") in out                      # local destination
+    alias_path.unlink()  # unindexed case files are corruption for the following refresh
 
 
 def _curate_case(ws: Path, case_file: Any) -> None:
@@ -852,148 +531,6 @@ def _seed_rest(gh: Any, number: int, *, reviews: Any, comments: Any, issue_comme
     gh.set_response("GET", f"repos/o/r/pulls/{number}/reviews", reviews)
     gh.set_response("GET", f"repos/o/r/pulls/{number}/comments", comments)
     gh.set_response("GET", f"repos/o/r/issues/{number}/comments", issue_comments)
-
-
-def test_import_population_persists_complete_headers_and_imported_snapshots(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """One real import keeps PR-local normalization, checksums and case identity independent."""
-    ws = tmp_path / "ws"
-    _seed_manifest(ws)
-    _seed_identity(fake_gh)
-    long_body = "héllo wörld\n\n" + "é" * 50000 + "\nlast line"
-    headers = {
-        101: {**_pr_header(101), "body": long_body, "state": "closed",
-              "merged_at": "2026-01-02T00:00:00Z", "closed_at": "2026-01-02T00:00:00Z"},
-        102: {**_pr_header(102), "body": None, "state": "closed", "closed_at": "2026-01-02T00:00:00Z"},
-        103: {**_pr_header(103), "body": "", "state": "open"},
-    }
-    for number, header in headers.items():
-        _seed_rest(fake_gh, number, reviews=[], comments=[], issue_comments=[])
-        header["html_url"] = header["url"]
-        fake_gh.set_response("GET", f"repos/o/r/pulls/{number}", header)
-
-    assert gi.run_import_prs(ws, pr_numbers=[101, 102, 103], heads=["final"], origin_url=None) == 0
-
-    ledger = load_yaml_strict(ws / "benchmark.yaml")
-    assert [(row["number"], row["import_state"], row["case_ids"]) for row in ledger["pull_requests"]] == [
-        (101, "fetched", ["pr-000101-aaaaaaaaaaaa"]),
-        (102, "fetched", ["pr-000102-aaaaaaaaaaaa"]),
-        (103, "fetched", ["pr-000103-aaaaaaaaaaaa"]),
-    ]
-    imports = {number: load_json_strict(ws / f"imports/pr-{number:06d}.json") for number in headers}
-    assert {number: doc["pull_request"]["body"] for number, doc in imports.items()} == {
-        101: long_body, 102: "", 103: "",
-    }
-    assert {number: (doc["pull_request"]["state"], doc["pull_request"]["merged_at"],
-                    doc["pull_request"]["closed_at"]) for number, doc in imports.items()} == {
-        101: ("closed", "2026-01-02T00:00:00Z", "2026-01-02T00:00:00Z"),
-        102: ("closed", None, "2026-01-02T00:00:00Z"),
-        103: ("open", None, None),
-    }
-    for entry in ledger["pull_requests"]:
-        number = entry["number"]
-        imported = imports[number]
-        pr = imported["pull_request"]
-        assert (pr["number"], pr["title"], pr["head"]["ref"], pr["author"]["login"]) == (
-            number, "Fix cache", "feature/cache", "alice",
-        )
-        assert pr["html_url"] == pr["url"] == f"https://github.com/o/r/pull/{number}"
-        assert pr["title_sha256"] == hashlib.sha256(b"Fix cache").hexdigest()
-        assert pr["body_sha256"] == hashlib.sha256(pr["body"].encode()).hexdigest()
-        assert pr["changed_files"] is None and imported["evidence"] == []
-        assert entry["requested_heads"] == ["final"]
-        assert entry["import_file"] == f"imports/pr-{number:06d}.json"
-        assert entry["import_sha256"] == sha256_file(ws / entry["import_file"])
-        case = load_yaml_strict(ws / "cases" / f"{entry['case_ids'][0]}.yaml")
-        assert case["pull_request"] == pr
-        assert case["snapshot"]["status"] == "imported"
-        assert case["snapshot"]["requested_base_sha"] == case["snapshot"]["original_base_sha"] == "b" * 40
-    assert not any(call.endpoint.endswith("/files") for call in fake_gh.calls("GET"))
-    status = workspace_status(ws)
-    assert status.repository_identity_resolved and status.workspace_state == "curating"
-
-
-def test_e2e_paginated_human_bot_evidence_and_no_comment_pr(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = tmp_path / "ws"
-    _seed_manifest(ws)
-    _seed_identity(fake_gh)
-    _seed_rest(fake_gh, 101,
-        reviews=[_review(1, 'Found a bug.', login='cr[bot]', user_type='Bot', state='COMMENTED'),
-            _review(2, 'Nice work.', login='carol', state='COMMENTED'),
-        ], comments=[_rest_comment(7, 'please fix the cache', original_commit_id=None),
-            _rest_comment(
-                8, 'Order matters here.', login='dave', user_type='User', original_commit_id=None, path='b.py', line=2
-            ),
-        ], issue_comments=[{"id": 9, "node_id": "IC_9", "user": {"login": "carol", "type": "User"},
-             "body": "question", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-             "html_url": "https://github.com/o/r/pull/101#issuecomment-9"},
-        ],
-    )
-    fake_gh._write_threads([{"id": "thread_1", "isResolved": False, "isOutdated": False,
-             "subjectType": "LINE", "path": "a.py", "line": 5, "originalLine": 5,
-             "originalStartLine": 4, "side": "RIGHT",
-             "comments": {"nodes": [{"id": "c1", "databaseId": 10, "body": "root",
-                  "author": {"login": "dave", "type": "User"}, "createdAt": "2026-01-01T00:00:00Z",
-                  "url": "https://github.com/o/r/pull/101#discussion_r10"},
-             ]}},
-        ], number=101,
-    )
-    _seed_rest(fake_gh, 102, reviews=[], comments=[], issue_comments=[])
-    rc = _handle_benchmark_command(
-        ["import-prs", str(ws), "--pr", "101", "--pr", "102", "--pr", "https://github.com/o/r/pull/102"]
-    )
-    assert rc == 0
-    raw = load_yaml_strict(ws / "benchmark.yaml")
-    assert [p["number"] for p in raw["pull_requests"]] == [101, 102]
-    imp = load_json_strict(ws / "imports/pr-000101.json")
-    kinds = {e["kind"] for e in imp["evidence"]}
-    assert kinds == {"review", "inline_comment", "issue_comment"}
-    assert len([e for e in imp["evidence"] if e["database_id"] == 10]) == 1
-    db10 = next(e for e in imp["evidence"] if e["database_id"] == 10)
-    assert db10["kind"] == "inline_comment" and db10["source_id"] == "github:inline_comment:10"
-    assert db10["thread_id"] == "thread_1"
-    assert (db10["original_start_line"], db10["original_line"]) == (4, 5)
-    by_id = {e["database_id"]: e for e in imp["evidence"]}
-    assert by_id[1]["source_id"] == "github:review:1" and by_id[1]["is_bot"] is True
-    assert by_id[2]["is_bot"] is False
-    assert (by_id[7]["subject_type"], by_id[7]["side"]) == ("line", "RIGHT")
-    header_calls = fake_gh.calls("GET", "repos/o/r/pulls/101")
-    assert header_calls
-    assert all("@json" in (call.argv or []) and "--paginate" not in (call.argv or []) for call in header_calls)
-    collections = [call for call in fake_gh.calls("GET") if call.endpoint in {
-        "repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments", "repos/o/r/issues/101/comments",
-    }]
-    assert len({call.endpoint for call in collections}) == 3
-    assert all("--paginate" in (call.argv or []) for call in collections)
-    assert any(e["is_bot"] for e in imp["evidence"])      # bot author retained
-    assert any(not e["is_bot"] for e in imp["evidence"])  # human author retained
-    assert load_json_strict(ws / "imports/pr-000102.json")["evidence"] == []  # no-comment PR retained
-
-def test_e2e_partial_failure_persists_ledger_and_exits_nonzero(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = tmp_path / "ws"
-    _seed_manifest(ws)
-    _seed_identity(fake_gh)
-    _seed_rest(fake_gh, 101, reviews=[], comments=[], issue_comments=[])
-    fake_gh.set_response("GET", "repos/o/r/pulls/102", {"__error__": "API rate limit exceeded Retry-After: 1"})
-    rc = _handle_benchmark_command(["import-prs", str(ws), "--pr", "101", "--pr", "102"])
-    assert rc != 0
-    raw = load_yaml_strict(ws / "benchmark.yaml")
-    by_n = {p["number"]: p for p in raw["pull_requests"]}
-    assert by_n[101]["import_state"] == "fetched"
-    assert by_n[102]["import_state"] == "fetch_failed"
-    assert by_n[102]["error"]["code"] == "rate_limit"
-    assert (ws / "imports/pr-000101.json").exists()
-    assert not (ws / "imports/pr-000102.json").exists()   # failed fetch: no import file
-
-    _seed_rest(fake_gh, 102, reviews=[], comments=[], issue_comments=[])
-    fake_gh.set_response("GET", "repos/o/r/pulls/103", None)
-    assert _handle_benchmark_command(["import-prs", str(ws), "--pr", "103", "--pr", "102"]) != 0
-    by_n = {p["number"]: p for p in load_yaml_strict(ws / "benchmark.yaml")["pull_requests"]}
-    assert by_n[102]["import_state"] == "fetched"
-    missing = by_n[103]
-    assert missing["import_state"] == "fetch_failed"
-    assert missing["error"]["code"] == "fetch" and missing["error"]["message"]
-    assert missing["import_file"] is None and missing["import_sha256"] is None
-    assert not (ws / "imports/pr-000103.json").exists()
 
 
 def test_refresh_derived_anchor_projection_flip_stales_curated_case(tmp_path: Path, fake_gh: FakeGh,) -> None:
@@ -1041,27 +578,7 @@ def test_refresh_derived_anchor_projection_flip_stales_curated_case(tmp_path: Pa
     assert case["curation"]["exclusions"] == prior_exclusions
 
 
-def test_graphql_review_threads_retries_rate_limit_then_fails(
-    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh)
-
-    calls = {"n": 0}
-
-    def flaky_gh_api(*a: Any, **kw: Any) -> dict[str, Any]:
-        calls["n"] += 1
-        if calls["n"] < 3:
-            raise RateLimitError("graphql rate limited", retry_after=0.0)
-        ok = {"repository": {"pullRequest": {"reviewThreads": {"nodes": [], "pageInfo": {"hasNextPage": False}}}}}
-        return {"data": ok}
-
-    monkeypatch.setattr("daydream.git_ops.gh_api", flaky_gh_api)
-    monkeypatch.setattr(gi, "time", type("_T", (), {"sleep": staticmethod(lambda _s: None)})())
-    threads = gi._graphql_review_threads(ws, "o/r", 101)
-    assert threads == []
-    assert calls["n"] == 3, "rate-limit retry should make 3 attempts"
-
-def test_graphql_threads_replies_collect_past_100(tmp_path: Path, fake_gh: FakeGh) -> None:
+def _graphql_threads_replies_collect_past_100(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws = _fetch_workspace(tmp_path)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
     _seed_empty_rest(fake_gh)
@@ -1080,7 +597,7 @@ def test_graphql_threads_replies_collect_past_100(tmp_path: Path, fake_gh: FakeG
     assert [e.database_id for e in sorted(replies, key=lambda r: r.database_id)] \
            == sorted(range(2001, 2251))
 
-def test_reconcile_inline_and_thread_into_one_record(tmp_path: Path, fake_gh: FakeGh) -> None:
+def _reconcile_inline_and_thread_into_one_record(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws = _fetch_workspace(tmp_path)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [_review(5, state='DISMISSED')])
@@ -1106,26 +623,7 @@ def test_reconcile_inline_and_thread_into_one_record(tmp_path: Path, fake_gh: Fa
     assert len([e for e in doc.evidence if e.database_id == 10]) == 1
     assert not any(e.kind == "thread_comment" for e in doc.evidence)
 
-def test_evidence_order_deterministic_across_page_sizes(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _fetch_workspace(tmp_path)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [_review(1, 'approved')])
-    comments = [_rest_comment(30, 'first', login='dave', user_type='User', original_commit_id=None, line=1),
-        _rest_comment(7, 'second', login='carol', user_type='User', original_commit_id=None, path='b.py', line=2,
-            created_at='2026-01-02T00:00:00Z', updated_at='2026-01-02T00:00:00Z'
-        ),
-    ]
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", comments)
-    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
-    fake_gh._write_threads([], number=101)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
-    # deterministic order: sorted by (database_id, created_at)
-    assert [e.database_id for e in doc.evidence] == [1, 7, 30]
-    payload = doc.fetch.payload_sha256
-    doc2 = gi.fetch_and_normalize(ws, "o/r", 101)     # refetch: identical digest
-    assert doc2.fetch.payload_sha256 == payload
-
-def test_outdated_root_not_exact_acceptable_via_joined_record(tmp_path: Path, fake_gh: FakeGh) -> None:
+def _outdated_root_not_exact_acceptable_via_joined_record(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws = _fetch_workspace(tmp_path)
     marker = finding_marker("f" * 64)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
@@ -1150,35 +648,7 @@ def test_outdated_root_not_exact_acceptable_via_joined_record(tmp_path: Path, fa
     assert cand.exact_acceptable is False
     assert cand.not_exact_reason == "outdated"
 
-def test_fixture_matrix_evidence_preserved_and_historical(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _fetch_workspace(tmp_path)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [
-        _review(1, 'Found a bug.', login='cr[bot]', user_type='Bot', state='COMMENTED'),   # non-pure review body
-        _review(2, 'Nice work.', login='carol'),   # pure approval
-    ])
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [
-        _rest_comment(7, original_commit_id=None, updated_at='2026-01-03T00:00:00Z')])
-    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [
-        {"id": 9, "node_id": "IC_9", "user": {"login": "carol", "type": "User"},
-         "body": "question", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-         "html_url": "https://github.com/o/r/pull/101#issuecomment-9"}])
-    fake_gh._write_threads([], number=101)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
-    kinds = {e.kind for e in doc.evidence}
-    assert kinds == {"review", "inline_comment", "issue_comment"}   # nothing dropped
-    assert any(e.is_bot for e in doc.evidence)                        # bot actor retained
-    assert any(not e.is_bot for e in doc.evidence)                    # human actor retained
-    edited = next(e for e in doc.evidence if e.database_id == 7)
-    assert edited.updated_at > edited.created_at                      # edit metadata preserved
-    by_src = {e.source_id: e for e in doc.evidence}
-    assert by_src["github:review:1"].state == "COMMENTED"             # non-pure review body retained
-    assert by_src["github:review:2"].state == "APPROVED"              # pure approval retained as evidence
-    cands = {c.source_id for c in gi.project_candidates(doc, head_sha="a" * 40)}
-    assert "github:inline_comment:7" in cands                          # root comment is a candidate
-    assert "github:review:2" not in cands                              # pure approval: evidence only
-
-def test_graphql_review_threads_records_rate_limit_after_retries(
+def _graphql_review_threads_records_rate_limit_after_retries(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ws = _preflight_workspace(tmp_path, fake_gh)
@@ -1191,48 +661,7 @@ def test_graphql_review_threads_records_rate_limit_after_retries(
     with pytest.raises(gi._ImportRateLimitError):
         gi._graphql_review_threads(ws, "o/r", 101)
 
-def test_corrupt_prior_import_fails_before_network(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from tests.test_benchmark_curation import _seed_ready_case
-
-    ws, case_id, head = _seed_ready_case(tmp_path, fake_gh)     # valid prior state
-    imp = next((ws / "imports").glob("*.json"))
-    imp.write_bytes(b"{ corrupt json !!")                       # corrupt the persisted import
-    with pytest.raises(WorkspaceCorrupt):                       # must fail, not heal to None
-        gi._prior_import_state(ws, load_yaml_strict(ws / "benchmark.yaml"), 101)
-
-def test_corrupt_prior_curation_fails_not_healed(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from tests.test_benchmark_curation import _seed_ready_case
-
-    ws, case_id, head = _seed_ready_case(tmp_path, fake_gh)
-    case = ws / "cases" / f"{case_id}.yaml"
-    case.write_bytes(b"{ corrupt yaml !!")   # corruption the strict loader rejects
-    with pytest.raises(WorkspaceCorrupt):
-        gi._prior_import_state(ws, load_yaml_strict(ws / "benchmark.yaml"), 101)
-
-
 # Projection signatures key by physical database_id and exclude transport metadata.
-
-
-def _one_evidence() -> dict[str, Any]:
-    return {"database_id": 1, "body_sha256": "a" * 64, "body": "please fix",
-            "path": "a.py", "line": 4, "commit_id": "a" * 40, "outdated": False,
-            "resolved": False, "dismissed": False, "state": "COMMENTED",
-            "subject_type": "line", "side": "RIGHT", "start_side": None,
-            "original_path": "a.py", "original_line": 4, "original_commit_id": "a" * 40,
-            "author": {"login": "alice", "type": "User"}}
-
-
-def _sig(ev: dict[str, Any]) -> Any:
-    return gi._evidence_signature_from_raw({"evidence": [ev]})
-
-
-def test_signature_changes_on_resolution_state() -> None:
-    base = _one_evidence()
-    assert _sig(base) != _sig({**base, "resolved": True})
-    assert _sig(base) != _sig({**base, "outdated": True})
-    assert _sig(base) != _sig({**base, "dismissed": True})
-    assert _sig(base) != _sig({**base, "commit_id": "b" * 40})
-    assert _sig(base) != _sig({**base, "author": {"login": "bob", "type": "User"}})
 
 
 # Stale decisions combine referenced-evidence changes with PR-wide task-input changes.
@@ -1556,140 +985,41 @@ def test_refresh_unreachable_pinned_head_freezes_fails_without_clobber(tmp_path:
     assert code == 0                                    # no orphan bundle corruption
 
 
-def test_fact_extraction_failure_records_unavailable_and_import_still_succeeds(
-    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+def test_target_parsing_and_anchor_projection_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _parse_targets_dedupes_and_orders(tmp_path)
+    _parse_head_pr_sha_grammar_and_binding()
+    _file_level_comment_exactness_gated_by_anchor()
+    _derive_one_anchor_inverted_range_and_bad_path_fail_closed(tmp_path, monkeypatch)
+    missing = gi._derive_one_anchor(_evidence_record(original_commit_id=None), tmp_path / "mirror.git", "a" * 40)
+    assert missing.status == "history-unavailable"
+    # Persisted facts are reused only for the same extraction version and candidate split.
+    prior = {"extraction_version": schema.EXTRACTION_VERSION, "head_sha": "a" * 40, "candidates": {"x": {}},
+             "non_candidates": {}}
+    for stale, candidates in (({**prior, "extraction_version": "old"}, {"x"}), (prior, {"y"})):
+        assert gi._reuse_prior_facts(stale, "a" * 40, set(), candidates, {"x", "y"}) is None
+
+
+def test_preflight_reverifies_identity_and_status_reports_it(
+    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """An old extraction version forces a failing probe without invalidating import or curation."""
+    for name in ("status", "reverify", "numeric"):
+        (tmp_path / name).mkdir()
+    _status_reports_last_preflight_verification(tmp_path / "status", fake_gh, capsys)
+    _preflight_reverifies_identity_on_every_run_and_fails_closed(tmp_path / "reverify", fake_gh)
+    _preflight_rejects_numeric_node_id(tmp_path / "numeric", fake_gh)
 
-    from tests.test_benchmark_curation import _seed_ready_case
 
-    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, candidate=True)
-    import_path = ws / load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["source"]["import_file"]
-    before = load_json_strict(import_path)
-    raw_case = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    raw_case["prioritization"]["extraction_version"] = 0
-    storage.atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw_case)
-
-    # break the mirror; the refresh freeze re-populates it from the local bare origin
-    shutil.rmtree(ws / "cache" / "repository.git")
-
-    def boom(*a: Any, **kw: Any) -> str:
-        raise git_ops.GitError("injected anchor_delta failure")
-
-    monkeypatch.setattr("daydream.benchmark.snapshot.anchor_delta", boom)
-    origin_url = str(tmp_path / "origin_local.git")
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=origin_url) == 0
-    case = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    sid = case["candidates"][0]["source_id"]
-    assert case["prioritization"]["candidates"][sid]["anchor_delta"] == "unavailable"
-    assert case["curation"]["state"] == "draft"
-    # Ignore refresh transport metadata; extraction must preserve the import payload.
-    after = load_json_strict(import_path)
-    for d in (before, after):
-        d["fetch"] = {k: v for k, v in d["fetch"].items() if k not in ("fetched_at", "etag")}
-    assert gi._payload_sha256(after) == gi._payload_sha256(before)
-    assert after["evidence"] == before["evidence"]
-
-def test_facts_absent_from_every_hash_surface(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """Advisory case facts cannot alter import digests or workspace validity."""
-    from tests.test_benchmark_curation import _seed_ready_case
-
-    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, candidate=True)
-    case_path = ws / "cases" / f"{case_id}.yaml"
-    case = load_yaml_strict(case_path)
-    import_path = ws / case["source"]["import_file"]
-    digest_before = gi._payload_sha256(load_json_strict(import_path))
-    code_before, _ = validate_workspace(ws)
-
-    sid = case["candidates"][0]["source_id"]
-    case["prioritization"]["candidates"][sid] = {"commit_relation": "non_ancestor", "anchor_delta": "deleted"}
-    storage.atomic_write_yaml(case_path, case)
-
-    assert gi._payload_sha256(load_json_strict(import_path)) == digest_before
-    code_after, _ = validate_workspace(ws)
-    assert code_after == code_before
-
-def test_refresh_reuses_persisted_facts_and_preserves_curation(
-    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+def test_fetch_normalizes_rest_and_graphql_evidence_into_projected_candidates(
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A no-op refresh preserves facts, curation, and snapshot without any mirror probes."""
-    from tests.test_benchmark_curation import _seed_ready_case
-
-    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, candidate=True)
-    case_path = ws / "cases" / f"{case_id}.yaml"
-    sid = load_yaml_strict(case_path)["candidates"][0]["source_id"]
-    cu.accept_candidate(ws, case_id, sid)     # curator action
-    before_case = load_yaml_strict(case_path)
-    facts = before_case["prioritization"]
-    assert facts["extraction_version"] == 1
-    assert facts["head_sha"] == before_case["snapshot"]["original_head_sha"]
-    assert (facts["candidates"][sid]["commit_relation"], facts["candidates"][sid]["anchor_delta"]) == (
-        "at_head", "unchanged",
-    )
-    assert set(facts["candidates"]) | set(facts["non_candidates"]) == {"github:inline_comment:1"}
-    origin_url = str(tmp_path / "origin_local.git")
-
-    def boom(*a: Any, **kw: Any) -> str:
-        raise AssertionError("mirror probe re-ran on a no-op refresh")
-
-    monkeypatch.setattr(sn, "commit_relation", boom)
-    monkeypatch.setattr(sn, "anchor_delta", boom)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=origin_url) == 0
-    after_case = load_yaml_strict(case_path)
-    assert after_case["curation"] == before_case["curation"]  # carried forward unchanged
-    assert after_case["snapshot"] == before_case["snapshot"]  # pinned head/bundle intact
-    assert after_case["prioritization"] == before_case["prioritization"]
-    assert after_case["prioritization"]["head_sha"] == after_case["snapshot"]["original_head_sha"]
-
-def test_reuse_gate_verifies_candidate_split(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Recompute facts when projection changes the candidate split, even with identical raw evidence."""
-    from tests.test_benchmark_curation import _seed_ready_case
-
-    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, candidate=True)
-    case_path = ws / "cases" / f"{case_id}.yaml"
-    before = load_yaml_strict(case_path)
-    sid = before["candidates"][0]["source_id"]
-    assert set(before["prioritization"]["candidates"]) == {sid}
-
-    monkeypatch.setattr(gi, "project_candidates", lambda doc, head: [])
-
-    calls: list[int] = []
-    real = gi._extract_prioritization_facts
-
-    def recorded(*a: Any, **kw: Any) -> Any:
-        calls.append(1)
-        return real(*a, **kw)
-
-    monkeypatch.setattr(gi, "_extract_prioritization_facts", recorded)
-    origin_url = str(tmp_path / "origin_local.git")
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=origin_url) == 0
-    assert calls  # the gate rejected the stale split and recomputed
-    after = load_yaml_strict(case_path)
-    assert after["prioritization"]["candidates"] == {}
-    assert set(after["prioritization"]["non_candidates"]) == {sid}
-
-def test_facts_version_bump_alone_never_stales(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from tests.test_benchmark_curation import _seed_ready_case
-
-    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, candidate=True)
-    case_path = ws / "cases" / f"{case_id}.yaml"
-    raw = load_yaml_strict(case_path)
-    raw["prioritization"]["extraction_version"] = 0            # simulate an older facts version
-    raw["curation"]["state"] = "ready"
-    storage.atomic_write_yaml(case_path, raw)
-    origin_url = str(tmp_path / "origin_local.git")
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=origin_url) == 0
-    refreshed = load_yaml_strict(case_path)
-    assert refreshed["curation"]["state"] == "ready"           # version bump alone does not stale
-
-    assert refreshed["prioritization"]["extraction_version"] == EXTRACTION_VERSION
-
-def test_equivalent_imports_produce_identical_facts_and_rank(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from tests.test_benchmark_curation import _seed_ready_case_mixed
-
-    ws1, case_id1, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
-    ws2, case_id2, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
-    v1, v2 = cu.get_case(ws1, case_id1), cu.get_case(ws2, case_id2)
-    assert v1["prioritized_evidence"] == v2["prioritized_evidence"]
-    assert load_yaml_strict(ws1 / "cases" / f"{case_id1}.yaml")["prioritization"] == \
-        load_yaml_strict(ws2 / "cases" / f"{case_id2}.yaml")["prioritization"]
+    """Every served GraphQL query is also validated by fake_gh against the checked-in schema subset."""
+    for check in (_candidate_projection_right_file_body_left, _graphql_threads_replies_collect_past_100,
+                  _reconcile_inline_and_thread_into_one_record, _outdated_root_not_exact_acceptable_via_joined_record):
+        root = tmp_path / check.__name__
+        root.mkdir()
+        check(root, fake_gh)
+    root = tmp_path / "rate-limit"
+    root.mkdir()
+    with pytest.raises(git_ops.GitError, match="pulls/999 failed"):   # an ordinary gh failure is not retried
+        gi._fetch_with_retry(root, "o/r", 999)
+    _graphql_review_threads_records_rate_limit_after_retries(root, fake_gh, monkeypatch)

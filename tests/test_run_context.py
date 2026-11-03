@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import subprocess
-import sys
-import textwrap
+import signal
 from typing import Any
 
 import pytest
 
+from daydream import run_context
 from daydream.run_context import (
     InteractionPolicy,
     RunContext,
@@ -26,7 +25,6 @@ class _EqualBackend(ScriptedBackend):
 
 
 
-
 def test_choice_forces_only_supplied_assume_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
     prompts: list[str] = []
     def prompt(_console: Any, message: str, _default: str) -> str:
@@ -40,7 +38,7 @@ def test_choice_forces_only_supplied_assume_mapping(monkeypatch: pytest.MonkeyPa
     assert unattended.choice("free form", default=".", safe_default="safe") == "safe"
     assert prompts == ["free form"]
 
-def test_backend_registration_is_identity_aware_and_reference_counted() -> None:
+def test_backend_registration_is_identity_aware_and_reference_counted(monkeypatch: pytest.MonkeyPatch) -> None:
     backend = _EqualBackend()
     sibling = _EqualBackend()
     first = resolve_run_context()
@@ -67,40 +65,65 @@ def test_backend_registration_is_identity_aware_and_reference_counted() -> None:
         assert active_backends()[0] is backend
     assert first.active_backends() == ()
     assert active_backends() == ()
+    # A same-thread signal snapshot must neither deadlock nor leak membership.
+    interrupted = ScriptedBackend()
 
-def test_signal_snapshot_reenters_registration_and_interrupted_enter_cleans_up() -> None:
-    """A same-thread signal snapshot must neither deadlock nor leak membership."""
-    script = textwrap.dedent(
-        """
-        import signal
+    def interrupt(_signum: int, _frame: object) -> None:
+        assert run_context.active_backends() == (interrupted,)
+        raise KeyboardInterrupt
 
-        import daydream.run_context as runtime
+    class InterruptingRegistry(dict[object, Any]):
+        def __setitem__(self, key: object, value: Any) -> None:
+            super().__setitem__(key, value)
+            signal.raise_signal(signal.SIGINT)
 
-        backend = object()
-        context = runtime.RunContext(runtime.InteractionPolicy())
+    monkeypatch.setattr(run_context, "_active_registrations", InterruptingRegistry())
+    previous = signal.signal(signal.SIGINT, interrupt)
+    try:
+        with pytest.raises(KeyboardInterrupt), first.backend_registration(interrupted):
+            raise AssertionError("registration enter should have been interrupted")
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    assert first.active_backends() == ()
+    assert active_backends() == ()
 
-        def interrupt(_signum, _frame):
-            assert runtime.active_backends() == (backend,)
-            raise KeyboardInterrupt
 
-        class InterruptingRegistry(dict):
-            def __setitem__(self, key, value):
-                super().__setitem__(key, value)
-                signal.raise_signal(signal.SIGINT)
+async def test_overlapping_runs_keep_prompt_and_console_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An interactive sibling task cannot enable stdin or disable log redaction for a logged run."""
+    import anyio
 
-        signal.signal(signal.SIGINT, interrupt)
-        runtime._active_registrations = InterruptingRegistry()
-        try:
-            with context.backend_registration(backend):
-                raise AssertionError("registration enter should have been interrupted")
-        except KeyboardInterrupt:
-            pass
-        else:
-            raise AssertionError("signal did not interrupt registration enter")
+    from daydream.agent import console
+    from daydream.run_context import bind_run_context, current_run_context
 
-        assert context.active_backends() == ()
-        assert runtime.active_backends() == ()
-        """
-    )
+    sentinel = "ghp_" + "x" * 16
+    input_calls: list[str] = []
 
-    subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True, timeout=5,)
+    def answer() -> str:
+        input_calls.append("read")
+        return "interactive-answer"
+
+    monkeypatch.setattr("builtins.input", answer)
+    logged = RunContext(InteractionPolicy(log_mode=True, quiet=True, interactive=False))
+    plain = RunContext(InteractionPolicy(assume="yes"))
+    choices: dict[str, str] = {}
+    logged_bound, plain_bound = anyio.Event(), anyio.Event()
+
+    async def run(label: str, context: RunContext, mine: anyio.Event, sibling: anyio.Event) -> None:
+        with bind_run_context(context):
+            mine.set()
+            await sibling.wait()  # Both runs are bound while each one prompts and prints.
+            choices[label] = resolve_run_context().choice(
+                f"{label} choice", default="safe-default", safe_default="safe-default", console=console)
+            console.print(f"{label}-token={sentinel}", markup=False, highlight=False)
+
+    with console.capture() as captured, anyio.fail_after(5):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(run, "logged", logged, logged_bound, plain_bound)
+            tasks.start_soon(run, "plain", plain, plain_bound, logged_bound)
+
+    assert choices == {"logged": "safe-default", "plain": "interactive-answer"}
+    assert input_calls == ["read"]
+    output = captured.get()
+    assert f"logged-token={sentinel}" not in output and "logged-token=[REDACTED_API_KEY]" in output
+    assert f"plain-token={sentinel}" in output
+    assert current_run_context() is None

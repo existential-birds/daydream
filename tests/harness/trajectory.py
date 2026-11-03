@@ -8,11 +8,8 @@ from typing import Any, cast
 
 from daydream.archive.manifest import Manifest
 from daydream.backends import (
-    CostEvent,
-    MetricsEvent,
     ResultEvent,
     TextEvent,
-    TurnEndEvent,
 )
 from daydream.trajectory import (
     DaydreamRunFlow,
@@ -133,37 +130,9 @@ def step_token_sum(traj: dict[str, Any], key: str) -> int:
     return sum(s["metrics"][key] for s in traj["steps"] if s.get("metrics") and s["metrics"].get(key))
 
 
-def observe_claude_shape(inv: Invocation) -> None:
-    """Emit five understated message metrics followed by an authoritative session total.
-
-    This SDK-shaped discrepancy exercises residual token reconciliation.
-    """
-    for i, c in enumerate((12, 9, 11, 8, 10)):
-        inv.observe(TextEvent(text=f"turn {i}"))
-        inv.observe(
-            MetricsEvent(message_id=f"m{i}", prompt_tokens=100, completion_tokens=c, cached_tokens=None, cost_usd=None)
-        )
-        inv.observe(TurnEndEvent(message_id=f"m{i}"))
-    inv.observe(CostEvent(cost_usd=0.5, input_tokens=600, output_tokens=66_737, cached_tokens=None))
-    inv.observe(ResultEvent(structured_output=None, continuation=None))
-
-
 def observe_text_and_result(inv: Invocation, text: str = "output") -> None:
     """Observe a TextEvent + ResultEvent to produce a minimal agent step."""
     inv.observe(TextEvent(text=text))
-    inv.observe(ResultEvent(structured_output=None, continuation=None))
-
-
-def observe_metrics_and_result(
-    inv: Invocation, text: str, *, message_id: str, prompt_tokens: int, completion_tokens: int,
-    cached_tokens: int | None, cost_usd: float | None,
-) -> None:
-    """Observe a TextEvent + MetricsEvent + ResultEvent to produce one agent step."""
-    inv.observe(TextEvent(text=text))
-    inv.observe(MetricsEvent(message_id=message_id, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
-            cached_tokens=cached_tokens, cost_usd=cost_usd,
-        )
-    )
     inv.observe(ResultEvent(structured_output=None, continuation=None))
 
 

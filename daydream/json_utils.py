@@ -9,11 +9,31 @@ import tempfile
 import threading
 from contextlib import suppress
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from itertools import islice
 from pathlib import Path
 from typing import Any, Callable
 
 from jsonschema import Draft202012Validator
+from jsonschema.exceptions import best_match
+from jsonschema.protocols import Validator
+from jsonschema.validators import validator_for
+
+
+@lru_cache(maxsize=64)
+def _compiled_validator(schema_json: str) -> Validator:
+    """Compile a JSON schema once; schema sites are a small fixed set."""
+    schema = json.loads(schema_json)
+    validator_class = validator_for(schema)
+    validator_class.check_schema(schema)
+    return validator_class(schema)
+
+
+def validate_json_schema(value: Any, schema: Any) -> None:
+    """``jsonschema.validate`` with the same error selection, minus per-call schema checks."""
+    error = best_match(_compiled_validator(json.dumps(schema)).iter_errors(value))
+    if error is not None:
+        raise error
 
 
 def _fsync_directory(path: Path) -> None:

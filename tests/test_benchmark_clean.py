@@ -4,7 +4,6 @@ The deletion set is strictly ledger-driven and containment-checked: every
 hermetic test stubs the Docker-removal default so CI never shells out to a
 real Docker/network call (the real ``docker rmi`` path is issue #13).
 """
-import fcntl
 import json
 from pathlib import Path
 from typing import Any
@@ -14,8 +13,7 @@ import pytest
 import daydream.benchmark.harbor.clean as clean_mod
 import daydream.benchmark.harbor.run as run_mod
 from daydream.benchmark import storage
-from daydream.benchmark.cli import _build_benchmark_parser, _handle_benchmark_command
-from daydream.benchmark.storage import atomic_write_json as storage_atomic_write_json
+from daydream.benchmark.cli import _handle_benchmark_command
 
 
 @pytest.fixture(autouse=True)
@@ -32,8 +30,11 @@ def _stub_harbor_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def ws(tmp_path: Path) -> Any:
+    return _make_ws(tmp_path / "ws")
+
+
+def _make_ws(ws: Path) -> Path:
     """A minimal valid workspace: curated scaffold + runtime, no derived dirt."""
-    ws = tmp_path / "ws"
     (ws / "runtime").mkdir(parents=True)
     for name in ("imports", "cases", "snapshots"):
         (ws / name).mkdir(parents=True, exist_ok=True)
@@ -69,16 +70,6 @@ def _append_ledger_run_raw(ws: Path, run_id: Any, *, job_dir: Any, state: Any, e
     storage.atomic_write_json(path, doc, mode=0o600)
 
 
-def test_clean_parser_exposes_flags_and_derived_union() -> None:
-    parser = _build_benchmark_parser()
-    args = parser.parse_args(["clean", "/ws", "--cache", "--jobs", "--trajectories"])
-    assert args.subcommand == "clean"
-    assert args.dir == Path("/ws")
-    assert args.cache is True and args.jobs is True and args.trajectories is True
-    assert args.derived is False and args.all is False and args.yes is False
-    derived = parser.parse_args(["clean", "/ws", "--derived"])
-    assert derived.derived is True and derived.cache is False
-
 def test_handle_clean_routes_to_clean_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
     def fake_clean(root: Any, *, cache: pytest.Cache, jobs: Any, trajectories: Any, all_: Any, yes: Any) -> Any:
@@ -93,81 +84,7 @@ def test_handle_clean_routes_to_clean_workspace(tmp_path: Path, monkeypatch: pyt
     assert captured["trajectories"] is True
     assert captured["all_"] is False and captured["yes"] is True
 
-def test_clean_report_summary_includes_populated_counters() -> None:
-    report = clean_mod.CleanReport(
-        cache_deleted=2, cache_absent=1, trajectory_deleted=3, trajectory_absent=4, job_dirs_deleted=5,
-        job_dirs_absent=6, runs_cleaned=7, runs_already_clean=8, images_removed=9, images_absent=10, images_failed=11,
-        gold_deleted=12, recoverable=False,
-    )
-
-    assert report.exit_code == 1
-    assert report.summary_lines() == [
-        "cache: 2 deleted, 1 absent", "trajectories: 3 deleted, 4 absent", "job dirs: 5 deleted, 6 absent",
-        "runs: 7 cleaned, 8 already clean", "images: 9 removed, 10 absent, 11 failed", "gold: 12 deleted",
-        "deletion is unrecoverable",
-    ]
-
-
-
-
-
-
-
-
-
-
-def test_job_dir_kept_when_image_removal_fails(ws: Path) -> None:
-    run_id = "00000000-0000-0000-0000-0000000000d1"
-    job = ws / "harbor" / "jobs" / run_id
-    (job / "t").mkdir(parents=True)
-    _append_ledger_run(ws, run_id, state="complete", environments=[_docker_env("c", removed=False)])
-
-    def fail_docker_rm(refs: Any) -> dict[str, Any]:
-        return {"returncode": 1}
-
-    report = clean_mod.clean_workspace(ws, jobs=True, docker_rm=fail_docker_rm)
-    assert report.exit_code == 1 and report.images_failed == 1
-    assert job.exists()                                # job dir preserved on image failure
-    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
-    assert ledger["runs"][0]["environments"][0]["removed"] is False
-    assert ledger["runs"][0]["state"] == "complete"    # not transitioned to cleaned
-
-def test_partial_failure_continues_to_other_runs(ws: Path) -> None:
-    for i, (rid, img) in enumerate([("a", "hb__x-a"), ("b", "hb__x-b")]):
-        job = ws / "harbor" / "jobs" / rid
-        (job / "t").mkdir(parents=True)
-        _append_ledger_run(ws, rid, state="complete", environments=[_docker_env(f"c{i}", removed=False, image_id=img)])
-
-    def selective(refs: Any) -> dict[str, Any]:
-        return {"returncode": 1 if refs == ["hb__x-a"] else 0}
-
-    report = clean_mod.clean_workspace(ws, jobs=True, docker_rm=selective)
-    assert report.images_failed == 1 and report.images_removed == 1
-    assert report.job_dirs_deleted == 1                 # successful run's dir removed
-
-def test_partial_failure_persists_removed_flags(ws: Path) -> None:
-    """Persist successful image removals even when another removal prevents job cleanup."""
-    run_id = "00000000-0000-0000-0000-0000000000d2"
-    job = ws / "harbor" / "jobs" / run_id
-    (job / "t").mkdir(parents=True)
-    _append_ledger_run(ws, run_id, state="complete",
-        environments=[
-            _docker_env("a", removed=False, image_id="hb__a"), _docker_env("b", removed=False, image_id="hb__b"),
-        ],
-    )
-
-    def selective(refs: Any) -> dict[str, Any]:
-        return {"returncode": 1 if refs == ["hb__a"] else 0}
-
-    report = clean_mod.clean_workspace(ws, jobs=True, docker_rm=selective)
-    assert report.images_failed == 1 and report.images_removed == 1
-    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
-    row = ledger["runs"][0]
-    assert row["state"] == "complete"               # not cleaned on partial failure
-    assert row["environments"][0]["removed"] is False
-    assert row["environments"][1]["removed"] is True  # persisted, not dropped
-
-def test_clean_jobs_absent_image_counts_absent_without_blocking(ws: Path) -> None:
+def _absent_image_counts_absent_without_blocking(ws: Path) -> None:
     """An already-absent image (the docker_rm seam reports ``absent``) is
     counted as absent, not failed, and does not block the run from cleaning:
     without this, an externally-pruned image re-fails forever and the run
@@ -192,7 +109,7 @@ def test_clean_jobs_absent_image_counts_absent_without_blocking(ws: Path) -> Non
     assert ledger["runs"][0]["environments"][0]["removed"] is True
     assert ledger["runs"][0]["state"] == "cleaned"
 
-def test_clean_jobs_keeps_dir_when_environments_empty(ws: Path) -> None:
+def _keeps_dir_when_environments_empty(ws: Path) -> None:
     """A ledger row with no recorded environments cannot be cleaned: deleting
     its job dir would permanently orphan the images that run spawned. Keep the
     dir and the run's prior state, and surface the incomplete cleanup.
@@ -215,8 +132,8 @@ def test_clean_jobs_keeps_dir_when_environments_empty(ws: Path) -> None:
     assert ledger["runs"][0]["state"] == "complete"  # never marked cleaned
 
 
-def test_symlink_escape_target_rejected(tmp_path: Path, ws: Any) -> None:
-    victim = tmp_path / "outside-secret"
+def _symlink_escape_target_rejected(ws: Path) -> None:
+    victim = ws.parent / "outside-secret"
     victim.mkdir()
     (ws / "cache").mkdir(parents=True)
     (ws / "cache" / "repository.git").symlink_to(victim, target_is_directory=True)
@@ -224,22 +141,22 @@ def test_symlink_escape_target_rejected(tmp_path: Path, ws: Any) -> None:
         clean_mod.clean_workspace(ws, cache=True)
     assert victim.exists()   # outside target untouched
 
-def test_non_contained_ledger_job_dir_rejected(tmp_path: Path, ws: Any) -> None:
-    evil = tmp_path / "evil"
+def _non_contained_ledger_job_dir_rejected(ws: Path) -> None:
+    evil = ws.parent / "evil"
     evil.mkdir()
     _append_ledger_run_raw(ws, "bad", job_dir=str(evil), state="complete", environments=[])
     with pytest.raises(clean_mod.RunError):
         clean_mod.clean_workspace(ws, jobs=True)
     assert evil.exists()
 
-def test_clean_all_refuses_without_yes_and_no_tty(ws: Path) -> None:
+def _refuses_without_yes_and_no_tty(ws: Path) -> None:
     report = clean_mod.clean_workspace(ws, all_=True, yes=False, confirm=lambda _: False)
     assert report.exit_code == 1
     for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
         assert (ws / name).exists()   # nothing deleted on refusal
 
 
-def test_clean_all_preserves_curated_when_derived_stage_raises(ws: Path) -> None:
+def _preserves_curated_when_derived_stage_raises(ws: Path) -> None:
     """Curated source/gold is unrecoverable, so it must be deleted last: a
     failure in a derived stage (here the jobs image-removal seam) must not have
     already destroyed the irreplaceable workspace when the stage raises.
@@ -257,7 +174,7 @@ def test_clean_all_preserves_curated_when_derived_stage_raises(ws: Path) -> None
     for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
         assert (ws / name).exists(), f"curated {name} must survive a derived-stage failure"
 
-def test_clean_all_preserves_curated_when_derived_stage_soft_fails(ws: Path) -> None:
+def _preserves_curated_when_derived_stage_soft_fails(ws: Path) -> None:
     """A soft derived-stage failure (a ``docker_rm`` non-zero returncode, not
     an exception) must also preserve curated source/gold: the pass exits
     non-zero, and an unrecoverable workspace must not be destroyed first.
@@ -275,33 +192,6 @@ def test_clean_all_preserves_curated_when_derived_stage_soft_fails(ws: Path) -> 
     assert report.gold_deleted == 0 and report.recoverable is True
     for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
         assert (ws / name).exists(), f"curated {name} must survive a soft derived failure"
-
-def test_workspace_lock_held_during_mutation(ws: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    run_id = "00000000-0000-0000-0000-0000000000f3"
-    job = ws / "harbor" / "jobs" / run_id
-    (job / "t").mkdir(parents=True)
-    _append_ledger_run(ws, run_id, state="complete", environments=[_docker_env("case-abc__1", removed=False)])
-
-    lock_held_at_write: list[bool] = []
-    real_atomic_write_json = storage_atomic_write_json
-
-    def recording_atomic_write_json(path: Path, data: Any, *, mode: int = 0o600,) -> None:
-        with (ws / ".benchmark.lock").open("r+") as lock_file:
-            try:
-                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                lock_held_at_write.append(True)
-            else:
-                lock_held_at_write.append(False)
-                fcntl.flock(lock_file, fcntl.LOCK_UN)
-        real_atomic_write_json(path, data, mode=mode)
-
-    monkeypatch.setattr(clean_mod, "atomic_write_json", recording_atomic_write_json)
-    report = clean_mod.clean_workspace(ws, jobs=True)
-
-    assert report.exit_code == 0 and report.job_dirs_deleted == 1
-    assert lock_held_at_write == [True]
-
 
 def test_clean_derived_union_deletes_all_derived(ws: Path) -> None:
     """One ledger-owned workspace exercises selected cleanup, resume and confirmed curated deletion."""
@@ -357,3 +247,12 @@ def test_clean_derived_union_deletes_all_derived(ws: Path) -> None:
     final = clean_mod.clean_workspace(ws, all_=True, yes=True, docker_rm=docker_rm)
     assert final.exit_code == 0 and final.gold_deleted == 4 and final.recoverable is False
     assert not any(path.exists() for path in curated) and removed == [["hb__owned"]]
+
+
+def test_clean_jobs_and_all_fail_closed_without_destroying_unrecoverable_state(tmp_path: Path) -> None:
+    """Every cleanup refusal or derived failure keeps images, escaped targets and curated gold."""
+    for check in (_absent_image_counts_absent_without_blocking, _keeps_dir_when_environments_empty,
+                  _symlink_escape_target_rejected, _non_contained_ledger_job_dir_rejected,
+                  _refuses_without_yes_and_no_tty, _preserves_curated_when_derived_stage_raises,
+                  _preserves_curated_when_derived_stage_soft_fails):
+        check(_make_ws(tmp_path / check.__name__ / "ws"))

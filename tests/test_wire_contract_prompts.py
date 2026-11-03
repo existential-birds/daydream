@@ -28,6 +28,10 @@ def test_wire_contract_checklists_are_delivered_only_to_their_intended_prompts(t
         strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"],
         **p)
     structural = build_structural_prompt(strategy=_default_strategy("discovery.structural"), files=["api.py"], **p,)
+    # Staged review assignments keep the same delivery rule.
+    staged_rust = build_per_stack_prompt(strategy=_default_strategy("discovery.per_stack"), stack_name="rust#0",
+        files=["src/main.rs"], review_stage={"stage": "first_pass"}, **p)
+    assert WIRE_CONTRACT_RUST_INSTRUCTION in staged_rust and WIRE_CONTRACT_GENERIC_INSTRUCTION not in staged_rust
 
     assert WIRE_CONTRACT_RUST_INSTRUCTION in rust
     assert WIRE_CONTRACT_GENERIC_INSTRUCTION not in rust

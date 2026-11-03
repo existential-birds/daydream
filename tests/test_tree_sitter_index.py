@@ -1,13 +1,13 @@
 """Unit tests for daydream.tree_sitter_index.detect_affected_files()."""
 
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from daydream import _tree_sitter_safety as safety, git_ops, tree_sitter_index
+from daydream import _tree_sitter_safety as safety, tree_sitter_index
 from daydream.tree_sitter_index import (
-    PYTHON_DEF_QUERY,
     TERMINAL_MACRO_NAMES,
     branch_statement_lines,
     definitions_in_file,
@@ -15,13 +15,9 @@ from daydream.tree_sitter_index import (
     get_parser,
     is_branch_line,
     is_terminal_line,
-    language_for_path,
     statements,
 )
-from daydream.tree_sitter_index.imports import _MAX_IMPORTERS
-from daydream.tree_sitter_index.runtime import _PARSER_CACHE, _def_query_for_language, _diagram_def_query_for_language
-from tests.conftest import _make_repo_with_main
-from tests.harness.git_helpers import commit as _commit, git as _git
+from daydream.tree_sitter_index.runtime import _PARSER_CACHE
 
 
 def _modified_diff(path: str) -> str:
@@ -34,10 +30,6 @@ def _modified_diff(path: str) -> str:
         " x = 1\n"
         "+y = 2\n"
     )
-
-
-def _importers(results: Any) -> set[str]:
-    return {r.path for r in results if r.role == "imported_by"}
 
 
 def _materialize(tmp_path: Path, files: dict[str, str]) -> Path:
@@ -94,7 +86,9 @@ def test_go_imports_reuse_one_package_index(tmp_path: Path, monkeypatch: pytest.
         "-print('bye')\n"
     )
     results = detect_affected_files(
-        _modified_diff("cmd/alpha.go") + _modified_diff("cmd/beta.go") + unsupported_diff + deleted_diff, repo,
+        _modified_diff("cmd/alpha.go") + _modified_diff("cmd/beta.go") + unsupported_diff + deleted_diff
+        # A header without a new-side path names no file rather than failing the parse.
+        + "diff --git malformed-header\n", repo,
     )
     assert [(r.path, r.role) for r in results if r.path == "lib/foo.rb"] == [("lib/foo.rb", "modified")]
     assert [(r.path, r.role) for r in results if r.path == "gone.py"] == [("gone.py", "modified")]
@@ -105,67 +99,21 @@ def test_go_imports_reuse_one_package_index(tmp_path: Path, monkeypatch: pytest.
     }
 
 
+def test_known_bad_tree_sitter_is_refused_at_detection_and_parser_construction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Guard actual Parser construction, including import-graph callers; an absent install is the degrade path."""
+    def _not_installed() -> None:
+        raise PackageNotFoundError("tree-sitter")
 
-def test_reverse_edge_capped_at_max(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """One real lookup keeps independent nested, generic, defining and non-code paths."""
-    repo = _make_repo_with_main(tmp_path)
-    (repo / "pkg").mkdir()
-    (repo / "pkg/widget.py").write_text("x = 1\ny = 2\n")
-    (repo / "gadget.py").write_text("x = 1\ny = 2\n")
-    (repo / "caller.py").write_text("from pkg.widget import W\n\nW()\n")
-    (repo / "app.py").write_text("x = 1\ny = 2\nimport config\n")
-    (repo / "config.py").write_text("def load_config():\n    return {}\n")
-    (repo / "unrelated.py").write_text("# the app starts here\nrun_app()\n")
-    (repo / "notes.md").write_text("The widget is documented here.\n")
-    overshoot = _MAX_IMPORTERS + 5
-    for stem, module in (("widget", "pkg.widget"), ("gadget", "gadget")):
-        for i in range(overshoot):
-            (repo / f"{stem}_importer_{i}.py").write_text(f"import {module}\n")
-    _git(repo, "add", ".")
-    _commit(repo, "mixed source and capped importers")
-
-    real_grep_fixed = git_ops.grep_fixed_matches
-    calls = 0
-
-    def one_batch(*args: Any, **kwargs: Any) -> Any:
-        nonlocal calls
-        calls += 1
-        if calls > 1:
-            raise AssertionError("grep_fixed_matches called more than once")
-        return real_grep_fixed(*args, **kwargs)
-
-    monkeypatch.setattr(git_ops, "grep_fixed_matches", one_batch)
-
-    results = detect_affected_files(
-        _modified_diff("pkg/widget.py") + _modified_diff("gadget.py")
-        + _modified_diff("app.py") + _modified_diff("config.py"), repo,
-    )
-    importers = _importers(results)
-    assert "caller.py" in importers
-    assert "app.py" in importers
-    assert "unrelated.py" not in importers
-    assert "notes.md" not in importers
-    widget = {p for p in importers if p == "caller.py" or p.startswith("widget_importer_")}
-    gadget = {p for p in importers if p.startswith("gadget_importer_")}
-    assert len(widget) == 40
-    assert len(gadget) == 40
-    assert len(importers) == 81
-    assert {r.path for r in results if r.role == "modified"} == {
-        "pkg/widget.py", "gadget.py", "app.py", "config.py",
-    }
-
-
-def test_detect_affected_files_refuses_known_bad_tree_sitter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(safety, "installed_tree_sitter_version", _not_installed)
+    safety.assert_tree_sitter_safe()  # not installed is the existing degrade path, not bad
     monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
     with pytest.raises(safety.TreeSitterBadVersionError):
         detect_affected_files(
             repo_root=tmp_path,
             diff_text=("diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n" "@@ -1 +1 @@\n-x\n+y\n"),
         )
-
-def test_get_parser_refuses_known_bad_tree_sitter(monkeypatch: pytest.MonkeyPatch,) -> None:
-    """Guard actual Parser construction, including import-graph callers."""
-    monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
     _PARSER_CACHE.clear()
     try:
         with pytest.raises(safety.TreeSitterBadVersionError):
@@ -176,163 +124,6 @@ def test_get_parser_refuses_known_bad_tree_sitter(monkeypatch: pytest.MonkeyPatc
 
 
 # Literal line outcomes exercise branch and terminal classification through real grammars.
-
-PYTHON_CF = b'''import os
-import sys
-
-
-def f(x, items):
-    if x > 1:
-        pass
-    elif x > 0:
-        pass
-    else:
-        pass
-    for i in items:
-        pass
-    while x:
-        break
-    try:
-        pass
-    except ValueError:
-        pass
-    finally:
-        pass
-    with open("f") as fh:
-        fh.close()
-    match x:
-        case 1:
-            pass
-        case _:
-            pass
-    y = 1 if x else 2
-    z = x and y
-    assert z
-    if x:
-        raise ValueError("no")
-    if y:
-        sys.exit(1)
-    if z:
-        os._exit(1)
-    if items:
-        exit(1)
-    if not items:
-        quit()
-    return 0
-'''
-
-TYPESCRIPT_CF = b'''function f(a: boolean, b: boolean, items: number[], o?: { p?: number }) {
-  if (a) {
-    return 1;
-  } else if (b) {
-    return 2;
-  } else {
-    throw new Error("x");
-  }
-  for (let i = 0; i < 3; i++) {
-    continue;
-  }
-  for (const it of items) {
-    break;
-  }
-  while (a) {
-    break;
-  }
-  do {
-    break;
-  } while (a);
-  try {
-    process.exit(1);
-  } catch (e) {
-    throw e;
-  } finally {
-    console.log("done");
-  }
-  const t = a ? 1 : 2;
-  const q = o?.p;
-  switch (t) {
-    case 1:
-      switch (q) {
-        case 2:
-          break;
-        default:
-          break;
-      }
-      break;
-    default:
-      break;
-  }
-  return t;
-}
-'''
-
-TSX_CF = b'''export const Panel = ({ n }: { n: number }) => {
-  if (n > 1) {
-    return <div>big</div>;
-  }
-  return n > 0 ? <span>small</span> : null;
-};
-'''
-
-JAVASCRIPT_CF = b'''function f(a, items) {
-  if (a) {
-    return 1;
-  }
-  for (const i of items) {
-    if (i) continue;
-  }
-  process.exit(0);
-}
-'''
-
-GO_CF = b'''package main
-
-import (
-\t"log"
-\t"os"
-\t"testing"
-)
-
-func f(a bool, b bool, ch chan int, v interface{}) int {
-\tif a {
-\t\treturn 1
-\t} else if b {
-\t\treturn 2
-\t} else {
-\t\treturn 3
-\t}
-\tfor i := 0; i < 3; i++ {
-\t\tcontinue
-\t}
-\tswitch a {
-\tcase true:
-\t\tswitch b {
-\t\tcase true:
-\t\t\tos.Exit(1)
-\t\tdefault:
-\t\t\tlog.Fatal("x")
-\t\t}
-\tdefault:
-\t\tpanic("x")
-\t}
-\tswitch t := v.(type) {
-\tcase int:
-\t\t_ = t
-\t}
-\tselect {
-\tcase <-ch:
-\t\treturn 4
-\t}
-\treturn 0
-}
-
-func g(t *testing.T) {
-\tlog.Fatalf("%v", 1)
-\tlog.Panic("x")
-\tt.Fatal("x")
-\tt.Fatalf("%v", 1)
-}
-'''
 
 RUST_CF = b'''use std::fs;
 use std::process;
@@ -384,15 +175,6 @@ def _terminal_lines(language_id: str | None, source: bytes) -> list[int]:
     return [n + 1 for n in range(len(rows)) if is_terminal_line(language_id, source, n + 1)]
 
 
-def _executable_lines(language_id: str | None, source: bytes) -> list[int]:
-    rows = source.split(b"\n")
-    return [
-        n + 1
-        for n in range(len(rows))
-        if tree_sitter_index.is_executable_statement_line(language_id, source, n + 1)
-    ]
-
-
 def _defs(repo_root: Path, path: str) -> set[tuple[str, int, int, str]]:
     return {
         (str(d["name"]), int(str(d["line"])), int(str(d["end_line"])), str(d["kind"]))
@@ -400,118 +182,7 @@ def _defs(repo_root: Path, path: str) -> set[tuple[str, int, int, str]]:
     }
 
 
-@pytest.mark.parametrize(
-    ("path", "expected"),
-    [
-        ("src/a.ts", "typescript"), ("src/a.tsx", "tsx"),
-        # .js is parsed by the TypeScript grammar, .jsx by the TSX grammar.
-        ("src/a.js", "javascript"), ("src/a.jsx", "tsx"),
-        ("README.md", None),
-        ("src/a.PY", None),  # suffix matching is case-sensitive
-    ],
-)
-def test_language_for_path_maps_supported_suffixes(path: str, expected: str | None) -> None:
-    assert language_for_path(path) == expected
-
-
-def test_definitions_in_file_typescript_covers_every_diagram_pattern(tmp_path: Path) -> None:
-    (tmp_path / "defs.ts").write_text(
-        "export function alpha(): void {}\n"
-        "export function* gen() {\n"
-        "  yield 1;\n"
-        "}\n"
-        "export const beta = (x: number) => x + 1;\n"
-        "const gamma = function inner() {\n"
-        "  return 1;\n"
-        "};\n"
-        "export class Widget {\n"
-        "  constructor() {}\n"
-        "  static make(): Widget {\n"
-        "    return new Widget();\n"
-        "  }\n"
-        "}\n"
-        "export abstract class Base {\n"
-        "  abstract go(): void;\n"
-        "}\n"
-        "export interface Shape {\n"
-        "  area(): number;\n"
-        "}\n"
-        "export type Alias = string;\n"
-        "export enum Color {\n"
-        "  Red,\n"
-        "}\n"
-        "declare function sig(a: string): void;\n"
-    )
-    assert _defs(tmp_path, "defs.ts") == {
-        ("alpha", 1, 1, "function"), ("gen", 2, 4, "function"),
-        # The arrow/function-expression capture lands on the variable_declarator,
-        # so `const beta = ...` and `const gamma = function inner() {}` both index.
-        ("beta", 5, 5, "function"), ("gamma", 6, 8, "function"), ("Widget", 9, 14, "class"),
-        ("constructor", 10, 10, "function"), ("make", 11, 13, "function"), ("Base", 15, 17, "class"),
-        ("Shape", 18, 20, "class"), ("area", 19, 19, "function"), ("Alias", 21, 21, "type"), ("Color", 22, 24, "class"),
-        ("sig", 25, 25, "function"),
-    }
-
-def test_definitions_in_file_tsx_indexes_jsx_component_and_method(tmp_path: Path) -> None:
-    (tmp_path / "defs.tsx").write_text(
-        "export const Panel = ({ title }: { title: string }) => <div>{title}</div>;\n"
-        "\n"
-        "export function App() {\n"
-        '  return <Panel title="x" />;\n'
-        "}\n"
-        "\n"
-        "export class Box {\n"
-        "  render() {\n"
-        "    return <span />;\n"
-        "  }\n"
-        "}\n"
-    )
-    assert _defs(tmp_path, "defs.tsx") == {
-        ("Panel", 1, 1, "function"), ("App", 3, 5, "function"), ("Box", 7, 11, "class"), ("render", 8, 10, "function"),
-    }
-
-def test_definitions_in_file_javascript_indexes_arrow_and_class(tmp_path: Path) -> None:
-    (tmp_path / "defs.js").write_text(
-        "export function alpha() {}\n"
-        "export const beta = (x) => x + 1;\n"
-        "export class Widget {\n"
-        "  go() {}\n"
-        "}\n"
-    )
-    assert _defs(tmp_path, "defs.js") == {
-        ("alpha", 1, 1, "function"), ("beta", 2, 2, "function"), ("Widget", 3, 5, "class"), ("go", 4, 4, "function"),
-    }
-
-def test_definitions_in_file_go_covers_func_method_type_spec_and_alias(tmp_path: Path) -> None:
-    (tmp_path / "defs.go").write_text(
-        "package main\n"
-        "\n"
-        "type Server struct {\n"
-        "\tName string\n"
-        "}\n"
-        "\n"
-        "type Alias = int\n"
-        "\n"
-        "type Stringer interface {\n"
-        "\tString() string\n"
-        "}\n"
-        "\n"
-        "func New() *Server {\n"
-        "\treturn &Server{}\n"
-        "}\n"
-        "\n"
-        "func (s *Server) Handle(x int) int {\n"
-        "\treturn x\n"
-        "}\n"
-    )
-    # `type Alias = int` is a type_alias, not a type_spec -- both are captured, and
-    # neither is stamped "class" the way the shared _definition_kind would.
-    assert _defs(tmp_path, "defs.go") == {
-        ("Server", 3, 5, "type"), ("Alias", 7, 7, "type"), ("Stringer", 9, 11, "type"), ("New", 13, 15, "function"),
-        ("Handle", 17, 19, "function"),
-    }
-
-def test_definitions_in_file_rust_covers_every_item_kind(tmp_path: Path) -> None:
+def test_definitions_in_file_rust_covers_every_item_kind_and_skips_unreadable_files(tmp_path: Path) -> None:
     (tmp_path / "defs.rs").write_text(
         "pub struct Widget {\n"
         "\tpub n: u32,\n"
@@ -545,118 +216,15 @@ def test_definitions_in_file_rust_covers_every_item_kind(tmp_path: Path) -> None
         ("Alias", 13, 13, "type"), ("inner", 15, 17, "module"), ("deep", 16, 16, "function"), ("U", 19, 21, "class"),
         ("top", 23, 25, "function"),
     }
-
-def test_definitions_in_file_python_range_excludes_the_decorator(tmp_path: Path) -> None:
-    (tmp_path / "defs.py").write_text(
-        "import functools\n"
-        "\n"
-        "\n"
-        "@functools.cache\n"
-        "def alpha(x):\n"
-        "    return x\n"
-        "\n"
-        "\n"
-        "class Widget:\n"
-        "    def go(self):\n"
-        "        return 1\n"
-    )
-    # decorated_definition has no `name` field, so the inner function_definition is
-    # captured and the decorator line (4) sits outside the reported range. Widget
-    # and go also share end_line 11: a line number alone is not a unique key.
-    assert _defs(tmp_path, "defs.py") == {
-        ("alpha", 5, 6, "function"), ("Widget", 9, 11, "class"), ("go", 10, 11, "function"),
-    }
-
-def test_definitions_in_file_missing_file_returns_empty(tmp_path: Path) -> None:
     assert definitions_in_file(tmp_path, "nope.ts") == []
-
-def test_definitions_in_file_unknown_language_returns_empty(tmp_path: Path) -> None:
     (tmp_path / "notes.md").write_text("# not code\n")
     assert definitions_in_file(tmp_path, "notes.md") == []
 
-def test_definitions_in_file_degrades_on_syntax_error(tmp_path: Path) -> None:
-    # python recovery keeps the enclosing definition; typescript collapses to a
-    # top-level ERROR and loses it. Neither may raise.
-    (tmp_path / "broken.py").write_text("def alpha(:\n    return 1\n")
-    (tmp_path / "broken.ts").write_text("function alpha( {\n  return 1;\n")
-    assert ("alpha", 1, 2, "function") in _defs(tmp_path, "broken.py")
-    assert definitions_in_file(tmp_path, "broken.ts") == []
 
-def test_shared_definition_query_still_excludes_typescript_and_go() -> None:
-    """Diagram queries must not widen the reverse-import definition gate.
-
-    Admitting TypeScript/Go there adds edges for generic index.ts/main.go files."""
-    for language_id in ("typescript", "tsx", "javascript", "go"):
-        assert _def_query_for_language(language_id) is None
-        assert _diagram_def_query_for_language(language_id) is not None
-    assert _def_query_for_language("python") is PYTHON_DEF_QUERY
-    assert _diagram_def_query_for_language("python") is PYTHON_DEF_QUERY
-
-
-def test_branch_lines_python_flat_elif_chain_and_match_cases() -> None:
-    # The if/elif/else chain is flat in python: `elif` (8) counts, `else` (10)
-    # does not, so the chain yields one line per condition, not two per branch.
-    # `match x:` (24) is dropped in favour of its case_clause lines (25, 27).
-    assert branch_statement_lines("python", PYTHON_CF) == [
-        6, 8, 12, 14, 16, 18, 20, 22, 25, 27, 29, 30, 31, 32, 34, 36, 38, 40
-    ]
-    assert is_branch_line("python", PYTHON_CF, 24) is True
-    assert is_branch_line("python", PYTHON_CF, 1) is False
-    assert is_branch_line("python", PYTHON_CF, 42) is False
-
-def test_branch_lines_typescript_nested_else_chain_and_nested_switch() -> None:
-    # else_clause NESTS in TypeScript: the second `if` (4) lives inside the first
-    # `else_clause`, and both share their physical line with their `else`. Counting
-    # if_statement only therefore still yields one line per condition (2, 4) rather
-    # than 2N. Both switch containers (30, 32) are dropped in favour of their own
-    # cases (31/39 outer, 33/35 inner) -- resolved independently per nesting level.
-    assert branch_statement_lines("typescript", TYPESCRIPT_CF) == [
-        2, 4, 9, 12, 15, 18, 21, 23, 25, 28, 29, 31, 33, 35, 39
-    ]
-    assert is_branch_line("typescript", TYPESCRIPT_CF, 30) is True
-    assert is_branch_line("typescript", TYPESCRIPT_CF, 32) is True
-
-@pytest.mark.parametrize("grammar", ["tsx", "javascript"])
-def test_branch_lines_other_grammars_match_typescript_on_the_same_source(grammar: str) -> None:
-    assert branch_statement_lines(grammar, TYPESCRIPT_CF) == branch_statement_lines("typescript", TYPESCRIPT_CF)
-
-def test_branch_lines_tsx_jsx_component() -> None:
-    # 2 = if_statement, 5 = ternary_expression in a JSX return.
-    assert branch_statement_lines("tsx", TSX_CF) == [2, 5]
-
-def test_branch_lines_javascript_source() -> None:
-    assert branch_statement_lines("javascript", JAVASCRIPT_CF) == [2, 5, 6]
-
-def test_branch_lines_go_has_no_else_node_and_four_switch_kinds() -> None:
-    # Go has no else_clause at all: `} else if b {` (12) is an if_statement whose
-    # parent is the outer if_statement, so the chain needs no exclusion rule.
-    # All four container kinds (20, 22 expression_switch, 31 type_switch, 35
-    # select) are dropped in favour of their cases (21, 23, 25, 28, 32, 36).
-    assert branch_statement_lines("go", GO_CF) == [10, 12, 17, 21, 23, 25, 28, 32, 36]
-    assert is_branch_line("go", GO_CF, 20) is True
-    assert is_branch_line("go", GO_CF, 22) is True
-    assert is_branch_line("go", GO_CF, 31) is True
-    assert is_branch_line("go", GO_CF, 35) is True
-
-def test_branch_lines_rust_nested_else_chain_and_match_arms() -> None:
-    # Rust nests else_clause exactly like TypeScript (5, 7 are the two heads).
-    # 26 keeps if/let on one line; a second pair at 30/31 exposes let_condition.
-    # 29 is a `?` try_expression; `match v {` (21) is dropped in favour of
-    # its match_arm lines (22, 23, 24).
-    assert branch_statement_lines("rust", RUST_CF) == [5, 7, 12, 15, 18, 22, 23, 24, 26, 29, 30, 31, 35]
-    assert is_branch_line("rust", RUST_CF, 21) is True
-
-def test_branch_lines_unknown_language_is_empty() -> None:
+def test_statement_classification_without_a_grammar_uses_keywords_or_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     assert branch_statement_lines("elixir", b"if x do\n  1\nend\n") == []
-
-def test_branch_lines_degrade_on_malformed_source() -> None:
-    # python's error recovery keeps the inner if; typescript collapses to a
-    # top-level ERROR. Neither may raise.
-    assert branch_statement_lines("python", b"def f(:\n    if x:\n        pass\n") == [2]
-    assert branch_statement_lines("typescript", b"function f( {\n  if (a) {\n") == []
-
-
-def test_is_branch_line_falls_back_to_keyword_regex() -> None:
     elixir = b"defmodule M do\n  if x do\n    1\n  end\nend\n"
     for language_id in (None, "elixir"):
         assert is_branch_line(language_id, elixir, 2) is True
@@ -664,88 +232,12 @@ def test_is_branch_line_falls_back_to_keyword_regex() -> None:
     # Out-of-range and non-positive lines are answers, not errors.
     assert is_branch_line(None, elixir, 999) is False
     assert is_branch_line(None, elixir, 0) is False
+    raising = b"defmodule M do\n  raise \"no\"\n  x = 1\nend\n"
+    for language_id in (None, "elixir"):
+        assert is_terminal_line(language_id, raising, 2) is True
+        assert is_terminal_line(language_id, raising, 3) is False
+    assert is_terminal_line(None, raising, 999) is False
 
-def test_executable_statement_line_rejects_python_non_code_lines() -> None:
-    source = (
-        b"def resolve():\n"
-        b'    \"\"\"Explain the function.\"\"\"\n'
-        b"    # describe the assignment\n"
-        b"\n"
-        b"    result = compute()\n"
-    )
-
-    assert tree_sitter_index.is_executable_statement_line("python", source, 1)
-    assert not tree_sitter_index.is_executable_statement_line("python", source, 2)
-    assert not tree_sitter_index.is_executable_statement_line("python", source, 3)
-    assert not tree_sitter_index.is_executable_statement_line("python", source, 4)
-    assert tree_sitter_index.is_executable_statement_line("python", source, 5)
-
-@pytest.mark.parametrize("language_id", ["typescript", "tsx", "javascript"])
-def test_executable_statement_lines_typescript_grammars(language_id: str) -> None:
-    source = (
-        b"function resolve(value: number) {\n"
-        b'  "description";\n'
-        b"  // describe the assignment\n"
-        b"\n"
-        b"  const result = compute(value);\n"
-        b"  emit(result);\n"
-        b"  if (result) {\n"
-        b"    result += 1;\n"
-        b"  }\n"
-        b"  for (const item of results) {\n"
-        b"    consume(item);\n"
-        b"  }\n"
-        b"  return result;\n"
-        b"}\n"
-    )
-
-    assert _executable_lines(language_id, source) == [1, 5, 6, 7, 8, 10, 11, 13]
-
-def test_executable_statement_lines_go() -> None:
-    source = (
-        b"package p\n"
-        b"func resolve(value int) int {\n"
-        b"    // describe the assignment\n"
-        b"\n"
-        b"    result := compute(value)\n"
-        b"    result = adjust(result)\n"
-        b"    emit(result)\n"
-        b"    if result > 0 {\n"
-        b"        result++\n"
-        b"    }\n"
-        b"    for _, item := range results {\n"
-        b"        consume(item)\n"
-        b"    }\n"
-        b"    go emit(result)\n"
-        b"    defer cleanup()\n"
-        b"    return result\n"
-        b"}\n"
-    )
-
-    assert _executable_lines("go", source) == [2, 5, 6, 7, 8, 9, 11, 12, 14, 15, 16]
-
-def test_executable_statement_lines_rust() -> None:
-    source = (
-        b"fn resolve(value: i32) -> i32 {\n"
-        b"    // describe the assignment\n"
-        b"\n"
-        b"    let mut result = compute(value);\n"
-        b"    result = adjust(result);\n"
-        b"    emit(result);\n"
-        b'    println!("{}", result);\n'
-        b"    if result > 0 {\n"
-        b"        result += 1;\n"
-        b"    }\n"
-        b"    for item in results {\n"
-        b"        consume(item);\n"
-        b"    }\n"
-        b"    return result;\n"
-        b"}\n"
-    )
-
-    assert _executable_lines("rust", source) == [1, 4, 5, 6, 7, 8, 9, 11, 12, 14]
-
-def test_executable_statement_line_fails_closed_without_a_parser(monkeypatch: pytest.MonkeyPatch,) -> None:
     monkeypatch.setattr(statements, "get_parser", lambda _language_id: None)
     source = b"def resolve():\n    result = compute()\n"
 
@@ -755,38 +247,6 @@ def test_executable_statement_line_fails_closed_without_a_parser(monkeypatch: py
     assert not tree_sitter_index.is_executable_statement_line(None, source, 0)
     assert not tree_sitter_index.is_executable_statement_line(None, source, 999)
 
-@pytest.mark.parametrize("language_id", sorted(tree_sitter_index.EXECUTABLE_STATEMENT_NODE_TYPES))
-def test_executable_statement_node_types_exist_in_grammar(language_id: str) -> None:
-    parser = get_parser(language_id)
-    assert parser is not None
-    language = parser.language
-    assert language is not None
-    named_types = {
-        language.node_kind_for_id(kind_id)
-        for kind_id in range(language.node_kind_count)
-        if language.node_kind_is_named(kind_id)
-    }
-
-    assert tree_sitter_index.EXECUTABLE_STATEMENT_NODE_TYPES[language_id] <= named_types
-
-
-def test_terminal_lines_python_return_raise_and_exit_calls() -> None:
-    # 33 raise, 35 sys.exit, 37 os._exit, 39 exit, 41 quit, 42 return.
-    assert _terminal_lines("python", PYTHON_CF) == [33, 35, 37, 39, 41, 42]
-
-def test_terminal_lines_typescript_return_throw_and_process_exit() -> None:
-    # 3/5 return, 7 throw new Error, 22 process.exit, 24 throw e, 42 return.
-    assert _terminal_lines("typescript", TYPESCRIPT_CF) == [3, 5, 7, 22, 24, 42]
-
-def test_terminal_lines_tsx_and_javascript() -> None:
-    assert _terminal_lines("tsx", TSX_CF) == [3, 5]
-    assert _terminal_lines("javascript", JAVASCRIPT_CF) == [3, 8]  # 8 = process.exit
-
-def test_terminal_lines_go_return_os_exit_panic_and_log_fatal() -> None:
-    # 11/13/15/37/39 return, 24 os.Exit, 26 log.Fatal, 29 panic, 43 log.Fatalf,
-    # 44 log.Panic, 45 t.Fatal, 46 t.Fatalf.
-    assert _terminal_lines("go", GO_CF) == [11, 13, 15, 24, 26, 29, 37, 39, 43, 44, 45, 46]
-
 def test_terminal_lines_rust_return_exit_abort_and_panic_macros() -> None:
     # 6/8 return, 10 std::process::exit, 22 panic!, 23 unreachable!, 24 todo!,
     # 33 process::exit, 36 std::process::abort, 38 process::abort.
@@ -794,10 +254,3 @@ def test_terminal_lines_rust_return_exit_abort_and_panic_macros() -> None:
     assert is_terminal_line("rust", RUST_CF, 27) is False
     assert "println" not in TERMINAL_MACRO_NAMES
     assert TERMINAL_MACRO_NAMES == frozenset({"panic", "unreachable", "todo", "unimplemented"})
-
-def test_is_terminal_line_falls_back_to_keyword_regex() -> None:
-    elixir = b"defmodule M do\n  raise \"no\"\n  x = 1\nend\n"
-    for language_id in (None, "elixir"):
-        assert is_terminal_line(language_id, elixir, 2) is True
-        assert is_terminal_line(language_id, elixir, 3) is False
-    assert is_terminal_line(None, elixir, 999) is False

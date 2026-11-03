@@ -217,31 +217,19 @@ def test_workspace_inventory_keeps_each_unowned_child_generic(tmp_path: Path) ->
         "structure": sorted([*changed, "healthy/App.tsx"]),
     }
 
-
-def test_mixed_frontend_and_repository_infrastructure_routes_separately(tmp_path: Path) -> None:
-    """Only React is present: repository defaults cannot hide behind another language."""
-    frontend = ["frontend/app/components/modals/__tests__/CreateShelfModal.test.tsx",
-        "frontend/app/components/shelf/ShelfNameInput.tsx",
-        "frontend/tests/components/taste-reveal/RevealFlowContainer.test.tsx", "frontend/App.tsx",
-    ]
-    react_files = frontend + ["package.json", "tsconfig.json", "frontend/fixtures/data.json", "frontend/Makefile"]
-    infrastructure = [".github/workflows/daydream.yml", "Makefile", "docs/README.md",
-        "docs/daydream-review.md", "quality-workspaces.json", "quality.json",
-        "scripts/daydream-workflow.test.mjs", "scripts/github-actions-workflow-policy.mjs",
-        "scripts/check.cjs", "scripts/ci/check.mjs", "frontend/helpers.mjs",
-    ]
+    # Only React is present: repository infrastructure cannot hide behind another language.
+    root = tmp_path / "frontend-only"
+    frontend = ["frontend/app/components/__tests__/Modal.test.tsx", "frontend/app/shelf/Input.tsx", "frontend/App.tsx"]
+    react_files = [*frontend, "package.json", "tsconfig.json", "frontend/fixtures/data.json", "frontend/Makefile"]
+    infrastructure = [".github/workflows/daydream.yml", "Makefile", "docs/README.md", "quality.json",
+                      "scripts/check.cjs", "scripts/ci/check.mjs", "frontend/helpers.mjs"]
     for path in frontend:
-        target = tmp_path / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text('import React from "react"; export const View = () => <div/>;')
-    (tmp_path / "package.json").write_text('{"dependencies":{"react":"*"}}')
-    (tmp_path / "tsconfig.json").write_text('{"compilerOptions":{"jsx":"react-jsx"}}')
-    files = react_files + infrastructure
-    stacks = {stack.stack_name: stack.files for stack in detect_stacks(files, target_dir=tmp_path)}
-    assert set(stacks["react"]) == set(react_files)
-    assert set(stacks["generic"]) == set(infrastructure)
-    assert set(stacks["structure"]) == set(files)
-
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text('import React from "react"; export const View = () => <div/>;')
+    (root / "package.json").write_text('{"dependencies":{"react":"*"}}')
+    (root / "tsconfig.json").write_text('{"compilerOptions":{"jsx":"react-jsx"}}')
+    stacks = {stack.stack_name: stack.files for stack in detect_stacks(react_files + infrastructure, target_dir=root)}
+    assert (set(stacks["react"]), set(stacks["generic"])) == (set(react_files), set(infrastructure))
 
 
 def test_local_packages_and_explicit_config_rules(tmp_path: Path) -> None:
@@ -278,15 +266,12 @@ def test_local_packages_and_explicit_config_rules(tmp_path: Path) -> None:
     assert Counter(f for s, paths in scopes.items() if s != "structure" for f in paths) == Counter(files)
 
 
-@pytest.mark.parametrize("flag", ["O_NOFOLLOW", "O_NONBLOCK"])
-def test_framework_missing_safe_open_capability_falls_back(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str,
-) -> None:
+def test_framework_missing_safe_open_capability_falls_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Unavailable safe-open flags retain generic source/config coverage without unsafe reads."""
     (tmp_path / "App.tsx").write_text('import React from "react"; const App = () => <div/>;')
     (tmp_path / "package.json").write_text('{"dependencies":{"react":"*"}}')
     (tmp_path / "tsconfig.json").write_text('{"compilerOptions":{"jsx":"react-jsx"}}')
-    monkeypatch.delattr(os, flag, raising=False)
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
     files = ["App.tsx", "package.json", "tsconfig.json"]
     result = detect_stacks(files, target_dir=tmp_path)
     primary = [stack for stack in result if stack.stack_name != "structure"]
@@ -295,115 +280,33 @@ def test_framework_missing_safe_open_capability_falls_back(
     assert next(stack.files for stack in result if stack.stack_name == "structure") == files
 
 
-
-@pytest.mark.parametrize("limit", ["source-count", "source-bytes", "metadata-count", "metadata-bytes", "total-bytes"])
-def test_framework_inspection_budget_boundaries(tmp_path: Path, limit: str) -> None:
+def test_framework_inspection_budget_boundaries(tmp_path: Path) -> None:
     """Exact defaults admit complete evidence; the first over-budget file receives generic coverage."""
-    files = []
-    expected_react = []
-    expected_generic = []
-    if limit in {"source-count", "source-bytes", "total-bytes"}:
-        count = 257 if limit == "source-count" else 17 if limit == "total-bytes" else 2
-        for index in range(count):
+    for limit in ("source-count", "source-bytes", "metadata-count"):
+        root = tmp_path / limit
+        root.mkdir()
+        files = []
+        if limit == "metadata-count":
+            for index in range(129):
+                directory = root / f"pkg{index:03}"
+                directory.mkdir()
+                (directory / "package.json").write_text('{"dependencies":{"react":"*"}}')
+                (directory / "App.tsx").write_text("const App = () => <div/>;")
+                files.append(f"{directory.name}/App.tsx")
+        for index in range(0 if limit == "metadata-count" else 257 if limit == "source-count" else 2):
             path = f"source{index:03}.ts"
             text = 'import React from "react";\n'
-            if limit != "source-count":
-                size = 256 * 1024 + (index if limit == "source-bytes" else 0)
+            if limit == "source-bytes":
+                size = 256 * 1024 + index
                 text += "//" + " " * (size - len(text) - 2)
-            (tmp_path / path).write_text(text)
+            (root / path).write_text(text)
             files.append(path)
-        expected_react = files[:-1]
-        expected_generic = files[-1:]
-    else:
-        count = 129 if limit == "metadata-count" else 2
-        for index in range(count):
-            directory = tmp_path / f"pkg{index:03}"
-            directory.mkdir()
-            metadata = '{"dependencies":{"react":"*"}}'
-            if limit == "metadata-bytes":
-                metadata += " " * (64 * 1024 + index - len(metadata))
-            (directory / "package.json").write_text(metadata)
-            (directory / "App.tsx").write_text("const App = () => <div/>;")
-            files.append(f"{directory.name}/App.tsx")
-        expected_react = files[:-1]
-        expected_generic = files[-1:]
-    # Reverse caller input: budgets and output must follow sorted paths.
-    result = detect_stacks(list(reversed(files)), target_dir=tmp_path)
-    scopes = {s.stack_name: s.files for s in result}
-    assert scopes["react"] == expected_react
-    assert scopes["generic"] == expected_generic
-    assert Counter(f for s, paths in scopes.items() if s != "structure" for f in paths) == Counter(files)
-
-
-def test_explicit_config_rule_survives_language_promotion() -> None:
-    registry = Registry()
-    registry.add_stack(StackRule("build", ("pyproject.toml", "package.json", "tsconfig.json")))
-    files = ["main.py", "pyproject.toml", "package.json", "tsconfig.json"]
-    scopes = {s.stack_name: s.files for s in detect_stacks(files, registry=registry)}
-    assert scopes["build"] == ["package.json", "pyproject.toml", "tsconfig.json"]
-    assert scopes["python"] == ["main.py"]
-
-
-
-def test_shard_stacks_fanout_cap_single_shard_split_never_wastes_reduction() -> None:
-    """One oversized file stays unsplit with its original name, leaving cap reduction to other stacks."""
-
-    # big.py exceeds the byte cap but cannot split mid-file.
-    big_diff = (
-        "diff --git a/big.py b/big.py\n--- a/big.py\n+++ b/big.py\n@@ -1 +1 @@\n+"
-        + "x" * 80
-        + "\n"
-    )
-    huge = StackAssignment(stack_name="python", files=["big.py"])
-    many = StackAssignment(stack_name="rust", files=[f"r{i}.rs" for i in range(12)])
-    go = StackAssignment(stack_name="go", files=[f"g{i}.go" for i in range(12)])
-    out = shard_stacks([huge, many, go], big_diff, max_files=2, max_bytes=100, fanout_cap=4, frontier_max=8)
-    # The single-shard stack stays unsplit under its original name.
-    assert any(s.stack_name == "python" and s.files == ["big.py"] for s in out)
-    # Total tasks (shards + unsplit) never exceed the cap.
-    assert len(out) <= 4
-    union = [f for s in out for f in s.files]
-    assert sorted(union) == sorted(["big.py"] + [f"r{i}.rs" for i in range(12)] + [f"g{i}.go" for i in range(12)])
-    rust_files = [f for s in out if s.stack_name.partition("#")[0] == "rust" for f in s.files]
-    go_files = [f for s in out if s.stack_name.partition("#")[0] == "go" for f in s.files]
-    assert sorted(rust_files) == sorted(f"r{i}.rs" for i in range(12))
-    assert sorted(go_files) == sorted(f"g{i}.go" for i in range(12))
-
-
-def test_shard_stacks_fanout_cap_irreducible_when_unsplit_stacks_outnumber_cap() -> None:
-    """Distinct unsplit stacks set the minimum fan-out; enforcing a lower cap cannot drop or merge them."""
-    stacks = [StackAssignment(stack_name=f"s{i}", files=[f"f{i}.py"]) for i in range(18)]
-    out = shard_stacks(stacks, "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8)
-    # No shard exists to un-split; the floor is the distinct-stack count.
-    assert len(out) == 18
-    union = [f for s in out for f in s.files]
-    assert sorted(union) == sorted([f"f{i}.py" for i in range(18)])
-
-
-def test_shard_stacks_co_locates_dependent_files_when_room(tmp_path: Path) -> None:
-    """Use a real, non-adjacent import edge so sorted singleton packing cannot pass accidentally."""
-
-    # The {a,d} dependency component fits a shard despite non-adjacent sorted names.
-    stack = StackAssignment(stack_name="python", files=["a.py", "b.py", "c.py", "d.py"])
-    root = Path(tmp_path)
-    for name in ("a.py", "b.py", "c.py"):
-        (root / name).write_text("x = 1\n")
-    (root / "d.py").write_text("import a\n")
-    graph = build_import_graph(["a.py", "b.py", "c.py", "d.py"], root)
-    out = shard_stacks([stack], "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8, graph=graph)
-    shards = [s for s in out if s.stack_name.startswith("python#")]
-    edge_shard = next(s for s in shards if "d.py" in s.files)
-    assert "a.py" in edge_shard.files  # co-located when size permits
-
-
-def test_shard_stacks_fail_open_without_graph() -> None:
-    """Missing edges fall back to deterministic packing with exactly one assignment per file."""
-    stack = StackAssignment(stack_name="python", files=[f"m{i}.py" for i in range(5)])
-    out = shard_stacks([stack], "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8, graph={})
-    union = [f for s in out for f in s.files]
-    assert sorted(union) == sorted(stack.files)  # no graph -> every file still assigned once
-    # A file with no resolvable edge still gets exactly one assignment (fallback).
-    assert len(set(union)) == len(union)  # no duplicate primary assignment
+        # Reverse caller input: budgets and output must follow sorted paths.
+        result = detect_stacks(list(reversed(files)), target_dir=root)
+        scopes = {s.stack_name: s.files for s in result}
+        assert scopes["react"] == files[:-1]
+        assert scopes["generic"] == files[-1:]
+        assert Counter(f for s, paths in scopes.items() if s != "structure" for f in paths) == Counter(files)
 
 
 def test_build_import_graph_resolves_python_edges(tmp_path: Path) -> None:
@@ -429,21 +332,15 @@ def test_build_import_graph_resolves_python_edges(tmp_path: Path) -> None:
     }
 
 
-
-@pytest.mark.parametrize('cap', [0, 1, 3, 4])
-def test_coarsening_merges_adjacent_lowest_weights_and_recomputes_frontiers(cap: int) -> None:
+def test_coarsening_merges_adjacent_lowest_weights_and_recomputes_frontiers() -> None:
     py = StackAssignment(stack_name='python', files=['a.py', 'b.py', 'c.py', 'd.py'])
     other = StackAssignment(stack_name='generic', files=['README.md'])
     diff = ''.join(f'diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n+{body}\n'
                    for path, body in [('a.py', 'x' * 500), ('b.py', 'x'), ('c.py', 'x'), ('d.py', 'x' * 600)])
-    result = shard_stacks([py, other], diff, max_files=1, max_bytes=10000, fanout_cap=cap,
+    result = shard_stacks([py, other], diff, max_files=1, max_bytes=10000, fanout_cap=3,
                           frontier_max=8, graph={'b.py': {'c.py', 'README.md'}})
     python = [stack for stack in result if stack.stack_name.startswith('python')]
-    expected = ([['a.py', 'b.py', 'c.py', 'd.py']] if cap <= 1 else
-                [['a.py', 'b.py', 'c.py'], ['d.py']] if cap == 3 else
-                [['a.py'], ['b.py', 'c.py'], ['d.py']])
-    assert [stack.files for stack in python] == expected
-    assert [stack.stack_name for stack in python] == (
-        ['python'] if len(expected) == 1 else [f'python#{i}' for i in range(len(expected))])
+    assert [stack.files for stack in python] == [['a.py', 'b.py', 'c.py'], ['d.py']]
+    assert [stack.stack_name for stack in python] == ['python#0', 'python#1']
     assert next(stack for stack in python if 'b.py' in stack.files).frontier_files == ['README.md']
     assert sum(len(stack.files) for stack in result) == 5

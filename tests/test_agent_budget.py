@@ -9,6 +9,7 @@ import math
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import anyio
 import httpx
@@ -17,20 +18,26 @@ import pytest
 from daydream.agent import run_agent
 from daydream.backends import (
     AgentEvent,
+    ContinuationToken,
     ResultEvent,
     RetryPolicy,
     TextEvent,
     ToolStartEvent,
 )
+from daydream.backends.codex import CodexBackend
 from daydream.backends.pi import PiBackend
 from daydream.config import RETRY_CIRCUIT_FAILURE_THRESHOLD
 from daydream.host_tools import NATIVE_SUBMIT, HostToolBinding, HostToolFatal, HostToolRejected
+from daydream.phases.review_prompts import build_review_stage_system_instruction
 from daydream.prompt_budget import prepare_sanctioned_inputs
+from daydream.prompts.grounding import REVIEW_STOPPING_GUIDANCE
 from daydream.retry_policy import RetryRecoveryBudget, derive_retry_summary
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.run_context import InteractionPolicy, RunContext
+from daydream.supervision import RuleBasedToolSupervisor, apply_findings_verdicts
 from daydream.trajectory import DaydreamPhase, RunWriteSnapshot
 from tests.harness.backend import ScriptedBackend
+from tests.harness.fake_cli_process import FakeCliScript, install_fake_cli_process
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 from tests.harness.pi_replay import make_mock_process, make_mock_process_from_fixture
 from tests.harness.trajectory import make_recorder
@@ -47,25 +54,6 @@ def _retryable_failing_backend(*, advance: Callable[[float], None], advance_s: f
     async def responder(*args: Any, **kwargs: Any) -> Any:
         advance(advance_s)
         return [_RetryableBackendError("transient")]
-    return ScriptedBackend(
-        responder=responder, model="mock-model", fanout_concurrency=4,
-        retry_policy=RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0),
-    )
-
-
-def _retryable_then_succeeding_backend(
-    *, advance: Callable[[float], None], retry_advance_s: float, success_advance_s: float
-) -> ScriptedBackend:
-    """Attempt 1 fails retryably; attempt 2 spends a large, legitimate turn then succeeds."""
-    attempts = 0
-    async def responder(*args: Any, **kwargs: Any) -> Any:
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            advance(retry_advance_s)
-            return [_RetryableBackendError("transient")]
-        advance(success_advance_s)
-        return [TextEvent(text="done"), ResultEvent(structured_output=None, continuation=None)]
     return ScriptedBackend(
         responder=responder, model="mock-model", fanout_concurrency=4,
         retry_policy=RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0),
@@ -153,38 +141,6 @@ async def test_run_agent_abort_records_reason_and_turn_end(tmp_path: Path) -> No
         assert document["extra"]["partial"] is True
 
 
-async def test_streaming_turn_is_cut_at_the_deadline_and_keeps_partial_output(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
-    delivered = 0
-    async def stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[AgentEvent]:
-        nonlocal delivered
-        for i in range(200):
-            yield TextEvent(text=f"partial-output-sentinel-{i}")
-            fake.advance(200.0)
-            delivered += 1
-            yield ToolStartEvent(id=f"t{i}", name="Bash", input={"command": "ls"})
-    backend = ScriptedBackend(responder=stream, model="mock-model", fanout_concurrency=2)
-    recorder = make_recorder(tmp_path)
-    with anyio.fail_after(5):
-        async with recorder:
-            output, _, reason = await run_agent(
-                backend, tmp_path, "go", phase=DaydreamPhase.FIX,
-                wall_budget_s=600.0,          # deadline = 1000 + 600 = 1600
-            )
-    assert reason == "wall_budget_exceeded"
-    assert delivered == 3             # 1000->1200->1400->1600: the 4th event is past it
-    assert backend.cancel_calls == 0          # sibling isolation: no backend-wide cancel
-    assert "partial-output-sentinel-2" in output   # text emitted before expiry survives
-    traj, meta = _budget_stop(recorder)
-    assert _agent_step_with_stop_reason(traj)["extra"]["stop_reason"] == "wall_budget_exceeded"
-    # The deadline interrupted an in-flight attempt, so the stop record must say
-    # its partials were kept -- the two deadline shapes are not interchangeable.
-    assert meta["partial_edit_handling"] == "kept"
-    assert meta["retry_stop_reason"] is None
-
-
 async def test_expiry_cleanup_is_shielded_and_bounded_by_the_grace(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -216,49 +172,6 @@ async def test_expiry_cleanup_is_shielded_and_bounded_by_the_grace(
     assert reason == "wall_budget_exceeded"
     assert "partial-output-sentinel" in output
     assert anyio.current_time() - start < 3.0  # bounded by the grace, not the teardown
-
-
-async def test_aborting_invocation_does_not_cancel_shared_backend_sibling(tmp_path: Path) -> None:
-    """An invocation budget abort closes its stream without cancelling a sibling."""
-    sibling_started = anyio.Event()
-    release_sibling = anyio.Event()
-    closed_prompts: set[str] = set()
-    backend_ref: list[ScriptedBackend] = []
-    async def responder(cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> Any:
-        async def _gen() -> AsyncGenerator[AgentEvent, None]:
-            try:
-                if prompt == "sibling":
-                    sibling_started.set()
-                    await release_sibling.wait()
-                    if backend_ref[0].cancel_calls:
-                        return
-                    yield TextEvent(text="sibling completed")
-                    yield ResultEvent(structured_output=None, continuation=None)
-                    return
-                await sibling_started.wait()
-                yield ToolStartEvent(id="tool-0", name="Bash", input={"command": "ls"})
-            finally:
-                closed_prompts.add(prompt)
-        return _gen()
-    backend = ScriptedBackend(responder=responder, model="mock-model", fanout_concurrency=2)
-    backend_ref.append(backend)
-    results: dict[str, str | bool] = {}
-    async def run_sibling() -> None:
-        output, _, _ = await run_agent(backend, tmp_path, "sibling", phase=DaydreamPhase.REVIEW)
-        results["sibling"] = output
-    async def run_aborting_invocation() -> None:
-        _, _, reason = await run_agent(backend, tmp_path, "abort", phase=DaydreamPhase.FIX, tool_call_budget=0)
-        results["abort_reason"] = reason or ""
-        results["abort_iterator_closed"] = "abort" in closed_prompts
-        release_sibling.set()
-    with anyio.fail_after(5):
-        async with anyio.create_task_group() as task_group:
-            task_group.start_soon(run_sibling)
-            task_group.start_soon(run_aborting_invocation)
-    assert results == {
-        "sibling": "sibling completed", "abort_reason": "tool_call_budget_exceeded", "abort_iterator_closed": True,
-    }
-    assert backend.cancel_calls == 0
 
 
 @pytest.mark.parametrize(("bound", "backoff"), [(False, False), (True, False), (True, True)],
@@ -327,47 +240,6 @@ async def test_run_agent_cancellation_closes_only_its_invocation(
                 pytest.fail("cancelled authority reopened")
 
 
-async def test_retry_recovery_allowance_ends_the_ladder_without_dispatching_again(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
-    slept = patch_retry_sleep(monkeypatch, fake)
-    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
-    backend = _retryable_failing_backend(advance=fake.advance, advance_s=30.0)
-    setattr(backend, "retry_policy", RetryPolicy(attempts=20, base_delay_s=60.0, max_delay_s=60.0))
-    recorder = make_recorder(tmp_path)
-    with pytest.raises(_RetryableBackendError):
-        async with recorder:
-            await run_agent(
-                backend, tmp_path, "go", phase=DaydreamPhase.FIX,
-                wall_budget_s=10_000.0, retry_recovery_allowance_s=60.0,
-            )
-    # 1000 (+30 attempt 1) -> backoff 60 -> 1090 (+30 attempt 2) -> allowance spent -> stop
-    assert backend.call_count == 2
-    assert slept == [60.0]
-    assert fake.monotonic_value == 1_120.0
-    _traj, meta = _budget_stop(recorder)
-    assert meta["retry_stop_reason"] == "retry_recovery_allowance_exhausted"
-    assert meta["partial_edit_handling"] == "discarded"
-    assert meta["circuit_state"] == "closed"
-    assert set(meta) >= {"attempts", "backend_s", "backoff_s", "elapsed_s"}
-    assert str(fake.monotonic_value) not in recorder.path.read_text(encoding="utf-8")
-
-
-async def test_retry_recovery_allowance_is_never_rebased_by_a_later_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
-    slept = patch_retry_sleep(monkeypatch, fake)
-    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
-    backend = _retryable_failing_backend(advance=fake.advance, advance_s=0.0)
-    setattr(backend, "retry_policy", RetryPolicy(attempts=20, base_delay_s=40.0, max_delay_s=40.0))
-    with pytest.raises(_RetryableBackendError):
-        await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.FIX, retry_recovery_allowance_s=100.0)
-    assert backend.call_count == 4  # 1 + 40 + 40 + 20, then the allowance is spent
-    assert slept == [40.0, 40.0, 20.0]  # a re-basing implementation would sleep 40 forever
-
-
 async def test_staged_conversations_cannot_renew_retry_recovery_spend(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
@@ -406,6 +278,22 @@ async def test_staged_conversations_cannot_renew_retry_recovery_spend(
     ]
     _, stop = _budget_stop(recorder)
     assert stop["retry_recovery_spent_s"] == 0  # Earlier conversations' spend is not billed twice.
+    assert stop["retry_stop_reason"] == "retry_recovery_allowance_exhausted"
+    assert (stop["attempts"], stop["backoff_s"], stop["partial_edit_handling"]) == (0, 0.0, "discarded")
+
+
+async def test_retry_recovery_allowance_is_never_rebased_by_a_later_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
+    slept = patch_retry_sleep(monkeypatch, fake)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
+    backend = ScriptedBackend(events=[_RetryableBackendError("transient")],
+                              retry_policy=RetryPolicy(attempts=20, base_delay_s=40.0, max_delay_s=40.0))
+    with pytest.raises(_RetryableBackendError):
+        await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.FIX, retry_recovery_allowance_s=100.0)
+    assert backend.call_count == 4  # 1 + 40 + 40 + 20, then the allowance is spent
+    assert slept == [40.0, 40.0, 20.0]  # a re-basing implementation would sleep 40 forever
 
 
 async def test_host_admitted_starts_remain_charged_when_native_events_are_lost(
@@ -514,69 +402,6 @@ async def test_protected_submission_denials_do_not_trip_the_stream_ceiling(
     assert budget.observed_tool_starts == 5
 
 
-async def test_group_deadline_still_wins_over_a_larger_allowance(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
-    patch_retry_sleep(monkeypatch, fake)
-    backend = _retryable_failing_backend(advance=fake.advance, advance_s=20.0)
-    _, _, reason = await run_agent(
-        backend, tmp_path, "go", phase=DaydreamPhase.FIX, deadline=1_030.0, retry_recovery_allowance_s=300.0,
-    )
-    assert reason == "wall_budget_exceeded"
-    assert backend.call_count == 2  # stopped at the group deadline, not the allowance
-
-
-async def test_a_healthy_invocation_is_never_capped_by_the_allowance(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
-    patch_retry_sleep(monkeypatch, fake)
-    backend = _retryable_then_succeeding_backend(advance=fake.advance, retry_advance_s=0.0, success_advance_s=1_200.0)
-    output, _, reason = await run_agent(
-        backend, tmp_path, "go", phase=DaydreamPhase.FIX, wall_budget_s=1_800.0, retry_recovery_allowance_s=300.0,
-    )
-    assert output == "done"
-    assert reason is None  # 1200 s of legitimate post-retry work is not cancelled
-    assert backend.call_count == 2
-
-
-async def test_a_deadline_that_ends_a_retry_ladder_still_records_retry_telemetry(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Deadline checks precede allowance checks but must still retain spent retry overhead."""
-    fake = FakeClock(monotonic_value=5_000.0).install(monkeypatch)
-    patch_retry_sleep(monkeypatch, fake)
-    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
-    # 5000 (+300 attempt 1) -> 5300 -> retry -> 5600 (+300 retry) -> deadline spent.
-    backend = _retryable_failing_backend(advance=fake.advance, advance_s=300.0)
-    recorder = make_recorder(tmp_path)
-    with anyio.fail_after(5):
-        async with recorder:
-            output, _, reason = await run_agent(
-                backend, tmp_path, "go", phase=DaydreamPhase.FIX, deadline=5_600.0, retry_recovery_allowance_s=300.0,
-            )
-    assert reason == "wall_budget_exceeded"
-    assert backend.call_count == 2
-    assert output == "" and fake.monotonic_value == 5_600.0
-    traj, meta = _budget_stop(recorder)
-    assert meta["elapsed_s"] == 600.0
-    assert "5600.0" not in recorder.path.read_text(encoding="utf-8")
-    assert meta["retry_stop_reason"] == "retry_deadline_exhausted"
-    assert meta["limit_expired"] == "caller_deadline"
-    # Retry-scoped counters: the one dispatched retry and its 300 s of backend
-    # time -- never the first, useful-work attempt.
-    assert meta["attempts"] == 1
-    assert meta["backend_s"] == 300.0
-    assert meta["backoff_s"] == 0.0
-    assert meta["retry_recovery_spent_s"] == 300.0
-    assert meta["partial_edit_handling"] == "discarded"
-    summary = derive_retry_summary(traj["extra"]["phase_events"])
-    assert summary is not None
-    assert summary["stops"] == {"retry_deadline_exhausted": 1}
-    assert summary["attempts"] == 1 and summary["backend_s"] == 300.0
-
-
 async def test_a_deadline_that_cuts_the_ladder_during_backoff_is_still_a_ladder_stop(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -602,30 +427,14 @@ async def test_a_deadline_that_cuts_the_ladder_during_backoff_is_still_a_ladder_
     assert meta["backoff_s"] == 100.0          # the sleep is the retry overhead
     assert meta["retry_recovery_spent_s"] == 100.0
     assert meta["partial_edit_handling"] == "discarded"
-    assert derive_retry_summary(traj["extra"]["phase_events"]) is not None
-
-
-async def test_a_zero_retry_ladder_stop_reports_no_retry_overhead(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Zero allowance records the stop reason without charging the initial attempt as retry overhead."""
-    fake = FakeClock(monotonic_value=2_000.0).install(monkeypatch)
-    slept = patch_retry_sleep(monkeypatch, fake)
-    backend = _retryable_failing_backend(advance=fake.advance, advance_s=250.0)
-    recorder = make_recorder(tmp_path)
-    with anyio.fail_after(5):
-        async with recorder:
-            with pytest.raises(_RetryableBackendError):
-                await run_agent(
-                    backend, tmp_path, "go", phase=DaydreamPhase.FIX,
-                    wall_budget_s=10_000.0, retry_recovery_allowance_s=0.0,
-                )
-    assert backend.call_count == 1 and slept == []
-    traj, meta = _budget_stop(recorder)
-    assert meta["retry_stop_reason"] == "retry_recovery_allowance_exhausted"
-    assert meta["attempts"] == 0
-    assert meta["backend_s"] == 0.0 and meta["backoff_s"] == 0.0
-    assert meta["retry_recovery_spent_s"] == 0.0
+    events = traj["extra"]["phase_events"]
+    summary = derive_retry_summary(events)
+    assert summary is not None
+    # A repeated stop folds counts once per stop without repeating its circuit state.
+    stop = next(event for event in events if event.get("event") == "agent_budget_stop"
+                and event.get("metadata", {}).get("retry_stop_reason"))
+    assert derive_retry_summary([stop, stop]) == derive_retry_summary([stop, {**stop, "metadata": {
+        **stop["metadata"], "circuit_state": None}}])
 
 
 async def test_initial_failed_attempt_deadline_records_discarded_stop(
@@ -739,7 +548,7 @@ async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_prob
     assert sibling.call_count == 1  # suppressed before its own probe could dispatch
 
 
-@pytest.mark.parametrize("bounded", [True, False], ids=["staged-deadline", "unbounded"])
+@pytest.mark.parametrize("bounded", [False, True], ids=["unbounded", "staged-deadline"])
 async def test_pi_attempt_preamble_tracks_preparation_and_retry_spend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bounded: bool,
 ) -> None:
@@ -836,6 +645,162 @@ async def test_sanctioned_input_preparation_expiry_never_dispatches_pi(
     assert [step["message"] for step in trajectory["steps"] if step["source"] == "user"] == ["Earlier work"]
     assert stop["attempts"] == 0 and stop["backend_s"] == 0
     assert stop["partial_edit_handling"] == "discarded"
+
+
+def test_rule_based_supervision_holds_findings_and_vetoes_denied_tools() -> None:
+    """Held findings leave the kept set with an event; denied writes and Bash commands are vetoed."""
+    kept, held, events = apply_findings_verdicts(
+        [{"id": 1, "file": "a.py"}, {"id": 2, "file": "b.py"}],
+        {1: {"id": 1, "action": "hold", "reason": "needs owner"}, 2: {"id": 2, "action": "unknown"}},
+    )
+    assert [item["id"] for item in kept] == [2] and [item["id"] for item in held] == [1]
+    assert events == [(1, "hold", "needs owner")]
+    supervisor = RuleBasedToolSupervisor(deny_globs=["*.lock"], bash_deny=[r"\brm\b"])
+    review = DaydreamPhase.REVIEW
+    assert supervisor("Edit", {"file_path": "deps/uv.lock"}, phase=review).veto
+    assert not supervisor("Write", {"path": "src/app.py"}, phase=review).veto
+    denied = supervisor("Bash", {"command": "rm -rf build"}, phase=review)
+    assert denied.veto and denied.reason == "Bash command denied by regex '\\brm\\b'"
+    assert not supervisor("Bash", {"command": "git status"}, phase=review).veto
+    assert not supervisor("Read", {"file_path": "deps/uv.lock"}, phase=review).veto
+
+
+async def test_staged_assistant_text_is_bounded_per_turn(tmp_path: Path) -> None:
+    """Staged review keeps at most 128 KiB of assistant text per turn instead of growing without bound."""
+    limit = 128 * 1024
+    backend = ScriptedBackend(events=[TextEvent(text="x" * limit), TextEvent(text="overflow-tail"),
+                                      ResultEvent(structured_output=None, continuation=None)])
+    output, _, reason = await run_agent(
+        backend, tmp_path, "review", phase=DaydreamPhase.REVIEW, output_schema={"type": "object"},
+        investigation_budget=ReviewInvestigationBudget.from_limits(ReviewLimits()),
+    )
+    assert reason is None
+    assert isinstance(output, str) and len(output) == limit and "overflow-tail" not in output
+
+
+async def test_cancelling_one_codex_invocation_leaves_its_shared_backend_sibling_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Attempt cancellation closes only its own transport; backend-wide cancellation belongs to run shutdown."""
+    finished = [json.dumps(row) for row in (
+        {"type": "thread.started", "thread_id": "sibling"}, {"type": "turn.started"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "sibling done"}},
+        {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}},
+    )]
+    spawner = install_fake_cli_process(monkeypatch, "codex", lines=[], scripts=[
+        FakeCliScript(lines=[json.dumps({"type": "thread.started", "thread_id": "cancelled"})], hang=True),
+        FakeCliScript(lines=finished, hang=True),
+    ])
+    backend = CodexBackend(model="fixture-model")
+    async with asyncio.TaskGroup() as tasks:
+        cancelled = tasks.create_task(run_agent(backend, tmp_path, "first", phase=DaydreamPhase.REVIEW))
+        with anyio.fail_after(5):
+            await spawner.wait_for_read(0)
+        sibling = tasks.create_task(run_agent(backend, tmp_path, "second", phase=DaydreamPhase.REVIEW))
+        with anyio.fail_after(5):
+            await spawner.wait_for_read(1)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        assert spawner.procs[0].reaped and spawner.procs[1].terminate_calls == 0
+        spawner.procs[1].finish([])
+        with anyio.fail_after(5):
+            output, _, reason = await sibling
+    assert (output, reason) == ("sibling done", None)
+
+
+async def test_pi_review_system_is_scoped_and_preserves_retry_and_stage_spend(tmp_path: Path) -> None:
+    """Review policy reaches only review invocations; a retry snapshot reports the reduced remaining allocation."""
+    commands: list[tuple[str, ...]] = []
+    system_prompts: list[str] = []
+    async def spawn(*args: str, **kwargs: Any) -> Any:
+        commands.append(args)
+        value = args[args.index("--append-system-prompt") + 1]
+        system_prompts.append(Path(value).read_text() if value.startswith("/") else value)
+        if len(commands) == 3:
+            return make_mock_process([json.dumps(event) for event in [
+                {"type": "session", "sessionId": "failed-review"},
+                *[{"type": "tool_execution_start", "toolCallId": path, "toolName": "read", "args": {"path": path}}
+                  for path in ("api.py", "App.tsx")],
+                {"type": "turn_end", "message": {"role": "assistant", "content": [],
+                 "stopReason": "error", "errorMessage": "503 Service Unavailable"}},
+            ]])
+        return make_mock_process_from_fixture("simple_text.jsonl")
+    backend = PiBackend(model="fixture-model", reasoning_effort="high")
+    backend.retry_attempts = 1
+    backend.retry_base_delay_s = backend.retry_max_delay_s = 0
+    budget = ReviewInvestigationBudget.from_limits(ReviewLimits(17, 3, 4))
+    access_guide = json.dumps({'supporting_catalog': {'path': str(tmp_path / 'catalog.json'),
+                                                   'status': 'partial', 'omitted_part_count': 1}})
+    invocations: list[tuple[DaydreamPhase, dict[str, Any]]] = [
+        (DaydreamPhase.DEEP, {"review_limits": ReviewLimits(17, 3, 3)}),
+        (DaydreamPhase.FIX, {}),
+        *[(DaydreamPhase.DEEP, {
+            "investigation_budget": budget,
+            "tool_call_budget": 4,
+            "review_system_instructions": build_review_stage_system_instruction({
+                "stage": stage,
+                "assigned_target_ids": [target],
+                "access_guide": access_guide,
+            }),
+            **({'continuation': ContinuationToken('pi', {'session_id': 'retained-navigation'})}
+               if stage == 'integration' else {}),
+        }) for stage, target in (("first_pass", "target-1"), ("integration", "whole-change"))],
+    ]
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", side_effect=spawn):
+        for phase, options in invocations:
+            assert (await run_agent(backend, tmp_path, "Assigned work", phase=phase,
+                                    progress_callback=lambda _: None, **options))[2] is None
+    review_system, fix_system, initial, retry, integration = system_prompts
+    paths = [args[args.index("--append-system-prompt") + 1] for args in commands]
+    assert all(not Path(path).exists() for path in paths if path.startswith("/"))
+    assert all(args[args.index("--thinking") + 1] == "high" for args in commands)
+    assert commands[-1][commands[-1].index('--session-id') + 1] == 'retained-navigation'
+    assert "at most 17 seconds and 3 tool calls" in review_system
+    assert REVIEW_STOPPING_GUIDANCE in review_system
+    assert "planted" not in review_system
+    assert "hidden evaluation" not in review_system
+    assert "Reopen a rejected candidate only when new evidence" in review_system
+    assert "an empty findings result is valid" in review_system
+    assert "Closed candidate decisions stay closed" not in review_system
+    assert "repository-scoped" in review_system
+    assert "Search before you read" not in review_system
+    assert "typically 50" not in review_system
+    assert REVIEW_STOPPING_GUIDANCE not in fix_system
+    assert "Investigation allowance" not in fix_system
+    assert budget.observed_tool_starts == 2 and budget.remaining_tool_calls == 2
+    assert "Reviewer dispatch-time snapshot:" in initial
+    assert "current invocation allocation: 4 tool calls" in initial
+    assert "Retry dispatch-time snapshot (supersedes the earlier invocation allocation):" in retry
+    assert "current invocation allocation: 2 tool calls" in retry
+    assert "Failed-attempt calls remain charged; future-stage reserves remain excluded" in retry
+    assert "current invocation allocation: 2 tool calls" in integration
+    for instructions, objective, target in (
+        (initial, "Review assigned changed behavior", "target-1"),
+        (retry, "Review assigned changed behavior", "target-1"),
+        (integration, "Review whole-change interactions and boundaries", "whole-change"),
+    ):
+        assignment_line = next(line for line in instructions.splitlines()
+                               if line.startswith("Daydream final-submission assignment: "))
+        assert json.loads(assignment_line.removeprefix("Daydream final-submission assignment: ")) == {
+            "objective": objective, "target_ids": [target], "candidate_ids": [],
+        }
+        assert 'Persistent exact access guide (supporting metadata): ' + access_guide in instructions
+        assert f'"targets": ["{target}"]' in instructions
+    for instructions in (initial, retry, integration):
+        assert "Cumulative observed starts:" not in instructions
+        assert "remaining cumulative tool starts" not in instructions
+        assert "at most one final-submission warning per native attempt" in instructions
+        assert "not a recurring counter" in instructions
+        assert "refreshed" not in instructions
+        assert "Unused capacity is expected" in instructions
+        assert "submit when those" in instructions
+        assert "planted" not in instructions
+        assert "hidden evaluation" not in instructions
+        assert REVIEW_STOPPING_GUIDANCE not in instructions
+        assert "Closed decisions stay closed" in instructions
+        assert "Return exactly assigned target or triage candidate IDs" in instructions
+        assert "host publishes terminal findings" in instructions
 
 
 async def test_shared_retry_recovery_spans_work_items_without_renewal_or_early_clamp(

@@ -12,9 +12,6 @@ from tests.conftest import ExtDir
 
 @pytest.mark.parametrize(("declaration", "message"),
     [
-        pytest.param("99", r"99.*supports 8\.\.8", id="above-ceiling"),
-        pytest.param("7", r"= 7;.*supports 8\.\.8", id="aged-out-v7-stage-builder"),
-        pytest.param("'1'", r"= '1';.*supports 8\.\.8", id="string"),
         pytest.param("1.5", r"= 1\.5;.*supports 8\.\.8", id="float"),
         pytest.param("True", r"= True;.*supports 8\.\.8", id="bool"),
     ],

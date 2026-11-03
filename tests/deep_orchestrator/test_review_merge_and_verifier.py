@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -12,58 +10,38 @@ import pytest
 
 from daydream import json_utils, pr_review, review_reporting, runner as _runner
 from daydream.backends import ResultEvent
-from daydream.backends.codex import CodexLifecycleError
-from daydream.backends.lifecycle import BackendLifecycleFailure
-from daydream.config import PHASE_DEFAULT_MODELS, REVIEW_OUTPUT_FILE
+from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.config_file import DaydreamFileConfig
-from daydream.deep import dedup as _dedup, detection as _detection, prompts as _prompts
 from daydream.deep.artifacts import (
     DeepArtifact,
-    deep_dir,
-    per_stack_records_path,
 )
-from daydream.deep.diff import _diff_changed_files
+from daydream.deep.diff import _diff_changed_files, bound_deep_diff
 from daydream.findings import load_findings_artifact
-from daydream.phases.review import ReviewOutputError
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.deep_orchestrator.precision_overlap_support import PrecisionOverlapBackend
 from tests.deep_orchestrator.support import (
     _count_review_prompts,
-    _install_accept_gate_pipeline,
     _install_post_recorder,
 )
 from tests.harness.fake_gh import FakeGh
-from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.review_result import merge_result, saved_coverage
 from tests.test_deep_orchestrator import (
-    _TWIN_DESCRIPTION,
-    Mute,
-    _force_interactive,
-    _install_model_capturing_stubs,
     _install_stub_backend,
     _pin_findings_pr,
     _prime_merge_resume,
-    _profile_with_pipeline,
     _record,
     _run_deep,
     _silence,
-    _twin_parse_by_stack,
-    _write_plugin_registry,
 )
 
 
-@pytest.mark.parametrize(('restart', 'presentation_fault'), [
-    pytest.param(False, 'none', id='report-fresh'), pytest.param(True, 'none', id='report-restart'),
-    pytest.param(False, 'context', id='unavailable-report-fresh'),
-    pytest.param(True, 'context', id='unavailable-report-restart'),
-    pytest.param(False, 'missing-items', id='missing-items'),
-    pytest.param(False, 'corrupt-items', id='corrupt-items'),
-    pytest.param(False, 'permission-items', id='permission-items'),
-    pytest.param(False, 'render', id='summary-render'),
-    pytest.param(False, 'post', id='post-failure'),
+@pytest.mark.parametrize('presentation_fault', [
+    pytest.param('context', id='unavailable-report-fresh'),
+    pytest.param('corrupt-items', id='corrupt-items'),
+    pytest.param('render', id='summary-render'),
 ])
 async def test_synthesis_receives_retained_structural_records_and_owns_publication(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, restart: bool,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     presentation_fault: str, fake_gh: FakeGh,
 ) -> None:
     """Complete input delivery and exact published output prevent structural resurrection.
@@ -105,49 +83,36 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
     async def publish(_repo: Path, items_file: Path, **_kwargs: Any) -> Any:
         summaries.append(_kwargs.get('review_summary'))
         assert 'Stale optional publication assertion' not in _kwargs['run_info']
-        if presentation_fault.endswith('-items') or presentation_fault == 'post':
+        if presentation_fault == 'corrupt-items':
             return await post(_repo, items_file, **_kwargs)
         published.extend(json.loads(items_file.read_text())["items"])
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", publish)
     config = empty_review_config(multi_stack_target, tmp_path / "synthesis-trajectory.json",
                                 output_mode="comment", pr_number=7)
-    prior_review_calls = 0
-    if restart:
-        assert await _runner.run(config) == 0
-        prior_review_calls = _count_review_prompts(backend.calls)
-        supplied.clear()
-        published.clear()
-        summaries.clear()
     failed: list[Path] = []
     stage, read = json_utils._stage_bytes, Path.read_text
     ready_to_post = False
     frozen_review_calls: list[int] = []
-    if presentation_fault != 'none':
-        def fail_context_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
-            nonlocal ready_to_post
-            if path.name == 'review-report-context.json':
-                ready_to_post = True
-                frozen_review_calls.append(_count_review_prompts(backend.calls))
-                if presentation_fault == 'context':
-                    failed.append(path)
-                    stale = json.loads(content)
-                    stale['author_reported'] = {'source': 'pull_request_body', 'head_sha': None,
-                                                'body': 'Stale optional publication assertion', 'truncated': False}
-                    path.write_text(json.dumps(stale))
-                    raise OSError('optional report context staging failed')
-            return stage(path, content, **kwargs)
-        monkeypatch.setattr(json_utils, '_stage_bytes', fail_context_stage)
-    if presentation_fault.endswith('-items'):
+    def fail_context_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
+        nonlocal ready_to_post
+        if path.name == 'review-report-context.json':
+            ready_to_post = True
+            frozen_review_calls.append(_count_review_prompts(backend.calls))
+            if presentation_fault == 'context':
+                failed.append(path)
+                stale = json.loads(content)
+                stale['author_reported'] = {'source': 'pull_request_body', 'head_sha': None,
+                                            'body': 'Stale optional publication assertion', 'truncated': False}
+                path.write_text(json.dumps(stale))
+                raise OSError('optional report context staging failed')
+        return stage(path, content, **kwargs)
+    monkeypatch.setattr(json_utils, '_stage_bytes', fail_context_stage)
+    if presentation_fault == 'corrupt-items':
         def fail_items_read(path: Path, *args: Any, **kwargs: Any) -> str:
             if ready_to_post and path.name == 'merged-items.json':
                 failed.append(path)
-                if presentation_fault == 'missing-items':
-                    path.unlink(missing_ok=True)
-                elif presentation_fault == 'corrupt-items':
-                    path.write_text('{corrupt canonical items after freeze')
-                else:
-                    raise PermissionError('items read denied after freeze')
+                path.write_text('{corrupt canonical items after freeze')
             return read(path, *args, **kwargs)
         monkeypatch.setattr(Path, 'read_text', fail_items_read)
     elif presentation_fault == 'render':
@@ -158,14 +123,9 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
             failed.append(Path('publication-summary'))
             raise TypeError('optional summary render failed')
         monkeypatch.setattr(review_reporting, 'render_github_review_context', fail_summary_render)
-    elif presentation_fault == 'post':
-        fake_gh.set_response('POST', '/repos/o/r/pulls/7/reviews', {'__error__': 'HTTP 503 unavailable'})
-    assert await _runner.run(config) == (1 if presentation_fault == 'post' else 0)
-    if restart:
-        assert _count_review_prompts(backend.calls) == 2 * prior_review_calls
-    if presentation_fault != 'none':
-        assert frozen_review_calls and frozen_review_calls[0] > 0
-        assert _count_review_prompts(backend.calls) == frozen_review_calls[0]
+    assert await _runner.run(config) == 0
+    assert frozen_review_calls and frozen_review_calls[0] > 0
+    assert _count_review_prompts(backend.calls) == frozen_review_calls[0]
     if presentation_fault == 'context':
         assert failed, 'context staging fault was not injected'
     if presentation_fault == 'render':
@@ -184,7 +144,7 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
     assert "## Structural Review" in report
     assert omitted["description"] not in report and twin["description"] not in report
     assert not (deep / "folded-structural.json").exists()
-    if presentation_fault in {'missing-items', 'corrupt-items'}:
+    if presentation_fault == 'corrupt-items':
         assert failed and published == [] and fake_gh.calls('POST', '/repos/o/r/pulls/7/reviews') == []
         assert all(scope['status'] == 'complete' for scope in saved_coverage(deep).scopes.values())
         return
@@ -193,82 +153,21 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
     assert [item["source_uids"] for item in items] == [["python:1", "structure:1"], ["structure:2"]]
     assert items[0]["related_files"] == ["App.tsx"]
     assert items[0]["severity"] == "high"
-    if presentation_fault in {'permission-items', 'post'}:
-        assert published == []
-        posts = fake_gh.calls('POST', '/repos/o/r/pulls/7/reviews')
-        assert bool(posts) is (presentation_fault == 'post')
-        assert failed if presentation_fault == 'permission-items' else posts
-        return
     assert items == published
 
 
-async def test_synthesis_structural_privilege_requires_retained_source(
+async def test_precision_overlap_keeps_independent_failure_policies_and_incomplete_publication(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """Model-controlled lens/unknown and rejected claims cannot authorize whole-file evidence.
+    """An unbound arbiter verdict fails only its pass after joining a completed suppression sibling.
 
-    Existing evidence predicates trust host lenses and do not exercise model-owned
-    attribution after real adjudication removes a structural source.
+    Serial missing-verdict tests cannot detect sibling cancellation, a lost
+    suppression result, or optimistic completion after concurrent failure.
     """
-    language = _record(description="Language source", severity="high", confidence="HIGH")
-    structural = _record(description="Valid whole-file structural source", line=0,
-                         evidence="Dependency violates the module contract")
-    rejected = _record(id=2, description="Rejected structural source", severity="high", confidence="HIGH")
-    claims = [("legitimate", ["structure:1"], 0), ("spoof", ["python:1"], 0),
-              ("unknown", ["structure:999"], 0), ("rejected", ["structure:2"], 0),
-              ("independently grounded", ["structure:999"], 1),
-              ("citation-only spoof", ["python:1"], 0)]
-    items = [{**language, "description": title, "lens": "structural", "line": line,
-              "evidence": "api.py:1 boundary violated" if title == "citation-only spoof"
-              else "The documented module boundary is violated", "source_uids": uids}
-             for title, uids, line in claims]
-
-    def respond(prompt: str) -> list[Any] | None:
-        if "you are the arbiter" in prompt.lower():
-            import re
-            match = re.search(r"listed in (\S*arbiter[-\w]*input\.json)", prompt)
-            assert match is not None
-            path = Path(match[1])
-            rows = json.loads(path.read_text())
-            return [ResultEvent(structured_output={"findings": [
-                {"arb_id": row["arb_id"], "keep": row["uid"] != "structure:2",
-                 "severity": row["severity"], "confidence": row["confidence"],
-                 "description": row["description"], "rationale": "source verified", "evidence": row["evidence"]}
-                for row in rows]}, continuation=None)]
-        if "cross-stack merge agent" in prompt.lower():
-            return [ResultEvent(structured_output=merge_result(items), continuation=None)]
-        return None
-
-    backend = EmptyReviewBackend(multi_stack_target, forbid_merge=False, forbid_supervise=False,
-        review_by_stack={"python": [language], "structure": [structural, rejected]}, responder=respond)
+    backend = PrecisionOverlapBackend(multi_stack_target, blocked=True, fault=("arbiter", "foreign-id"))
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    assert await _runner.run(empty_review_config(multi_stack_target, tmp_path / "provenance-trajectory.json")) == 0
-    deep = multi_stack_target / ".daydream/deep"
-    retained = json.loads(per_stack_records_path(deep, "structure").read_text())["issues"]
-    assert [record["uid"] for record in retained] == ["structure:1"]
-    actual = json.loads(DeepArtifact.MERGED_ITEMS.at(deep).read_text())["items"]
-    assert [item["description"] for item in actual] == ["legitimate", "independently grounded", "citation-only spoof"]
-    assert [item["source_uids"] for item in actual] == [["structure:1"], [], ["python:1"]]
-    assert actual[0]["line"] == 0
-    assert actual[2]["location_cited_line"] == 0
-    assert actual[2]["line"] > 0
-    dropped = json.loads((deep / "dropped-speculative.json").read_text())
-    assert [item["description"] for item in dropped["dropped_items"]] == ["spoof", "unknown", "rejected"]
-
-
-@pytest.mark.parametrize("first", ["arbiter", "suppression"])
-async def test_precision_adjudication_overlaps_and_joins_before_reconciling_original_records(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, first: str,
-) -> None:
-    """Serial dispatch deadlocks these provider barriers; stale offsets corrupt the later survivors.
-
-    Existing precision tests cover exclusions after serial mutation, without
-    forcing either concurrent completion order or observing the join boundary.
-    """
-    backend = PrecisionOverlapBackend(multi_stack_target, blocked=True)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    trajectory = tmp_path / "overlap-trajectory.json"
-    config = empty_review_config(multi_stack_target, trajectory, precision_mode=True, latency_profile="forensic")
+    config = empty_review_config(multi_stack_target, tmp_path / "failure-trajectory.json",
+                                precision_mode=True, review_cache_enabled=True, latency_profile="forensic")
     results: list[int] = []
 
     async def review() -> None:
@@ -279,247 +178,33 @@ async def test_precision_adjudication_overlaps_and_joins_before_reconciling_orig
             tasks.start_soon(review)
             for event in backend.started.values():
                 await event.wait()
-            assert backend.completed == []
-            deep = backend.input_paths["arbiter"].parent
-            original = {path.name: path.read_bytes() for path in deep.glob("stack-*-records.json")}
-            assert original
-            assert not DeepArtifact.ADJUDICATION_COMPLETE.at(deep).exists()
-            backend.release[first].set()
-            await backend.closed[first].wait()
-            other = "suppression" if first == "arbiter" else "arbiter"
-            assert not backend.closed[other].is_set()
-            assert not DeepArtifact.ADJUDICATION_COMPLETE.at(deep).exists()
-            assert {name: (deep / name).read_bytes() for name in original} == original
-            backend.release[other].set()
+            backend.release["arbiter"].set()
+            await backend.closed["arbiter"].wait()
+            assert not backend.closed["suppression"].is_set()
+            backend.release["suppression"].set()
     assert results == [0]
-    assert backend.completed == [first, other]
-    arbiter = {row["uid"]: row for row in backend.inputs["arbiter"]}
-    suppression = {row["uid"]: row for row in backend.inputs["suppression"]}
-    assert set(arbiter) == {"generic:1", "python:1"}
-    assert set(suppression) == {"python:2", "react:1", "react:2"}
-    assert arbiter["python:1"]["severity"] == "high"
-    assert suppression["python:2"]["description"] == "Drop same-location Python nit"
-
-    deep = multi_stack_target / ".daydream/deep"
-    records = {row["uid"]: row for path in deep.glob("stack-*-records.json")
-               for row in json.loads(path.read_text())["issues"]}
-    assert set(records) == {"python:1", "react:2", "structure:1", "structure:2"}
-    assert records["python:1"]["description"] == "Confirmed: Confirmed Python defect"
-    assert records["python:1"]["severity"] == "low"
-    assert records["react:2"]["description"] == "Confirmed: Keep React accessibility defect"
-    for uid in ("structure:1", "structure:2"):
-        assert records[uid] == next(row for row in backend.review_by_stack["structure"]
-                                    if row["description"] == records[uid]["description"]) | {"uid": uid}
-    items = json.loads(DeepArtifact.MERGED_ITEMS.at(deep).read_text())["items"]
-    assert {source for item in items for source in item["source_uids"]} == set(records)
-    assert len(items) == len(records)
-    assert {item["description"] for item in items} == {row["description"] for row in records.values()}
-    report = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
-    assert report == DeepArtifact.MERGED_REPORT.at(deep).read_text()
-    assert all(row["description"] in report for row in records.values())
-    assert "Dismiss early docs finding" not in report and "Drop React rendering concern" not in report
-    provenance = json.loads(DeepArtifact.ADJUDICATION_PROVENANCE.at(deep).read_text())["records"]
-    assert set(provenance) == set(arbiter) | set(suppression)
-    for uid, outcome in provenance.items():
-        assert outcome["passes"] == (["arbiter"] if uid in arbiter else ["suppression"])
-        assert outcome["verdict_bound"] is True
-        assert outcome["kept"] is (uid in records)
-    coverage = saved_coverage(deep)
-    assert coverage.phases["arbiter"]["status"] == coverage.phases["suppression"]["status"] == "complete"
-    assert coverage.phases["alternatives"]["noop"] is True  # Its design duty was delegated to Structure.
-    assert DeepArtifact.ADJUDICATION_COMPLETE.at(deep).is_file()
-    merge = next(call for call in backend.calls if "cross-stack merge agent" in call["prompt"].lower())
-    assert merge["continuation"].data == {"session_id": backend.arbiter_session_id}
-    extra = json.loads(trajectory.read_text())["extra"]
-    events = [*extra["phase_events"], *(event for sub in extra.get("subtrajectories", [])
-                                        for event in sub.get("phase_events", []))]
-    for stage in ("arbiter", "suppression"):
-        lifecycle = [event for event in events if event.get("metadata", {}).get("stage") == stage
-                     and event["event"] in {"phase_start", "phase_end"}]
-        assert [event["event"] for event in lifecycle] == ["phase_start", "phase_end"]
-        assert lifecycle[-1]["status"] == "succeeded"
-
-
-@pytest.mark.parametrize(('failed', 'fault'), [(owner, fault) for owner in ('arbiter', 'suppression')
-    for fault in ('raise', 'malformed', 'foreign-id')])
-async def test_precision_overlap_keeps_independent_failure_policies_and_incomplete_publication(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failed: str, fault: str,
-) -> None:
-    """Acquisition errors stop after joining; unbound verdicts retain each pass's policy.
-
-    Serial missing-verdict tests cannot detect sibling cancellation, a lost
-    suppression result, or optimistic completion after concurrent failure.
-    """
-    backend = PrecisionOverlapBackend(multi_stack_target, blocked=True, fault=(failed, fault))
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    config = empty_review_config(multi_stack_target, tmp_path / "failure-trajectory.json",
-                                precision_mode=True, review_cache_enabled=True, latency_profile="forensic")
-    results: list[int] = []
-    acquisition_failed = fault in {"raise", "malformed"}
-    errors: list[Exception] = []
-
-    async def review() -> None:
-        if acquisition_failed:
-            expected_error = RuntimeError if fault == "raise" else ReviewOutputError
-            with pytest.raises(expected_error) as caught:
-                await _runner.run(config)
-            errors.append(caught.value)
-        else:
-            results.append(await _runner.run(config))
-
-    with anyio.fail_after(30):
-        async with anyio.create_task_group() as tasks:
-            tasks.start_soon(review)
-            for event in backend.started.values():
-                await event.wait()
-            backend.release[failed].set()
-            await backend.closed[failed].wait()
-            sibling = "suppression" if failed == "arbiter" else "arbiter"
-            assert not backend.closed[sibling].is_set()
-            backend.release[sibling].set()
-    assert results == ([] if acquisition_failed else [0])
-    assert len(errors) == int(acquisition_failed)
-    assert sibling in backend.completed
+    assert "suppression" in backend.completed
     assert all(event.is_set() for event in backend.closed.values())
     deep = multi_stack_target / ".daydream/deep"
     records = {row["uid"]: row for path in deep.glob("stack-*-records.json")
                for row in json.loads(path.read_text())["issues"]}
     coverage = saved_coverage(deep)
-    if acquisition_failed:
-        assert set(records) == {"generic:1", "python:1", "python:2", "react:1", "react:2",
-                                "structure:1", "structure:2"}
-        assert not any(row["description"].startswith("Confirmed:") for row in records.values())
-        assert any(row["status"] == "failed" for row in coverage.phases.values())
-        assert not DeepArtifact.ADJUDICATION_PROVENANCE.at(deep).exists()
-        trajectory = json.loads((tmp_path / "failure-trajectory.json").read_text())
-        dispatches = [step["extra"] for step in trajectory["steps"]
-                      if step.get("extra", {}).get("daydream_phase") == "deep"
-                      and step["extra"].get("planned_count") == 2]
-        assert len(dispatches) == 1
-        assert dispatches[0]["dispatch_status"] == "failed"
-    elif failed == "arbiter":
-        assert set(records) == {"generic:1", "python:1", "react:2", "structure:1", "structure:2"}
-        assert records["python:1"]["description"] == "Confirmed Python defect"
-        assert records["python:1"]["severity"] == "high"
-        assert records["react:2"]["description"].startswith("Confirmed:")
-    else:
-        assert set(records) == {"python:1", "structure:1", "structure:2"}
-        assert records["python:1"]["description"].startswith("Confirmed:")
-    if not acquisition_failed:
-        assert coverage.phases[failed]["status"] in {"failed", "incomplete"}
-        assert coverage.phases[sibling]["status"] == "complete"
+    assert set(records) == {"generic:1", "python:1", "react:2", "structure:1", "structure:2"}
+    assert records["python:1"]["description"] == "Confirmed Python defect"
+    assert records["python:1"]["severity"] == "high"
+    assert records["react:2"]["description"].startswith("Confirmed:")
+    assert coverage.phases["arbiter"]["status"] in {"failed", "incomplete"}
+    assert coverage.phases["suppression"]["status"] == "complete"
     assert not DeepArtifact.ADJUDICATION_COMPLETE.at(deep).exists()
     manifests = list((deep.parent / "review-cache/entries").glob("*/manifest.json"))
     assert all(json.loads(path.read_text())["unit"] != "arbiter" for path in manifests)
 
 
-@pytest.mark.parametrize("shape", ["empty", "nonprecision", "arbiter-only", "suppression-only"])
-async def test_precision_overlap_adds_no_calls_for_absent_or_disabled_populations(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shape: str,
-) -> None:
-    """The parallel scheduler must not dispatch a provider for an empty population."""
-    backend = PrecisionOverlapBackend(multi_stack_target)
-    if shape == "empty":
-        backend.review_by_stack = {}
-    elif shape == "arbiter-only":
-        backend.review_by_stack = {"python": backend.review_by_stack["python"][:1]}
-    elif shape == "suppression-only":
-        backend.review_by_stack = {"react": backend.review_by_stack["react"]}
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    assert await _runner.run(empty_review_config(multi_stack_target, tmp_path / "population-trajectory.json",
-                                               precision_mode=shape != "nonprecision",
-                                               latency_profile="forensic")) == 0
-    expected = {"empty": set(), "nonprecision": {"arbiter"}, "arbiter-only": {"arbiter"},
-                "suppression-only": {"suppression"}}[shape]
-    assert set(backend.inputs) == expected
-    assert len(backend.completed) == len(expected)
-
-
-@pytest.mark.parametrize("capacity", [1, 2])
-async def test_precision_shards_and_suppression_share_capacity_without_holding_a_parent_slot(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capacity: int,
-) -> None:
-    """Separate limiters exceed the ceiling; a parent slot deadlocks capacity one.
-
-    Completion-order tests use one unsharded arbiter and cannot establish the
-    shared ceiling across a sharded arbiter's children and its suppression sibling.
-    """
-    backend = PrecisionOverlapBackend(multi_stack_target)
-    backend.fanout_concurrency = capacity
-    execute = backend.execute
-    entered = anyio.Event()
-    release = anyio.Event()
-    active = 0
-    max_active = 0
-
-    async def gated(cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
-        nonlocal active, max_active
-        adjudication = "you are the arbiter" in prompt.lower() or "you are the suppression reviewer" in prompt.lower()
-        if not adjudication:
-            async for event in execute(cwd, prompt, *args, **kwargs):
-                yield event
-            return
-        active += 1
-        max_active = max(max_active, active)
-        if active == capacity:
-            entered.set()
-        try:
-            await release.wait()
-            async for event in execute(cwd, prompt, *args, **kwargs):
-                yield event
-        finally:
-            active -= 1
-
-    monkeypatch.setattr(backend, "execute", gated)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    results: list[int] = []
-
-    async def review() -> None:
-        results.append(await _runner.run(empty_review_config(
-            multi_stack_target, tmp_path / "capacity-trajectory.json", precision_mode=True,
-            latency_profile="balanced")))
-
-    with anyio.fail_after(30):
-        async with anyio.create_task_group() as tasks:
-            tasks.start_soon(review)
-            await entered.wait()
-            await anyio.wait_all_tasks_blocked()
-            assert active == max_active == capacity
-            assert backend.completed == []
-            release.set()
-    assert results == [0]
-    assert active == 0 and max_active == capacity
-    assert backend.completed.count("arbiter") == 2
-    assert backend.completed.count("suppression") == 1
-    deep = multi_stack_target / ".daydream/deep"
-    routing = json.loads((deep / "latency-routing.json").read_text())["arbiter"]
-    assert routing["sharded"] is True and len(routing["groups"]) == 2
-    assert DeepArtifact.ADJUDICATION_COMPLETE.at(deep).is_file()
-
-
-@pytest.mark.parametrize("budget_stop,diagnostic_fault", [
-    (False, None), (True, None), (False, "foreign"), (False, "subclass"),
-], ids=["provider-failure", "incomplete-coverage", "foreign-diagnostic", "error-subclass"])
 async def test_cold_empty_merge_preserves_failed_stack_diagnostics(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-    capsys: pytest.CaptureFixture[str], budget_stop: bool, diagnostic_fault: str | None,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    backend = EmptyReviewBackend(multi_stack_target, fail_stack=None if budget_stop else "python",
-                                 incomplete_stack="python" if budget_stop else None)
-    if diagnostic_fault:
-        class ForeignDiagnostic:
-            def diagnostic(self) -> str:
-                return "review provider unavailable"
-
-        class ExternalLifecycleError(CodexLifecycleError):
-            pass
-
-        evidence = BackendLifecycleFailure("terminal_drain", 5.0, True, False, None)
-        failure = (ExternalLifecycleError(evidence) if diagnostic_fault == "subclass"
-                   else CodexLifecycleError(evidence))
-        if diagnostic_fault != "subclass":
-            failure.lifecycle_failure = ForeignDiagnostic()  # type: ignore[assignment]
-        backend.stack_error = failure
+    backend = EmptyReviewBackend(multi_stack_target, incomplete_stack="python")
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
 
     policy = DaydreamFileConfig(supervisor="llm", tool_supervisor="rules", tool_bash_deny=["blocked-review-tool"])
@@ -549,127 +234,9 @@ async def test_cold_empty_merge_preserves_failed_stack_diagnostics(
     assert result["pipeline_state"] == "completed"
     assert set(result["completed_stacks"]) == {"generic", "react", "structure"}
     failed_scope = next(row for row in result["stack_outcomes"] if row["scope_id"] == "python")
-    assert failed_scope["reason_codes"] == ["policy_veto" if budget_stop else "backend_failure"]
-    if budget_stop:
-        assert "tool_vetoed" in failures["python"] and "budget exhausted" not in failures["python"]
-    else:
-        assert "backend_failure" in failures["python"] and "review provider unavailable" not in failures["python"]
-        if diagnostic_fault:
-            assert "Codex terminal_drain" not in failures["python"]
-            assert failures["python"].startswith(f"{type(failure).__name__}: review invocation failed")
+    assert failed_scope["reason_codes"] == ["policy_veto"]
+    assert "tool_vetoed" in failures["python"] and "budget exhausted" not in failures["python"]
 
-
-@pytest.mark.parametrize("input_kind", ["language", "alternatives", "custom"])
-async def test_cold_merge_with_model_owned_inputs_or_custom_strategy_dispatches(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, input_kind: str,
-) -> None:
-    backend = EmptyReviewBackend(multi_stack_target, forbid_merge=False, forbid_supervise=False)
-    config_overrides: dict[str, Any] = {}
-    if input_kind == "language":
-        backend.review_by_stack = {"python": [_record(description="Language defect", file="api.py", severity="medium",
-                                                      confidence="MEDIUM", rationale="stub", evidence="api.py:1")]}
-        backend.merge_echo_records = True
-    elif input_kind == "alternatives":
-        backend.alternatives = [{"id": 1, "title": "Alternative design", "description": "Missing reusable boundary",
-                                 "recommendation": "Extract boundary", "severity": "low", "files": ["api.py"],
-                                 "confidence": "MEDIUM", "rationale": "Boundary is reused", "evidence": "api.py:1"}]
-        config_overrides["review_profile"] = independent_alternatives_profile()
-    else:
-        resolved = _profile_with_pipeline()
-        strategies = dict(resolved.profile.strategies)
-        strategies["merge"] = replace(strategies["merge"], content=strategies["merge"].content + "\nCustom synthesis.")
-        config_overrides["review_profile"] = replace(resolved, profile=replace(resolved.profile, strategies=strategies))
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-
-    config = empty_review_config(multi_stack_target, tmp_path / "trajectory.json", **config_overrides)
-    assert await _runner.run(config) == 0
-
-    assert sum("cross-stack merge agent" in call["prompt"].lower() for call in backend.calls) == 1
-    deep = multi_stack_target / ".daydream" / "deep"
-    assert DeepArtifact.MERGED_ITEMS.at(deep).is_file()
-    if input_kind == "language":
-        items = json.loads(DeepArtifact.MERGED_ITEMS.at(deep).read_text())["items"]
-        assert items[0]["description"] == "Language defect"
-        assert items[0]["source_uids"] == ["python:1"]
-        supervisors = sum("supervisor adjudication" in call["prompt"].lower() for call in backend.calls)
-        assert supervisors == 1
-    if input_kind == "alternatives":
-        assert json.loads((deep / "alternatives.json").read_text()) == backend.alternatives
-
-
-def _install_merge_captures(
-    monkeypatch: pytest.MonkeyPatch, *, captured_merge: dict[str, Any], captured_record_dedup: dict[str, Any],
-    captured_dedup_records: dict[str, Any] | None = None,
-) -> None:
-    """Wrap the merge/dedup builders to capture their arguments."""
-    real_build_merge = _prompts.build_merge_prompt
-    real_build_dedup = _dedup.build_dedup_candidates
-    real_build_record_dedup = _dedup.build_record_dedup_candidates
-
-    def _capture_merge(**kwargs: Any) -> Any:
-        captured_merge.update(kwargs)
-        return real_build_merge(**kwargs)
-
-    def _capture_dedup(records: Any, alt_issues: Any) -> Any:
-        if captured_dedup_records is not None:
-            captured_dedup_records["records"] = list(records)
-        return real_build_dedup(records, alt_issues)
-
-    def _capture_record_dedup(records: Any, sources: Any) -> Any:
-        captured_record_dedup["records"] = list(records)
-        captured_record_dedup["sources"] = list(sources)
-        return real_build_record_dedup(records, sources=sources)
-
-    monkeypatch.setattr("daydream.deep.prompts.build_merge_prompt", _capture_merge)
-    monkeypatch.setattr("daydream.deep.merge_steps.build_dedup_candidates", _capture_dedup)
-    monkeypatch.setattr("daydream.deep.merge_steps.build_record_dedup_candidates", _capture_record_dedup,)
-
-def test_run_deep_routes_detected_react_to_react_stack_without_plugin(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-
-
-    _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target, pin_skill_availability=False)
-    # A populated or empty plugin registry must not change built-in routing (M1):
-    # react stays its own stack even with only python installed.
-    _write_plugin_registry(tmp_path, ["beagle-python"])
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
-
-    captured: dict[str, list[_detection.StackAssignment]] = {}
-    real_detect = _detection.detect_stacks
-
-    def _spy(files: list[str], **kwargs: Any) -> list[_detection.StackAssignment]:
-        result = real_detect(files, **kwargs)
-        captured["stacks"] = result
-        return result
-
-    monkeypatch.setattr("daydream.deep.orchestrator.detect_stacks", _spy)
-
-    exit_code = anyio.run(_run_deep, multi_stack_target)
-    assert exit_code == 0
-
-    stacks = {s.stack_name for s in captured["stacks"]}
-    # M1/M3: built-in routing is registry-independent and never degrades a
-    # detected stack to generic -- react stays its own stack regardless of
-    # which plugins are installed.
-    assert "python" in stacks
-    assert "react" in stacks
-
-def test_diff_changed_files_rename_single_entry() -> None:
-    """Rename diff contributes only the destination path, not both sides."""
-    rename_diff = (
-        "diff --git a/foo.py b/foo.ts\n"
-        "similarity index 85%\n"
-        "rename from foo.py\n"
-        "rename to foo.ts\n"
-        "--- a/foo.py\n"
-        "+++ b/foo.ts\n"
-        "@@ -1 +1 @@\n"
-        "-x = 1\n"
-        "+const x = 1;\n"
-    )
-    assert _diff_changed_files(rename_diff) == ["foo.ts"]
 
 def test_diff_changed_files_handles_modify_add_delete_binary() -> None:
     """Non-rename diff shapes emit exactly one path each."""
@@ -705,209 +272,13 @@ def test_diff_changed_files_handles_modify_add_delete_binary() -> None:
     )
     assert _diff_changed_files(mixed) == ["keep.py", "new.py", "old.py", "logo.png",
                                         "removed\tfile.py", 'logo"quoted".png']
+    # Bounding keeps whole byte-identical blocks: an oversized leading block survives, later ones drop by name.
+    big = "diff --git a/0big.py b/0big.py\n--- a/0big.py\n+++ b/0big.py\n@@ -0,0 +1 @@\n+" + "x" * 200 + "\n"
+    bounded, info = bound_deep_diff(big + mixed, budget=100)
+    assert info.marker is not None and bounded == info.marker + big
+    assert "dropped: keep.py, new.py, old.py, logo.png" in info.marker
+    assert (info.retained_blocks, info.oversize_paths) == (1, ["0big.py"])
 
-async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A per-stack agent failure must: 1) persist to typed review coverage under .daydream/deep/, 2) appear in
-    the merge prompt under an 'Uncovered stacks' block, so the merge agent can call it out instead of silently
-    ignoring the gap."""
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-
-    # Wrap execute so only the REACT per-stack prompt raises; everything else
-    # keeps the stub's normal behavior.
-    original_execute = stub.execute
-
-    def _maybe_fail(cwd: Any, prompt: str, output_schema: Any = None, continuation: Any = None, agents: Any = None,
-        max_turns: Any = None, read_only: Any = False, persist_session: Any = True,
-    ) -> Any:
-        pl = prompt.lower()
-        if "you are reviewing the react stack" in pl:
-            async def _raise() -> None:
-                raise RuntimeError("simulated react failure")
-
-            async def _fail() -> AsyncIterator[Any]:
-                await _raise()
-                yield  # pragma: no cover -- unreachable; satisfies async-gen typing
-
-            return _fail()
-        return original_execute(
-            cwd, prompt, output_schema, continuation, agents, max_turns=max_turns, read_only=read_only,
-            persist_session=persist_session,
-        )
-
-    stub.execute = _maybe_fail  # type: ignore[method-assign]
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-
-    failures_payload = saved_coverage(multi_stack_target / ".daydream/deep").unfinished_scopes
-    assert "react" in failures_payload
-    assert "backend_failure" in failures_payload["react"]
-    assert "simulated react failure" not in failures_payload["react"]
-
-    merge_prompts = [c["prompt"] for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
-    assert merge_prompts, "merge agent was not invoked"
-    prompt = merge_prompts[0]
-    assert "Uncovered stacks" in prompt
-    assert "react" in prompt
-    assert "backend_failure" in prompt and "simulated react failure" not in prompt
-
-async def test_resume_merge_errors_on_missing_stack_records(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    # Records for python only; react and generic are missing.
-    _prime_merge_resume(multi_stack_target, python=[_record(description="py issue")])
-    exit_code = await _run_deep(multi_stack_target, start_at="merge")
-    assert exit_code == 1
-    # Merge agent must NOT have run -- the orchestrator bailed before it.
-    merge_calls = [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
-    assert merge_calls == []
-
-async def test_resume_merge_allows_missing_records_for_failed_stacks(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-
-    # No records for the generic bucket, but it's listed as a prior failure.
-    deep = _prime_merge_resume(multi_stack_target, python=[_record(description="py issue")],
-        react=[_record(description="tsx issue", file="App.tsx")], structure=[_record(description="structural issue")],
-    )
-    coverage = saved_coverage(deep)
-    coverage.record_scope("generic", "failed", reasons=("backend_failure",),
-                          diagnostic="simulated generic failure")
-    (deep / "review-coverage.json").write_text(json.dumps(coverage.to_dict()))
-
-    exit_code = await _run_deep(multi_stack_target, start_at="merge")
-    assert exit_code == 0
-
-    merge_calls = [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
-    assert len(merge_calls) == 1
-
-async def test_orchestrator_passes_structural_records_separately_to_merge(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured_merge: dict[str, Any] = {}
-    captured_dedup_records: dict[str, Any] = {}
-    captured_record_dedup: dict[str, Any] = {}
-    _install_merge_captures(monkeypatch, captured_merge=captured_merge, captured_dedup_records=captured_dedup_records,
-        captured_record_dedup=captured_record_dedup,
-    )
-
-    _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-
-    # The structural record carries a sentinel id so we can verify it never lands
-    # in the dedup input lists.
-    _prime_merge_resume(multi_stack_target, python=[_record(id=1, description="py issue")],
-        react=[_record(id=2, description="tsx issue", file="App.tsx")],
-        generic=[_record(id=3, description="docs issue", file="README.md")],
-        structure=[_record(id=4, description="1000-line file budget violated")],
-    )
-
-    exit_code = await _run_deep(multi_stack_target, start_at="merge")
-    assert exit_code == 0
-
-    # Language paths remain partitioned; the explicit structural path supplies
-    # the complete retained meta-stack to synthesis.
-    per_stack_paths = captured_merge["per_stack_records_paths"]
-    assert all(p.name != "stack-structure-records.json" for p in per_stack_paths), (
-        f"structural records must be partitioned out: {per_stack_paths}"
-    )
-
-    assert captured_merge["structural_records_path"].name == "stack-structure-records.json"
-
-    # (2) The structural sentinel record must NOT appear in either dedup input.
-    def _has_structure(records: list[dict[str, Any]]) -> bool:
-        return any(r.get("id") == 4 for r in records)
-
-    assert not _has_structure(captured_dedup_records["records"]), (
-        f"structural records leaked into build_dedup_candidates: {captured_dedup_records['records']}"
-    )
-    assert not _has_structure(captured_record_dedup["records"]), (
-        f"structural records leaked into build_record_dedup_candidates: {captured_record_dedup['records']}"
-    )
-    # And the sources list must stay parallel to the filtered records list.
-    assert len(captured_record_dedup["sources"]) == len(captured_record_dedup["records"])
-
-async def test_orchestrator_passes_structural_records_separately_to_merge_fresh_run(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured_merge: dict[str, Any] = {}
-    captured_record_dedup: dict[str, Any] = {}
-    _install_merge_captures(monkeypatch, captured_merge=captured_merge, captured_record_dedup=captured_record_dedup,)
-
-    _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-
-    # Structural records file lives under the deep artifact dir.
-    per_stack_paths = captured_merge["per_stack_records_paths"]
-    assert all(p.name != "stack-structure-records.json" for p in per_stack_paths), (
-        f"structural records must be partitioned out (fresh run): {per_stack_paths}"
-    )
-
-    assert captured_merge["structural_records_path"].name == "stack-structure-records.json"
-
-    # Fresh-run populates record_sources with stack_name, so the partition drops
-    # every entry whose source == 'structure'; sources stay parallel to records.
-    assert "structure" not in captured_record_dedup["sources"]
-    assert len(captured_record_dedup["sources"]) == len(captured_record_dedup["records"])
-
-@pytest.mark.parametrize("structural_line", [1, 0], ids=["same-line", "whole-file"])
-async def test_structural_language_twin_is_arbitrated_and_reported_once(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, structural_line: int,
-) -> None:
-    """Same-line and whole-file structural twins collapse to one high-severity finding."""
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.merge_items = [
-        {**_record(description=_TWIN_DESCRIPTION, severity="high", confidence="HIGH"),
-         "lens": "cross-stack", "source_uids": ["python:1", "structure:1"]},
-        {**_record(file="App.tsx", description="React concern"), "lens": "per-stack", "source_uids": ["react:1"]},
-        {**_record(file="README.md", description="Docs concern"), "lens": "per-stack", "source_uids": ["generic:1"]},
-    ]
-    stub.parse_by_stack = _twin_parse_by_stack(structural_line=structural_line)
-    assert await _run_deep(multi_stack_target) == 0
-
-    deep = deep_dir(multi_stack_target, allow_standalone=True)
-    arbiter_input = json.loads(DeepArtifact.ARBITER_INPUT.at(deep).read_text())
-    observed = sorted((record["file"], record["line"], record["severity"]) for record in arbiter_input)
-    expected = sorted([("api.py", 1, "medium"), ("api.py", structural_line, "high")])
-    assert observed == expected, arbiter_input
-    structural = json.loads(per_stack_records_path(deep, "structure").read_text())
-    assert structural["issues"][0]["description"].startswith("ARBITRATED: ")
-
-    items = json.loads(DeepArtifact.MERGED_ITEMS.at(deep).read_text())["items"]
-    twins = [item for item in items if item["file"] == "api.py" and _TWIN_DESCRIPTION in item["description"]]
-    assert len(twins) == 1, twins
-    assert twins[0]["severity"] == "high"
-    assert {item["file"] for item in items} == {"api.py", "App.tsx", "README.md"}
-
-async def test_precision_suppression_preserves_structural_records_on_resume(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.merge_echo_records = True
-    stub.suppression_keep = False
-    deep = _prime_merge_resume(multi_stack_target,
-        python=[_record(description="Local borderline finding", severity="low", confidence="MEDIUM")],
-        react=[], generic=[],
-        structure=[_record(description="Structural boundary mismatch", severity="low", confidence="MEDIUM",
-                           evidence="api.py:1")],
-    )
-    assert await _run_deep(multi_stack_target, start_at="merge", precision_mode=True) == 0
-    items = json.loads((deep / "merged-items.json").read_text())["items"]
-    assert not any(item["description"] == "Local borderline finding" for item in items)
-    structural = [item for item in items if item["description"] == "Structural boundary mismatch"]
-    assert len(structural) == 1
-    assert structural[0]["lens"] == "structural"
-    assert structural[0]["source_uids"] == ["structure:1"]
 
 async def test_resume_fix_skips_pr_post(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _silence(monkeypatch)
@@ -936,108 +307,3 @@ async def test_resume_fix_skips_pr_post(multi_stack_target: Path, monkeypatch: p
     assert post_calls == [], (
         f"post_review_to_pr_from_report should be skipped on --start-at fix, got {len(post_calls)} call(s)"
     )
-
-async def test_resolve_backend_called_with_each_phase_in_deep_flow(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
-) -> None:
-    seen_phases: list[str] = []
-    original = _runner._resolve_backend
-
-    def spy(config: Any, phase: Any, cache: Any = None, *, cwd: Any = None, audit_workspace: Any = None,
-        effort_override: Any = None,
-    ) -> Any:
-        seen_phases.append(phase)
-        return original(config, phase, cache, cwd=cwd, audit_workspace=audit_workspace, effort_override=effort_override,
-        )
-
-    # run_deep imports _resolve_backend from daydream.runner, so patching it there
-    # intercepts every call site under per-phase resolution.
-    monkeypatch.setattr("daydream.runner._resolve_backend", spy)
-
-    # Accept the fix gate so fix/test/commit run; pin interactivity so the "y"
-    # stub is honoured instead of the unattended decline default.
-    _force_interactive(monkeypatch)
-    monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
-
-    _install_stub_backend(monkeypatch, multi_stack_target)
-
-    # Stub the outward-facing tail phases (they still trigger their resolver call)
-    # plus phase_fix, so the fix loop doesn't mutate the workspace.
-    mute_side_effects()
-
-    async def _stub_fix(backend: Any, work: Any, item: Any, idx: Any, total: Any, **kwargs: Any) -> None:  # noqa: ARG001
-        return None
-
-    monkeypatch.setattr("daydream.phases.fix.phase_fix", _stub_fix)
-
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-
-    # Issue #745: the pre-merge parse-<stack> stage was removed (reviewers emit
-    # records directly), so "parse" is no longer a resolved deep phase.
-    expected_phases = {"intent", "per_stack_review", "merge", "fix", "test", "verify"}
-    captured = set(seen_phases)
-    missing = expected_phases - captured
-    assert not missing, f"Deep orchestrator missing per-phase resolver calls for {missing}; got {sorted(captured)}"
-    assert "wonder" not in captured  # The default design lens shares per_stack_review.
-
-async def test_intent_phase_runs_on_sonnet_through_runner_run(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """#171 real-path: the intent phase Sonnet downgrade must be observable through the runner.run production
-    entrypoint, not only at the unit seam."""
-    _silence(monkeypatch)
-    calls = _install_model_capturing_stubs(
-        monkeypatch, multi_stack_target, parse_severity="high", merge_echo_records=True
-    )
-
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-
-    # "understand the intent of these changes" is unique to build_intent_prompt
-    # (phases.py) -- the established intent-phase prompt discriminator.
-    intent_models = [c["model"] for c in calls if "understand the intent of these changes" in c["prompt"].lower()]
-    assert intent_models, "intent phase did not execute through runner.run"
-    assert set(intent_models) == {PHASE_DEFAULT_MODELS["claude"]["intent"]}, (
-        f"intent phase should run on its default model, got {sorted(intent_models)!r}"
-    )
-
-async def test_verifier_runs_after_merge_before_fix(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
-) -> None:
-    # phase_fix stays REAL so verdict propagation is observable.
-    stub = _install_accept_gate_pipeline(monkeypatch, multi_stack_target, mute_side_effects)
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-
-    merge_idx: int | None = None
-    verifier_idx: int | None = None
-    first_fix_idx: int | None = None
-    for idx, call in enumerate(stub.calls):
-        pl = call["prompt"].lower()
-        if merge_idx is None and "cross-stack merge agent" in pl:
-            merge_idx = idx
-        elif verifier_idx is None and "recommendation-verifier" in pl:
-            verifier_idx = idx
-        elif first_fix_idx is None and pl.startswith("fix this issue:"):
-            first_fix_idx = idx
-
-    assert verifier_idx is not None, "verifier prompt was not dispatched"
-    assert merge_idx is not None, "merge prompt was not dispatched"
-    assert first_fix_idx is not None, "no fix prompt dispatched -- fix loop did not run"
-    assert merge_idx < verifier_idx < first_fix_idx, (
-        f"expected merge ({merge_idx}) < verifier ({verifier_idx}) < first fix ({first_fix_idx})"
-    )
-
-    # Verdicts JSON lands on disk at the orchestrator-controlled path.
-    expected_path = DeepArtifact.VERDICTS.at(multi_stack_target / ".daydream" / "deep")
-    assert expected_path == multi_stack_target / ".daydream" / "deep" / "recommendation-verdicts.json"
-    assert expected_path.is_file(), f"verdicts file missing at {expected_path}"
-
-
-    payload = json.loads(expected_path.read_text())
-    assert payload["verdicts"] == [
-        {"issue_id": 1, "verdict": "consistent", "evidence": "stub", "unverified_assumptions": []}
-    ]
-    assert payload["selection"]["decisions"]

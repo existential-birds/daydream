@@ -261,18 +261,3 @@ def grpc_trace_server(receive: GrpcReceiver, *, workers: int = 1) -> Iterator[in
             server.stop(grace=0).wait(timeout=5)
 
 
-@contextmanager
-def otlp_grpc_collector(*, reject: bool = False) -> Iterator[TraceCollector]:
-    """Capture real gRPC requests/headers; optionally answer UNAVAILABLE after capture."""
-    collector = TraceCollector()
-
-    def receive(request: ExportTraceServiceRequest, context: grpc.ServicerContext) -> ExportTraceServiceResponse:
-        metadata = {key.lower(): value for key, value in context.invocation_metadata()}
-        collector.capture("/grpc", metadata, request.SerializeToString())
-        if reject:
-            context.abort(grpc.StatusCode.UNAVAILABLE, "scripted collector outage")
-        return ExportTraceServiceResponse()
-
-    with grpc_trace_server(receive, workers=2) as port:
-        collector.base_url = f"127.0.0.1:{port}"
-        yield collector

@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
 import daydream.deep.diagram_schema as diagram_schema
 import daydream.improve.prompts as improve_prompts
 import daydream.improve.recon as improve_recon
@@ -106,14 +104,13 @@ def _strict_violations(node: Any, path: str) -> list[str]:
 
 _SCHEMAS = _collect_output_schemas()
 
-def test_output_schemas_were_discovered() -> None:
-    """Guard the guard: discovery must not silently match zero schemas."""
+def test_output_schemas_are_codex_strict_compliant() -> None:
+    """Every discovered output schema satisfies OpenAI strict structured-output rules."""
+    # Guard the guard: discovery must not silently match zero schemas.
     assert _SCHEMAS, "No *_SCHEMA constants discovered — schema collection is broken"
-
-@pytest.mark.parametrize("name,schema", _SCHEMAS, ids=[n for n, _ in _SCHEMAS])
-def test_output_schema_is_codex_strict_compliant(name: str, schema: dict[str, Any]) -> None:
-    """Every output schema satisfies OpenAI strict structured-output rules."""
-    violations = _strict_violations(schema, name)
-    if schema.get("type") != "object":
-        violations.append(f"{name}: root schema must be an object")
+    violations: list[str] = []
+    for name, schema in _SCHEMAS:
+        violations.extend(_strict_violations(schema, name))
+        if schema.get("type") != "object":
+            violations.append(f"{name}: root schema must be an object")
     assert not violations, "Schema not Codex/OpenAI strict-compliant:\n" + "\n".join(violations)
