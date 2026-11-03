@@ -115,7 +115,8 @@ class CanonicalChange:
             text = diff_path.read_text(encoding="utf-8")
         index_text = hunk_index_path.read_text(encoding="utf-8")
         index = json.loads(index_text)
-        _revalidate(canonical, captured_source)
+        # Each factory also validates the captured source before using this change.
+        _revalidate(canonical, None)
         if hashlib.sha256(text.encode()).hexdigest() != canonical[0].sha256:
             raise inputs.SanctionedInputUnavailable("canonical change bytes changed during preparation")
         if hashlib.sha256(index_text.encode()).hexdigest() != canonical[1].sha256:

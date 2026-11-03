@@ -473,8 +473,6 @@ async def phase_per_stack_reviews(
         effective_fanout_concurrency(10, backend)
     )
     prior_commits = git_ops.daydream_commits(work.repo, work.base_branch)
-    read_only = (getattr(backend, 'read_only_disposable_clone', False) is True
-                 or uses_diff_reference(backend, work.repo, read_only=True))
 
     structural_records = per_stack_records_path(deep_dir_path, STRUCTURE_STACK_NAME)
     structural_output = per_stack_review_path(deep_dir_path, STRUCTURE_STACK_NAME)
@@ -488,13 +486,12 @@ async def phase_per_stack_reviews(
         phase=DaydreamPhase.DEEP,
         descriptors=dispatch_descriptors,
     ) as dispatch:
-        change: CanonicalChange | None = None
-        change_error: Exception | None = None
+        change: CanonicalChange | Exception
         try:
             change = await prepared_off_loop(partial(CanonicalChange.capture, diff_path,
                                                      diff_path.parent / 'hunk-index.json', work.captured_source))
         except Exception as exc:  # noqa: BLE001 -- every planned scope records this failure below
-            change_error = exc
+            change = exc
 
         async def _review_stack_impl(stack: "StackAssignment") -> None:
             output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
@@ -520,9 +517,8 @@ async def phase_per_stack_reviews(
             if exploration_dir is not None:
                 shared_paths.update({"exploration-summary": exploration_dir / "summary.md",
                                      "exploration-affected-files": exploration_dir / "affected_files.md"})
-            if change_error is not None:
-                raise change_error
-            assert change is not None
+            if isinstance(change, Exception):
+                raise change
             build_inputs = partial(prepared_off_loop, partial(StageInputFactory.for_review, backend, work, stack,
                 change=change, shared_paths=shared_paths, revision=coverage.revision.to_dict(),
                 registry=active_registry, artifact_session=artifact_session, allow_standalone=allow_standalone))
@@ -657,7 +653,7 @@ async def phase_per_stack_reviews(
                             structured, budget_reason = await investigation.run(backend, work.repo, build_stage_prompt,
                                 stage_inputs=lambda state: prepared_off_loop(partial(input_factory.prepare, state)),
                                 input_factory=input_factory,
-                                read_only=read_only,
+                                read_only=input_factory.read_only,
                                 run_context=run_context,
                             )
                 except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation

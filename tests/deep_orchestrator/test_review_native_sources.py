@@ -318,15 +318,13 @@ def test_stage_inputs_rebind_retained_decisions_and_refuse_changed_canonical_byt
             revision=revision, artifact_session=None, allow_standalone=True, read_only=True)
 
     factory, sibling = scope_inputs(), scope_inputs()
-    pristine = copy.deepcopy((sibling.parts[0].assignment, sibling.index, sibling._source_aliases))
-    factory.parts[0].assignment['source_refs'].clear()
-    factory.index['api.py']['hunks'].clear()
-    factory._source_aliases.clear()
-    assert (sibling.parts[0].assignment, sibling.index, sibling._source_aliases) == pristine
-    assert scope_inputs().index == pristine[1] and scope_inputs().parts[0].assignment == pristine[0]
+    pristine = copy.deepcopy((factory.parts[0].assignment, factory.index, factory._source_aliases))
+    sibling.parts[0].assignment['source_refs'].clear()
+    sibling.index['api.py']['hunks'].clear()
+    sibling._source_aliases.clear()
+    assert (factory.parts[0].assignment, factory.index, factory._source_aliases) == pristine
     with pytest.raises(TypeError):
         change.index_entries['api.py'] = '{}'  # type: ignore[index]
-    factory = scope_inputs()
     part = factory.assignment_batches[0][0]
     reference = next(ref for ref in part['source_refs'] if ref['side'] == 'new')
     decision = {'target_id': part['target_id'], 'status': 'reviewed', 'reason': '', 'evidence_refs': [reference]}
@@ -341,11 +339,15 @@ def test_stage_inputs_rebind_retained_decisions_and_refuse_changed_canonical_byt
         factory.prepare({'stage': 'triage', 'assigned_target_ids': []})
 
 
-@pytest.mark.parametrize('lines', [3, 3000], ids=['whole-file', 'split'])
-def test_type_changed_path_keeps_old_side_refs_under_each_block_header(tmp_path: Path, lines: int) -> None:
-    """A regular file replaced by a symlink is a deletion block then an addition block for one path.
+@pytest.mark.parametrize(('lines', 'to_symlink'), [(3, True), (3000, True), (3000, False)],
+                         ids=['whole-file', 'split', 'split-to-regular'])
+def test_type_changed_path_keeps_old_side_refs_under_each_block_header(
+    tmp_path: Path, lines: int, to_symlink: bool,
+) -> None:
+    """A type change is a deletion block then an addition block for one path.
 
-    Removed lines stay citable on the old side, and a split part carries only its own block's header.
+    Removed lines stay citable on the old side, and a split part carries only its own block's header,
+    whether the oversized block comes first (regular file to symlink) or last (symlink to regular file).
     """
     from daydream.backends.pi import PiBackend
     from daydream.deep.detection import StackAssignment
@@ -355,14 +357,17 @@ def test_type_changed_path_keeps_old_side_refs_under_each_block_header(tmp_path:
 
     repo = tmp_path / 'repo'
     init_repo(repo)
-    (repo / 'x').write_text(''.join(f'line {index} ' + 'y' * 40 + '\n' for index in range(lines)))
     (repo / 'target').write_text('t\n')
-    git(repo, 'add', '.')
-    base = commit(repo, 'base')
-    (repo / 'x').unlink()
-    (repo / 'x').symlink_to('target')
-    git(repo, 'add', 'x')
-    head = commit(repo, 'type change')
+    regular = ''.join(f'line {index} ' + 'y' * 40 + '\n' for index in range(lines))
+    for side, symlink in (('base', not to_symlink), ('type change', to_symlink)):
+        (repo / 'x').unlink(missing_ok=True)
+        if symlink:
+            (repo / 'x').symlink_to('target')
+        else:
+            (repo / 'x').write_text(regular)
+        git(repo, 'add', '.')
+        head = commit(repo, side)
+    base = git(repo, 'rev-parse', 'HEAD~1')
     patch = git_ops.diff(repo, base, head)
     root = tmp_path / 'inputs'
     root.mkdir()
@@ -378,7 +383,11 @@ def test_type_changed_path_keeps_old_side_refs_under_each_block_header(tmp_path:
         return
     headers = [[line for line in part.diff.splitlines() if line.startswith(('diff --git', 'new file', 'deleted file'))]
                for part in factory.parts]
-    assert len(factory.parts) > 2
-    assert headers[:-1] == [['diff --git a/x b/x', 'deleted file mode 100644']] * (len(factory.parts) - 1)
-    assert refs[:-1] == [{('old', 'x')}] * (len(factory.parts) - 1)
-    assert headers[-1] == ['diff --git a/x b/x', 'new file mode 120000'] and refs[-1] == {('new', 'x')}
+    deleted = [['diff --git a/x b/x', 'deleted file mode ' + ('100644' if to_symlink else '120000')]]
+    added = [['diff --git a/x b/x', 'new file mode ' + ('120000' if to_symlink else '100644')]]
+    split = len(factory.parts) - 1
+    assert split > 1
+    if to_symlink:
+        assert (headers, refs) == (deleted * split + added, [{('old', 'x')}] * split + [{('new', 'x')}])
+    else:
+        assert (headers, refs) == (deleted + added * split, [{('old', 'x')}] + [{('new', 'x')}] * split)

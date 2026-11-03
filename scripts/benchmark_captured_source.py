@@ -294,7 +294,6 @@ def worker(args):
     error = None
     factories = []
     phase_sample = None
-    disk_capture = objects = None
     try:
         with metrics.span("capture"):
             captured = cs.capture_source(
@@ -308,7 +307,6 @@ def worker(args):
             from daydream.deep.detection import StackAssignment
             from daydream.hunk_index import write_hunk_index
             from daydream import review_stage_inputs as rsi
-            from daydream.review_stage_inputs import StageInputFactory
             from daydream.workspace import WorkContext
             from tests.harness.backend import ScriptedBackend
 
@@ -332,67 +330,63 @@ def worker(args):
             if args.phase:
                 with metrics.span("phase"):
                     phase_sample = review_phase(args, work, revision, diff_path)
-                captured.remove()
-                captured = None
-                raise _PhaseDone
-            change = (
-                {"change": rsi.CanonicalChange.capture(diff_path, generated / "hunk-index.json", captured)}
-                if hasattr(rsi, "CanonicalChange")
-                else {"diff_path": diff_path, "hunk_index_path": generated / "hunk-index.json"}
-            )
-            with metrics.span("planned_factories"):
-                for i in range(args.scopes):
-                    factories.append(
-                        StageInputFactory(
-                            ScriptedBackend(),
-                            work,
-                            StackAssignment("python#" + str(i), list(captured.files)),
-                            **change,
-                            shared_paths={},
-                            revision=revision,
-                            artifact_session=None,
-                            allow_standalone=True,
-                            read_only=True,
+            else:
+                change = (
+                    {"change": rsi.CanonicalChange.capture(diff_path, generated / "hunk-index.json", captured)}
+                    if hasattr(rsi, "CanonicalChange")
+                    else {"diff_path": diff_path, "hunk_index_path": generated / "hunk-index.json"}
+                )
+                with metrics.span("planned_factories"):
+                    for i in range(args.scopes):
+                        factories.append(
+                            rsi.StageInputFactory(
+                                ScriptedBackend(),
+                                work,
+                                StackAssignment("python#" + str(i), list(captured.files)),
+                                **change,
+                                shared_paths={},
+                                revision=revision,
+                                artifact_session=None,
+                                allow_standalone=True,
+                                read_only=True,
+                            )
                         )
-                    )
-            installed = []
+                installed = []
 
-            def admission(i):
-                factory = factories[i % len(factories)]
+                def admission(i):
+                    factory = factories[i % len(factories)]
 
-                def resolve(canonicalize):
-                    for part in factory.parts[: args.targets]:
-                        assignment = part.assignment
-                        selector = {
-                            "source_id": assignment["source_options"][0]["source_id"],
-                            "basis": "supplied_diff",
-                            "source_range": None,
-                        }
-                        canonicalize([selector], assignment["source_refs"])
+                    def resolve(canonicalize):
+                        for part in factory.parts[: args.targets]:
+                            assignment = part.assignment
+                            selector = {
+                                "source_id": assignment["source_options"][0]["source_id"],
+                                "basis": "supplied_diff",
+                                "source_range": None,
+                            }
+                            canonicalize([selector], assignment["source_refs"])
 
-                if hasattr(factory, "admit_submission"):
+                    if hasattr(factory, "admit_submission"):
 
-                    def prepare(sources):
-                        resolve(sources.canonicalize)
-                        return lambda: installed.append(i)
+                        def prepare(sources):
+                            resolve(sources.canonicalize)
+                            return lambda: installed.append(i)
 
-                    factory.admit_submission(prepare)
-                else:
-                    factory.canonicalize_source_selectors([], [], require_assigned=False)
-                    resolve(factory.canonicalize_source_selectors)
-                    factory.canonicalize_source_selectors([], [], require_assigned=False)
-                    installed.append(i)
+                        factory.admit_submission(prepare)
+                    else:
+                        factory.canonicalize_source_selectors([], [], require_assigned=False)
+                        resolve(factory.canonicalize_source_selectors)
+                        factory.canonicalize_source_selectors([], [], require_assigned=False)
+                        installed.append(i)
 
-            with metrics.span("admissions"):
-                with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-                    list(pool.map(admission, range(args.admissions)))
-            with metrics.span("release_factories"):
-                factories.clear()
-                gc.collect()
+                with metrics.span("admissions"):
+                    with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+                        list(pool.map(admission, range(args.admissions)))
+                with metrics.span("release_factories"):
+                    factories.clear()
+                    gc.collect()
         with metrics.span("cleanup"):
             captured.remove()
-    except _PhaseDone:
-        pass
     except BaseException as exc:
         error = {"type": type(exc).__name__, "message": str(exc)}
         disk_capture = disk_stats(dest)
@@ -448,10 +442,6 @@ def worker(args):
     print(json.dumps({"result": result}), flush=True)
 
 
-class _PhaseDone(Exception):
-    """The phase measurement removed its capture; skip the factory/admission steps."""
-
-
 def review_phase(args, work, revision, diff_path):
     """Run the real per-stack phase offline; sample while C scopes are admitted and N - C are queued.
 
@@ -472,6 +462,7 @@ def review_phase(args, work, revision, diff_path):
     admitted = min(args.concurrency, len(stacks))
     sample = {}
     release = anyio.Event()
+    release.set()  # The warm-up runs unblocked.
     entered = 0
 
     async def respond(*_):
@@ -495,51 +486,42 @@ def review_phase(args, work, revision, diff_path):
         stop.permanent = True  # Permanent: no retry backoff in the measured runtime.
         return [stop]
 
-    diff_key = hashlib.sha256(diff_path.read_bytes()).hexdigest()
-    coverage = ReviewCoverage(
-        "benchmark", AnalyzedRevision(revision["head_sha"], revision["merge_base_sha"], diff_key, source_id=revision["source_id"]),
-        [PlannedScope(s.stack_name, s.stack_name, tuple(s.files)) for s in stacks], (),
-    )
+    revision = AnalyzedRevision(revision["head_sha"], revision["merge_base_sha"],
+                                hashlib.sha256(diff_path.read_bytes()).hexdigest(), source_id=revision["source_id"])
     intent = diff_path.parent / "intent.md"
     intent.write_text("Offline admission benchmark.\n")
     backend = ScriptedBackend(responder=respond, fanout_concurrency=args.concurrency)
+
+    def review(scopes, run_id):
+        coverage = ReviewCoverage(run_id, revision, [PlannedScope(s.stack_name, s.stack_name, tuple(s.files))
+                                                     for s in scopes], ())
+        return anyio.run(lambda: phase_per_stack_reviews(
+            backend, work, scopes, diff_path=diff_path, intent_path=intent, alternatives_path=intent.parent / "absent",
+            include_alternatives=False, allow_standalone=True, coverage=coverage,
+            run_context=RunContext(InteractionPolicy(interactive=False)),
+        ))
+
     # Warm lazy imports with one throwaway scope so retained deltas compare queued scopes only.
-    warm_release = release
+    review(stacks[:1], "warm")
     release = anyio.Event()
-    release.set()
-    anyio.run(lambda: phase_per_stack_reviews(
-        backend, work, stacks[:1], diff_path=diff_path, intent_path=intent, alternatives_path=diff_path.parent / "absent",
-        include_alternatives=False, allow_standalone=True, coverage=ReviewCoverage(
-            "warm", coverage.revision, [PlannedScope(stacks[0].stack_name, stacks[0].stack_name, tuple(stacks[0].files))], ()),
-        run_context=RunContext(InteractionPolicy(interactive=False)),
-    ))
-    release = warm_release
     gc.collect()
     before = tracemalloc.get_traced_memory()[0] if tracemalloc.is_tracing() else 0
     start = time.perf_counter()
-    _, failures = anyio.run(lambda: phase_per_stack_reviews(
-        backend, work, stacks, diff_path=diff_path, intent_path=intent, alternatives_path=diff_path.parent / "absent",
-        include_alternatives=False, allow_standalone=True, coverage=coverage,
-        run_context=RunContext(InteractionPolicy(interactive=False)),
-    ))
+    _, failures = review(stacks, "benchmark")
     sample.update(phase_seconds=time.perf_counter() - start, failed_scopes=len(failures), scopes=len(stacks))
     return sample
 
 
-def process_tree_memory(procs):
-    """Sum private memory: macOS phys_footprint or Linux USS/PSS; never a sum of RSS."""
-    footprint = pss = 0
-    for p in procs:
-        if sys.platform == "darwin":
-            footprint += _darwin_footprint(p.pid)
-        else:
-            full = p.memory_full_info()
-            footprint += full.uss
-            pss += full.pss
-    return footprint, pss
+def private_memory(process):
+    """Private memory of one process: macOS phys_footprint or Linux (USS, PSS); never RSS."""
+    if sys.platform == "darwin":
+        return _darwin_footprint(process.pid), 0
+    full = process.memory_full_info()
+    return full.uss, full.pss
 
 
-def _darwin_footprint(pid):
+@functools.cache
+def _darwin_rusage():
     import ctypes
 
     class RUsage(ctypes.Structure):
@@ -560,8 +542,14 @@ def _darwin_footprint(pid):
             )
         ]
 
-    usage = RUsage()
-    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    return RUsage, ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+
+
+def _darwin_footprint(pid):
+    import ctypes
+
+    rusage, libproc = _darwin_rusage()
+    usage = rusage()
     return usage.footprint if libproc.proc_pid_rusage(pid, 0, ctypes.byref(usage)) == 0 else 0
 
 
@@ -610,7 +598,7 @@ def sample_run(params, repeat):
             for p in procs:
                 try:
                     rss += p.memory_info().rss
-                    private, proportional = process_tree_memory([p])
+                    private, proportional = private_memory(p)
                     footprint += private
                     pss += proportional
                     pids.append(p.pid)
@@ -640,7 +628,7 @@ def sample_run(params, repeat):
             sampled_disk_logical_peak=peak_disk,
             sample_interval_seconds=0.01,
         )
-        peak_disk = max(peak_disk, (result["disk_capture"] or {"logical": 0})["logical"])
+        peak_disk = max(peak_disk, result["disk_capture"]["logical"])
         result["disk_logical_peak_boundaries_or_sampled"] = peak_disk
         with (ROOT / "results.jsonl").open("a") as f:
             f.write(json.dumps(result) + "\n")
