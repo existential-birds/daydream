@@ -17,7 +17,8 @@ invocation then fails permanently, so no provider runs and no retry backoff is t
 A warm-up phase over one scope loads lazy imports first, so the retained delta compares scope
 state only. Each case has one traced repetition and three untraced repetitions. The untraced
 runs give the phase runtime and the peak of summed per-process private memory (Linux USS,
-sampled every 10 ms) across the worker's process tree. RSS is never summed.
+sampled every 10 ms) across the worker's process tree. Summed RSS (`tree_rss_sum_peak`) is
+diagnostic only, not private RAM, because RSS double-counts shared pages.
 
 Baseline: `2688970` (v0.33.0). Change: this PR. Both ran the same harness against identical
 fixtures: `phase-128`, `phase-1024` and `phase-4096` have 64 changed files with 128, 1,024 or
