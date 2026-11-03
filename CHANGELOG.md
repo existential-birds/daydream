@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fan-out slot, and cache hits still validate without waiting for one. The private
   stage/cache contract moves to 17, so existing review-cache entries miss once
   ([#1711](https://github.com/existential-birds/daydream/issues/1711)).
+- Completed fork trajectories (reviewers, fixes, exploration, adjudication and
+  similar child work) are no longer held in memory until the run ends. The run
+  keeps a small reference to each written child file (path, size, SHA-256) and
+  re-reads it with checks when needed. Retained memory no longer grows with
+  finished child transcripts. A child file that goes missing or changes during
+  the run is left out of that run's evidence and live run info with a warning,
+  and review output is unaffected
+  ([#1712](https://github.com/existential-birds/daydream/issues/1712)).
 
 ### Fixed
 

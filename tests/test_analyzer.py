@@ -57,7 +57,7 @@ def test_evaluation_uses_frozen_bytes_status_and_cutoff(tmp_path: Path) -> None:
     snapshot.validate("frozen")
     live_path = tmp_path / ".daydream" / "runs" / "frozen" / "trajectory.json"
     live_path.parent.mkdir(parents=True)
-    live_path.write_bytes(snapshot.documents[0].json_bytes)
+    live_path.write_bytes(snapshot.documents[0].read_bytes())
     root["final_metrics"]["total_cost_usd"] = 99.0
     root["extra"]["run_ended_at"] = "2026-01-01T00:01:00Z"
     live_path.write_text(json.dumps(root))
@@ -182,7 +182,7 @@ async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Pa
     snapshot = snapshots[-1]
     snapshot.validate(recorder.session_id)
     assert not empty.path.exists()
-    root = json.loads(snapshot.documents[0].json_bytes)
+    root = json.loads(snapshot.documents[0].read_bytes())
     assert root["final_metrics"]["total_prompt_tokens"] == 190
     assert root["final_metrics"]["total_cost_usd"] == pytest.approx(0.50006)
     assert not any(item.get("descriptor") == "empty-child" for item in root["extra"]["subtrajectories"])

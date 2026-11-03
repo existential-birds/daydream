@@ -15,6 +15,7 @@ import pytest
 
 from daydream.archive import (
     ArchiveFinalizationError,
+    ArchiveIntegrityError,
     finalize_archive_run,
     get_archive_dir,
     pipeline,
@@ -60,7 +61,15 @@ from daydream.run_snapshot import (
     ManifestRunIdentity,
     RunPhaseCapabilities,
 )
-from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, PhaseEvent, RunWriteSnapshot, TrajectoryDocumentSnapshot
+from daydream.trajectory import (
+    DaydreamPhase,
+    DaydreamRunFlow,
+    PhaseEvent,
+    RunWriteSnapshot,
+    TrajectoryDocumentReference,
+    TrajectoryDocumentSnapshot,
+    sibling_document_path,
+)
 from tests.harness.review_result import review_coverage
 from tests.harness.trajectory import make_manifest
 
@@ -785,12 +794,21 @@ def test_snapshot_manifest_provenance_rejects_malformed_identity(tmp_path: Path)
 
 def _finalizer_arguments(tmp_path: Path, session_id: str, *, config: RunConfig,
 ) -> dict[str, Any]:
-    """Freeze real trajectory bytes and bind the finalizer's independent roots."""
+    """Freeze a prepared root and a completed-child file reference, binding the finalizer's roots."""
     frozen = tmp_path / "frozen"
     path = frozen / ".daydream" / "runs" / session_id / "trajectory.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     snapshot = _manifest_write_snapshot(session_id=session_id, final_metrics={}, path=path)
-    path.write_bytes(snapshot.documents[0].json_bytes)
+    path.write_bytes(snapshot.documents[0].read_bytes())
+    # Completed children reach consumers as references into the frozen copy, named by their logical path.
+    child = json.dumps({"session_id": session_id, "trajectory_id": "fork-1", "steps": []}).encode()
+    private_child = sibling_document_path(path.parent, "frozen-child.json")
+    private_child.parent.mkdir()
+    private_child.write_bytes(child)
+    logical_child = sibling_document_path(tmp_path / "live" / "runs" / session_id, "review.json")
+    snapshot = replace(snapshot, documents=(
+        *snapshot.documents, TrajectoryDocumentReference.written("fork-1", logical_child, private_child, child),
+    ))
     return dict(run=_archive_snapshot(snapshot),
         artifacts=ArtifactTreeSnapshot(session_id, "workspace", frozen, manifest_tree(frozen), ()),
         artifact_provenance=ArtifactEvidenceProvenance("workspace", session_id, tmp_path / "source", tmp_path / "live",
@@ -918,21 +936,27 @@ def test_strict_archive_rejects_frozen_receipt_changed_by_evaluator(
     assert not (archive_dir / "index.db").exists()
 
 
+@pytest.mark.parametrize(("mutated", "message"), [
+    (0, "frozen artifact tree changed"),
+    # A completed child changed after its checked bundle copy fails its next read as integrity, not optional.
+    (1, "frozen trajectory document changed"),
+])
 def test_strict_archive_refuses_frozen_tree_mutated_before_publication(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutated: int, message: str,
 ) -> None:
     session_id = "strict-mutated-publication"
     arguments = _finalizer_arguments(
         tmp_path, session_id, config=RunConfig(target=str(tmp_path), run_eval=False, archive=True),
     )
-    document = arguments["run"].trajectories.documents[0]
+    document = arguments["run"].trajectories.documents[mutated]
+    private_path = getattr(document, "private_path", document.path)
     from daydream.archive.provenance import capture_executable_provenance
 
     def mutate_then_capture() -> Any:
-        document.path.write_bytes(document.json_bytes + b"\n")
+        private_path.write_bytes(document.read_bytes() + b"\n")
         return capture_executable_provenance()
 
     monkeypatch.setattr("daydream.archive.provenance.capture_executable_provenance", mutate_then_capture)
-    with pytest.raises(ArchiveFinalizationError, match="frozen artifact tree changed"):
+    with pytest.raises(ArchiveIntegrityError, match=message):
         finalize_archive_run(**arguments)
     assert not (get_archive_dir() / "runs" / session_id).exists()

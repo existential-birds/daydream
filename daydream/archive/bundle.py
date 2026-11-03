@@ -44,7 +44,7 @@ def _copy_snapshot_bundle(
     artifact_provenance: ArtifactEvidenceProvenance,
     run_dir: Path,
 ) -> None:
-    """Assemble an archive only from frozen tree and immutable document bytes.
+    """Assemble an archive only from the frozen tree and checked trajectory documents.
 
     The registered findings destination is relocated from its live write path
     into the frozen tree; public output paths are never reconstructed.
@@ -82,16 +82,17 @@ def _project_documents(
     *,
     session_id: str,
 ) -> None:
-    """Project the exact frozen trajectory bytes into one archive bundle.
+    """Copy each frozen trajectory document's checked bytes into one archive bundle.
 
-    ``session_id`` additionally binds every document to the archived run.
+    Each document is read once; ``session_id`` additionally binds it to the
+    archived run, and a changed referenced file fails the projection.
     """
     root_path = run_document_path(run_dir)
     root_path.unlink(missing_ok=True)
     shutil.rmtree(siblings_directory(run_dir), ignore_errors=True)
     seen: set[Path] = set()
     for document in write_snapshot.documents:
-        document.validated_payload(session_id)
+        raw, _ = document.validated(session_id)
         if document.trajectory_id == write_snapshot.root_trajectory_id:
             destination = root_path
         else:
@@ -103,7 +104,7 @@ def _project_documents(
             raise ValueError("duplicate frozen trajectory destination")
         seen.add(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(document.json_bytes)
+        destination.write_bytes(raw)
 
 
 def _copy_run_artifacts(

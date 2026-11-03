@@ -129,7 +129,7 @@ async def test_run_agent_abort_records_reason_and_turn_end(tmp_path: Path) -> No
         )
     assert reason == "tool_call_budget_exceeded"
     partial = next(snapshot for snapshot in snapshots if snapshot.status == "partial")
-    cleanup_document = json.loads(partial.documents[0].json_bytes)
+    cleanup_document = json.loads(partial.documents[0].read_bytes())
     final_document = json.loads(recorder.path.read_bytes())
     for document in (cleanup_document, final_document):
         step = _agent_step_with_stop_reason(document)

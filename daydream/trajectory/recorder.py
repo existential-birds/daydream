@@ -29,7 +29,7 @@ from daydream.atif import (
     SubagentTrajectoryRef,
     Trajectory,
 )
-from daydream.json_utils import atomic_write_json
+from daydream.json_utils import atomic_write_bytes
 from daydream.redaction import (
     _redact_unstructured_text,
     redact_value,
@@ -52,6 +52,8 @@ from daydream.trajectory.types import (
     LifecycleReasonCode,
     LifecycleStatus,
     RunWriteSnapshot,
+    TrajectoryDocument,
+    TrajectoryDocumentReference,
     TrajectoryDocumentSnapshot,
 )
 from daydream.ui import create_console, print_error
@@ -82,7 +84,9 @@ def _safe_descriptor(raw: str) -> str:
 
 
 TrajectoryWriteCallback = Callable[["TrajectoryRecorder", RunWriteSnapshot], None]
-TrajectoryDocumentWriter = Callable[[TrajectoryDocumentSnapshot, Literal["complete", "partial"]], None]
+TrajectoryDocumentWriter = Callable[
+    [TrajectoryDocumentSnapshot, Literal["complete", "partial"]], TrajectoryDocumentReference
+]
 
 
 class _SignalFlushRegistry:
@@ -90,7 +94,8 @@ class _SignalFlushRegistry:
 
     def __init__(self) -> None:
         self._active: dict[int, TrajectoryRecorder] = {}
-        self._completed: dict[str, TrajectoryDocumentSnapshot] = {}
+        # The only owner of completed children: references, never document bytes.
+        self._completed: dict[str, TrajectoryDocumentReference] = {}
         self._partial_state_digest = ""
         self._partial_cutoff_at = ""
 
@@ -103,9 +108,13 @@ class _SignalFlushRegistry:
         if self._active.get(id(recorder)) is recorder:
             self._active.pop(id(recorder), None)
 
-    def retain(self, document: TrajectoryDocumentSnapshot) -> None:
-        """Retain the exact bytes of a completed child until root archival."""
-        self._completed[document.trajectory_id] = document
+    def retain(self, reference: TrajectoryDocumentReference) -> None:
+        """Retain a completed child's written-file reference until root archival."""
+        self._completed[reference.trajectory_id] = reference
+
+    def completed(self) -> tuple[TrajectoryDocumentReference, ...]:
+        """Return completed child references in trajectory-id order."""
+        return tuple(reference for _, reference in sorted(self._completed.items()))
 
     def _partial_cutoff(
         self, recorders: Sequence[TrajectoryRecorder], summaries: dict[int, list[dict[str, Any]]],
@@ -113,8 +122,8 @@ class _SignalFlushRegistry:
         state = [(recorder.trajectory_id, recorder._partial_state_key(summaries[id(recorder)]))
                  for recorder in recorders]
         state.extend(
-            (trajectory_id, hashlib.sha256(document.json_bytes).hexdigest())
-            for trajectory_id, document in sorted(self._completed.items())
+            (trajectory_id, reference.sha256)
+            for trajectory_id, reference in sorted(self._completed.items())
         )
         digest = hashlib.sha256(json.dumps(state, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         if digest != self._partial_state_digest:
@@ -136,7 +145,7 @@ class _SignalFlushRegistry:
         prepared: Sequence[TrajectoryDocumentSnapshot],
         cutoff_at: str,
     ) -> RunWriteSnapshot:
-        documents = dict(self._completed)
+        documents: dict[str, TrajectoryDocument] = dict(self._completed)
         documents.update((document.trajectory_id, document) for document in prepared)
         ordered = tuple(
             sorted(
@@ -795,19 +804,31 @@ class TrajectoryRecorder:
         )
         if document is None:
             return
-        self._write_document(document, "complete")
+        reference = self._write_document(document, "complete")
         if registry is not None:
-            registry.retain(document)
+            registry.retain(reference)
 
-    def _write_document(self, document: TrajectoryDocumentSnapshot, status: Literal["complete", "partial"]) -> None:
-        """Write one frozen document through the host sink, or straight to disk."""
+    def _write_document(
+        self, document: TrajectoryDocumentSnapshot, status: Literal["complete", "partial"]
+    ) -> TrajectoryDocumentReference:
+        """Write one frozen document's exact bytes through the host sink, or straight to disk."""
         if self.document_writer is not None:
-            self.document_writer(document, status)
-        elif status == "complete":
-            atomic_write_json(document.path, json.loads(document.json_bytes))
+            return self.document_writer(document, status)
+        if status == "complete":
+            atomic_write_bytes(document.path, document.json_bytes)
         else:
             document.path.parent.mkdir(parents=True, exist_ok=True)
             document.path.write_text(document.json_bytes.decode("utf-8"), encoding="utf-8")
+        return TrajectoryDocumentReference.written(
+            document.trajectory_id, document.path, document.path, document.json_bytes
+        )
+
+    def completed_child_documents(self) -> tuple[TrajectoryDocumentReference, ...]:
+        """Return the run's completed child references from the active run registry."""
+        registry = self._signal_registry
+        if registry is None:
+            raise RuntimeError("recorder is not active")
+        return registry.completed()
 
     def _partial_dispatch_summaries(self) -> list[dict[str, Any]]:
         """Retain planned and queued host work without a terminal dispatch decision."""

@@ -62,6 +62,7 @@ from daydream.json_utils import _fsync_directory, _fsync_file
 from daydream.run_artifacts import _RunWriteCapture
 from daydream.trajectory import (
     RunWriteSnapshot,
+    TrajectoryDocumentReference,
     TrajectoryDocumentSnapshot,
 )
 from daydream.workspace import WorkContext
@@ -878,11 +879,14 @@ async def test_artifact_session_freeze_rejects_invalid_run_snapshot(source: Path
         path = session.daydream_dir / "runs" / session_id / "trajectory.json"
         document = TrajectoryDocumentSnapshot(session_id, path, _payload(session_id))
         valid = _snapshot(session_id, (document,), root_trajectory_id=session_id)
+        child_path = path.parent / "trajectories" / "child.json"
+        child = TrajectoryDocumentReference.written("child", child_path, child_path, _payload(session_id, "child"))
         for snapshot in (
             _snapshot(session_id, (document, document), root_trajectory_id=session_id),
             replace(valid, documents=()),
-            replace(valid, documents=(replace(document, json_bytes=b"[]"),)),
-            replace(valid, documents=(replace(document, json_bytes=cast(bytes, "{}")),)),
+            # Reference metadata is rejected without reading: a root reference and a malformed digest.
+            replace(valid, documents=(replace(child, trajectory_id=session_id),)),
+            replace(valid, documents=(document, replace(child, sha256="0" * 63))),
             replace(valid, status=cast(Any, "unfinished")),
         ):
             with pytest.raises(ValueError):
@@ -2331,6 +2335,7 @@ async def test_external_entry_interruption_reconciles_before_unlock(tmp_path: Pa
 
 
 async def test_external_trajectory_write_freeze_and_dispositions_use_immutable_bytes(tmp_path: Path, source: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     requested, partial_path = _external_target(tmp_path / "external")
     session_id = "external-freeze"
@@ -2388,66 +2393,37 @@ async def test_external_trajectory_write_freeze_and_dispositions_use_immutable_b
             assert not reader.is_alive() and not missing and observed
             assert set(observed) <= set(payloads)
 
+            # Completed children stay on disk as references; freeze checks them in place.
+            children = route.run_dir / "trajectories"
+            references = {
+                name: session.write_trajectory_document(route, TrajectoryDocumentSnapshot(
+                    name, children / f"{name}.json",
+                    _payload("other-session" if name == "identity" else session_id, name)), "complete")
+                for name in ("deleted", "digest", "identity", "kept", "size")
+            }
+            (children / "deleted.json").unlink()
+            (children / "digest.json").write_bytes(_payload(session_id, "digest").upper())
+            (children / "size.json").write_bytes(_payload(session_id, "size") + b" ")
+            changed = {path.name: path.read_bytes() for path in children.iterdir()}
+            capsys.readouterr()
+
             requested.unlink()
             partial_path.write_bytes(b"mutable path is not evidence")
-            frozen = session.freeze(_snapshot(session_id, (full_document,)))
-            assert (frozen.root / ".daydream" / "runs" / session_id / "trajectory.json").read_bytes() == full_bytes
+            snapshot = _snapshot(session_id, (full_document, *references.values()))
+            frozen = session.freeze(snapshot)
+            frozen_run = frozen.root / ".daydream" / "runs" / session_id
+            assert (frozen_run / "trajectory.json").read_bytes() == full_bytes
+            # Mismatched children are dropped with a warning, left untouched, and the kept one is rebased.
+            warnings = capsys.readouterr().out
+            assert (warnings.count("TrajectoryDocumentIntegrityError"), warnings.count("(ValueError)")) == (3, 1)
+            assert {path.name: path.read_bytes() for path in children.iterdir()} == changed
+            kept = replace(references["kept"], private_path=frozen_run / "trajectories" / "kept.json")
+            assert frozen.trajectories == replace(snapshot, documents=(full_document, kept))
+            assert kept.read_bytes() == _payload(session_id, "kept")
             _publish(session, frozen)
 
     assert partial_path.read_bytes() == b"mutable path is not evidence"
     assert requested.read_bytes() == b"prior full"
-
-
-async def test_live_sibling_snapshots_reject_foreign_frozen_and_invalid_retained_entries(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Live sibling snapshots are bound to the open session and revalidate every retained entry."""
-    cases: tuple[tuple[Callable[..., Any], dict[str, Any]], ...] = (
-        (_live_sibling_snapshot_rejects_wrong_session_and_frozen_session_case, {}),
-        (_live_sibling_snapshot_revalidates_retained_entries_case, {}),
-    )
-    for index, (case, extra) in enumerate(cases):
-        with monkeypatch.context() as patch:
-            await _run_case(case, root=tmp_path / f"case-{index}", monkeypatch=patch, **extra)
-
-
-async def _live_sibling_snapshot_rejects_wrong_session_and_frozen_session_case(source: Path) -> None:
-    session_id = "snapshot-lifetime"
-    async with open_artifact_session(_work(source), session_id=session_id) as session:
-        with pytest.raises(ArtifactVisibilityError, match="not registered"):
-            session.snapshot_completed_sibling_trajectories(session_id=session_id)
-        route = session.register_trajectory_output(None)
-        root = TrajectoryDocumentSnapshot(session_id, cast(Path, route.full.requested), _payload(session_id),)
-        session.write_trajectory_document(route, root, "complete")
-        # A still-partial sibling is written privately but is not retained as completed evidence.
-        child = TrajectoryDocumentSnapshot("child", route.run_dir / "trajectories" / "child.json",
-            _payload(session_id, "child"))
-        session.write_trajectory_document(route, child, "partial")
-        assert session.snapshot_completed_sibling_trajectories(session_id=session_id) == ()
-        with pytest.raises(ArtifactVisibilityError, match="session"):
-            session.snapshot_completed_sibling_trajectories(session_id="other-session")
-        session.freeze(_snapshot(session_id, (root,)))
-        with pytest.raises(ArtifactVisibilityError, match="frozen"):
-            session.snapshot_completed_sibling_trajectories(session_id=session_id)
-
-
-async def _live_sibling_snapshot_revalidates_retained_entries_case(source: Path) -> None:
-    """Validate retained identity/bytes and paths the legacy writer accepts."""
-    for problem in ("nested", "wrong-key", "non-bytes"):
-        session_id = f"snapshot-retained-{problem}"
-        async with open_artifact_session(_work(source), session_id=session_id) as session:
-            route = session.register_trajectory_output(None)
-            relative = "nested/child.json" if problem == "nested" else "child.json"
-            child = TrajectoryDocumentSnapshot("child", route.run_dir / "trajectories" / relative,
-                cast(bytes, "not-bytes") if problem == "non-bytes" else _payload(session_id, "child"),
-            )
-            if problem == "nested":
-                session.write_trajectory_document(route, child, "complete")
-            else:
-                session._completed_sibling_trajectories = {"wrong-key" if problem == "wrong-key" else "child": child}
-
-            with pytest.raises(ArtifactVisibilityError, match="sibling"):
-                session.snapshot_completed_sibling_trajectories(session_id=session_id)
 
 
 async def test_findings_delivery_and_finalization_merge_are_closed_host_boundaries(tmp_path: Path, source: Path,

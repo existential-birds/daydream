@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from daydream.trajectory import RunWriteSnapshot
 
 _SCHEMA_VERSION = 1
 _DAYDREAM = ".daydream"
@@ -229,13 +232,18 @@ class _DestinationRecord:
 
 @dataclass(frozen=True)
 class ArtifactTreeSnapshot:
-    """Frozen run tree consumed by later archive/evaluation/publication."""
+    """Frozen run tree consumed by later archive/evaluation/publication.
+
+    ``trajectories`` is the post-freeze document view consumers must use: the
+    documents freeze retained, with completed-child references pointing into the
+    frozen copy. It is ``None`` for a run frozen without a recorder document."""
 
     session_id: str
     workspace_key: str
     root: Path
     manifest: tuple[ArtifactManifestEntry, ...]
     destinations: tuple[RoutedDestination, ...]
+    trajectories: RunWriteSnapshot | None = None
 
 
 @dataclass

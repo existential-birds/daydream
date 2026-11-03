@@ -29,6 +29,7 @@ from daydream.run_snapshot import ArchiveRunSnapshot
 from daydream.trajectory import (
     RUNS_DIRNAME,
     DaydreamRunFlow,
+    TrajectoryDocumentIntegrityError,
     run_directory,
     snapshot_trajectories,
 )
@@ -230,6 +231,8 @@ def finalize_archive_run(
                     progress("Live-source quality unavailable; frozen analysis retained")
             except Exception as exc:
                 _validate_frozen_artifacts(artifacts)
+                if isinstance(exc, TrajectoryDocumentIntegrityError):
+                    raise
                 raise ArchiveFinalizationError("evaluation finalization failed") from exc
             (assembly_dir / "evaluation.json").write_text(json.dumps(evaluation, indent=2), encoding="utf-8")
             _validate_frozen_artifacts(artifacts)
@@ -287,4 +290,7 @@ def finalize_archive_run(
             _discard_or_note(dump_path, exc, "dump", recreate=True)
         if isinstance(exc, ArchiveFinalizationError) or not isinstance(exc, Exception):
             raise
+        if isinstance(exc, TrajectoryDocumentIntegrityError):
+            # Every trajectory read precedes the dump, so no dump stage needs discarding.
+            raise ArchiveIntegrityError("frozen trajectory document changed before archive") from exc
         raise ArchiveFinalizationError("archive finalization failed") from exc

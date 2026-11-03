@@ -36,6 +36,7 @@ from daydream.run_snapshot import ArchiveRunSnapshot, ManifestRunIdentity, RunPh
 from daydream.trajectory import (
     DaydreamRunFlow,
     RunWriteSnapshot,
+    TrajectoryDocumentReference,
     TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
     default_trajectory_path,
@@ -51,7 +52,10 @@ class _RunSnapshotCaptureError(RuntimeError):
 
 @dataclass
 class _RunWriteCapture:
-    """Synchronous, non-raising retention boundary for P07 write snapshots."""
+    """Synchronous, non-raising retention boundary for P07 write snapshots.
+
+    Snapshots hold completed children as file references, so retention (also run
+    from the signal handler) validates metadata only and performs no I/O."""
 
     session_id: str
     run_flow: DaydreamRunFlow | None = None
@@ -95,10 +99,10 @@ class _RunArtifacts:
 
     def write_trajectory_document(
         self, document: TrajectoryDocumentSnapshot, status: Literal["complete", "partial"]
-    ) -> None:
-        """Write through the host sink and retain a closed failure disposition."""
+    ) -> TrajectoryDocumentReference:
+        """Write through the host sink, return its file reference, and retain a closed failure disposition."""
         try:
-            self.session.write_trajectory_document(self.trajectory, document, status)
+            return self.session.write_trajectory_document(self.trajectory, document, status)
         except Exception as exc:
             self.capture.validation_error = _RunSnapshotCaptureError(
                 f"trajectory {status} output failed ({type(exc).__name__})"
@@ -382,6 +386,11 @@ def _finalize_run_artifacts(
     if identity is None:
         raise ArtifactVisibilityError("manifest run identity was not captured")
     snapshot = run_artifacts.session.freeze(selected)
+    # Freeze checked completed-child references in place; consumers read the
+    # frozen view, whose references point into the frozen copy.
+    if snapshot.trajectories is None:
+        raise ArtifactVisibilityError("frozen run snapshot was not retained")
+    selected = snapshot.trajectories
     _capture_dataset(run_artifacts, snapshot=snapshot, selected=selected, config=config,
                      work=work, successful=successful, interrupted=interrupted, progress=progress)
     recorder_provenance = archive_recorder_provenance_from_snapshot(
