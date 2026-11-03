@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-11-03
+
 ### Changed
 
 - Per-stack review shares one validated copy of the patch and hunk index across
@@ -14,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   patch, block map and parsed index; it builds its inputs only once it gets a
   fan-out slot, and cache hits still validate without waiting for one. The private
   stage/cache contract moves to 17, so existing review-cache entries miss once
-  ([#1711](https://github.com/existential-birds/daydream/issues/1711)).
+  ([#1711](https://github.com/existential-birds/daydream/issues/1711), #1755).
 - Completed fork trajectories (reviewers, fixes, exploration, adjudication and
   similar child work) are no longer held in memory until the run ends. The run
   keeps a small reference to each written child file (path, size, SHA-256) and
@@ -22,13 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finished child transcripts. A child file that goes missing or changes during
   the run is left out of that run's evidence and live run info with a warning,
   and review output is unaffected
-  ([#1712](https://github.com/existential-birds/daydream/issues/1712)).
+  ([#1712](https://github.com/existential-birds/daydream/issues/1712), #1756).
 
 ### Fixed
 
 - Reviews of a shallow clone work again. The captured source now keeps the clone's
   shallow history boundary, so Codex's read-only copy of it no longer fails with
-  "failed to create disposable read-only checkout".
+  "failed to create disposable read-only checkout" ([#1757](https://github.com/existential-birds/daydream/issues/1757)).
 - Review assignments for a file that changes type (a regular file becoming a
   symlink or the reverse) now carry old-side source refs for the removed lines,
   and oversized type changes split under each diff block's own header
@@ -2022,7 +2024,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.33.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.34.0...HEAD
+[0.34.0]: https://github.com/existential-birds/daydream/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/existential-birds/daydream/compare/v0.32.0...v0.33.0
 [0.32.0]: https://github.com/existential-birds/daydream/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/existential-birds/daydream/compare/v0.30.0...v0.31.0
