@@ -66,18 +66,8 @@ def test_missing_live_source_returns_bounded_unavailable_result(source: LiveRunI
     assert FALLBACK_NOTE in result.markdown
     assert result.diagnostic == diagnostic
 
-class _Session:
-    def __init__(self, error: Exception | None = None) -> None:
-        self.error = error
-
-    def require_active(self) -> None:
-        if self.error is not None:
-            raise self.error
-
-
 def _source(
-    tmp_path: Path, children: tuple[tuple[str, bytes], ...] = (), *, error: Exception | None = None,
-    recorder: TrajectoryRecorder | None = None,
+    tmp_path: Path, children: tuple[tuple[str, bytes], ...] = (), *, recorder: TrajectoryRecorder | None = None,
 ) -> LiveRunInfoSource:
     """Retain real written child files as the active recorder registry's references."""
     recorder = recorder or _recorder(tmp_path)
@@ -87,11 +77,18 @@ def _source(
         path.write_bytes(content)
         registry.retain(TrajectoryDocumentReference.written(trajectory_id, path, path, content))
     recorder._signal_registry = registry
-    return LiveRunInfoSource(recorder=recorder, artifacts=cast(ArtifactSession, _Session(error)))
+    return LiveRunInfoSource(recorder=recorder, artifacts=cast(ArtifactSession, object()))
 
-def test_snapshot_failure_returns_fixed_diagnostic_without_exception_text(tmp_path: Path,) -> None:
+def test_snapshot_failure_returns_fixed_diagnostic_without_exception_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     secret = "private/session/path/and-bad-json"
-    source = _source(tmp_path, error=RuntimeError(secret))
+    source = _source(tmp_path)
+
+    def unavailable() -> None:
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(source.recorder, "completed_child_documents", unavailable)
     result = render_live_run_info(source)
 
     assert result.diagnostic == "run info: trajectory snapshot unavailable"

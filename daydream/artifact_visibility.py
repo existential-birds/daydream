@@ -199,8 +199,7 @@ class ArtifactSession:
         """Project one registered durable destination to its live write path."""
         return self._projected_path(path, repo=repo, source="requested", target="write_path")
 
-    def require_active(self) -> None:
-        """Raise unless the session is still live (not yet frozen or published)."""
+    def _require_active(self) -> None:
         if self._state is not _SessionState.ACTIVE:
             raise ArtifactVisibilityError("artifact session is frozen and no longer writable")
 
@@ -216,7 +215,7 @@ class ArtifactSession:
         return path
 
     def _route_repo(self, repo: Path) -> None:
-        self.require_active()
+        self._require_active()
         declared = filesystem._absolute_lexical(repo)
         if declared != self.layout.repo:
             raise ArtifactVisibilityError("requested repo does not match active artifact session")
@@ -245,7 +244,7 @@ class ArtifactSession:
         additional: Sequence[Path] = (),
         public_subtree_owner: RoutedDestination | None = None,
     ) -> tuple[Path, Path, bool]:
-        self.require_active()
+        self._require_active()
         if not isinstance(label, OutputLabel):
             raise ArtifactVisibilityError("artifact destination label is unsupported")
         if public_subtree_owner is not None and not (
@@ -504,7 +503,7 @@ class ArtifactSession:
         """Register the root trajectory and its P07 partial as one atomic route."""
         from daydream.trajectory import partial_document_path, run_directory, run_document_path
 
-        self.require_active()
+        self._require_active()
         if self._trajectory_route is not None:
             raise ArtifactVisibilityError("paired trajectory output is already registered")
         run_dir = run_directory(self.daydream_dir, self.layout.session_id)
@@ -627,11 +626,10 @@ class ArtifactSession:
     ) -> TrajectoryDocumentReference:
         """Write exact P07 bytes to private evidence and the authorized live root.
 
-        Return the reference (private path, size, SHA-256) of the bytes written;
-        a write that raises returns none."""
+        Return the reference (private path, size, SHA-256) of the bytes written."""
         from daydream.trajectory import TrajectoryDocumentReference
 
-        self.require_active()
+        self._require_active()
         if route is not self._trajectory_route or status not in ("complete", "partial"):
             raise ArtifactVisibilityError("trajectory output route identity mismatch")
         selected = route.full if status == "complete" else route.partial
@@ -675,15 +673,10 @@ class ArtifactSession:
         return reference
 
     def freeze(self, run_snapshot: RunWriteSnapshot) -> ArtifactTreeSnapshot:
-        """Freeze the live tree with *run_snapshot*'s documents as its trajectory evidence.
-
-        Prepared documents are rewritten into the live root. Completed-child
-        references are checked in place without rewriting; one whose file is
-        missing or no longer matches is left untouched and excluded from the
-        returned ``trajectories`` view, whose references point into the frozen copy."""
+        """Rewrite prepared documents, check references in place, and freeze the live tree."""
         from daydream.trajectory import TrajectoryDocumentSnapshot
 
-        self.require_active()
+        self._require_active()
         try:
             run_snapshot.validate(self.layout.session_id)
         except (ValueError, UnicodeError) as exc:
@@ -728,32 +721,24 @@ class ArtifactSession:
                 except ValueError as exc:
                     _print_dropped_child_warning(exc)
                     continue
+                document = replace(document, private_path=self.layout.live_root.parent / "frozen" / relative)
             retained.append(document)
         return self._freeze_tree(replace(run_snapshot, documents=tuple(retained)))
 
     def freeze_unproduced(self) -> ArtifactTreeSnapshot:
         """Freeze a supported run that exited before producing a recorder document."""
-        self.require_active()
+        self._require_active()
         if self._trajectory_route is None:
             raise ArtifactVisibilityError("unproduced run has no registered trajectory route")
         return self._freeze_tree()
 
     def _freeze_tree(self, trajectories: RunWriteSnapshot | None = None) -> ArtifactTreeSnapshot:
-        from daydream.trajectory import TrajectoryDocumentReference
-
-        live_root = self.layout.live_root
-        entries = filesystem.manifest_tree(live_root)
-        frozen_root = live_root.parent / "frozen"
+        entries = filesystem.manifest_tree(self.layout.live_root)
+        frozen_root = self.layout.live_root.parent / "frozen"
         if frozen_root.exists() or frozen_root.is_symlink():
             raise ArtifactVisibilityError("frozen artifact tree already exists")
-        filesystem._copy_tree(live_root, frozen_root, entries)
+        filesystem._copy_tree(self.layout.live_root, frozen_root, entries)
         filesystem._atomic_json(frozen_root.parent / "frozen-manifest.json", filesystem._manifest_payload(entries))
-        if trajectories is not None:
-            trajectories = replace(trajectories, documents=tuple(
-                replace(document, private_path=frozen_root / document.private_path.relative_to(live_root))
-                if isinstance(document, TrajectoryDocumentReference) else document
-                for document in trajectories.documents
-            ))
         result = ArtifactTreeSnapshot(
             session_id=self.layout.session_id,
             workspace_key=self.layout.workspace_key,

@@ -49,12 +49,11 @@ def _print_omitted_child_warning(exc: TrajectoryDocumentIntegrityError) -> None:
 
 
 def render_live_run_info(source: LiveRunInfoSource) -> RunInfoResult:
-    """Acquire validated live trajectories and render them while the session is active.
+    """Acquire validated live trajectories and render them while the recorder is active.
 
-    The parent comes from the recorder's memory. Completed children come from
-    the recorder's file references and are read through the checked
-    (no-follow, size- and SHA-256-verified) document read; a child whose file is
-    missing or changed is omitted with a warning rather than blocking the post.
+    The parent comes from recorder memory; completed children are checked reads
+    of the recorder registry's file references, and a missing or changed child
+    is omitted with a warning rather than blocking the post.
     Diagnostics are fixed low-cardinality categories. Exception messages,
     session paths, and trajectory contents never cross this boundary.
     """
@@ -71,7 +70,6 @@ def render_live_run_info(source: LiveRunInfoSource) -> RunInfoResult:
         return _unavailable("run info: trajectory identity invalid")
 
     try:
-        artifacts.require_active()
         references = recorder.completed_child_documents()
     except Exception:  # noqa: BLE001 - live review must still post
         return _unavailable("run info: trajectory snapshot unavailable")
