@@ -5,7 +5,7 @@ Set DAYDREAM_CAPTURE_BENCH_CODE to the import checkout (defaults to this checkou
 DAYDREAM_CAPTURE_BENCH_ROOT to the external fixture/result directory.
 Python allocations and timings run separately. Process private memory is sampled as macOS
 RUSAGE_INFO_V0 footprint (the original investigation's method) or Linux USS/PSS.
-`run --phase` measures queued per-stack review scopes; see docs/performance/review-admission.md.
+`run --phase` measures memory held by queued per-stack review scopes through the real phase.
 No providers run; only disposable fixture refs/index are written.
 """
 
