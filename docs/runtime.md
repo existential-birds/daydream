@@ -619,8 +619,9 @@ path, the private file actually written, and that file's size and SHA-256. Run
 snapshots keep the root and still-running forks as prepared bytes, because every
 flush rewrites their `.partial` paths. Every consumer reads documents through one
 checked read: prepared bytes come from memory, and a reference is re-read without
-following links and must match its size, digest and trajectory/session identity.
-Retaining a snapshot checks only reference metadata. Freeze checks each reference
+following links and must match its size and digest; identity-checked reads also
+verify trajectory/session identity. Retaining a snapshot, which also happens from
+the signal handler, checks only reference metadata and performs no I/O. Freeze checks each reference
 in place. A missing or changed child (for example a later fork reusing a legacy
 descriptor, or an edit in private state) is dropped from that snapshot with a
 warning, and its file is left in place; live run info drops it from its view the

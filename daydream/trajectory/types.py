@@ -98,9 +98,6 @@ class _TrajectoryDocument:
     def read_bytes(self) -> bytes:
         raise NotImplementedError
 
-    def validate(self, session_id: str) -> None:
-        raise NotImplementedError
-
     def validated(self, session_id: str) -> tuple[bytes, dict[str, Any]]:
         """Return the exact document bytes and their decoded, identity-checked payload."""
         raw = self.read_bytes()
@@ -140,8 +137,7 @@ class TrajectoryDocumentReference(_TrajectoryDocument):
 
     ``path`` is the recorder's logical document path (its file name names archive
     and analyzer entries); ``private_path`` is the private file actually written
-    or its frozen copy. Retention checks only this metadata; every read re-checks
-    the file without following links."""
+    or its frozen copy."""
 
     trajectory_id: str
     path: Path
@@ -185,10 +181,7 @@ TrajectoryDocument = TrajectoryDocumentSnapshot | TrajectoryDocumentReference
 
 @dataclass(frozen=True)
 class RunWriteSnapshot:
-    """Immutable run-wide write input consumed by the Task 5 callback boundary.
-
-    The root and still-running forks are prepared bytes; completed children are
-    references, so validating or retaining a snapshot performs no file I/O."""
+    """Immutable run-wide write input consumed by the Task 5 callback boundary."""
 
     status: Literal["complete", "partial"]
     cutoff_at: str
@@ -203,8 +196,6 @@ class RunWriteSnapshot:
             raise ValueError("metadata is malformed")
         identities: set[str] = set()
         for document in self.documents:
-            if not isinstance(document, TrajectoryDocumentSnapshot | TrajectoryDocumentReference):
-                raise ValueError("document is malformed")
             document.validate(session_id)
             if document.trajectory_id in identities:
                 raise ValueError("contains duplicate document identity")

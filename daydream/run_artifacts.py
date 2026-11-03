@@ -52,10 +52,7 @@ class _RunSnapshotCaptureError(RuntimeError):
 
 @dataclass
 class _RunWriteCapture:
-    """Synchronous, non-raising retention boundary for P07 write snapshots.
-
-    Snapshots hold completed children as file references, so retention (also run
-    from the signal handler) validates metadata only and performs no I/O."""
+    """Synchronous, non-raising retention boundary for P07 write snapshots."""
 
     session_id: str
     run_flow: DaydreamRunFlow | None = None
@@ -386,8 +383,6 @@ def _finalize_run_artifacts(
     if identity is None:
         raise ArtifactVisibilityError("manifest run identity was not captured")
     snapshot = run_artifacts.session.freeze(selected)
-    # Freeze checked completed-child references in place; consumers read the
-    # frozen view, whose references point into the frozen copy.
     if snapshot.trajectories is None:
         raise ArtifactVisibilityError("frozen run snapshot was not retained")
     selected = snapshot.trajectories

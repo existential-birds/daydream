@@ -94,7 +94,6 @@ class _SignalFlushRegistry:
 
     def __init__(self) -> None:
         self._active: dict[int, TrajectoryRecorder] = {}
-        # The only owner of completed children: references, never document bytes.
         self._completed: dict[str, TrajectoryDocumentReference] = {}
         self._partial_state_digest = ""
         self._partial_cutoff_at = ""
@@ -111,10 +110,6 @@ class _SignalFlushRegistry:
     def retain(self, reference: TrajectoryDocumentReference) -> None:
         """Retain a completed child's written-file reference until root archival."""
         self._completed[reference.trajectory_id] = reference
-
-    def completed(self) -> tuple[TrajectoryDocumentReference, ...]:
-        """Return completed child references in trajectory-id order."""
-        return tuple(reference for _, reference in sorted(self._completed.items()))
 
     def _partial_cutoff(
         self, recorders: Sequence[TrajectoryRecorder], summaries: dict[int, list[dict[str, Any]]],
@@ -824,11 +819,11 @@ class TrajectoryRecorder:
         )
 
     def completed_child_documents(self) -> tuple[TrajectoryDocumentReference, ...]:
-        """Return the run's completed child references from the active run registry."""
+        """Return the run's completed child references in trajectory-id order."""
         registry = self._signal_registry
         if registry is None:
             raise RuntimeError("recorder is not active")
-        return registry.completed()
+        return tuple(reference for _, reference in sorted(registry._completed.items()))
 
     def _partial_dispatch_summaries(self) -> list[dict[str, Any]]:
         """Retain planned and queued host work without a terminal dispatch decision."""
