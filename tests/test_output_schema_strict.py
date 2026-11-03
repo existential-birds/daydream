@@ -15,6 +15,7 @@ import daydream.improve.recon as improve_recon
 import daydream.phases as phases
 import daydream.prompts.exploration_subagents as exploration_subagents
 from daydream.improve.audit import _schema_with_provenance
+from daydream.phases.schemas import review_stage_schema, review_stage_submission_schema
 
 # Modules whose public ``*_SCHEMA`` constants are all backend output schemas.
 _SCHEMA_MODULES = [phases, exploration_subagents, improve_prompts, improve_recon, diagram_schema]
@@ -57,6 +58,10 @@ def _collect_output_schemas() -> list[tuple[str, dict[str, Any]]]:
         for name, schema in list(found)
         if name.startswith("daydream.improve.") and _takes_provenance(schema)
     )
+    # Staged review sends its assignment-specialized selector transport to every backend.
+    found.extend((f"review_stage_submission_schema({label})", review_stage_submission_schema(
+        review_stage_schema(["t"], candidates, triage=triage)))
+        for label, candidates, triage in (("review", [], False), ("triage", ["c"], True)))
     return found
 
 

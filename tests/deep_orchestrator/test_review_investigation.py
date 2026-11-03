@@ -7,7 +7,6 @@ import hashlib
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable
 from contextlib import aclosing
-from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -22,7 +21,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
-from daydream.phases.schemas import REVIEW_STAGE_SCHEMA
+from daydream.review_source_refs import SOURCE_SELECTORS_SCHEMA
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
 from tests.deep_orchestrator.test_review_completion import ReviewRun, record, scopes
@@ -383,7 +382,10 @@ async def test_optional_supporting_paths_are_confined_without_rejecting_valid_de
                 'path': 'module_03.py', 'side': 'new', 'source_range': {'start': 1, 'end': 1},
                 'fragment': None, 'basis': 'source_inspection', 'role': 'supporting',
             })
-            output['targets'][0]['evidence_refs'].append(supporting_reference.copy())
+            # The provider selects a supporting path; the host pins its whole-blob identity.
+            output['targets'][0]['evidence_refs'].append({
+                'path': 'module_03.py', 'side': 'new', 'source_range': {'start': 1, 'end': 1},
+                'basis': 'source_inspection'})
             output.update(notes='Supporting paths are optional model declarations.', supporting_files=[
                 './module_03.py', 'module_03.py', '../outside.py', str(outside),
                 'linked.py', 'missing.py', '.git/config', '.daydream/deep/stack-python-records.json',
@@ -462,17 +464,16 @@ async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
         prose = call['prompt'].split('Host review stage:\n')[0]
         assert set(call['output_schema']['properties']) == {
             'targets', 'notes', 'supporting_files', 'candidates', 'contradictions'}
-        reference = call['output_schema']['properties']['targets']['items']['properties'][
-            'evidence_refs']['items']['properties']
-        assert reference['revision']['enum'] == [review.pr.head_sha, review.pr.base_sha]
-        assert reference['role']['enum'] == ['assigned']
+        # Non-Pi backends select sources through the strict transport; only the host builds canonical refs.
+        assert 'supporting_files' in call['output_schema']['required']
+        assert call['output_schema']['properties']['targets']['items']['properties'][
+            'evidence_refs'] == SOURCE_SELECTORS_SCHEMA
+        assert stage['submission_transport'] == 'final_output' and 'source_refs' not in stage
+        assert all('source_refs' not in part for part in stage['assignment_parts'])
+        assert 'rejects the whole stage with no correction attempt' in call['review_instructions']
+        assert 'correct the submission in this conversation' not in call['review_instructions']
         if output['targets']:
             assert Draft202012Validator(call['output_schema']).is_valid(output)
-            for field, value in (('revision', review.pr.head_sha[:12]), ('role', 'supporting')):
-                faulty = deepcopy(output)
-                faulty['targets'][0]['evidence_refs'][0][field] = value
-                assert not Draft202012Validator(call['output_schema']).is_valid(faulty)
-                assert Draft202012Validator(REVIEW_STAGE_SCHEMA).is_valid(faulty)
         assert 'with issues' not in prose
         assert 'AI-generated code' not in prose
         assert 'Be strict' not in prose

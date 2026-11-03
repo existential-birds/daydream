@@ -286,7 +286,7 @@ results 7, immutable results 8 and their committed terminal version 1 stay disti
 Results 1–3 predate bounded navigation and sharded per-target coverage, and 4–6 predate
 work records; they are rejected with a restart instruction rather than converted.
 Mismatched versions/identities and local-to-PR relabeling are explicitly rejected.
-Private stage/cache contract 15 invalidates older cache entries. Captured review
+Private stage/cache contract 16 invalidates older cache entries. Captured review
 paths reject `--start-at` and do not restore judgment shards: a complete shard
 marker does not establish that its enclosing review completed. Stopped reviews
 restart; retained evidence cannot restore assignment authority. Replace incompatible
@@ -472,14 +472,18 @@ to the captured source while native configuration and its trust policy remain
 rooted in the original source.
 Existing private artifact/sanctioned-input owners furnish frozen diff parts and
 source context.
-Models select assigned source IDs or supporting path/side/LF ranges; the host
-constructs canonical `evidence_refs` from the full assignment inventory and pinned
-regular Git blobs. Exact continuation fragments retain their null source ranges.
-Supporting attribution cannot satisfy assigned coverage. Correspondence is never
-proof of a read, understanding or an executed check. Backends that author canonical
-references generate assigned references only, because supporting references need a
-host-computed blob digest; an assigned range may join the hunks of one part, and a
-stage assigned only fragments must cite those fragments.
+Every staged review backend selects assigned source IDs or supporting
+path/side/LF ranges; the host constructs canonical `evidence_refs` from the full
+assignment inventory and pinned regular Git blobs with the same admission code for
+all backends. Exact continuation fragments retain their null source ranges and
+are cited as fragments, never by a continuation range; an assigned range may only
+narrow its offered range. Supporting attribution cannot satisfy assigned coverage.
+Correspondence is never proof of a read, understanding or an executed check.
+Pi submits through its bound host tool and corrects rejected selectors within the
+conversation (below). Other backends return selectors once as final structured
+output, so an invalid selection rejects the whole stage as `evidence_incomplete`
+source attribution while earlier admitted findings, decisions and truthful
+incomplete coverage remain; unavailable storage stays fatal for the invocation.
 
 The existing `structured_output` terminal tool calls one invocation-local host
 callback. Only a sole terminal call in a completed native generation may enter

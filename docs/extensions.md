@@ -92,7 +92,7 @@ contract versions are independent. Preserve these supplied groups:
 | Fields | Meaning |
 |---|---|
 | `stage`, `scope_id`, `analyzed_revision` | Frozen first-pass/integration/triage identity; local source includes `source_id` |
-| `assigned_files`, `source_refs`, `source_options`, `assignment_parts`, `source_summary` | Exact targets, canonical source identities and host source IDs; offsets are UTF-8 diff-body bytes |
+| `assigned_files`, `source_options`, `assignment_parts`, `source_summary`, `submission_transport` | Exact targets, host source IDs and how selectors are submitted (`host_tool` for Pi, `final_output` otherwise); offsets are UTF-8 diff-body bytes |
 | `supporting_bundle`, `supporting_catalog` | Bounded admitted context/pointers and availability; no directory-wide access |
 | `remaining_work`, `advisory_tool_call_target`, `remaining_tool_calls`, `hard_tool_call_allowance` | Dispatch-time residual work, pace and enforced budgets; future reserves already excluded |
 | `context_inputs`, `context_transport`, `context_statuses`, `canonical_input_identities` | Transport and original captured input bindings |
@@ -122,13 +122,13 @@ authority and incomplete coverage; later success cannot erase earlier failures.
 (The committed-review program instead decides completion from current, non-superseded
 [work](runtime.md#assignment-policy-and-work).)
 Final-turn output selection and native structured submission remain host-owned;
-malformed envelopes cannot recover nested fragments. Native Pi's private stage
-contract 15 uses selector submissions and one host-accepted canonical result after
-clean native settlement. Its model schema is distinct from retained canonical
-output; other backends retain their canonical reference schema. The private cache
-identity changes with this contract, while extension API 8 and persisted canonical
-evidence remain compatible. Budgets/reserves remain host policy; feedback is
-system instruction, never a synthetic user turn. Read
+malformed envelopes cannot recover nested fragments. Private stage contract 16
+uses selector submissions for every backend and one host-accepted canonical result;
+Pi's result follows clean native settlement. The model schema is distinct from
+retained canonical output. The private cache identity changes with this contract,
+while extension API 8 and persisted canonical evidence remain compatible.
+Budgets/reserves remain host policy; feedback is system instruction, never a
+synthetic user turn. Read
 [output selection](../daydream/agent_output.py) and the relevant backend.
 Configured reviewer time and the shared pipeline deadline cover preparation,
 every stage, and retries. Explicit caller wall or absolute deadlines can tighten
@@ -192,7 +192,7 @@ Ordinary unbound calls retain their supported version/configuration behavior.
 Improve still requires Claude's independent snapshot-root guard.
 
 Assigned `source_options` accompany all supplied parts and bounded deferred
-Structure catalogs. Models copy compact `source:N` handles in
+Structure catalogs for every backend. Models copy compact `source:N` handles in
 `{source_id, basis, source_range}`, with null retaining the exact host identity,
 or select supporting `{path, side, source_range, basis}`. One deterministic map
 per captured review scope binds identical source identities to the same handle

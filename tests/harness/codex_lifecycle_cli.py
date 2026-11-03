@@ -131,7 +131,10 @@ def _response(prompt: str) -> tuple[str, str | None]:
         if "you are the structural reviewer" in lower or _FIXTURE_CONFIG.get("empty_reviews"):
             candidates = []
         return json.dumps({"targets": [{"target_id": target, "status": "reviewed", "reason": "",
-                                        "evidence_refs": state["source_refs"][target][:1]}
+                                        "evidence_refs": [
+                                            {"source_id": option["source_id"], "basis": "supplied_diff",
+                                             "source_range": None}
+                                            for option in state["source_options"][target][:1]]}
                                        for target in state["assigned_target_ids"]],
                            "notes": "Synthetic assigned review complete", "supporting_files": [],
                            "candidates": candidates,

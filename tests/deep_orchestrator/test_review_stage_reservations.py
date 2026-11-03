@@ -136,7 +136,8 @@ async def test_native_correction_admits_only_the_valid_whole_stage(
         # rejected plan has these same valid targets, so handoff rejection must
         # happen after a shared-capacity preview that fits exactly.
         expected = {**investigation.target_progress, **{
-            target['target_id']: {**target, 'evidence_refs': deepcopy(stage['source_refs'][target['target_id']][:1])}
+            target['target_id']: {**target, 'evidence_refs': deepcopy(
+                investigation.assignments[target['target_id']]['source_refs'][:1])}
             for target in output['targets']}}
         envelope: dict[str, Any] = {'terminal_result': {'stack_outcomes': [{'scope_id': 'python'}]}}
         without_decisions = len(json.dumps(envelope, indent=2, ensure_ascii=False).encode())
@@ -218,8 +219,7 @@ async def test_native_stage_capacity_and_input_failure_preserve_prior_admission(
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         bindings.append(backend.calls[-1]['host_tools'])
         if not admitted:
-            admitted.extend({**target, 'evidence_refs': deepcopy(stage['source_refs'][target['target_id']][:1])}
-                            for target in output['targets'])
+            admitted.extend(output['targets'])
             output['candidates'] = [candidate(disposition='confirmed', finding=record())]
             yield ToolStartEvent(id='accepted-submit', name='structured_output', input=output)
             yield ToolResultEvent(id='accepted-submit', output='Submitted.', is_error=False)
@@ -237,7 +237,11 @@ async def test_native_stage_capacity_and_input_failure_preserve_prior_admission(
     scope = scopes(data)['python']
     assert scope['status'] == 'incomplete' and scope['partial_evidence'] is True
     assert scope['reason_codes'] == ['evidence_incomplete']
-    assert scope['target_decisions'] == admitted
+    # Retained decisions are exactly the host-built canonical result of the first admission.
+    accepted = bindings[0].accepted_result
+    assert accepted is not None and scope['target_decisions'] == accepted['targets']
+    assert [decision['target_id'] for decision in scope['target_decisions']] == [
+        target['target_id'] for target in admitted]
     assert not set(unfinished).intersection(target['target_id'] for target in scope['target_decisions'])
     assert [finding['title'] for finding in data['findings']] == ['Grounded defect']
     failed = bindings[-1]
@@ -253,5 +257,5 @@ async def test_native_stage_capacity_and_input_failure_preserve_prior_admission(
     assert all(item['attempt'] == 1 for item in metadata)
     persisted = saved_coverage(review.repo / '.daydream/deep').to_dict()['stack_outcomes']
     persisted_scope = next(item for item in persisted if item['scope_id'] == 'python')
-    assert persisted_scope['target_decisions'] == admitted
+    assert persisted_scope['target_decisions'] == accepted['targets']
     assert persisted_scope['status'] == scope['status'] and persisted_scope['reason_codes'] == scope['reason_codes']

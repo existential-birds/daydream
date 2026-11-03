@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 from collections.abc import Iterable
@@ -72,9 +73,23 @@ def capture(review: InvestigationRun, stage: dict[str, Any], *, bundle: bool = T
     return contents['diff'], index
 
 
+def canonical_decisions(index: dict[str, Any], decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Expected host references for submitted selectors, read from the delivered hunk index."""
+    delivered = {option['source_id']: reference for entry in index.values() for part in entry['assignments']
+                 for option, reference in zip(part['source_options'], part['source_refs'], strict=True)}
+    return [{**decision, 'evidence_refs': [
+        {**delivered[selector['source_id']], 'basis': selector['basis'], 'role': 'assigned',
+         **({'source_range': selector['source_range']} if selector['source_range'] else {})}
+        for selector in decision['evidence_refs']]} for decision in decisions]
+
+
+@pytest.mark.parametrize('invalid_selection', [False, True], ids=['retry', 'unpreparable-foreign-source'])
 async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_starts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir) -> None:
-    """A schema-rejected stage retries once with fresh grounding; both attempts charge their tool starts."""
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, invalid_selection: bool) -> None:
+    """A schema-rejected stage retries once with fresh grounding; both attempts charge their tool starts.
+
+    An unknown selection still blocks the retry when other fields leave the payload unpreparable.
+    """
     ext_dir.write_module(
         'from daydream.deep.prompts import build_per_stack_prompt\n'
         'def staged(**kw):\n'
@@ -103,6 +118,10 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
             yield from read_events(review.repo, path, event_id=f'attempt-{attempts}-{path}')
         if not initial_assignment:
             assert all('FAILED_ATTEMPT_MARKER' not in str(item) for item in stage['notes'])
+        elif invalid_selection:
+            del output['notes']
+            output['targets'][0]['evidence_refs'] = [
+                {'source_id': 'source:' + '0' * 64, 'basis': 'supplied_diff', 'source_range': None}]
         elif attempts == 1:
             output['targets'][0]['PRIVATE_UNKNOWN_PROPERTY_MARKER'] = None
             output['notes'] = 'FAILED_ATTEMPT_MARKER'
@@ -121,6 +140,12 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
         yield TurnEndEvent()
         yield ResultEvent(structured_output=None, continuation=None)
 
+    if invalid_selection:
+        await review.finish('python', reason='malformed_output')
+        assert attempts == 1
+        assert [(event['metadata']['attempt'], event['metadata']['failure_class'])
+                for event in stage_ends(review, 'python')] == [(1, 'source_attribution')]
+        return
     await review.finish('python', findings=('Grounded defect',))
     assert attempts == 2
     metadata = [event['metadata'] for event in stage_ends(review, 'python')]
@@ -171,7 +196,7 @@ async def test_failed_canonical_stage_input_preserves_successful_sibling_review(
 
 async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An inline (sandboxed) reviewer keeps old-only and later continuation ranges canonical."""
+    """A non-Pi (Codex) reviewer selects sources; the host persists canonical old-only and continuation refs."""
 
     from tests.harness.git_helpers import git
 
@@ -194,19 +219,23 @@ async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         diff, index = capture(review, stage)
-        schema = review.backend.calls[-1]['output_schema']
-        assert Draft202012Validator(schema).is_valid(output)
-        fragments_only = all(reference['fragment'] is not None for part in stage['assignment_parts']
-                             for reference in part['source_refs'])
-        fragment_stages.append(fragments_only)
-        if fragments_only:
-            cited = copy.deepcopy(output)
-            cited['targets'][0]['evidence_refs'][0].update(source_range={'start': 1, 'end': 1}, fragment=None)
-            assert Draft202012Validator(schema).is_valid(output)
-            assert not Draft202012Validator(schema).is_valid(cited)
+        binding = json.loads(supporting_contents(review.backend.calls[-1]['prompt'])['input-binding'])
+        assert Draft202012Validator(review.backend.calls[-1]['output_schema']).is_valid(output)
+        delivered = index['api.py']['assignments']
+        fragment_stages.append(all(reference['fragment'] is not None for part in delivered
+                                   for reference in part['source_refs']))
+        canonical = canonical_decisions(index, output['targets'])
+        revision = binding['analyzed_revision']
+        revisions = {'old': revision['merge_base_sha'], 'new': revision.get('source_id', revision['head_sha'])}
+        for reference in (reference for decision in canonical for reference in decision['evidence_refs']):
+            # Digests and revisions come from delivered bytes, never from the model's selection.
+            assert reference['artifact_sha256'] == binding['canonical_inputs']['canonical-diff']
+            assert (reference['path'], reference['revision']) == ('api.py', revisions[reference['side']])
+            if len(delivered) == 1:
+                assert reference['part_sha256'] == hashlib.sha256(diff.encode()).hexdigest()
         scoped = index['api.py']
         fragments.append(diff)
-        decisions.extend(copy.deepcopy(output['targets']))
+        decisions.extend(canonical)
         for part in stage['assignment_parts']:
             assignments.append(part)
             expected = (part['old_start'], part['old_start'] + part['old_count'] - 1,
@@ -247,7 +276,7 @@ async def test_redaction_expansion_rejects_stage_without_losing_admitted_finding
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         if not stage['progress']:
-            admitted.extend(copy.deepcopy(output['targets']))
+            admitted.extend(canonical_decisions(capture(review, stage, bundle=False)[1], output['targets']))
             output['candidates'] = [candidate(disposition='confirmed', finding=record())]
         else:
             output['targets'][0]['reason'] = 'TOKEN=x ' * 20000
@@ -256,7 +285,8 @@ async def test_redaction_expansion_rejects_stage_without_losing_admitted_finding
     assert scopes(data)['python']['target_decisions'] == admitted
     events = stage_ends(review, 'python')
     assert [event['metadata']['admitted'] for event in events] == [True, False]
-    assert events[-1]['metadata']['failure_class'] == 'source_attribution'
+    # The canonical result-byte bound is an admission limit, not a source attribution fault.
+    assert events[-1]['metadata']['failure_class'] == 'admission_failure'
     assert 'TOKEN=x' not in review.output.read_text()
     saved = json.loads((review.repo / '.daydream/deep/stack-python-records.json').read_text())
     assert [finding['description'] for finding in saved['issues']] == ['Grounded defect']

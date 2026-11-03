@@ -131,14 +131,14 @@ async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
         assert f'# original_path: {old_path}' in captured and '# side: before' in captured
         assert captured.endswith(old) and not path.is_relative_to(repo)
         for target in output['targets']:
-            offered = stage['source_refs'][target['target_id']]
-            if any(ref['path'] in {old_path, 'modern.py'} for ref in offered):
+            offered = stage['source_options'][target['target_id']]
+            if any(option['path'] in {old_path, 'modern.py'} for option in offered):
                 # A supported Pi subclass needs the same frozen before context.
                 # Submit only IDs; production callback admission must retain the
                 # rename, absent-side and metadata identities asserted below.
                 part = next(part for part in stage['assignment_parts'] if part['target_id'] == target['target_id'])
                 options = part['source_options']
-                assert len(options) == len(offered)
+                assert options == offered
                 assert all(option['basis'] == 'supplied_diff' for option in options)
                 target['evidence_refs'] = [
                     {'source_id': option['source_id'], 'basis': 'supplied_diff', 'source_range': None}
@@ -159,9 +159,9 @@ async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
     # to independently known Git bytes, rather than echoing the offered selector.
     metadata = (f'diff --git a/{old_path} b/modern.py\nsimilarity index 100%\n'
                 f'rename from {old_path}\nrename to modern.py\n').encode()
-    for target_id, refs in submitted.items():
-        assert retained[target_id] == refs
-        ref, = refs
+    for target_id, options in submitted.items():
+        ref, = retained[target_id]
+        assert len(options) == 1
         assert (ref['path'], ref['side'], ref['revision']) == ('modern.py', 'diff', review.pr.head_sha)
         assert ref['part_sha256'] == hashlib.sha256(metadata).hexdigest()
         assert ref['fragment'] == {'offset': 0, 'bytes': len(metadata),

@@ -68,10 +68,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep Codex, Claude and Osprey staged reviews from losing a scope when a model
+  miscopies a host-supplied digest. Every backend now selects sources and the host
+  builds canonical references; an invalid selection still rejects only that stage
+  with truthful incomplete coverage. A reviewer check that writes into the captured
+  checkout now fails the stage it was submitted in for every backend, as Pi already
+  did. Cached staged results from earlier versions are not reused
+  ([#1744](https://github.com/existential-birds/daydream/issues/1744)).
 - Keep Claude deep reviews from losing scopes to `evidence_incomplete`. Ignored
   output from reviewer checks no longer fails captured-source validation, integrity
-  failures name the changed path, non-Pi stages generate assigned references only,
-  and an assigned range may join hunks of one part
+  failures name the changed path
   ([#1735](https://github.com/existential-birds/daydream/issues/1735)).
 - Allow Pi's captured-source validation to finish within the original review
   deadline without mistaking valid slow admission for a lost submission receipt.
