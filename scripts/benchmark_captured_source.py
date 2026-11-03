@@ -305,9 +305,9 @@ def worker(args):
         with metrics.span("validate"):
             captured.validate()
         if args.scopes:
+            from daydream import review_stage_inputs as rsi
             from daydream.deep.detection import StackAssignment
             from daydream.hunk_index import write_hunk_index
-            from daydream import review_stage_inputs as rsi
             from daydream.workspace import WorkContext
             from tests.harness.backend import ScriptedBackend
 
@@ -452,6 +452,7 @@ def review_phase(args, work, revision, diff_path):
     import anyio
 
     from daydream import review_stage_inputs as rsi
+    from daydream.backends import effective_fanout_concurrency
     from daydream.deep.detection import StackAssignment
     from daydream.phases.review import phase_per_stack_reviews
     from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
@@ -460,7 +461,6 @@ def review_phase(args, work, revision, diff_path):
 
     files = list(work.captured_source.files)
     stacks = [StackAssignment(f"python#{i}", files[i :: args.scopes]) for i in range(min(args.scopes, len(files)))]
-    admitted = min(args.concurrency, len(stacks))
     sample = {}
     release = anyio.Event()
     release.set()  # The warm-up runs unblocked.
@@ -492,6 +492,7 @@ def review_phase(args, work, revision, diff_path):
     intent = diff_path.parent / "intent.md"
     intent.write_text("Offline admission benchmark.\n")
     backend = ScriptedBackend(responder=respond, fanout_concurrency=args.concurrency)
+    admitted = min(effective_fanout_concurrency(10, backend), len(stacks))  # The phase's admission ceiling.
 
     def review(scopes, run_id):
         coverage = ReviewCoverage(run_id, revision, [PlannedScope(s.stack_name, s.stack_name, tuple(s.files))
