@@ -613,20 +613,24 @@ through subprocess dispatch; inherited Git routing cannot select replacement
 metadata. Unsafe cleanup retains the operational worktree and warns without
 replacing a primary failure.
 
-Completed fork trajectories stay on disk, not in RAM. The run's recorder
-registry keeps one reference per completed child: its trajectory id, logical
-path, the private file actually written, and that file's size and SHA-256. Run
-snapshots keep the root and still-running forks as prepared bytes, because every
-flush rewrites their `.partial` paths. Every consumer reads documents through one
-checked read: prepared bytes come from memory, and a reference is re-read without
-following links and must match its size and digest; identity-checked reads also
-verify trajectory/session identity. Retaining a snapshot, which also happens from
-the signal handler, checks only reference metadata and performs no I/O. Freeze checks each reference
-in place. A missing or changed child (for example a later fork reusing a legacy
-descriptor, or an edit in private state) is dropped from that snapshot with a
-warning, and its file is left in place; live run info drops it from its view the
-same way. Consumers after freeze read references from the frozen copy, where a
-mismatch is an integrity failure.
+Completed fork trajectories stay on disk, not in RAM. The run's recorder registry
+keeps one reference per completed child: its trajectory id, logical path, the
+private file actually written, and that file's size and SHA-256. Run snapshots keep
+the root and still-running forks as prepared bytes, because every flush rewrites
+their `.partial` paths. Every consumer reads documents through one checked read:
+prepared bytes come from memory, and a reference is re-read without following links
+and must match its size and digest; identity-checked reads also verify
+trajectory/session identity. Retaining a snapshot, which also happens from the
+signal handler, checks only reference metadata and performs no I/O. Freeze checks
+each reference in place and against the frozen copy's manifest. A missing or changed
+child is dropped from that snapshot with a warning, and its file is left in place;
+live run info drops it from its view the same way. Realistic causes are an older
+retained partial snapshot whose child file a later fork with the same legacy
+descriptor overwrote, or an edit in private state. Intact bytes with the wrong
+identity remain a fatal freeze error. A run that lost a child still installs its
+outputs and archive, but optional dataset capture rejects its incomplete record.
+Consumers after freeze read references from the frozen copy, where a mismatch is an
+integrity failure.
 
 Finalization reports local JSONL capture, configured upload, archive/evaluation,
 and public installation separately. Later failure cannot revoke a successful

@@ -14,8 +14,9 @@ import anyio
 import pytest
 
 from daydream import runner
-from daydream.artifact_visibility import private_root_locations
+from daydream.artifact_visibility import ArtifactSession, private_root_locations
 from daydream.run_config import RunConfig
+from daydream.trajectory import RunWriteSnapshot, TrajectoryDocumentReference
 from tests.harness.blocked_mode import wait_for_entered
 from tests.harness.claude_sdk import (
     MockResultMessage,
@@ -386,6 +387,16 @@ async def test_runner_improve_claude_strict_uses_audit_root_and_inline_sanctione
     explicit_trajectory = tmp_path / "improve trajectory output.json"
     config = _probe_config(make_config, repo, flow_name="improve", backend="claude", trajectory_path=explicit_trajectory
     )
+    # A completed child file lost before freeze leaves archived evidence, never the run's outputs.
+    freeze, dropped = ArtifactSession.freeze, []
+
+    def freeze_without_child(session: ArtifactSession, snapshot: RunWriteSnapshot) -> Any:
+        child = next(document for document in snapshot.documents if isinstance(document, TrajectoryDocumentReference))
+        child.private_path.unlink()
+        dropped.append(child.path.name)
+        return freeze(session, snapshot)
+
+    monkeypatch.setattr(ArtifactSession, "freeze", freeze_without_child)
     assert await _run_probe(config, private_base) == 0
     assert observations
 
@@ -451,6 +462,8 @@ async def test_runner_improve_claude_strict_uses_audit_root_and_inline_sanctione
 
     explicit = _assert_archived_run(archive_dir, explicit_trajectory, backend="claude", status="complete")
     assert explicit["extra"].get("partial") is not True
+    archived_children = archive_dir / "runs" / explicit["session_id"] / "trajectories"
+    assert dropped and any(archived_children.iterdir()) and not (archived_children / dropped[0]).exists()
 
 
 def _assert_pid_reaped(pid: int) -> None:

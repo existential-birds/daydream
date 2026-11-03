@@ -2335,7 +2335,7 @@ async def test_external_entry_interruption_reconciles_before_unlock(tmp_path: Pa
 
 
 async def test_external_trajectory_write_freeze_and_dispositions_use_immutable_bytes(tmp_path: Path, source: Path,
-    capsys: pytest.CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     requested, partial_path = _external_target(tmp_path / "external")
     session_id = "external-freeze"
@@ -2399,24 +2399,35 @@ async def test_external_trajectory_write_freeze_and_dispositions_use_immutable_b
                 name: session.write_trajectory_document(route, TrajectoryDocumentSnapshot(
                     name, children / f"{name}.json",
                     _payload("other-session" if name == "identity" else session_id, name)), "complete")
-                for name in ("deleted", "digest", "identity", "kept", "size")
+                for name in ("deleted", "digest", "identity", "kept", "late", "size")
             }
             (children / "deleted.json").unlink()
             (children / "digest.json").write_bytes(_payload(session_id, "digest").upper())
             (children / "size.json").write_bytes(_payload(session_id, "size") + b" ")
-            changed = {path.name: path.read_bytes() for path in children.iterdir()}
+            # A child whose bytes are intact but whose identity is wrong is a writer fault, not a drop.
+            with pytest.raises(ArtifactVisibilityError, match="snapshot child identity"):
+                session.freeze(_snapshot(session_id, (full_document, references.pop("identity"))))
             capsys.readouterr()
+            before = {path.name: path.read_bytes() for path in children.iterdir()}
+            manifest_tree = artifact_filesystem.manifest_tree
 
+            def edit_late_child(root: Path, *args: Any) -> Any:
+                if root == session.layout.live_root:  # An edit after the in-place check, before the copy.
+                    (children / "late.json").write_bytes(_payload(session_id, "late").upper())
+                return manifest_tree(root, *args)
+
+            monkeypatch.setattr(artifact_filesystem, "manifest_tree", edit_late_child)
             requested.unlink()
             partial_path.write_bytes(b"mutable path is not evidence")
             snapshot = _snapshot(session_id, (full_document, *references.values()))
             frozen = session.freeze(snapshot)
+            monkeypatch.undo()
             frozen_run = frozen.root / ".daydream" / "runs" / session_id
             assert (frozen_run / "trajectory.json").read_bytes() == full_bytes
             # Mismatched children are dropped with a warning, left untouched, and the kept one is rebased.
-            warnings = capsys.readouterr().out
-            assert (warnings.count("TrajectoryDocumentIntegrityError"), warnings.count("(ValueError)")) == (3, 1)
-            assert {path.name: path.read_bytes() for path in children.iterdir()} == changed
+            assert capsys.readouterr().out.count("TrajectoryDocumentIntegrityError") == 4
+            after = {path.name: path.read_bytes() for path in children.iterdir()}
+            assert after == {**before, "late.json": _payload(session_id, "late").upper()}
             kept = replace(references["kept"], private_path=frozen_run / "trajectories" / "kept.json")
             assert frozen.trajectories == replace(snapshot, documents=(full_document, kept))
             assert kept.read_bytes() == _payload(session_id, "kept")

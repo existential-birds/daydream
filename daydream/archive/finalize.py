@@ -231,8 +231,6 @@ def finalize_archive_run(
                     progress("Live-source quality unavailable; frozen analysis retained")
             except Exception as exc:
                 _validate_frozen_artifacts(artifacts)
-                if isinstance(exc, TrajectoryDocumentIntegrityError):
-                    raise
                 raise ArchiveFinalizationError("evaluation finalization failed") from exc
             (assembly_dir / "evaluation.json").write_text(json.dumps(evaluation, indent=2), encoding="utf-8")
             _validate_frozen_artifacts(artifacts)

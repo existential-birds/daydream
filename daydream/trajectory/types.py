@@ -163,7 +163,7 @@ class TrajectoryDocumentReference(_TrajectoryDocument):
     def read_bytes(self) -> bytes:
         """Re-read the referenced regular file and verify its size and SHA-256."""
         try:
-            fd = os.open(self.private_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            fd = os.open(self.private_path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
             with os.fdopen(fd, "rb") as stream:
                 metadata = os.fstat(stream.fileno())
                 if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != self.size:

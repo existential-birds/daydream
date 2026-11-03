@@ -674,7 +674,7 @@ class ArtifactSession:
 
     def freeze(self, run_snapshot: RunWriteSnapshot) -> ArtifactTreeSnapshot:
         """Rewrite prepared documents, check references in place, and freeze the live tree."""
-        from daydream.trajectory import TrajectoryDocumentSnapshot
+        from daydream.trajectory import TrajectoryDocumentIntegrityError, TrajectoryDocumentSnapshot
 
         self._require_active()
         try:
@@ -718,9 +718,11 @@ class ArtifactSession:
             else:
                 try:
                     document.validated(self.layout.session_id)
-                except ValueError as exc:
+                except TrajectoryDocumentIntegrityError as exc:
                     _print_dropped_child_warning(exc)
                     continue
+                except ValueError as exc:
+                    raise ArtifactVisibilityError(f"run snapshot child {exc}") from exc
                 document = replace(document, private_path=self.layout.live_root.parent / "frozen" / relative)
             retained.append(document)
         return self._freeze_tree(replace(run_snapshot, documents=tuple(retained)))
@@ -733,12 +735,27 @@ class ArtifactSession:
         return self._freeze_tree()
 
     def _freeze_tree(self, trajectories: RunWriteSnapshot | None = None) -> ArtifactTreeSnapshot:
+        from daydream.trajectory import TrajectoryDocumentIntegrityError, TrajectoryDocumentReference
+
         entries = filesystem.manifest_tree(self.layout.live_root)
         frozen_root = self.layout.live_root.parent / "frozen"
         if frozen_root.exists() or frozen_root.is_symlink():
             raise ArtifactVisibilityError("frozen artifact tree already exists")
         filesystem._copy_tree(self.layout.live_root, frozen_root, entries)
         filesystem._atomic_json(frozen_root.parent / "frozen-manifest.json", filesystem._manifest_payload(entries))
+        if trajectories is not None:
+            # The verified copy matches its manifest, so a reference whose file
+            # changed after its in-place check is dropped without another read.
+            files = {entry.path: (entry.size, entry.sha256) for entry in entries if entry.kind == "file"}
+            documents = []
+            for document in trajectories.documents:
+                if isinstance(document, TrajectoryDocumentReference) and files.get(
+                    document.private_path.relative_to(frozen_root).as_posix()
+                ) != (document.size, document.sha256):
+                    _print_dropped_child_warning(TrajectoryDocumentIntegrityError("referenced document changed"))
+                    continue
+                documents.append(document)
+            trajectories = replace(trajectories, documents=tuple(documents))
         result = ArtifactTreeSnapshot(
             session_id=self.layout.session_id,
             workspace_key=self.layout.workspace_key,
