@@ -117,8 +117,8 @@
     ],
     "profile_selection_formula": "Keep node medians >= minimum_profiled_seconds only when the exact node ID has <= maximum_profiled_node_id_characters characters; round kept medians to duration_decimal_places.",
     "pruned": {
-      "base": "cdba57b2d4f1b6444e9ee53d694e338e2dcc7612",
-      "head": "77ebf04000cb85c866276d86fedad3d152b09ea8",
+      "base": "a4dda0a599e180ff2a3ae1a8b9453270155579aa",
+      "head": "77932ea4a2c71064f526d59ccdd29cacada1f0ed",
       "nodes_before": 2367,
       "nodes_after": 133,
       "rule": "Kept only node IDs collected after pruning whose test function is unchanged from base; removed or rewritten tests use fallback_seconds."
