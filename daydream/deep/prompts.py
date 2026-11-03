@@ -19,7 +19,6 @@ from daydream.phases.review_prompts import (
     _exploration_pointer,
     _settled_decisions_block,
 )
-from daydream.phases.schemas import REVIEW_STAGE_SCHEMA
 from daydream.prompt_budget import inline_context_file
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
 from daydream.prompts.grounding import (
@@ -295,7 +294,7 @@ def _build_review_stage_prompt(*, strategy: str, stack_name: str, files: list[st
     if rejection is not None:
         parts.append("The previous completed attempt was rejected by strict schema validation. "
             "Safe validator feedback: " + json.dumps(rejection, ensure_ascii=False)
-            + "\nReturn a new object matching REVIEW_STAGE_SCHEMA exactly, including its "
+            + "\nReturn a new object matching response_contract.schema exactly, including its "
             "additionalProperties:false rules. Do not repair, recover, or continue previous output.")
     if triage:
         parts.append(f"You are triaging the {stack_name} review's assigned candidate IDs only: "
@@ -354,8 +353,6 @@ def _build_review_stage_prompt(*, strategy: str, stack_name: str, files: list[st
         "advisory_tool_call_target guides pace rather than limiting useful assigned checks. "
         "The host enforces cumulative spending and the absolute deadline; "
         "keep one native Pi call for structured_output.")
-    if not review_stage.get('response_contract'):
-        parts.append("REVIEW_STAGE_SCHEMA:\n" + json.dumps(REVIEW_STAGE_SCHEMA, ensure_ascii=False))
     return "\n\n".join(parts)
 
 

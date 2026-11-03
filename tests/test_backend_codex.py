@@ -12,7 +12,6 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from jsonschema import Draft202012Validator
 
 from daydream import git_ops
 from daydream.agent import StructuredOutputFailure, run_agent
@@ -40,7 +39,7 @@ from daydream.backends.codex import (
     CodexError,
 )
 from daydream.extensions import Registry, ToolDecision, set_registry
-from daydream.phases.schemas import REVIEW_STAGE_SCHEMA, review_stage_generation_schema, review_stage_schema
+from daydream.phases.schemas import review_stage_schema, review_stage_submission_schema
 from daydream.retry_policy import FailureClass, classify_failure
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.trajectory import DaydreamPhase
@@ -272,16 +271,12 @@ async def test_nonzero_exit_raises_with_captured_output() -> None:
     assert len(bounded) <= 64 and "ghp_" not in bounded and "[REDACTED" in bounded
 
 
-async def _continuation_token_resumes_case(tmp_path: Path, read_only: bool, local: bool) -> None:
-    """Native output-schema transport must allow working-source identity instead of provenance HEAD."""
+async def _continuation_token_resumes_case(tmp_path: Path, read_only: bool) -> None:
+    """A resumed thread persists the staged selector transport schema as native output."""
     backend = CodexBackend(model="fixture-model")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     token = ContinuationToken(backend="codex", data={"thread_id": "th_prev"})
-    head, base = '98d18d2e9f66792e1e732e1cddbb7007d84f5485', '7ec97298a90c28789e36afb4412ecdc640d8abae'
-    canonical = review_stage_schema(['api.py'], [], triage=False)
-    after = 'd' * 64 if local else head
-    schema = review_stage_generation_schema(canonical, {'head_sha': head, 'merge_base_sha': base,
-                                                       **({'source_id': after} if local else {})})
+    schema = review_stage_submission_schema(review_stage_schema(['api.py'], [], triage=False))
     persisted: dict[str, Any] = {}
 
     async def spawn(*args: str, **kwargs: Any) -> Any:
@@ -307,23 +302,6 @@ async def _continuation_token_resumes_case(tmp_path: Path, read_only: bool, loca
         assert isinstance(request.config, CodexRequestConfig)
         assert request.config.continuation_mode == "resume" and request.config.native_output_schema is True
         assert request.output_schema == schema == persisted
-        revision = persisted['properties']['targets']['items']['properties']['evidence_refs']['items'][
-            'properties']['revision']
-        assert revision['enum'] == [after, base]
-        validator = Draft202012Validator(revision)
-        assert validator.is_valid(after) and validator.is_valid(base)
-        assert validator.is_valid(head) is (not local)
-        assert not validator.is_valid('98d18d2e9f66792e1732e1cddbb7007d84f5485')
-        assert 'enum' not in canonical['properties']['targets']['items']['properties'][
-            'evidence_refs']['items']['properties']['revision']
-        assert 'enum' not in REVIEW_STAGE_SCHEMA['properties']['targets']['items']['properties'][
-            'evidence_refs']['items']['properties']['revision']
-        for unusable in ({}, {'head_sha': head}, {'head_sha': head, 'merge_base_sha': 'main'}):
-            assert 'enum' not in review_stage_generation_schema(canonical, unusable)['properties']['targets'][
-                'items']['properties']['evidence_refs']['items']['properties']['revision']
-        identical = review_stage_generation_schema(canonical, {'head_sha': head, 'merge_base_sha': head})
-        assert identical['properties']['targets']['items']['properties']['evidence_refs']['items'][
-            'properties']['revision']['enum'] == [head]
         assert (request.session_id, request.session_source) == ("th_prev", "configured")
         result = next(event for event in events if isinstance(event, ResultEvent))
         assert result.continuation is not None
@@ -332,12 +310,11 @@ async def _continuation_token_resumes_case(tmp_path: Path, read_only: bool, loca
 
 
 async def test_continuation_token_resumes(tmp_path: Path) -> None:
-    for index, (read_only, local) in enumerate([(False, False), (False, True), (True, False), (True, True)]):
+    for index, read_only in enumerate([False, True]):
         try:
-            await _continuation_token_resumes_case(tmp_path=_case_dir(tmp_path, index), read_only=read_only,
-                                                   local=local)
+            await _continuation_token_resumes_case(tmp_path=_case_dir(tmp_path, index), read_only=read_only)
         except BaseException as exc:
-            exc.add_note(f"case: read_only={read_only} local={local}")
+            exc.add_note(f"case: read_only={read_only}")
             raise
 
 

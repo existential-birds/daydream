@@ -31,7 +31,6 @@ from daydream.json_utils import SchemaRejection, validates_schema
 from daydream.phases.review_prompts import build_review_stage_system_instruction
 from daydream.phases.schemas import (
     review_stage_admission_schema,
-    review_stage_generation_schema,
     review_stage_schema,
     review_stage_submission_schema,
 )
@@ -60,12 +59,12 @@ from daydream.review_result import (
     reason_for_budget,
     reason_for_exception,
 )
-from daydream.review_source_refs import _SubmissionSources, validate_source_refs
+from daydream.review_source_refs import _SubmissionSources
 from daydream.run_context import resolve_run_context
 from daydream.trajectory import DaydreamPhase, LifecycleReasonCode, LifecycleStatus, phase_scope
 from daydream.ui.agent_stream import present_result
 
-STAGED_REVIEW_CONTRACT = 15
+STAGED_REVIEW_CONTRACT = 16
 HANDOFF_MAX_BYTES = 64 * 1024
 HANDOFF_MAX_ITEMS = 128
 
@@ -305,8 +304,10 @@ class ReviewInvestigation:
                   max(8, len(files)) if stage == 'integration' else max(4, 2 * len(files)))
         return {'contract_version': STAGED_REVIEW_CONTRACT, 'scope_id': self.scope_id,
             'analyzed_revision': self.revision, 'stage': stage, 'assigned_target_ids': targets,
-            'assignment_parts': assignment_parts,
-            'source_refs': self._reference_options(stage, targets),
+            # Stage state offers selectors only; the host builds canonical references.
+            'assignment_parts': [{key: value for key, value in part.items() if key != 'source_refs'}
+                                 for part in assignment_parts],
+            'source_options': self._reference_options(stage, targets),
             'completed_target_ids': [target for target, progress in self.target_progress.items()
                                      if progress['status'] == 'reviewed'],
             'assigned_files': sorted(candidate_files) if stage == 'triage' else files,
@@ -321,26 +322,21 @@ class ReviewInvestigation:
             'hard_tool_call_allowance': self.budget.remaining_tool_calls,
             'advisory_tool_call_target': min(target, self.budget.remaining_tool_calls)}
 
-    def _reference_options(self, stage: str, targets: list[str], *,
-                           selectors: bool = False) -> dict[str, list[dict[str, Any]]]:
+    def _reference_options(self, stage: str, targets: list[str]) -> dict[str, list[dict[str, Any]]]:
         """Offer bounded source identities, never a claim that a source was read."""
-        field = 'source_options' if selectors else 'source_refs'
         if stage == 'integration':
             # Whole-change judgment can cite useful assigned work without a
             # mandatory reference for every file or an exhaustive registry.
-            choices = list(islice((option for part in self.assignments.values() for option in part[field]), 4))
+            choices = list(islice((option for part in self.assignments.values()
+                                   for option in part['source_options']), 4))
             return {target: choices for target in targets}
-        return {target: self.assignments.get(target, {}).get(field, []) for target in targets}
+        return {target: self.assignments.get(target, {}).get('source_options', []) for target in targets}
 
     def _expected_source_refs(self, stage: str, target: str) -> Iterable[dict[str, Any]]:
         """Prompt examples do not narrow the assigned whole-change identity."""
         parts = (self.assignments.values() if stage == 'integration' else
                  [self.assignments.get(target, {})])
         return (ref for part in parts for ref in part.get('source_refs', []))
-
-    def _assigns_only_fragments(self, stage: str, targets: list[str]) -> bool:
-        references = [reference for target in targets for reference in self._expected_source_refs(stage, target)]
-        return bool(references) and all(reference['fragment'] is not None for reference in references)
 
     async def _stage(self, backend: Backend, cwd: Path, prompt_builder: Callable[[dict[str, Any]], str],
         stage: str, targets: list[str], files: list[str], agent_kwargs: dict[str, Any], *,
@@ -362,23 +358,24 @@ class ReviewInvestigation:
             state = self._stage_state(stage, targets, files, candidate_ids, assignment_parts)
             self.failure_diagnostic, self.failed_invocation, self.failure_class = None, False, None
             state.update(attempt=attempt, max_attempts=2, schema_rejection=rejection.to_dict() if rejection else None)
-            schema = review_stage_schema(targets, candidate_ids, triage=stage == "triage")
+            stage_schema = review_stage_schema(targets, candidate_ids, triage=stage == "triage")
+            # Every backend receives the strict selector transport; host admission
+            # tolerates absent supporting metadata and checks canonical output separately.
+            transport_schema = review_stage_submission_schema(stage_schema)
+            submission_schema = review_stage_admission_schema(transport_schema)
+            canonical_schema = review_stage_admission_schema(stage_schema)
             native_admission = isinstance(backend, PiBackend)
-            fragments_only = self._assigns_only_fragments(stage, targets)
-            submission_schema = (review_stage_submission_schema(review_stage_admission_schema(schema))
-                                 if native_admission else review_stage_generation_schema(
-                                     schema, self.revision, fragments_only=fragments_only))
-            if native_admission:
-                state['source_attribution'] = 'host_selectors'
-                state['source_options'] = self._reference_options(stage, targets, selectors=True)
-            state["response_contract"] = {"schema": submission_schema, "skeleton": {
+            # Only a host-tool submission can be corrected within the invocation.
+            state['submission_transport'] = 'host_tool' if native_admission else 'final_output'
+            state["response_contract"] = {"schema": transport_schema, "skeleton": {
                 "targets": [{"target_id": target, "status": "reviewed", "reason": "", "evidence_refs": []}
                             for target in targets],
                 "notes": "", "supporting_files": [], "candidates": [{
                     "candidate_id": candidate["candidate_id"], "file": candidate["file"], "line": candidate["line"],
                     "trigger": "", "consequence": "", "grounds": "", "disposition": "unresolved", "finding": None,
                 } for candidate in state["candidates"]] if stage == "triage" else [], "contradictions": []}}
-            evidence = ReviewEvidence(review_stage_admission_schema(schema))
+            # Pi returns the host-built canonical result; other backends return selectors for host admission.
+            evidence = ReviewEvidence(canonical_schema if native_admission else submission_schema)
             self.assertion_failure_class: str | None = None
             self.assertion_failure_diagnostic: str | None = None
             syntax_error: dict[str, int] | None = None
@@ -395,68 +392,26 @@ class ReviewInvestigation:
                     prepared = await stage_inputs(state)
                     kwargs = {**agent_kwargs, 'sanctioned_inputs': prepared}
                     prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
-                    if native_admission:
-                        if self._input_factory is None:
-                            raise SanctionedInputUnavailable('Native review requires frozen source admission')
+                    if self._input_factory is None:
+                        raise SanctionedInputUnavailable('Staged review requires frozen source admission')
+                    assigned_files = files or state['assigned_files']
 
+                    def admit(submitted: dict[str, Any], binding: HostToolBinding | None = None) -> dict[str, Any]:
+                        return self._admit_submission(
+                            submitted, stage, targets, candidate_ids, files=assigned_files,
+                            canonical_schema=canonical_schema, binding=binding,
+                            revalidate=lambda: prepared.revalidate(backend, cwd, kwargs.get('read_only', False)))
+
+                    if native_admission:
                         def accept_submission(submitted: Any) -> dict[str, Any]:
                             """Prepare and install one whole stage without yielding authority."""
-                            assert binding is not None and self._input_factory is not None
-                            active_binding = binding
-                            active_binding.ensure_open()
+                            assert binding is not None
+                            binding.ensure_open()
                             if not validates_schema(submitted, submission_schema):
                                 raise HostToolRejected(
                                     'Review stage fields do not match response_contract.schema; '
                                     'supply every required judgment and remove unknown fields.')
-
-                            def prepare(sources: _SubmissionSources) -> Callable[[], dict[str, Any]]:
-                                canonical: dict[str, Any] = deepcopy(submitted)
-                                canonical['targets'] = []
-                                for index, target in enumerate(submitted['targets']):
-                                    try:
-                                        references = sources.canonicalize(
-                                            target['evidence_refs'],
-                                            self._expected_source_refs(stage, target['target_id']),
-                                            require_assigned=target['status'] == 'reviewed')
-                                    except HostToolRejected as exc:
-                                        label = redact_text(target['target_id'])[:160]
-                                        raise HostToolRejected(
-                                            f'targets[{index}] target_id {label!r}: {exc}') from exc
-                                    canonical['targets'].append({**target, 'evidence_refs': references})
-                                canonical['supporting_files'] = self._supporting_files(submitted)
-                                serialized = json.dumps(canonical, ensure_ascii=False, allow_nan=False,
-                                                        separators=(',', ':')).encode('utf-8')
-                                if len(serialized) > _MAX_RESULT_BYTES:
-                                    raise HostToolRejected(
-                                        f'The whole canonical review result exceeds {_MAX_RESULT_BYTES} UTF-8 bytes; '
-                                        'shorten notes, reasons or candidate text and remove optional supporting '
-                                        'selectors. Assigned canonical hashes also count toward this bound.')
-                                if not validates_schema(canonical, evidence.schema or {}):
-                                    raise HostToolRejected(
-                                        'Canonical review result does not match the required schema.')
-                                plan, reason = self._assessment(canonical, stage, targets, candidate_ids,
-                                    files=files or state['assigned_files'], admitting=True,
-                                    native_sources=True, sources=sources)
-                                if plan is None:
-                                    raise HostToolRejected(self.assertion_failure_diagnostic or (
-                                        'Review-stage fields cannot be retained; shorten optional text and '
-                                        'supply the assigned judgments from response_contract.'))
-                                prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
-
-                                def install() -> dict[str, Any]:
-                                    active_binding.ensure_open()
-                                    self._install(plan)
-                                    self.assertion_failure_class = None
-                                    return canonical
-
-                                return install
-
-                            try:
-                                return self._input_factory.admit_submission(prepare)
-                            except SanctionedInputUnavailable as exc:
-                                raise HostToolFatal(
-                                    f'Frozen review input validation failed: {redact_text(str(exc))}. '
-                                    'this review invocation must stop.', code='input_unavailable') from exc
+                            return admit(submitted, binding)
 
                         binding = HostToolBinding(deadline=self.budget.deadline, accept=accept_submission)
                         kwargs['host_tools'] = binding
@@ -491,14 +446,12 @@ class ReviewInvestigation:
                     if self.reason is None:
                         stage_prompt = prompt_builder(state)
                         output, _, self.reason = await agent.run_agent(
-                            backend, cwd, stage_prompt, phase=DaydreamPhase.DEEP, output_schema=submission_schema,
-                            result_schema=evidence.schema,
+                            backend, cwd, stage_prompt, phase=DaydreamPhase.DEEP, output_schema=transport_schema,
                             review_stage_scope_id=transition.scope_id,
                             review_system_instructions=build_review_stage_system_instruction(state),
                             require_full_schema=True, investigation_budget=self.budget, review_evidence=evidence,
-                            schema_rejection_guard=lambda value: isinstance(value, dict) and self._assessment(
-                                value, stage, targets, candidate_ids,
-                                files=files or state['assigned_files'])[1] is None,
+                            schema_rejection_guard=lambda value: self._retryable(
+                                value, stage, targets, candidate_ids, files=assigned_files),
                             advisory_tool_call_target=state['advisory_tool_call_target'], **kwargs)
                     else:
                         output = None
@@ -517,14 +470,9 @@ class ReviewInvestigation:
                         FailureClass.AUTH_CONFIG, FailureClass.SCHEMA, FailureClass.TOOL_POLICY, FailureClass.PERMANENT}
                     self.failure_diagnostic = (codex_lifecycle_diagnostic(exc)
                         or f"{type(exc).__name__}: review invocation failed ({self.reason}).")
-                    if binding is not None and binding.fatal_error is not None:
-                        fatal = binding.fatal_error
-                        self._continuable_failure = False
-                        self.failure_diagnostic = str(fatal)
-                        if fatal.code in {'input_unavailable', 'evidence_incomplete'}:
-                            self.reason = 'evidence_incomplete'
-                        elif isinstance(fatal, HostToolCallBudgetExceeded):
-                            self.reason = 'tool_call_budget_exceeded'
+                    fatal = exc if isinstance(exc, HostToolFatal) else binding.fatal_error if binding else None
+                    if fatal is not None:
+                        self._record_fatal(fatal)
                 else:
                     actual_rejection = output.rejection if isinstance(output, agent.StructuredOutputFailure) else None
                     syntax_error = output.syntax_error if isinstance(output, agent.StructuredOutputFailure) else None
@@ -537,8 +485,7 @@ class ReviewInvestigation:
                             if not binding.accepted or output != binding.accepted_result:
                                 self.reason = 'evidence_incomplete'
                         else:
-                            self.reason = self._admit(output, stage, targets, candidate_ids or [], evidence,
-                                                      files=files or state['assigned_files'])
+                            self.reason = self._admit(output, admit)
                     accepted = self.reason is None
                     if accepted:
                         assert isinstance(output, dict)
@@ -632,7 +579,7 @@ class ReviewInvestigation:
     def _assessment(self, output: dict[str, Any], stage: str, targets: list[str],
                     candidate_ids: list[str], *, files: list[str],
                     admitting: bool = False, native_sources: bool = False,
-                    sources: _SubmissionSources | None = None) -> tuple[_AdmissionPlan | None, str | None]:
+                    ) -> tuple[_AdmissionPlan | None, str | None]:
         """Assess available domain failures and bounds without admitting output or repairing unassessable fields."""
         raw_targets = output.get('targets')
         declared_targets = [item for item in raw_targets if isinstance(item, dict)] if (
@@ -724,20 +671,6 @@ class ReviewInvestigation:
                 if len(raw_decisions) + prior > HANDOFF_MAX_ITEMS:
                     return None, 'evidence_incomplete'
             return None, None
-        for target in declared_targets:
-            # This guard also runs on schema-rejected payloads to prevent a
-            # fresh schema retry from disguising an independently invalid citation.
-            if 'evidence_refs' not in target:
-                continue
-            valid_refs = validate_source_refs(
-                target['evidence_refs'], self._expected_source_refs(stage, target['target_id']),
-                revision=self.revision, source_root=self._source_root,
-                require_assigned=target['status'] == 'reviewed', raise_unavailable=native_sources,
-                captured_source=self._input_factory.captured_source if self._input_factory else None,
-                _submission=sources)
-            if not valid_refs:
-                self.assertion_failure_class = 'source_attribution'
-                return None, 'evidence_incomplete'
         if stage == 'triage':
             by_id = {candidate['candidate_id']: candidate for candidate in decisions}
             candidates = [by_id.get(candidate['candidate_id'], candidate) for candidate in prior_candidates]
@@ -868,17 +801,115 @@ class ReviewInvestigation:
             return None, 'evidence_incomplete'
         return _AdmissionPlan(handoff, target_progress), None
 
-    def _admit(self, output: Any, stage: str, targets: list[str], candidate_ids: list[str],
-               evidence: ReviewEvidence, *, files: list[str]) -> str | None:
-        """Commit a bounded plan only after the full strict schema and domain gates."""
-        if not isinstance(output, dict) or not validates_schema(output, evidence.schema or {}):
+    def _retryable(self, value: Any, stage: str, targets: list[str], candidate_ids: list[str], *,
+                   files: list[str]) -> bool:
+        """A fresh schema retry must not disguise an independently invalid assignment or source selection."""
+        if not isinstance(value, dict) or self._assessment(
+                value, stage, targets, candidate_ids, files=files)[1] is not None:
+            return False
+        assert self._input_factory is not None
+        # Selections are checked even when other fields leave the payload unpreparable.
+        raw_targets = value.get('targets')
+        for target in raw_targets if isinstance(raw_targets, list) else []:
+            if not isinstance(target, dict) or not isinstance(target.get('target_id'), str) or (
+                    'evidence_refs' not in target):
+                continue
+            try:
+                self._input_factory.canonicalize_source_selectors(
+                    target['evidence_refs'], self._expected_source_refs(stage, target['target_id']),
+                    require_assigned=target.get('status') == 'reviewed')
+            except HostToolRejected:
+                self.assertion_failure_class = 'source_attribution'
+                return False
+        return True
+
+    def _admit_submission(self, submitted: dict[str, Any], stage: str, targets: list[str],
+                          candidate_ids: list[str], *, files: list[str], canonical_schema: dict[str, Any],
+                          binding: HostToolBinding | None, revalidate: Callable[[], None]) -> dict[str, Any]:
+        """Build canonical references from selectors, then install the whole stage atomically.
+
+        Every backend shares this host path. Rejections raise HostToolRejected
+        before any domain mutation; unavailable frozen input raises HostToolFatal.
+        A host-tool binding makes irreparable capacity and contradiction failures
+        fatal, since correction cannot fix them; without one, any rejection ends the stage.
+        """
+        assert self._input_factory is not None
+
+        def prepare(sources: _SubmissionSources) -> Callable[[], dict[str, Any]]:
+            canonical: dict[str, Any] = deepcopy(submitted)
+            canonical['targets'] = []
+            for index, target in enumerate(submitted['targets']):
+                try:
+                    references = sources.canonicalize(
+                        target['evidence_refs'], self._expected_source_refs(stage, target['target_id']),
+                        require_assigned=target['status'] == 'reviewed')
+                except HostToolRejected as exc:
+                    label = redact_text(target['target_id'])[:160]
+                    raise HostToolRejected(f'targets[{index}] target_id {label!r}: {exc}') from exc
+                canonical['targets'].append({**target, 'evidence_refs': references})
+            canonical['supporting_files'] = self._supporting_files(submitted)
+            serialized = json.dumps(canonical, ensure_ascii=False, allow_nan=False,
+                                    separators=(',', ':')).encode('utf-8')
+            if len(serialized) > _MAX_RESULT_BYTES:
+                self.assertion_failure_class = 'admission_failure'
+                raise HostToolRejected(
+                    f'The whole canonical review result exceeds {_MAX_RESULT_BYTES} UTF-8 bytes; '
+                    'shorten notes, reasons or candidate text and remove optional supporting '
+                    'selectors. Assigned canonical hashes also count toward this bound.')
+            if not validates_schema(canonical, canonical_schema):
+                self.assertion_failure_class = 'admission_failure'
+                raise HostToolRejected('Canonical review result does not match the required schema.')
+            plan, _ = self._assessment(canonical, stage, targets, candidate_ids, files=files,
+                                       admitting=True, native_sources=binding is not None)
+            if plan is None:
+                raise HostToolRejected(self.assertion_failure_diagnostic or (
+                    'Review-stage fields cannot be retained; shorten optional text and '
+                    'supply the assigned judgments from response_contract.'))
+            revalidate()
+
+            def install() -> dict[str, Any]:
+                if binding is not None:
+                    binding.ensure_open()
+                self._install(plan)
+                self.assertion_failure_class = None
+                return canonical
+
+            return install
+
+        try:
+            return self._input_factory.admit_submission(prepare)
+        except SanctionedInputUnavailable as exc:
+            raise HostToolFatal(
+                f'Frozen review input validation failed: {redact_text(str(exc))}. '
+                'this review invocation must stop.', code='input_unavailable') from exc
+
+    def _admit(self, output: Any, admit: Callable[[dict[str, Any]], dict[str, Any]]) -> str | None:
+        """Admit final output once; without host tools an invalid selection rejects the stage."""
+        if not isinstance(output, dict):
             return (output.reason if isinstance(output, agent.StructuredOutputFailure)
                     else 'malformed_output' if output else 'missing_output')
-        plan, reason = self._assessment(output, stage, targets, candidate_ids, files=files, admitting=True)
-        if plan is None:
-            return reason
-        self._install(plan)
+        self.assertion_failure_class = None
+        try:
+            admit(output)
+        except HostToolRejected:
+            # Domain assessment classifies its own failures; anything earlier is source construction.
+            self.assertion_failure_class = self.assertion_failure_class or 'source_attribution'
+            return ('malformed_output' if self.assertion_failure_class == 'assignment_mismatch'
+                    else 'evidence_incomplete')
+        except HostToolFatal as exc:
+            self._record_fatal(exc)
+            return self.reason or 'evidence_incomplete'
         return None
+
+    def _record_fatal(self, fatal: HostToolFatal) -> None:
+        """An irreparable admission failure stops this invocation; admitted work stays retained."""
+        self.failed_invocation = True
+        self._continuable_failure = False
+        self.failure_diagnostic = str(fatal)
+        if fatal.code in {'input_unavailable', 'evidence_incomplete'}:
+            self.reason = 'evidence_incomplete'
+        elif isinstance(fatal, HostToolCallBudgetExceeded):
+            self.reason = 'tool_call_budget_exceeded'
 
     def _install(self, plan: _AdmissionPlan) -> None:
         self.coverage.admit_target_decisions(self.scope_id, list(plan.target_progress.values()))
