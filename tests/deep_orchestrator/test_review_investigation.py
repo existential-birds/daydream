@@ -694,17 +694,20 @@ def test_assessment_rejects_domain_faults_and_irreparable_native_capacity(
     this owner check proves every irreparable bound without a review run.
     """
     from daydream import review_result
+    from daydream.config import STRUCTURE_STACK_NAME
     from daydream.deep.detection import StackAssignment
     from daydream.host_tools import HostToolFatal
+    from daydream.review_budget import ReviewLimits
     from daydream.review_investigation import HANDOFF_MAX_BYTES, HANDOFF_MAX_ITEMS, ReviewInvestigation
     from tests.harness.review_result import review_coverage
 
     coverage = review_coverage(scope_ids=('python',), files=('api.py',))
     part = {'target_id': 'api.py', 'file': 'api.py', 'source_refs': [], 'source_options': []}
 
-    def fresh() -> ReviewInvestigation:
-        return ReviewInvestigation(StackAssignment('python', ['api.py']), '', coverage.revision.to_dict(),
-                                   assignment_batches=[[part]], coverage=coverage)
+    def fresh(batches: list[list[dict[str, Any]]] | None = None, *, scope_id: str = 'python',
+              limits: ReviewLimits | None = None) -> ReviewInvestigation:
+        return ReviewInvestigation(StackAssignment(scope_id, ['api.py']), '', coverage.revision.to_dict(),
+                                   assignment_batches=batches or [[part]], coverage=coverage, limits=limits)
 
     judgment = {'trigger': 'x', 'consequence': 'x', 'grounds': 'x', 'disposition': 'open', 'candidate_id': ''}
     reviewed = {'target_id': 'api.py', 'status': 'reviewed', 'reason': ''}
@@ -784,6 +787,15 @@ def test_assessment_rejects_domain_faults_and_irreparable_native_capacity(
     assert batches._continuation_admitted({}) is False
     assert (batches.reason, batches.failure_class, batches.failure_diagnostic) == (
         'tool_call_budget_exceeded', 'quantitative_exhaustion', 'Review limit exhausted: tool_call_budget_exceeded')
+    # Ordinary per-batch spend still reaches every batch of a many-batch scope; a zero allowance
+    # still stops dispatch, and Structure's single integration stage keeps the base allowance.
+    many = [[{**part, 'target_id': f'api.py#{index}'}] for index in range(12)]
+    scoped = fresh(many)
+    for _ in many:
+        assert scoped._budget_stop_reason() is None
+        scoped.budget.observed_tool_starts += 9
+    assert fresh(many, limits=ReviewLimits(tool_calls=0))._budget_stop_reason() == 'tool_call_budget_exceeded'
+    assert fresh(many, scope_id=STRUCTURE_STACK_NAME).budget.limits == ReviewLimits()
     monkeypatch.setattr(review_result, 'RUN_TARGET_DECISIONS_MAX_BYTES', 1)
     with pytest.raises(HostToolFatal, match='required target IDs') as targets:
         fresh()._assessment(valid, 'first_pass', ['api.py'], [], files=['api.py'], native_sources=True)
