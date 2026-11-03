@@ -257,9 +257,7 @@ def gh_repo_view_required(
             raise error
         data = gh_api(repo, "repos/{owner}/{repo}", idempotent=True, auth=auth)
         full_name = data.get("full_name") if isinstance(data, dict) else None
-        if not isinstance(full_name, str):
-            raise GitError("GitHub REST repository read returned no full_name")
-        raw_slug = full_name
+        raw_slug = full_name if isinstance(full_name, str) else ""
     slug = queries.split_owner_repo(raw_slug)
     if slug is None:
         raise GitError("gh repo view returned an invalid repository slug")
@@ -459,16 +457,13 @@ def gh_api(
     if jq is not None:
         output_args.extend(["--jq", f"({jq}) | @json"])
     retries = process._gh_retries() if idempotent else 0
-    graphql = endpoint.lstrip("/") == "graphql"
 
     if input_data is None:
         method_args = ["-X", method.upper()] if method.upper() != "GET" else []
         args = ["api", *header_args, *method_args, *output_args, endpoint]
         proc = process._run_gh(repo, args, auth=auth, retries=retries)
         if proc.returncode != 0:
-            raise process._gh_error_for(
-                f"gh api {endpoint} failed: {proc.stderr.strip()}", proc.stderr, graphql=graphql,
-            )
+            raise process._gh_error_for(f"gh api {endpoint} failed: {proc.stderr.strip()}", proc.stderr)
         return _parse_gh_json(proc.stdout, jq, endpoint)
 
     # input_data path: serialise to a tempfile and shell out via `--input`.
@@ -489,7 +484,7 @@ def gh_api(
             raise process._gh_error_for(
                 f"gh api {endpoint} failed: {proc.stderr.strip()}{payload_note}",
                 proc.stderr,
-                graphql=graphql,
+                graphql=endpoint.lstrip("/") == "graphql",
             )
         result = _parse_gh_json(proc.stdout, jq, endpoint, payload_note=payload_note)
         succeeded = True

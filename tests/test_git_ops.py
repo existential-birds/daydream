@@ -829,8 +829,10 @@ def test_gh_read_wrappers_fall_back_to_rest_when_graphql_is_refused(
     ]:
         _patch_subprocess_run(monkeypatch, returncode=1, stderr=stderr)
         with pytest.raises(GitError) as excinfo:
-            git_ops.gh_api(tmp_path, endpoint)
-        assert type(excinfo.value) is error_type, stderr
+            git_ops.gh_api(tmp_path, endpoint, method="POST", input_data={"query": "{ viewer { login } }"})
+        payload = excinfo.value.preserved_payload_path
+        assert type(excinfo.value) is error_type and payload is not None, stderr
+        payload.unlink()
 
 
 def test_gh_api_input_data_preserves_tempfile_only_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
