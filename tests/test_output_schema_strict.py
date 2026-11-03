@@ -59,9 +59,8 @@ def _collect_output_schemas() -> list[tuple[str, dict[str, Any]]]:
         if name.startswith("daydream.improve.") and _takes_provenance(schema)
     )
     # Staged review sends its assignment-specialized selector transport to every backend.
-    found.extend((f"review_stage_submission_schema({label})", review_stage_submission_schema(
-        review_stage_schema(["t"], candidates, triage=triage)))
-        for label, candidates, triage in (("review", [], False), ("triage", ["c"], True)))
+    found.append(("review_stage_submission_schema", review_stage_submission_schema(
+        review_stage_schema(["t"], [], triage=False))))
     return found
 
 

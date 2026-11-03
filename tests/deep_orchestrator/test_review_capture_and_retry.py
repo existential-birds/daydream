@@ -74,13 +74,13 @@ def capture(review: InvestigationRun, stage: dict[str, Any], *, bundle: bool = T
 
 
 def canonical_decisions(index: dict[str, Any], decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Expected host references for submitted selectors, read from the delivered hunk index."""
+    """Resolve exact (null-range, supplied-diff) selectors to the references in the delivered hunk index."""
     delivered = {option['source_id']: reference for entry in index.values() for part in entry['assignments']
                  for option, reference in zip(part['source_options'], part['source_refs'], strict=True)}
-    return [{**decision, 'evidence_refs': [
-        {**delivered[selector['source_id']], 'basis': selector['basis'], 'role': 'assigned',
-         **({'source_range': selector['source_range']} if selector['source_range'] else {})}
-        for selector in decision['evidence_refs']]} for decision in decisions]
+    assert all(selector['source_range'] is None and selector['basis'] == 'supplied_diff'
+               for decision in decisions for selector in decision['evidence_refs'])
+    return [{**decision, 'evidence_refs': [delivered[selector['source_id']] for selector in decision['evidence_refs']]}
+            for decision in decisions]
 
 
 @pytest.mark.parametrize('invalid_selection', [False, True], ids=['retry', 'unpreparable-foreign-source'])
@@ -215,6 +215,7 @@ async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
     fragments: list[str] = []
     decisions: list[dict[str, Any]] = []
     fragment_stages: list[bool] = []
+    whole_part_digests: set[str] = set()
 
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
@@ -226,13 +227,17 @@ async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
                                    for reference in part['source_refs']))
         canonical = canonical_decisions(index, output['targets'])
         revision = binding['analyzed_revision']
+        unmarked = re.sub(r'^\[Ordered continuation[^\n]*\n', '', diff, flags=re.M)
+        delivered_part_digests = {hashlib.sha256(('diff --git ' + part).encode()).hexdigest()
+                                  for part in re.split(r'^diff --git ', unmarked, flags=re.M)[1:]}
         revisions = {'old': revision['merge_base_sha'], 'new': revision.get('source_id', revision['head_sha'])}
         for reference in (reference for decision in canonical for reference in decision['evidence_refs']):
             # Digests and revisions come from delivered bytes, never from the model's selection.
             assert reference['artifact_sha256'] == binding['canonical_inputs']['canonical-diff']
             assert (reference['path'], reference['revision']) == ('api.py', revisions[reference['side']])
-            if len(delivered) == 1:
-                assert reference['part_sha256'] == hashlib.sha256(diff.encode()).hexdigest()
+            if reference['fragment'] is None:
+                whole_part_digests.add(reference['part_sha256'])
+                assert reference['part_sha256'] in delivered_part_digests
         scoped = index['api.py']
         fragments.append(diff)
         decisions.extend(canonical)
@@ -252,6 +257,7 @@ async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
     coverage = json.loads((repo / '.daydream/deep/review-coverage.json').read_text())
     assert all(scope['status'] == 'complete' for scope in coverage['stack_outcomes'])
     assert True in fragment_stages
+    assert whole_part_digests, 'the old-only whole hunk must be checked against delivered part bytes'
     assert assignments[0]['old_start'] == 1 and assignments[0]['new_count'] == 0
     first_reference, = decisions[0]['evidence_refs']
     assert first_reference['side'] == 'old'
