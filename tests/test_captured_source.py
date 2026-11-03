@@ -49,15 +49,34 @@ def test_capture_uses_working_bytes_of_a_staged_addition(source: tuple[Path, str
     assert (captured.root / "added.py").read_bytes() == b"value = 2\n"
 
 
-def test_capture_of_a_shallow_clone_stays_copyable(source: tuple[Path, str, str], tmp_path: Path) -> None:
-    """Shallow history ends at a boundary; the capture keeps it, so read-only copies still clone."""
+def test_capture_of_a_shallow_clone_stays_copyable(
+    source: tuple[Path, str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shallow history ends at a boundary; the capture keeps it, so read-only copies still clone.
+
+    The boundary is part of the copied population: a change during copying retries.
+    """
     origin, _, head = source
     write_and_stage(origin, "subject.py", "value = 2\n")
     latest = commit(origin, "latest")
     shallow = tmp_path / "shallow"
     git(tmp_path, "clone", "--quiet", "--depth=2", origin.as_uri(), str(shallow))
     assert git(shallow, "rev-parse", "--is-shallow-repository") == "true"
+    original = immutable._copy_objects
+    copies = 0
+
+    def boundary_changing_copy(common: Path, target: Path) -> None:
+        nonlocal copies
+        original(common, target)
+        copies += 1
+        if copies == 1:
+            # Rewritten as a concurrent fetch would, with no object added.
+            boundary = shallow / ".git/shallow"
+            boundary.write_text(boundary.read_text() + head + "\n")
+
+    monkeypatch.setattr(immutable, "_copy_objects", boundary_changing_copy)
     captured = capture_source(shallow, tmp_path / "captured", base_sha=head, head_sha=latest, local=True)
+    assert copies == 2
     copy = snapshot.prepare_independent_snapshot(captured.root, tmp_path / "copy", include_untracked=True)
     assert (copy.repo / "subject.py").read_text() == "value = 2\n"
 
