@@ -239,15 +239,31 @@ def _population(source: Path, head_entries: list[_Entry]) -> tuple[list[str], di
     return selected, gitlinks
 
 
-def _copy_objects(common: Path, target: Path) -> None:
-    before = {relative: _fingerprint(path.lstat()) for path, relative in immutable._object_files(common)}
+def _shallow_boundary(common: Path) -> bytes | None:
+    """A shallow source's history boundary, so a copy's absent parents read as cut off, not corrupt."""
+    if not (common / "shallow").exists():
+        return None
+    boundary = immutable._regular(common / "shallow", limit=immutable._MAX_FILES * 65)
+    if any(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", oid) is None for oid in boundary.decode().splitlines()):
+        raise GitError("captured source shallow boundary is malformed")
+    return boundary
+
+
+def _copy_objects(common: Path, git_dir: Path) -> None:
+    """Copy the object store and its shallow boundary as one stable population."""
+    def population() -> tuple[dict[Path, tuple[int, ...]], bytes | None]:
+        objects = {relative: _fingerprint(path.lstat()) for path, relative in immutable._object_files(common)}
+        return objects, _shallow_boundary(common)
+
+    before = population()
     try:
-        immutable._copy_objects(common, target)
+        immutable._copy_objects(common, git_dir / "objects")
     except immutable._SourceChanged as exc:
         raise _UnstableSource(_RERUN) from exc
-    after = {relative: _fingerprint(path.lstat()) for path, relative in immutable._object_files(common)}
-    if before != after:
+    if population() != before:
         raise _UnstableSource(_RERUN)
+    if before[1] is not None:
+        (git_dir / "shallow").write_bytes(before[1])
 
 
 def _verify_object(root: Path, oid: str, raw_size: int, algorithm: str) -> None:
@@ -594,7 +610,7 @@ def capture_source(
                 algorithm = "sha256" if len(head_sha) == 64 else "sha1"
                 immutable._git(destination, "init", "--template=", "--object-format=" + algorithm, ".")
                 owned_directories.update((p, _directory_identity(destination / p)) for p in (".git", ".git/objects"))
-                _copy_objects(common, destination / ".git/objects")
+                _copy_objects(common, destination / ".git")
                 _validate_commit(destination, base_sha)
                 _validate_commit(destination, head_sha)
                 before = immutable._inventory(destination, base_sha, max_blob_bytes=immutable._MAX_SOURCE_BYTES)
