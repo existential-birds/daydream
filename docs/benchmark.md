@@ -2,39 +2,9 @@
 
 ## Public ReviewBench
 
-Install the host's Daydream wheel and its packaged
-[Harbor lock](../daydream/benchmark/reviewbench/harbor-runtime.lock) together:
-`uv pip install -r /path/to/harbor-runtime.lock /path/to/daydream.whl`.
-Install Node 20+ and ReviewBench at `4f04392d6bf4941ab6f8a3ea0c15b449f4458864` with `npm ci`.
-Tracked source must match that commit; extra files under `scripts/` are rejected.
-Unrelated untracked files elsewhere are allowed.
-Export performs no inference; model/judge runs require separate authorization.
-Keep inputs/results outside capture/training and use fresh paths:
-
-```bash
-daydream benchmark reviewbench harbor-export /private/export \
-  --source ~/ReviewBench --wheel /path/to/candidate.whl --rounds 3 \
-  --platform linux/arm64 -- --backend pi /path/to/operator-config-root
-daydream benchmark reviewbench harbor-run /private/export \
-  --reviewer-pi-home /private/reviewer-auth --pi-home /private/judge-auth \
-  --jobs-dir /private/jobs --job-name comparison --set test --rounds 3
-```
-
-Pi requires configured `nous`; for Codex use `--backend codex` / `--codex-home`.
-Keep independent native credentials outside exports/jobs. The judge uses `openai-codex` / `gpt-6.1-sol`.
-Concurrent Codex reviews link the same canonical credential file into private role homes without a Daydream
-review-wide lock. Existing regular `.reviewer.lock` files remain inert and need no migration.
-Pi retains its native refresh locking.
-Docker needs the selected architecture, nested sandboxing and exact-host isolation.
-The wheel/hash identifies the candidate; package extensions there. No matching installation is needed.
-Exports freeze reviewer retry, idle, and Codex lifecycle controls for native execution.
-`--set test`: supplied 25; `--set full`: all 219; repeated `--task EXACT_NAME`: a subset.
-Harbor owns rounds/timeouts; supplied scoring/checkers own results. Use fresh schema-4 wheels/exports;
-regenerate earlier exports without frozen execution controls and preserve old evidence.
-Ordinary timeout cancellation joins writers and exports partial root/child trajectories, phase cancellation events,
-native output, `execution.json`, and process receipts. Cleanup retains a 20-second graceful shutdown allowance;
-forced termination can leave detailed review evidence unavailable. New runs create no periodic checkpoint artifacts;
-preserve historical artifacts.
+ReviewBench and other public benchmarks run in
+[code-review-benchmarks](https://github.com/existential-birds/code-review-benchmarks),
+which pins one Daydream build and reviews each pull request with it in Harbor.
 
 ## Private Harbor benchmark
 
