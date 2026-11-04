@@ -390,7 +390,7 @@ async def test_audit_execute_rejects_unsafe_invocation_before_client(patch_sdk: 
         with pytest.raises(AuditIsolationError) as refused:
             create_backend(name, audit_root=root)
         assert (refused.value.backend_name, refused.value.reason) == (name, "unsupported_backend")
-    with pytest.raises(ValueError, match="Unknown backend.*'pi'"):
+    with pytest.raises(ValueError, match=r"Unknown backend: 'invalid'\. Expected .*'pi'"):
         create_backend("invalid", audit_root=root)
     # Only public adapter names resolve lazily from the package (the fresh-process test proves the hits).
     import daydream.backends as package
