@@ -12,9 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Daydream loads a native backend adapter and its SDK only when a run or phase
   selects it. CLI help, configuration and Codex, Pi or Osprey runs no longer
   import the Claude Agent SDK or unused adapters, which cuts startup memory per
-  process. `from daydream.backends import ClaudeBackend` and the other package-level
-  adapter names still work and load on first use. A broken Claude SDK installation
-  now fails when Claude is selected rather than at CLI start
+  process. A run loads every adapter it can select when it starts, so a broken
+  Claude SDK still fails before any work in runs that use Claude.
+  `from daydream.backends import ClaudeBackend` and the other package-level
+  adapter names still work and load on first use; a star import loads none of them
   ([#1713](https://github.com/existential-birds/daydream/issues/1713),
   [#1762](https://github.com/existential-birds/daydream/pull/1762)).
 

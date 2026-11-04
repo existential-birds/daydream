@@ -43,6 +43,7 @@ from daydream.backends import (
     Backend,
     BackendExecutionInput,
     create_backend,
+    load_adapters,
 )
 from daydream.config import (
     BUDGET_CLEANUP_GRACE_S,
@@ -87,6 +88,7 @@ from daydream.run_artifacts import (
 from daydream.run_config import (
     DEEP_FLOW_ALIASES,
     RunConfig,
+    _default_backend_name,
     _file_config_or_empty,
     _resolved_backend_name,
     _resolved_model,
@@ -275,6 +277,15 @@ def _compute_diff_ref(cwd: Path) -> str:
     return "HEAD"
 
 
+def _load_selected_adapters(config: RunConfig) -> None:
+    """Import every adapter a phase of this run can select, so a broken SDK fails before any work.
+
+    The default backend covers phases without their own setting; unused adapters stay unloaded.
+    """
+    phases = ("review", "fix", "test", *_file_config_or_empty(config).phases)
+    load_adapters({_default_backend_name(config), *(_resolved_backend_name(config, phase) for phase in phases)})
+
+
 def _run_posts_to_github(config: RunConfig) -> bool:
     """Return whether this run posts to GitHub."""
     if config.flow_name is not None:
@@ -308,6 +319,7 @@ async def run(
         hub_repo = resolve_hub_repo(config)
         if hub_repo:
             config = replace(config, dataset_capture=True, trajectory_hub_repo=hub_repo)
+    _load_selected_adapters(config)
 
     backend_factory: BackendFactory | None = None
     if execution is not None:

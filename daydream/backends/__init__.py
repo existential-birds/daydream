@@ -6,8 +6,10 @@ and TurnEndEvent closes a recorder step. Generation events describe provider
 boundaries using host-local correlators. A terminal ResultEvent may precede an
 exception, so its presence does not imply successful execution.
 
-This common package imports no native adapter. ``create_backend`` loads only the
-selected adapter and its SDK; the package-level adapter names load on first access.
+This common package imports no native adapter. Runs load the adapters they can
+select at start through ``load_adapters``, so a broken SDK fails before any work;
+``create_backend`` loads only the selected adapter. The package-level adapter names
+load on first access and stay out of ``__all__`` so a star import loads none.
 Consumers that only need to recognize an adapter object use ``is_adapter_instance``,
 which never imports an adapter. tests/test_backend_lifecycle.py proves the module
 graph in a fresh interpreter.
@@ -22,7 +24,7 @@ import os
 import re
 import sys
 import unicodedata
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass, field, fields
 from functools import partial
 from pathlib import Path
@@ -1074,8 +1076,8 @@ def create_backend(
     raise ValueError(f"Unknown backend: {name!r}. Expected 'claude', 'codex', 'pi', or 'osprey'.")
 
 
-# Adapter-owned names and their adapter modules. Public names in __all__ load on
-# first package attribute access; is_adapter_instance recognizes the others too.
+# Adapter-owned names and their adapter modules; is_adapter_instance recognizes all
+# of them, and the package serves the public ones on first attribute access.
 _ADAPTER_NAMES: Mapping[str, str] = MappingProxyType({
     "ClaudeBackend": "claude",
     "MaxTurnsError": "claude",
@@ -1083,13 +1085,23 @@ _ADAPTER_NAMES: Mapping[str, str] = MappingProxyType({
     "OspreyBackend": "osprey",
     "PiBackend": "pi",
 })
+_PUBLIC_ADAPTER_NAMES = frozenset(_ADAPTER_NAMES) - {"CodexLifecycleError"}
 
 
-def __getattr__(name: str) -> Any:
-    """Load a public adapter name from its adapter module on first access."""
-    if name not in __all__ or name not in _ADAPTER_NAMES:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    return getattr(importlib.import_module(f"{__name__}.{_ADAPTER_NAMES[name]}"), name)
+def load_adapters(names: Iterable[str]) -> None:
+    """Import the named adapters now; unknown names are left to create_backend's diagnostics."""
+    for name in sorted(set(names) & set(_ADAPTER_NAMES.values())):
+        importlib.import_module(f"{__name__}.{name}")
+
+
+if not TYPE_CHECKING:
+    # Hidden from type checkers, which would otherwise type every unknown package
+    # name as Any; they see the public adapter names through the imports above.
+    def __getattr__(name: str) -> Any:
+        """Load a public adapter name from its adapter module on first access."""
+        if name not in _PUBLIC_ADAPTER_NAMES:
+            raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+        return getattr(importlib.import_module(f"{__name__}.{_ADAPTER_NAMES[name]}"), name)
 
 
 @overload
@@ -1117,7 +1129,6 @@ __all__ = [
     "AuditIsolationError",
     "Backend",
     "BackendExecutionInput",
-    "ClaudeBackend",
     "ClaudeRequestConfig",
     "CodexRequestConfig",
     "ContinuationToken",
@@ -1126,12 +1137,9 @@ __all__ = [
     "GenerationEndEvent",
     "GenerationStartEvent",
     "JsonValue",
-    "MaxTurnsError",
     "MetricsEvent",
     "ModelUsageTotals",
-    "OspreyBackend",
     "OspreyRequestConfig",
-    "PiBackend",
     "PiRequestConfig",
     "READ_ONLY_BASH_ALLOWLIST",
     "ReasoningChoicePart",
@@ -1148,5 +1156,6 @@ __all__ = [
     "create_backend",
     "effective_fanout_concurrency",
     "is_adapter_instance",
+    "load_adapters",
     "unix_ms_to_ns",
 ]

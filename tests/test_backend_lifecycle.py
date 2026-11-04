@@ -36,7 +36,7 @@ def test_fresh_process_loads_only_the_selected_native_adapter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CLI help and per-phase selection load only the selected adapter; public adapter names stay importable.
+    """CLI help and run-start selection load only the selected adapters; public adapter names stay importable.
 
     Only a fresh interpreter proves the module graph: the suite has already loaded every adapter.
     """
@@ -75,18 +75,28 @@ assert loaded() == set(), loaded()
 from daydream.backends import ResultEvent, TextEvent
 from daydream.prompt_budget import uses_diff_reference
 from daydream.run_config import RunConfig
-from daydream.runner import _resolve_backend
+from daydream.runner import _load_selected_adapters, _resolve_backend
 
 target = Path(sys.argv[1])
 backends = {}
 for name in ("codex", "osprey", "pi"):
     before = loaded()
-    config = RunConfig(target=str(target), backend="claude", review_backend=name, review_model="fixture-model")
+    # Run start loads what a Codex run with this review override can select, and nothing else.
+    config = RunConfig(target=str(target), backend="codex", review_backend=name, review_model="fixture-model")
+    _load_selected_adapters(config)
+    assert loaded() - before == {f"daydream.backends.{name}"}, (name, loaded() - before)
     backends[name] = _resolve_backend(config, "review", cwd=target)
     # Consumers recognize adapter objects without importing adapters that were not selected.
     assert uses_diff_reference(backends[name], target, read_only=True) is (name == "pi")
     assert loaded() - before == {f"daydream.backends.{name}"}, (name, loaded() - before)
-assert sys.modules["claude_agent_sdk"] is None
+# A run that selects Claude for any phase fails at start, before any work, without its SDK.
+try:
+    _load_selected_adapters(RunConfig(target=str(target), backend="pi", fix_backend="claude"))
+except ImportError:
+    pass
+else:
+    raise AssertionError("Claude selection loaded without its SDK")
+assert sys.modules["claude_agent_sdk"] is None and "daydream.backends.claude" not in sys.modules
 
 async def run_pi():
     events = [event async for event in backends["pi"].execute(target, "Ordinary Pi call", persist_session=False)]
