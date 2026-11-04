@@ -75,7 +75,7 @@ assert loaded() == set(), loaded()
 from daydream.backends import ResultEvent, TextEvent
 from daydream.prompt_budget import uses_diff_reference
 from daydream.run_config import RunConfig
-from daydream.runner import _load_selected_adapters, _resolve_backend
+from daydream.runner import _load_selected_adapters, _resolve_backend, run
 
 target = Path(sys.argv[1])
 backends = {}
@@ -89,13 +89,14 @@ for name in ("codex", "osprey", "pi"):
     # Consumers recognize adapter objects without importing adapters that were not selected.
     assert uses_diff_reference(backends[name], target, read_only=True) is (name == "pi")
     assert loaded() - before == {f"daydream.backends.{name}"}, (name, loaded() - before)
-# A run that selects Claude for any phase fails at start, before any work, without its SDK.
+# runner.run fails at start, before any work, when any phase selects Claude without its SDK.
 try:
-    _load_selected_adapters(RunConfig(target=str(target), backend="pi", fix_backend="claude"))
+    asyncio.run(run(RunConfig(target=str(target), backend="pi", fix_backend="claude")))
 except ImportError:
     pass
 else:
     raise AssertionError("Claude selection loaded without its SDK")
+assert not any(target.iterdir())
 assert sys.modules["claude_agent_sdk"] is None and "daydream.backends.claude" not in sys.modules
 
 async def run_pi():
