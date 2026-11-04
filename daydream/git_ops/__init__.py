@@ -80,7 +80,6 @@ from daydream.git_ops.mutations import (
     worktree_remove_unlocked as worktree_remove_unlocked,
     worktree_unlock as worktree_unlock,
 )
-from daydream.git_ops.process import GH_CREDENTIAL_HELPER as GH_CREDENTIAL_HELPER
 from daydream.git_ops.queries import (
     assert_is_worktree as assert_is_worktree,
     branch_exists as branch_exists,
@@ -100,7 +99,6 @@ from daydream.git_ops.queries import (
     git_common_dir as git_common_dir,
     git_dir as git_dir,
     git_dirs as git_dirs,
-    git_ls_remote as git_ls_remote,
     grep_fixed_matches as grep_fixed_matches,
     has_executable_pre_push_hook as has_executable_pre_push_hook,
     head_sha as head_sha,

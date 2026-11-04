@@ -6,13 +6,8 @@ Each boundary decides how to handle None: report/approval paths preserve it
 without blocking approval; only the structural lens may default to high.
 """
 
-from typing import Literal, TypeAlias
-
 CANONICAL_LEVELS: tuple[str, ...] = ("low", "medium", "high")
 """The canonical severity vocabulary: the only declaration of the levels."""
-
-SeverityLevel: TypeAlias = Literal["high", "medium", "low"]
-"""Static mirror of the model-facing levels, bound to the runtime declaration by tests."""
 
 
 def model_facing_levels() -> tuple[str, ...]:

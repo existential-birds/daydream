@@ -140,7 +140,7 @@ These boundaries matter across subsystems; module docstrings carry finer detail:
   lookup and explain when to use it. Host enforcement must not depend on polling.
   Preserve genuine user turns and the native assistant/tool conversation history.
 - Keep ATIF construction in `trajectory/`. Use the vendored models without adding
-  Harbor to core runtime dependencies; the benchmark extra is separate. Follow
+  Harbor as a dependency. Follow
   [the vendoring policy](daydream/atif/NOTICE): re-vendor wholesale, no local patches.
 - Resolve the private artifact owner once and pass the same owner/session through
   workspace, recorder, and flows. Route generated files through that session;
@@ -212,5 +212,4 @@ rules in these owners rather than expanding this file with defaults and inventor
 | Improve audit/plans | [Improve implementation](daydream/improve/), [Improve flow](docs/extensions.md#improve); `services.py` owns shared service discovery |
 | Capture, harvest, adjudication, dataset publication, corpus projection | [Research](README.md#research), [record dataset workflow](docs/runbooks/record-dataset.md), [calibration](docs/calibration.md); preserve immutable evidence, repository provenance, and C5 benchmark isolation |
 | Training launches or RL | [Training launch](docs/training-launch.md), [RL package](rl/daydream_review/README.md) |
-| Benchmarks | [Benchmark runbook](docs/benchmark.md); `daydream/benchmark/harbor/env_policy.py` owns environment allow/scrub policy |
 | Bot/workflow publication or CI policy | [Packaged workflows](daydream/templates/workflows/README.md), [self-hosted bot](docs/self-hosted-bot-setup.md), [CI spend policy](.github/workflows/README.md#ci-spend-policy) |

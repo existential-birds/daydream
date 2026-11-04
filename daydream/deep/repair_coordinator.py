@@ -48,6 +48,8 @@ nothing at all.
 
 from __future__ import annotations
 
+import fcntl
+import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
@@ -59,7 +61,6 @@ from typing import Literal
 import daydream.agent as agent
 import daydream.ui as ui
 from daydream import git_ops
-from daydream.benchmark.storage import LockContentionError, WorkspaceLock
 from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.repair_job import (
     RepairAction,
@@ -317,6 +318,33 @@ def _restore_candidate(
 # --- ownership ------------------------------------------------------------------------------------
 
 
+class LockContentionError(Exception):
+    """Another owner holds the repair job."""
+
+
+@dataclass
+class _JobLock:
+    """An exclusive, non-blocking ``flock`` on the job root's retained lock file."""
+
+    fd: int
+
+    @classmethod
+    def acquire(cls, root: Path) -> _JobLock:
+        root.mkdir(parents=True, exist_ok=True)
+        # The file keeps its earlier name, so older Daydream processes still exclude this one.
+        fd = os.open(root / ".benchmark.lock", os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            raise LockContentionError(f"repair job is locked by another process: {root}") from None
+        return cls(fd)
+
+    def release(self) -> None:
+        fcntl.flock(self.fd, fcntl.LOCK_UN)
+        os.close(self.fd)
+
+
 @dataclass
 class RepairOwnerHandle:
     """A live repair owner's claim on one job, or the reason there is none.
@@ -330,14 +358,14 @@ class RepairOwnerHandle:
     owner_id: str
     acquired: bool
     reason: str = ""
-    _lock: WorkspaceLock | None = field(default=None, repr=False)
+    _lock: _JobLock | None = field(default=None, repr=False)
 
     def release(self) -> None:
         """Release the claim. Idempotent; the lock file is deliberately left in place."""
         lock, self._lock = self._lock, None
         _OWNERS.pop(self.root, None)
         if lock is not None:
-            lock.__exit__(None, None, None)
+            lock.release()
 
     def __enter__(self) -> RepairOwnerHandle:
         return self
@@ -350,11 +378,9 @@ class RepairOwnerHandle:
 def try_acquire_repair_owner(root: Path) -> RepairOwnerHandle:
     """Claim exclusive ownership of the repair job rooted at *root*.
 
-    Two layers, because either alone is insufficient. ``WorkspaceLock`` gives a
-    cross-process exclusive ``flock`` — and is reentrant *within* a process,
-    which is exactly wrong here: a second coordinator in the same interpreter
-    would be handed the first one's lock. The owner registry closes that gap, so
-    "one live owner" means one owner in either dimension.
+    The job lock is a cross-process exclusive ``flock``. The owner registry
+    names a second coordinator in this interpreter as such, so "one live owner"
+    means one owner in either dimension.
     """
     root = Path(root)
     held = _OWNERS.get(root)
@@ -362,10 +388,8 @@ def try_acquire_repair_owner(root: Path) -> RepairOwnerHandle:
         return RepairOwnerHandle(
             root, "", False, f"another repair owner is already live for this job: {root}",
         )
-    lock = WorkspaceLock(root, blocking=False)
     try:
-        # WorkspaceLock has no non-context acquire; this is its documented entry.
-        lock.__enter__()
+        lock = _JobLock.acquire(root)
     except LockContentionError as exc:
         return RepairOwnerHandle(root, "", False, str(exc))
     owner_id = uuid.uuid4().hex
@@ -377,7 +401,7 @@ def try_acquire_repair_owner(root: Path) -> RepairOwnerHandle:
 def _owner_lock(root: Path) -> Iterator[RepairOwnerHandle]:
     """Hold the repair job's ownership for the duration of the block, or raise.
 
-    :class:`~daydream.benchmark.storage.LockContentionError` is the contended
+    :class:`LockContentionError` is the contended
     answer, so a caller that genuinely cannot continue says so instead of
     proceeding as though it owned the job.
     """

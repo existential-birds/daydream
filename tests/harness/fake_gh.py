@@ -35,11 +35,6 @@ def _argv_opt(argv: list[str], name: str) -> str | None:
 
 _GIT_CREDENTIAL_HELPER = ("protocol=https\n" "host=github.com\n" "username=x\n" "password=<fake>\n")
 
-_LS_REMOTE_DEFAULT = (
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/heads/head\n"
-    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/heads/base\n"
-)
-
 # Match gh 2.45: reject unsupported PR JSON fields before serving a response.
 _GH_245_PR_JSON_FIELDS = frozenset({
         "number", "title", "body", "state", "headRefName", "baseRefName", "headRefOid", "url", "headRepository",
@@ -600,19 +595,6 @@ def install_fake_gh(state_dir: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
             _record(state_dir, {"kind": "gh process", "cwd": str(cwd), "argv": list(args)},)
             rc, out, err = _handle_gh(list(args[1:]), kwargs.get("input") or "", state_dir)
             return subprocess.CompletedProcess(list(args), rc, stdout=out, stderr=err)
-        if (isinstance(args, (list, tuple)) and args and args[0] == "git" and "ls-remote" in args):
-            # Named remotes use real Git. URL requests must carry the
-            # command-scoped credential helper before receiving fake refs.
-            target = args[args.index("ls-remote") + 1] if args.index("ls-remote") + 1 < len(args) else ""
-            if "://" not in target and "@" not in target:
-                return real_run(args, *pargs, **kwargs)
-            if not any("credential.helper=" in a for a in args):
-                return subprocess.CompletedProcess(list(args), 1, stdout="",
-                    stderr="fake gh: git ls-remote without a command-scoped credential helper\n",
-                )
-            refs = _read_responses(state_dir).get("git-ls-remote", _LS_REMOTE_DEFAULT)
-            _record(state_dir, {"kind": "git ls-remote", "argv": list(args), "env": kwargs.get("env")},)
-            return subprocess.CompletedProcess(list(args), 0, stdout=refs, stderr="")
         return real_run(args, *pargs, **kwargs)
 
     monkeypatch.setattr("daydream.git_ops.process.subprocess.run", router)

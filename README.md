@@ -52,4 +52,5 @@ records contain raw evidence. Upload requires an explicitly selected private
 Hugging Face dataset and the `hub` extra. The training pipeline implements
 reward construction → SFT → RFT → online RL; production training has not completed.
 For agents working on data or experiments: [dataset workflow](docs/runbooks/record-dataset.md),
-[training](docs/training-launch.md), [benchmarks](docs/benchmark.md).
+[training](docs/training-launch.md). Benchmarks run from
+[code-review-benchmarks](https://github.com/existential-birds/code-review-benchmarks).

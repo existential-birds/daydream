@@ -1064,17 +1064,6 @@ def split_owner_repo(slug: str) -> tuple[str, str] | None:
     return owner, repo
 
 
-def git_ls_remote(repo: Path, url: str) -> str:
-    """Read remote refs using command-scoped ``gh`` credentials and no terminal prompts.
-
-    Credentials stay out of URLs, argv, and persistent config. Failures raise.
-    """
-    args = [*process._credential_helper_args(), "ls-remote", url]
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-    proc = process._run_git(repo, args, env_cmd=env, error_context=f"git ls-remote {url} failed")
-    return proc.stdout
-
-
 def remote_contains_commit(repo: Path, branch: str, sha: str, *, remote: str = "origin") -> bool:
     """Check the authenticated remote branch ref for an exact SHA; failed reads raise."""
     proc = process._run_git(

@@ -1255,14 +1255,19 @@ async def test_immutable_synthetic_bundle_rejects_attested_extra_commit_history(
     Compiler bundle tests own compilation; this enters the runtime request with
     recomputed evidence so digest/ref guards cannot mask its topology obligation.
     """
-    from daydream.benchmark.snapshot import build_bundle
     from daydream.git_ops import process
     from daydream.git_ops.immutable import immutable_review_diff
     original = tmp_path / "original"
     seed_feature_branch(original, base={"api.py": "VALUE = 1\n"}, feature={"api.py": "VALUE = 0\n"})
     original_input = immutable_input_for(original).to_dict()
     bundle = tmp_path / "captured.bundle"
-    build_bundle(original, git(original, "rev-parse", "main"), git(original, "rev-parse", "HEAD"), bundle)
+    # Exactly two synthetic commits carrying the original base and head trees.
+    synthetic_base = git(original, "commit-tree", git(original, "rev-parse", "main^{tree}"), "-m", "snapshot base")
+    synthetic_head = git(original, "commit-tree", git(original, "rev-parse", "HEAD^{tree}"), "-p", synthetic_base,
+                         "-m", "snapshot head")
+    git(original, "update-ref", "refs/heads/base", synthetic_base)
+    git(original, "update-ref", "refs/heads/head", synthetic_head)
+    git(original, "bundle", "create", str(bundle), "refs/heads/base", "refs/heads/head")
     source = tmp_path / "synthetic"
     git(tmp_path, "clone", "--no-local", str(bundle), str(source))
     base = git(source, "rev-parse", "origin/base")

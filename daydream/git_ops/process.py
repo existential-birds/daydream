@@ -96,11 +96,6 @@ def _require_ok(proc: subprocess.CompletedProcess[Any], context: str) -> None:
 # Bounded retries let read-only queries survive temporary host starvation.
 _GIT_TIMEOUT_RETRIES = 2
 
-# Git invokes this helper with get/store/erase and protocol/host on stdin.
-# Ambient gh auth keeps tokens out of argv, URLs, files, and Git config.
-# Read at call time so the harness can substitute a recording wrapper.
-GH_CREDENTIAL_HELPER = "!gh auth git-credential"
-
 # Retries require caller-declared reads: GraphQL queries and mutations both
 # use POST. Read both budgets at call time so the fake-gh harness can bound
 # subprocess stalls without inheriting production network timeouts.
@@ -523,11 +518,6 @@ def _run_gh(
         scrub=_redact_sensitive_text,
         suffix=suffix,
     )
-
-
-def _credential_helper_args(helper: str | None = None) -> list[str]:
-    """Select the call-time helper for one command without changing Git config."""
-    return ["-c", f"credential.helper={helper or GH_CREDENTIAL_HELPER}"]
 
 
 def _gh_error_for(message: str, stderr: str, *, graphql: bool = False) -> GitError:

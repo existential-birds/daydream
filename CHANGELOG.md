@@ -9,11 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- `daydream benchmark reviewbench harbor-export` and `harbor-run`, with the
-  `daydream.benchmark.reviewbench` package and its packaged Harbor runtime lock.
-  Public ReviewBench runs now live in
-  [code-review-benchmarks](https://github.com/existential-birds/code-review-benchmarks);
-  the private Harbor benchmark is unchanged.
+- The `daydream benchmark` command, the `daydream.benchmark` package and the
+  `benchmark` extra: both the public ReviewBench lane (`reviewbench harbor-export`
+  and `harbor-run`, #1759) and the private Harbor benchmark workspace (`init`,
+  `import-prs`, `curate`, `build-harbor`, `run`, `objective` and the rest).
+  Benchmarks now run from
+  [code-review-benchmarks](https://github.com/existential-birds/code-review-benchmarks),
+  and `daydream benchmark` exits with a pointer there. Repair-job ownership keeps
+  its cross-process lock on the same lock file.
 
 ## [0.34.0] - 2026-11-03
 

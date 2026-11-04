@@ -31,18 +31,6 @@ def test_agent_document_reference_paths_exist() -> None:
                 )
 
 
-def test_benchmark_runbook_uses_placeholders_and_points_at_env_policy() -> None:
-    """Private benchmark instructions carry no credentials or private PR identities."""
-    text = (ROOT / "docs" / "benchmark.md").read_text(encoding="utf-8")
-    assert "OWNER/REPO" in text
-    assert re.search(r"sk-[A-Za-z0-9]", text) is None
-    assert re.search(r"ghp_[A-Za-z0-9]", text) is None
-    assert re.search(r"github\.com/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/pull/\d+", text) is None
-    # The docs name the single environment-policy source without restating its sets.
-    for owner in (text, (ROOT / "AGENTS.md").read_text(encoding="utf-8")):
-        assert "daydream/benchmark/harbor/env_policy.py" in owner
-
-
 def test_observability_contract_fixtures_are_pinned_and_machine_readable() -> None:
     fixtures = ROOT / "tests/fixtures/observability_contract"
     manifest = json.loads((fixtures / "replay-manifest.json").read_text())
