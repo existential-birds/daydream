@@ -22,10 +22,13 @@ DEFAULT_WALL_BUDGET_S = 1800.0
 REVIEW_WALL_BUDGET_S = 3600.0
 
 # Base cumulative calls for one staged reviewer; scaling: docs/extensions.md.
-REVIEWER_TOOL_CALL_BUDGET = 48
+# The whole-change structure stage spends about 1.5 calls per changed file reading
+# its exact-path diff parts and catalog pages before investigating, so 48 left
+# 15-file reviews at the cap; 120 leaves room for its observed ~63 calls (#1762).
+REVIEWER_TOOL_CALL_BUDGET = 120
 
-# First-pass batches one base allowance covers: about 12 calls per batch at the
-# default, the top of the 7-12 calls per batch observed in #1746.
+# First-pass batches one base allowance covers: about 30 calls per batch at the
+# default, above the 7-12 calls per batch observed in #1746.
 REVIEWER_BATCHES_PER_ALLOWANCE = 4
 
 # Use wall time to bound exploratory turns; tool counts can truncate valid
