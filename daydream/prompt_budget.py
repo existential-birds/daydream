@@ -366,7 +366,7 @@ def sanctioned_transport_for(
 
 def uses_diff_reference(backend: object, cwd: Path, *, read_only: bool) -> bool:
     """Pi discovery reads its durable diff through an admitted host path."""
-    return is_adapter_instance(backend, "pi", "PiBackend") and sanctioned_transport_for(
+    return is_adapter_instance(backend, "PiBackend") and sanctioned_transport_for(
         backend, cwd, read_only=read_only,
     ) is SanctionedInputTransport.EXACT_PATHS
 

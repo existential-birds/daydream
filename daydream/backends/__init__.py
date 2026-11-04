@@ -8,10 +8,9 @@ exception, so its presence does not imply successful execution.
 
 This common package imports no native adapter. ``create_backend`` loads only the
 selected adapter and its SDK; the package-level adapter names load on first access.
-Consumers that only need to recognize an adapter instance use
-``is_adapter_instance``, which never imports an adapter.
-``tests/test_backend_lifecycle.py::test_fresh_process_loads_only_the_selected_native_adapter``
-proves the module graph in a fresh interpreter.
+Consumers that only need to recognize an adapter object use ``is_adapter_instance``,
+which never imports an adapter. tests/test_backend_lifecycle.py proves the module
+graph in a fresh interpreter.
 """
 
 from __future__ import annotations
@@ -1075,42 +1074,39 @@ def create_backend(
     raise ValueError(f"Unknown backend: {name!r}. Expected 'claude', 'codex', 'pi', or 'osprey'.")
 
 
-type _AdapterModule = Literal["claude", "codex", "osprey", "pi"]
-
-# Package-level adapter names, resolved from their adapter module on first access.
-_LAZY_ADAPTER_EXPORTS: Mapping[str, _AdapterModule] = MappingProxyType({
+# Adapter-owned names and their adapter modules. Public names in __all__ load on
+# first package attribute access; is_adapter_instance recognizes the others too.
+_ADAPTER_NAMES: Mapping[str, str] = MappingProxyType({
     "ClaudeBackend": "claude",
     "MaxTurnsError": "claude",
+    "CodexLifecycleError": "codex",
     "OspreyBackend": "osprey",
     "PiBackend": "pi",
 })
 
 
 def __getattr__(name: str) -> Any:
-    """Load a package-level adapter name from its adapter module on first access."""
-    adapter = _LAZY_ADAPTER_EXPORTS.get(name)
-    if adapter is None:
+    """Load a public adapter name from its adapter module on first access."""
+    if name not in __all__ or name not in _ADAPTER_NAMES:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    return getattr(importlib.import_module(f"{__name__}.{adapter}"), name)
+    return getattr(importlib.import_module(f"{__name__}.{_ADAPTER_NAMES[name]}"), name)
 
 
 @overload
-def is_adapter_instance(
-    value: object, adapter: Literal["pi"], class_name: Literal["PiBackend"]
-) -> TypeGuard[PiBackend]: ...
+def is_adapter_instance(value: object, class_name: Literal["PiBackend"]) -> TypeGuard[PiBackend]: ...
 
 
 @overload
-def is_adapter_instance(value: object, adapter: _AdapterModule, class_name: str) -> bool: ...
+def is_adapter_instance(value: object, class_name: Literal["CodexLifecycleError", "OspreyBackend"]) -> bool: ...
 
 
-def is_adapter_instance(value: object, adapter: _AdapterModule, class_name: str) -> bool:
+def is_adapter_instance(value: object, class_name: str) -> bool:
     """Return isinstance(value, adapter class) without importing the adapter.
 
     An adapter object cannot exist before its module loads, so an unloaded
     adapter matches nothing; subclasses match exactly as with isinstance.
     """
-    module = sys.modules.get(f"{__name__}.{adapter}")
+    module = sys.modules.get(f"{__name__}.{_ADAPTER_NAMES[class_name]}")
     return module is not None and isinstance(value, getattr(module, class_name))
 
 

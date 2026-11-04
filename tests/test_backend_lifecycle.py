@@ -73,15 +73,18 @@ with contextlib.redirect_stdout(io.StringIO()):
 assert loaded() == set(), loaded()
 
 from daydream.backends import ResultEvent, TextEvent
+from daydream.prompt_budget import uses_diff_reference
 from daydream.run_config import RunConfig
 from daydream.runner import _resolve_backend
 
 target = Path(sys.argv[1])
 backends = {}
-for name in ("pi", "osprey", "codex"):
+for name in ("codex", "osprey", "pi"):
     before = loaded()
     config = RunConfig(target=str(target), backend="claude", review_backend=name, review_model="fixture-model")
     backends[name] = _resolve_backend(config, "review", cwd=target)
+    # Consumers recognize adapter objects without importing adapters that were not selected.
+    assert uses_diff_reference(backends[name], target, read_only=True) is (name == "pi")
     assert loaded() - before == {f"daydream.backends.{name}"}, (name, loaded() - before)
 assert sys.modules["claude_agent_sdk"] is None
 
@@ -94,14 +97,12 @@ asyncio.run(run_pi())
 assert sys.modules["daydream.host_tools_server"] is None
 
 del sys.modules["claude_agent_sdk"]
-import daydream.backends as package
 from daydream.backends import ClaudeBackend, MaxTurnsError, OspreyBackend, PiBackend
 from daydream.backends import claude, osprey, pi
 
 exported = (ClaudeBackend, MaxTurnsError, OspreyBackend, PiBackend)
 owned = (claude.ClaudeBackend, claude.MaxTurnsError, osprey.OspreyBackend, pi.PiBackend)
 assert all(left is right for left, right in zip(exported, owned, strict=True))
-assert not hasattr(package, "NotABackend")
 assert isinstance(_resolve_backend(RunConfig(target=str(target)), "review"), ClaudeBackend)
 assert "claude_agent_sdk" in sys.modules
 """

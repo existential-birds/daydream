@@ -351,7 +351,7 @@ async def run_agent(
         # Host composition also covers wholesale extension prompt overrides.
         # Read-only Pi has only its stock bounded tools: no shell, Git or helper.
         search_guidance = REPOSITORY_SEARCH_GUIDANCE
-        if read_only and is_adapter_instance(backend, "pi", "PiBackend"):
+        if read_only and is_adapter_instance(backend, "PiBackend"):
             # Composed review prompts embed the shell guidance; substitute it in place.
             search_guidance = READ_ONLY_PI_SEARCH_GUIDANCE
             prompt = prompt.replace(REPOSITORY_SEARCH_GUIDANCE, search_guidance)

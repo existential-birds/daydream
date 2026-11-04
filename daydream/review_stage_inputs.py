@@ -427,8 +427,8 @@ class StageInputFactory:
 
     def _before_context(self, files: set[str], directory: Path, statuses: list[dict[str, str]]) -> dict[str, Path]:
         """Offer bounded ordinary file context for old paths file-only tools cannot reach."""
-        if not (is_adapter_instance(self.backend, "pi", "PiBackend")
-                or is_adapter_instance(self.backend, "osprey", "OspreyBackend")):
+        if not (is_adapter_instance(self.backend, "PiBackend")
+                or is_adapter_instance(self.backend, "OspreyBackend")):
             return {}
         candidates: dict[str, Path] = {}
         for index, file in enumerate(sorted(files)):
