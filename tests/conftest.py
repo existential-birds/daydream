@@ -582,36 +582,3 @@ def no_ci_remote(fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     harness = NoCIRemote(fake_gh, monkeypatch, tmp_path)
     yield harness
     harness.finish()
-
-
-# Harbor assets use bare verifier_core imports without a daydream dependency.
-# Load the canonical module under that name, matching compiled-task resolution.
-_TEMPLATES = Path(__file__).resolve().parents[1] / "daydream" / "benchmark" / "harbor" / "templates"
-
-
-def _load_template_asset(path: Path, name: str) -> Any:
-    """Load a non-package template asset; bare `import verifier_core` hits the canonical module."""
-    from daydream.benchmark.harbor import verifier_core as _canonical_vc
-
-    registered = "verifier_core" not in sys.modules
-    if registered:
-        sys.modules["verifier_core"] = _canonical_vc
-    try:
-        spec = importlib.util.spec_from_file_location(name, path)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[name] = module
-        spec.loader.exec_module(module)
-        return module
-    finally:
-        if registered:
-            sys.modules.pop("verifier_core", None)
-
-
-@pytest.fixture(scope="session")
-def sr_module() -> Any:
-    """The loaded ``templates/tests/score_review.py`` verifier entry module."""
-    return _load_template_asset(_TEMPLATES / "tests" / "score_review.py", "score_review")
-
-
-

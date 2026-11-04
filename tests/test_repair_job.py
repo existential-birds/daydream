@@ -226,6 +226,16 @@ def test_second_coordinator_does_not_launch_a_second_worker(tmp_path: Path) -> N
     # coordinator owns the same job.
     with try_acquire_repair_owner(tmp_path) as reacquired:
         assert reacquired.acquired is True
+    # Another process's hold on the job's lock file excludes this owner too.
+    import fcntl
+    import os
+    held = os.open(tmp_path / ".benchmark.lock", os.O_RDWR)
+    try:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        contended = try_acquire_repair_owner(tmp_path)
+        assert contended.acquired is False and "locked by another process" in contended.reason
+    finally:
+        os.close(held)
     # An unreadable checkpoint is untrustworthy, never mistaken for an absent one.
     from daydream.phases.repair_checkpoint import read_repair_checkpoint
     DeepArtifact.REPAIR_CHECKPOINT.at(tmp_path).write_text("{unreadable")

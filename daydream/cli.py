@@ -9,7 +9,6 @@ from rich.console import Console
 
 from daydream import git_ops
 from daydream.agent import console
-from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.commands import admin, corpus, improve, review, search, train
 from daydream.diagnostics import format_verbose_exception, sanitize_verbose_message
 from daydream.phases import UnconfinedFindingError
@@ -26,7 +25,6 @@ def _command_handlers() -> dict[str, Callable[[list[str]], int]]:
         "summarize": admin._handle_summarize_command,
         "corpus": corpus._handle_corpus_command,
         "train": train._handle_train_command,
-        "benchmark": _handle_benchmark_command,
         "post-findings": admin._handle_post_findings_command,
         "setup": admin._handle_setup_command,
         "ext": admin._handle_ext_command,
@@ -122,10 +120,11 @@ def main(argv: list[str] | None = None) -> None:
     # Resolve bare --verbose before config/provenance/tracing so startup failures
     # can still include diagnostics. Tokens after -- do not enable it.
     verbose_mode = _verbose_token_in_argv(argv)
-    # Reject removed bench explicitly; otherwise it would become a review target.
-    if argv and argv[0] == "bench":
+    # Reject removed benchmark commands explicitly; otherwise they would become review targets.
+    if argv and argv[0] in ("bench", "benchmark"):
         print(
-            "error: the 'bench' command is no longer a command; use 'daydream benchmark'",
+            f"error: '{argv[0]}' is no longer a command; benchmarks run from "
+            "https://github.com/existential-birds/code-review-benchmarks",
             file=sys.stderr,
         )
         sys.exit(2)

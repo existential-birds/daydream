@@ -39,8 +39,7 @@ make hooks
 ```
 
 `make install` runs `uv sync --all-extras`. All extras are installed on
-purpose so the full gate suite runs — the benchmark objective tests need the
-`benchmark` extra's harbor package. Note that, like `uv sync`, this does
+purpose so the full gate suite runs with every dependency it exercises. Note that, like `uv sync`, this does
 **not** put a `daydream` command on your `PATH`; for the runnable CLI, see
 [Quick start](README.md#quick-start) in the README.
 
@@ -89,7 +88,7 @@ The focused targets, all run from the repo root:
 | `make coverage-report` | checks that `coverage.xml` exists after `make test`; the measurement + ratchet procedure is in [docs/coverage.md](docs/coverage.md) |
 | `make actionlint` | actionlint over `.github/workflows/*.yml` plus the packaged workflow templates |
 | `make lockcheck` | `uv lock --check` — fails if `uv.lock` is out of sync with `pyproject.toml` |
-| `make package-check` | Build the wheel, check it ships its packaged resources, and install it with the benchmark reviewer's runtime lock in a fresh environment; check dependencies and the installed entrypoint |
+| `make package-check` | Build the wheel and check it ships its packaged resources |
 | `make check-naming` | naming-convention check over the repo (`scripts/check-naming.sh`) |
 | `make rl-check` | the RL project's own lockcheck + ruff + mypy + pytest suite, run with a scoped git identity as process env. **This is explicitly not part of `make check`** — it mirrors `ci.yml`, where RL is a manually dispatched job while RL work is paused (its e2e test drives the `claude` CLI that CI's `check` job never installs). Run it by hand whenever you change `rl/daydream_review`. |
 
@@ -141,8 +140,7 @@ select the operator's dataset or credentials. Production defaults are unchanged.
   `daydream/atif/**` is lint-exempt as vendored Harbor code (see
   [daydream/atif/NOTICE](daydream/atif/NOTICE)); make only mechanical edits
   there.
-- **mypy** — configured in `pyproject.toml`, run over `daydream tests scripts/ci_*.py`;
-  hand-written stubs live in `mypy_stubs/`.
+- **mypy** — configured in `pyproject.toml`, run over `daydream tests scripts/ci_*.py`.
 - **Dependencies** — declared in `pyproject.toml`; keep `uv.lock` in sync (`uv
   lock`) or `make check` fails at its first step (`lockcheck`).
 - **Commit messages** — Conventional Commits, e.g. `feat(backends): ...`.
@@ -221,7 +219,6 @@ This guide links rather than duplicates; these documents carry the detail:
 
 By task:
 
-- Benchmarks → [docs/benchmark.md](docs/benchmark.md)
 - Tracing / observability → [docs/observability.md](docs/observability.md)
 - Corpus / training launches → [docs/training-launch.md](docs/training-launch.md)
 - RL package work → [rl/daydream_review/README.md](rl/daydream_review/README.md)

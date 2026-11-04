@@ -8,8 +8,7 @@ PYTEST_WORKERS ?= logical
 PYTEST_REPORT_ARGS ?=
 
 install:
-	# All extras so `make check` runs the full suite (benchmark objective tests
-	# need the harbor package from the benchmark extra).
+	# All extras so `make check` runs every test with the dependencies it exercises.
 	uv sync --all-extras
 
 package-check:

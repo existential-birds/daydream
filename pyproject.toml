@@ -33,7 +33,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-benchmark = ["harbor>=0.25.0,<0.26"]
 hub = ["huggingface_hub>=2.4.0"]
 
 [dependency-groups]
@@ -76,8 +75,6 @@ include = [
     "daydream/training/schema/**",
     "daydream/atif/LICENSE",
     "daydream/atif/NOTICE",
-    "daydream/benchmark/harbor/templates/**",
-    "daydream/benchmark/harbor/runtime-requirements.lock",
 ]
 
 [tool.mypy]
@@ -85,15 +82,6 @@ python_version = "3.14"
 strict = true
 namespace_packages = true
 explicit_package_bases = true
-# The sandbox score_review.py does a bare `import verifier_core` (the twin of
-# in-repo daydream.benchmark.harbor.verifier_core, copied beside it at sandbox
-# build time; golden byte-parity gate: tests/test_benchmark_verifier_assets.py).
-# That top-level name is not on sys.path, so mypy_stubs/verifier_core.py shims it
-# by re-exporting the source twin's public API. Pointing mypy_path at harbour/
-# itself would discover the twin twice ("Source file found twice"), so the shim
-# lives on its own mypy_path root -- the sandbox still checks against the real
-# signatures, never Any.
-mypy_path = "mypy_stubs"
 
 
 [[tool.mypy.overrides]]
@@ -101,12 +89,6 @@ mypy_path = "mypy_stubs"
 # mechanical-edit-only policy forbids hand-fixes. Mirrors ruff exemption above.
 module = ["daydream.atif.*"]
 ignore_errors = true
-
-[[tool.mypy.overrides]]
-# Harbor ships without py.typed; no stub package exists. Narrow per-module,
-# not blanket-library, so future typed releases are picked up automatically.
-module = ["harbor.models.*", "harbor.agents.base", "harbor.utils.env", "harbor.environments.docker.*", "harbor.environments.base", "harbor.publisher.packager"]
-ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 # No types-huggingface_hub exists on PyPI (verified); boundary stays Any-typed.

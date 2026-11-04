@@ -252,9 +252,8 @@ jobs:
         run: make lockcheck
 
       - name: Install dependencies
-        # The benchmark extra (harbor) is required by the benchmark objective/
-        # aggregate tests in the default suite; the `install` step syncs all
-        # extras so the full suite runs with every dependency it exercises.
+        # The `install` step syncs all extras so the full suite runs with every
+        # dependency it exercises.
         run: make install
 
       - name: Lint with ruff
