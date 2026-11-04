@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   process. `from daydream.backends import ClaudeBackend` and the other package-level
   adapter names still work and load on first use. A broken Claude SDK installation
   now fails when Claude is selected rather than at CLI start
-  ([#1713](https://github.com/existential-birds/daydream/issues/1713)).
+  ([#1713](https://github.com/existential-birds/daydream/issues/1713),
+  [#1762](https://github.com/existential-birds/daydream/pull/1762)).
 
 ### Removed
 
