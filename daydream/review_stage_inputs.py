@@ -12,9 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from daydream import prompt_budget as inputs
 from daydream.artifact_visibility import ArtifactSession, artifact_dir_for
-from daydream.backends import Backend
-from daydream.backends.osprey import OspreyBackend
-from daydream.backends.pi import PiBackend
+from daydream.backends import Backend, is_adapter_instance
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, base_stack_name
 from daydream.deep.diff import _DIFF_MINUS_HEADER, _DIFF_PLUS_HEADER, iter_diff_blocks
@@ -429,7 +427,8 @@ class StageInputFactory:
 
     def _before_context(self, files: set[str], directory: Path, statuses: list[dict[str, str]]) -> dict[str, Path]:
         """Offer bounded ordinary file context for old paths file-only tools cannot reach."""
-        if not isinstance(self.backend, (PiBackend, OspreyBackend)):
+        if not (is_adapter_instance(self.backend, "pi", "PiBackend")
+                or is_adapter_instance(self.backend, "osprey", "OspreyBackend")):
             return {}
         candidates: dict[str, Path] = {}
         for index, file in enumerate(sorted(files)):

@@ -9,10 +9,7 @@ from daydream.artifact_visibility import (
     artifact_dir_for,
     artifact_session_active,
 )
-from daydream.backends import (
-    Backend,
-)
-from daydream.backends.claude import READ_ONLY_BASH_ALLOWLIST
+from daydream.backends import READ_ONLY_BASH_ALLOWLIST, Backend
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.prompt_budget import (
     AdvisoryCandidate,

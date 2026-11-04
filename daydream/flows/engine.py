@@ -91,9 +91,9 @@ class FlowContext:
                 effort_override=effort,
             )
         if self.work.captured_source is not None:
-            from daydream.backends.pi import PiBackend
+            from daydream.backends import is_adapter_instance
 
-            if isinstance(backend, PiBackend):
+            if is_adapter_instance(backend, "pi", "PiBackend"):
                 backend.bind_review_context(self.work.source)
         return backend
 

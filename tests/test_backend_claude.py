@@ -390,8 +390,13 @@ async def test_audit_execute_rejects_unsafe_invocation_before_client(patch_sdk: 
         with pytest.raises(AuditIsolationError) as refused:
             create_backend(name, audit_root=root)
         assert (refused.value.backend_name, refused.value.reason) == (name, "unsupported_backend")
-    with pytest.raises(ValueError, match="Unknown backend"):
+    with pytest.raises(ValueError, match="Unknown backend.*'pi'"):
         create_backend("invalid", audit_root=root)
+    # Package-level adapter names resolve lazily to the adapter's own objects; other names stay missing.
+    import daydream.backends as package
+
+    assert (package.ClaudeBackend, package.MaxTurnsError) == (ClaudeBackend, MaxTurnsError)
+    assert not hasattr(package, "NotABackend")
     # A safe audit pins every Git redirect to the snapshot root instead of ambient or source values.
     async for _ in backend.execute(root, "audit", read_only=True):
         pass

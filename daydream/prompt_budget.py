@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from daydream.artifact_visibility import ArtifactVisibilityError
-from daydream.backends import AUDIT_ROOT_ISOLATION
+from daydream.backends import AUDIT_ROOT_ISOLATION, is_adapter_instance
 
 # Upper bound for inlined diff text. Above this bound, prompts retain an
 # on-disk diff pointer rather than embedding the diff.
@@ -366,9 +366,7 @@ def sanctioned_transport_for(
 
 def uses_diff_reference(backend: object, cwd: Path, *, read_only: bool) -> bool:
     """Pi discovery reads its durable diff through an admitted host path."""
-    from daydream.backends.pi import PiBackend
-
-    return isinstance(backend, PiBackend) and sanctioned_transport_for(
+    return is_adapter_instance(backend, "pi", "PiBackend") and sanctioned_transport_for(
         backend, cwd, read_only=read_only,
     ) is SanctionedInputTransport.EXACT_PATHS
 
