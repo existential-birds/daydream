@@ -453,16 +453,6 @@ class ReviewInvestigation:
                             schema_rejection_guard=lambda value: self._retryable(
                                 value, stage, targets, candidate_ids, files=assigned_files),
                             advisory_tool_call_target=state['advisory_tool_call_target'], **kwargs)
-                        if (self.reason == 'tool_call_budget_exceeded'
-                                and self.budget.provider_restarts > restarts_before):
-                            # The restart redid the failed attempt's work on the unrenewed allowance;
-                            # the provider failure, not the budget, prevented submission.
-                            self.reason = 'backend_failure'
-                            self.failed_invocation = True
-                            self._continuable_failure = False
-                            self.failure_diagnostic = (
-                                'Provider failure restarted the stage; the restart exhausted the original '
-                                'cumulative tool allowance before submitting.')
                     else:
                         output = None
                     prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
@@ -512,6 +502,15 @@ class ReviewInvestigation:
                             for target in output['targets']]}
                         present_result(agent.console, context.policy, agent_kwargs.get("progress_callback"), display)
                 finally:
+                    if self.reason == 'tool_call_budget_exceeded' and self.budget.provider_restarts > restarts_before:
+                        # Returned or native-fatal exhaustion alike: the restart redid the failed attempt's
+                        # work on the unrenewed allowance, so the provider failure prevented submission.
+                        self.reason = 'backend_failure'
+                        self.failed_invocation = True
+                        self._continuable_failure = False
+                        self.failure_diagnostic = (
+                            'Provider failure restarted the stage; the restart exhausted the original '
+                            'cumulative tool allowance before submitting.')
                     if self.reason in {'tool_call_budget_exceeded', 'wall_budget_exceeded', 'pipeline_budget_exceeded',
                                        'model_budget_exhaustion'}:
                         self.failure_class = 'quantitative_exhaustion'

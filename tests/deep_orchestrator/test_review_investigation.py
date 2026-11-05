@@ -21,6 +21,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.host_tools import HostToolCallBudgetExceeded
 from daydream.review_source_refs import SOURCE_SELECTORS_SCHEMA
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
@@ -846,18 +847,24 @@ def test_bounded_review_context_and_tool_evidence_drop_oldest_whole_entries() ->
     assert evidence.omitted == 1 and evidence.clipped
 
 
-@pytest.mark.parametrize(('dropped', 'reason', 'status', 'diagnostic'), [
-    (True, 'backend_failure', 'failed', 'Provider failure restarted the stage; the restart exhausted the original '
-     'cumulative tool allowance before submitting.'),
-    (False, 'host_tool_budget_exhaustion', 'incomplete', 'Review limit exhausted: tool_call_budget_exceeded'),
-], ids=['restarted', 'single_attempt'])
+_PROVIDER_RESTART = ('Provider failure restarted the stage; the restart exhausted the original cumulative tool '
+                     'allowance before submitting.')
+
+
+@pytest.mark.parametrize(('dropped', 'native', 'reason', 'status', 'diagnostic'), [
+    (True, False, 'backend_failure', 'failed', _PROVIDER_RESTART),
+    (True, True, 'backend_failure', 'failed', _PROVIDER_RESTART),
+    (False, False, 'host_tool_budget_exhaustion', 'incomplete', 'Review limit exhausted: tool_call_budget_exceeded'),
+], ids=['restarted', 'restarted_native_fatal', 'single_attempt'])
 async def test_provider_restart_that_exhausts_the_allowance_is_a_backend_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dropped: bool, reason: str, status: str, diagnostic: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dropped: bool, native: bool, reason: str, status: str,
+    diagnostic: str,
 ) -> None:
     """A stream drop late in a stage restarts it on the unrenewed allowance.
 
-    When the restart exhausts that allowance, coverage names the provider failure, not a budget stop.
-    Exhaustion without a restart remains a quantitative budget stop."""
+    When the restart exhausts that allowance, whether the stream ends or the host binding raises its native
+    fatal, coverage names the provider failure, not a budget stop. Exhaustion without a restart remains a
+    quantitative budget stop."""
     review = many_file_review(tmp_path, monkeypatch, count=3, docs_count=0)
     monkeypatch.setenv('DAYDREAM_PI_RETRY_ATTEMPTS', '1')
     monkeypatch.setenv('DAYDREAM_PI_RETRY_BASE_DELAY_S', '0')
@@ -871,6 +878,9 @@ async def test_provider_restart_that_exhausts_the_allowance_is_a_backend_failure
         for index in range(8):
             if dropped and attempts == 1 and index == 4:
                 raise _StubRetryableError('stream dropped')
+            if native and attempts == 2 and index == 2:
+                raise HostToolCallBudgetExceeded(
+                    'Original cumulative tool allowance exhausted; no further native calls are authorized')
             for event in read_events(review.repo, 'api.py', event_id=f'read-{attempts}-{index}'):
                 yield event
 
