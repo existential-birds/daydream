@@ -158,7 +158,7 @@ class PreparedSanctionedInputs:
         canonical_cwd = _canonical_cwd(cwd)
         if canonical_cwd != self.cwd or read_only is not self.read_only:
             raise SanctionedInputUnavailable("sanctioned input call mode changed")
-        if _sanctioned_transport(backend, canonical_cwd, read_only=read_only) is not self.transport:
+        if sanctioned_transport_for(backend, canonical_cwd, read_only=read_only) is not self.transport:
             raise SanctionedInputUnavailable("sanctioned input transport mode changed before model execution")
         aggregate = 0
         for item in self.inputs:
@@ -337,13 +337,16 @@ def _capture_input(
     )
 
 
-def _sanctioned_transport(backend: object, canonical_cwd: Path, *, read_only: bool) -> SanctionedInputTransport:
-    """Choose inline transport unless a concrete backend declares exact host-path access."""
+def sanctioned_transport_for(backend: object, cwd: Path, *, read_only: bool) -> SanctionedInputTransport:
+    """Choose inline transport unless a concrete backend declares exact host-path access.
+
+    Builders call this early to size advisory inputs. A strict audit root must
+    match ``cwd`` after resolution, so callers need not canonicalize it first."""
     strict_audit = getattr(backend, "audit_root_isolation", None) == AUDIT_ROOT_ISOLATION
     if strict_audit:
         audit_root = getattr(backend, "audit_root", None)
         try:
-            matched = isinstance(audit_root, Path) and audit_root.resolve(strict=True) == canonical_cwd
+            matched = isinstance(audit_root, Path) and audit_root.resolve(strict=True) == _canonical_cwd(cwd)
         except OSError as exc:
             raise SanctionedInputUnavailable("sanctioned input audit root is unavailable") from exc
         if not matched:
@@ -357,18 +360,12 @@ def _sanctioned_transport(backend: object, canonical_cwd: Path, *, read_only: bo
     return SanctionedInputTransport.EXACT_PATHS
 
 
-def sanctioned_transport_for(
-    backend: object, cwd: Path, *, read_only: bool
-) -> SanctionedInputTransport:
-    """Resolve the capture transport early so builders can size advisory inputs."""
-    return _sanctioned_transport(backend, cwd, read_only=read_only)
+def uses_diff_reference(backend: object) -> bool:
+    """Pi discovery reads its durable diff through an admitted host path.
 
-
-def uses_diff_reference(backend: object, cwd: Path, *, read_only: bool) -> bool:
-    """Pi discovery reads its durable diff through an admitted host path."""
-    return is_adapter_instance(backend, "PiBackend") and sanctioned_transport_for(
-        backend, cwd, read_only=read_only,
-    ) is SanctionedInputTransport.EXACT_PATHS
+    Pi runs on the host and declares no sandbox, audit isolation or disposable
+    clone, so its transport is always EXACT_PATHS."""
+    return is_adapter_instance(backend, "PiBackend")
 
 
 def select_advisory_inputs(
@@ -384,7 +381,7 @@ def select_advisory_inputs(
     INLINE accounts for exact rendered bytes; EXACT_PATHS uses capture limits.
     Unavailable candidates are omitted; transport resolution errors propagate."""
     canonical_cwd = _canonical_cwd(cwd)
-    transport = _sanctioned_transport(backend, canonical_cwd, read_only=read_only)
+    transport = sanctioned_transport_for(backend, canonical_cwd, read_only=read_only)
     inline = transport is SanctionedInputTransport.INLINE
     allowance_bytes = (
         _transport_allowance(transport, 0, staged_review=staged_review)[0]
@@ -441,7 +438,7 @@ def prepare_sanctioned_inputs(
 ) -> PreparedSanctionedInputs:
     """Capture a closed logical-label mapping for one backend call."""
     canonical_cwd = _canonical_cwd(cwd)
-    transport = _sanctioned_transport(backend, canonical_cwd, read_only=read_only)
+    transport = sanctioned_transport_for(backend, canonical_cwd, read_only=read_only)
     if transport is SanctionedInputTransport.EXACT_PATHS and len(inputs) > SANCTIONED_EXACT_INPUT_MAX_FILES:
         raise SanctionedInputUnavailable("sanctioned input file count limit exceeded")
     prepared: list[PreparedSanctionedInput] = []
@@ -449,7 +446,7 @@ def prepare_sanctioned_inputs(
     for label, path in sorted(inputs.items()):
         if not label or len(label) > 128 or any(ord(c) < 32 or ord(c) == 127 or c in '<>"' for c in label):
             raise SanctionedInputUnavailable("sanctioned input label is invalid")
-        pointer_only = label == "diff" and uses_diff_reference(backend, canonical_cwd, read_only=read_only)
+        pointer_only = label == "diff" and uses_diff_reference(backend)
         item = _capture_input(label, path, transport, aggregate, pointer_only=pointer_only,
                               staged_review=staged_review)
         if not pointer_only:

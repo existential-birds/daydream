@@ -130,7 +130,7 @@ async def phase_understand_intent(
             diff_text, INLINE_DIFF_BUDGET_BYTES, "\n[diff truncated to fit the prompt budget]\n"
         )
     else:
-        inline_diff = None if uses_diff_reference(backend, work.repo, read_only=True) else _inlineable_diff(diff_text)
+        inline_diff = None if uses_diff_reference(backend) else _inlineable_diff(diff_text)
     session_active = artifact_session_active()
     inline_exploration_summary: str | None = None
     if not session_active and read_only_disposable_clone and exploration_dir is not None:
@@ -285,7 +285,7 @@ async def phase_alternative_review(
     ui.print_phase_hero(agent.console, "WONDER", ui.phase_subtitle("WONDER"))
     ui.print_dim(agent.console, f"Model: {backend.model}")
 
-    read_only = uses_diff_reference(backend, work.repo, read_only=True)
+    read_only = uses_diff_reference(backend)
     inline_diff = None if read_only else _inlineable_diff(diff_text)
     # Apply the shared advisory exploration budget; exact diff limits stay strict.
     sanctioned_inputs = _prepare_existing_phase_inputs(

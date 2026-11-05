@@ -197,7 +197,7 @@ class StageInputFactory:
             build_generic_fallback_prompt, build_per_stack_prompt, build_structural_prompt))
             or getattr(builder, 'review_input_bundle', False) is True)
         read_only = (getattr(backend, 'read_only_disposable_clone', False) is True
-                     or inputs.uses_diff_reference(backend, work.repo, read_only=True))
+                     or inputs.uses_diff_reference(backend))
         return cls(backend, work, stack, change=change, shared_paths=shared_paths, revision=revision,
             artifact_session=artifact_session, allow_standalone=allow_standalone, read_only=read_only,
             bundle_capable=bundle_capable)
