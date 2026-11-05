@@ -34,6 +34,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `daydream benchmark` exits with a pointer there. Repair-job ownership keeps
   its cross-process lock on the same lock file.
 
+### Fixed
+
+- A staged review stage that a provider failure (such as a dropped stream)
+  forced to restart, and whose restart then ran out of the stage's unrenewed
+  tool-call allowance, is now reported as a `backend_failure` with a diagnostic
+  naming the provider restart. Previously it looked like ordinary tool-budget
+  exhaustion, which pointed operators at the budget instead of the provider. The
+  cumulative allowance is still never renewed
+  ([#1767](https://github.com/existential-birds/daydream/issues/1767)).
+
 ## [0.34.0] - 2026-11-03
 
 ### Changed

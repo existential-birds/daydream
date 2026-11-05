@@ -1014,6 +1014,8 @@ async def _run_agent(
                         ):
                             _emit_ladder_stop("circuit_open")
                             raise
+                        if investigation_budget is not None:
+                            investigation_budget.provider_restarts += 1
                         continue
                     if classification.retries_allowed and exception_max_retries > 0:
                         _emit_ladder_stop("retry_attempts_exhausted")

@@ -205,12 +205,14 @@ class ReviewInvestigationBudget:
     """Observed spend and an absolute deadline for one staged reviewer.
 
     Native execution may precede its start event. Track received starts, including over-limit ones; this ledger
-    promises neither prospective tool admission nor unseen buffered events.
+    promises neither prospective tool admission nor unseen buffered events. A provider restart redispatches the
+    original request on the same unrenewed allowance; ``provider_restarts`` counts them.
     """
 
     limits: ReviewLimits
     deadline: float
     observed_tool_starts: int = 0
+    provider_restarts: int = 0
     shared_deadline: float | None = None
     retry_recovery_budget: RetryRecoveryBudget | None = None
 

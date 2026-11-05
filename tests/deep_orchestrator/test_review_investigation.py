@@ -27,7 +27,7 @@ from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
 from tests.deep_orchestrator.test_review_completion import ReviewRun, record, scopes
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 from tests.harness.git_helpers import git, seed_feature_branch
-from tests.harness.stub_backend import review_stage_state, stage_result
+from tests.harness.stub_backend import _StubRetryableError, review_stage_state, stage_result
 from tests.test_deep_orchestrator import _profile_with_pipeline, _sanctioned_inputs
 
 StageResponse = Callable[[dict[str, Any], dict[str, Any]],
@@ -844,3 +844,37 @@ def test_bounded_review_context_and_tool_evidence_drop_oldest_whole_entries() ->
         evidence.observe(ToolStartEvent(id=f'read-{index}', name='Read', input={'file_path': 'api.py'}))
     assert len(evidence.pending) == 64 and 'read-0' not in evidence.pending
     assert evidence.omitted == 1 and evidence.clipped
+
+
+@pytest.mark.parametrize(('dropped', 'reason', 'status', 'diagnostic'), [
+    (True, 'backend_failure', 'failed', 'Provider failure restarted the stage; the restart exhausted the original '
+     'cumulative tool allowance before submitting.'),
+    (False, 'host_tool_budget_exhaustion', 'incomplete', 'Review limit exhausted: tool_call_budget_exceeded'),
+], ids=['restarted', 'single_attempt'])
+async def test_provider_restart_that_exhausts_the_allowance_is_a_backend_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dropped: bool, reason: str, status: str, diagnostic: str,
+) -> None:
+    """A stream drop late in a stage restarts it on the unrenewed allowance.
+
+    When the restart exhausts that allowance, coverage names the provider failure, not a budget stop.
+    Exhaustion without a restart remains a quantitative budget stop."""
+    review = many_file_review(tmp_path, monkeypatch, count=3, docs_count=0)
+    monkeypatch.setenv('DAYDREAM_PI_RETRY_ATTEMPTS', '1')
+    monkeypatch.setenv('DAYDREAM_PI_RETRY_BASE_DELAY_S', '0')
+    monkeypatch.setenv('DAYDREAM_PI_RETRY_MAX_DELAY_S', '0')
+    attempts = 0
+
+    @review.backend.script('python')
+    async def response(stage: dict[str, Any], output: dict[str, Any]) -> AsyncGenerator[AgentEvent, None]:
+        nonlocal attempts
+        attempts += 1
+        for index in range(8):
+            if dropped and attempts == 1 and index == 4:
+                raise _StubRetryableError('stream dropped')
+            for event in read_events(review.repo, 'api.py', event_id=f'read-{attempts}-{index}'):
+                yield event
+
+    data = await review.finish('python', reason=reason, statuses=(status,),
+                               review_profile=_profile_with_pipeline(reviewer_tool_call_budget=6))
+    assert attempts == (2 if dropped else 1)
+    assert f'python: {diagnostic}' in data['review_warnings']

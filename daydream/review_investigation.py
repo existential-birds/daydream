@@ -384,6 +384,7 @@ class ReviewInvestigation:
             accepted = False
             binding: HostToolBinding | None = None
             starts_before = self.budget.observed_tool_starts
+            restarts_before = self.budget.provider_restarts
             candidate_count = 0
             async with phase_scope(DaydreamPhase.DEEP, stage=f'review-{stage.replace('_', '-')}') as transition:
                 prior_admitted = self.admitted_stages
@@ -452,6 +453,16 @@ class ReviewInvestigation:
                             schema_rejection_guard=lambda value: self._retryable(
                                 value, stage, targets, candidate_ids, files=assigned_files),
                             advisory_tool_call_target=state['advisory_tool_call_target'], **kwargs)
+                        if (self.reason == 'tool_call_budget_exceeded'
+                                and self.budget.provider_restarts > restarts_before):
+                            # The restart redid the failed attempt's work on the unrenewed allowance;
+                            # the provider failure, not the budget, prevented submission.
+                            self.reason = 'backend_failure'
+                            self.failed_invocation = True
+                            self._continuable_failure = False
+                            self.failure_diagnostic = (
+                                'Provider failure restarted the stage; the restart exhausted the original '
+                                'cumulative tool allowance before submitting.')
                     else:
                         output = None
                     prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
