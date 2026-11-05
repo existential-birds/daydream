@@ -925,7 +925,7 @@ def superseded_unfinished_review(
             if (not isinstance(commit, str) or _DAYDREAM_FOOTER_PREFIX not in body
                     or not bot_login_matches((review.get("user") or {}).get("login"), author)):
                 continue
-            if commit == pr.head_sha or git_ops.is_ancestor(target_dir, commit, pr.head_sha):
+            if commit == pr.head_sha or _github_ancestor(target_dir, pr, commit, auth=auth):
                 latest = review
     except GitError as exc:
         print_warning(console, f"Could not check earlier review notices; an unfinished notice may remain ({exc}).")
@@ -933,6 +933,19 @@ def superseded_unfinished_review(
     if latest is None or not _UNFINISHED_REVIEW_HEADING.search(latest.get("body") or ""):
         return None
     return str(latest["commit_id"])
+
+
+def _github_ancestor(target_dir: Path, pr: PRInfo, commit: str, *, auth: GitHubAuth) -> bool:
+    """Ask GitHub whether *commit* precedes the PR head; posting runs may have no checkout.
+
+    An unknown or unreachable commit is not an ancestor."""
+    try:
+        comparison = git_ops.gh_api(
+            target_dir, f"repos/{pr.owner}/{pr.repo}/compare/{commit}...{pr.head_sha}", idempotent=True, auth=auth,
+        )
+    except GitError:
+        return False
+    return isinstance(comparison, dict) and comparison.get("status") == "ahead"
 
 
 def render_completion_notice(head_sha: str, superseded_sha: str) -> str:

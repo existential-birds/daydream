@@ -27,7 +27,7 @@ from daydream.pr_review import (
 )
 from tests.harness.console import collapse_panel_text as _console_text
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import commit, git, init_repo
+from tests.harness.git_helpers import commit, git
 from tests.harness.review_result import findings_artifact
 from tests.harness.scripts import cli_main
 from tests.test_findings import immutable_findings_artifact
@@ -537,17 +537,14 @@ def test_complete_clean_review_supersedes_only_a_current_unfinished_notice(
 ) -> None:
     """A complete review with no findings answers the latest unfinished Daydream notice on its head or an ancestor.
 
+    The shipped poster has no checkout, so ancestry comes from GitHub's comparison, never local history.
+
     Notices on other heads or PRs, by other logins, or without the current renderer's footer are not superseded,
     nor is any notice when findings already on the PR remain current. The earlier review is never edited,
     dismissed or minimized, and nothing is approved."""
-    target = tmp_path / "target"
-    init_repo(target)
-    (target / "a.py").write_text("one\n")
-    git(target, "add", "a.py")
-    parent = commit(target, "first")
-    (target / "a.py").write_text("two\n")
-    git(target, "add", "a.py")
-    head = commit(target, "second")
+    target = tmp_path / "no-checkout"
+    target.mkdir()
+    parent, head = "1" * 40, "2" * 40
     pr = PRInfo(number=7, head_sha=head, base_sha="", base_ref="", head_ref="", owner="o", repo="r", url="")
 
     def notice(commit_id: str, **warning: str) -> str:
@@ -570,6 +567,8 @@ def test_complete_clean_review_supersedes_only_a_current_unfinished_notice(
     }[case]
     fake_gh.set_response("GET", "repos/o/r/pulls/7/reviews", reviews)
     fake_gh.set_response("GET", "repos/o/r/pulls/8/reviews", [_review(1, head, unfinished)])
+    fake_gh.set_response("GET", f"repos/o/r/compare/{parent}...{head}", {"status": "ahead"})
+    fake_gh.set_response("GET", f"repos/o/r/compare/{'d' * 40}...{head}", {"status": "diverged"})
     findings = [_inline_finding("Already posted")] if case == "matched_findings" else []
     fake_gh.serve_prior_threads(fingerprints=[finding["fingerprint"] for finding in findings], viewer_did_author=True)
     artifact = _write_artifact(tmp_path / "findings.json", findings, head_sha=head)
