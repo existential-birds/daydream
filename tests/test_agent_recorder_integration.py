@@ -17,12 +17,12 @@ from daydream.atif import validate as atif_validate
 from daydream.backends import (
     AgentEvent,
     Backend,
-    MaxTurnsError,
     ResultEvent,
     TextEvent,
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.backends.claude import MaxTurnsError
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,

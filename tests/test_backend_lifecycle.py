@@ -36,7 +36,7 @@ def test_fresh_process_loads_only_the_selected_native_adapter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CLI help and run-start selection load only the selected adapters; public adapter names stay importable.
+    """CLI help and run-start selection load only the selected adapters; Claude still loads when selected.
 
     Only a fresh interpreter proves the module graph: the suite has already loaded every adapter.
     """
@@ -108,13 +108,7 @@ asyncio.run(run_pi())
 assert sys.modules["daydream.host_tools_server"] is None
 
 del sys.modules["claude_agent_sdk"]
-from daydream.backends import ClaudeBackend, MaxTurnsError, OspreyBackend, PiBackend
-from daydream.backends import claude, osprey, pi
-
-exported = (ClaudeBackend, MaxTurnsError, OspreyBackend, PiBackend)
-owned = (claude.ClaudeBackend, claude.MaxTurnsError, osprey.OspreyBackend, pi.PiBackend)
-assert all(left is right for left, right in zip(exported, owned, strict=True))
-assert isinstance(_resolve_backend(RunConfig(target=str(target)), "review"), ClaudeBackend)
+assert type(_resolve_backend(RunConfig(target=str(target)), "review")).__name__ == "ClaudeBackend"
 assert "claude_agent_sdk" in sys.modules
 """
     result = subprocess.run([sys.executable, "-c", script, str(target)], capture_output=True, text=True, timeout=30)

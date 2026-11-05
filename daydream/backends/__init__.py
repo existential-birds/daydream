@@ -8,8 +8,8 @@ exception, so its presence does not imply successful execution.
 
 This common package imports no native adapter. Runs load the adapters they can
 select at start through ``load_adapters``, so a broken SDK fails before any work;
-``create_backend`` loads only the selected adapter. The package-level adapter names
-load on first access and stay out of ``__all__`` so a star import loads none.
+``create_backend`` loads only the selected adapter. Adapter classes are imported
+from their own modules (``daydream.backends.claude`` and so on), never from here.
 Consumers that only need to recognize an adapter object use ``is_adapter_instance``,
 which never imports an adapter. tests/test_backend_lifecycle.py proves the module
 graph in a fresh interpreter.
@@ -283,9 +283,7 @@ class AuditIsolationError(RuntimeError):
 if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
 
-    from daydream.backends.claude import ClaudeBackend as ClaudeBackend, MaxTurnsError as MaxTurnsError
-    from daydream.backends.osprey import OspreyBackend as OspreyBackend
-    from daydream.backends.pi import PiBackend as PiBackend
+    from daydream.backends.pi import PiBackend
 
 
 #
@@ -1076,32 +1074,19 @@ def create_backend(
     raise ValueError(f"Unknown backend: {name!r}. Expected 'claude', 'codex', 'pi', or 'osprey'.")
 
 
-# Adapter-owned names and their adapter modules; is_adapter_instance recognizes all
-# of them, and the package serves the public ones on first attribute access.
-_ADAPTER_NAMES: Mapping[str, str] = MappingProxyType({
-    "ClaudeBackend": "claude",
-    "MaxTurnsError": "claude",
+_ADAPTER_MODULES = frozenset({"claude", "codex", "osprey", "pi"})
+# Adapter classes consumers recognize without importing their adapter module.
+_RECOGNIZED_ADAPTER_CLASSES: Mapping[str, str] = MappingProxyType({
     "CodexLifecycleError": "codex",
     "OspreyBackend": "osprey",
     "PiBackend": "pi",
 })
-_PUBLIC_ADAPTER_NAMES = frozenset(_ADAPTER_NAMES) - {"CodexLifecycleError"}
 
 
 def load_adapters(names: Iterable[str]) -> None:
     """Import the named adapters now; unknown names are left to create_backend's diagnostics."""
-    for name in sorted(set(names) & set(_ADAPTER_NAMES.values())):
+    for name in sorted(set(names) & _ADAPTER_MODULES):
         importlib.import_module(f"{__name__}.{name}")
-
-
-if not TYPE_CHECKING:
-    # Hidden from type checkers, which would otherwise type every unknown package
-    # name as Any; they see the public adapter names through the imports above.
-    def __getattr__(name: str) -> Any:
-        """Load a public adapter name from its adapter module on first access."""
-        if name not in _PUBLIC_ADAPTER_NAMES:
-            raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-        return getattr(importlib.import_module(f"{__name__}.{_ADAPTER_NAMES[name]}"), name)
 
 
 @overload
@@ -1118,7 +1103,7 @@ def is_adapter_instance(value: object, class_name: str) -> bool:
     An adapter object cannot exist before its module loads, so an unloaded
     adapter matches nothing; subclasses match exactly as with isinstance.
     """
-    module = sys.modules.get(f"{__name__}.{_ADAPTER_NAMES[class_name]}")
+    module = sys.modules.get(f"{__name__}.{_RECOGNIZED_ADAPTER_CLASSES[class_name]}")
     return module is not None and isinstance(value, getattr(module, class_name))
 
 
