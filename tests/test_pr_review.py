@@ -14,6 +14,7 @@ from daydream.extensions import Registry
 from daydream.extensions.builtins import register_builtins
 from daydream.findings import load_findings_artifact
 from daydream.git_ops import GitError
+from daydream.github_app import GitHubIdentity
 from daydream.pr_review import (
     InlineReviewComment,
     ParsedIssue,
@@ -465,6 +466,39 @@ async def test_pinned_publication_revalidates_and_places_the_captured_comparison
             assert not plan.file_level and not plan.body_only
         assert (git_repo / "feature.py").read_text() == 'value = "LOCAL_ONLY"\n' * 10
         assert (git_repo / "untracked.py").read_text() == "LOCAL_ONLY = True\n"
+
+
+async def test_complete_pinned_comment_review_supersedes_its_unfinished_notice(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path, fake_gh: FakeGh, tmp_path: Path,
+) -> None:
+    """The --comment route answers its own unfinished notice only after a complete pinned review.
+
+    The bot-route matrix proves notice selection; this proves the live route's completeness gate and identity."""
+    row, base, head = _local_pr_row(git_repo)
+    pinned = PRInfo(number=7, owner="o", repo="r", base_sha=base, pr_base_sha=base, head_sha=head,
+                    base_ref="main", head_ref="feature", url=row["url"])
+    monkeypatch.setattr(pr_review, "find_pr_by_number", lambda *_a, **_k: pinned)
+    notice = build_payload_for_event(pinned, pr_review.ClassifiedIssues(), event=pr_review.ReviewEvent.COMMENT,
+                                     run_info=_RUN_INFO, renderers=BUILTIN_RENDERERS,
+                                     review_warnings=("structure: Review limit exhausted",)).body
+    fake_gh.set_response("GET", "repos/o/r/pulls/7/reviews",
+                         [{"id": 1, "user": {"login": "Octocat"}, "commit_id": head, "body": notice}])
+    merged = tmp_path / "merged-items.json"
+    merged.write_text(json.dumps({"items": []}))
+    context = RunContext(InteractionPolicy(assume="yes"), github_identity=GitHubIdentity("octocat"))
+    for complete in (False, True):
+        status = await pr_review.post_review_to_pr_from_report(
+            git_repo, merged, console=_FakeConsole(),  # type: ignore[arg-type]
+            post=True, renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO, run_context=context, captured_pr=pinned,
+            snapshot_diff=git_ops.diff_paths(git_repo, base, head, ["."]), review_complete=complete,
+            publication_dir=git_repo,
+        )
+        posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+        if not complete:
+            assert status is pr_review.PostStatus.NOTHING_TO_POST and not fake_gh.calls("GET") and not posts
+    assert status is pr_review.PostStatus.POSTED
+    assert len(posts) == 1 and posts[0].payload["event"] == "COMMENT" and posts[0].payload["commit_id"] == head
+    assert f"✅ **Review complete.** No findings in the complete review of `{head[:7]}`" in posts[0].payload["body"]
 
 
 async def _post_review_from_report_empty_items_posts_diagram_case(
