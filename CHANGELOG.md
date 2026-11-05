@@ -25,13 +25,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- **Breaking:** `daydream.backends` no longer re-exports the adapter classes
-  `ClaudeBackend`, `MaxTurnsError`, `OspreyBackend` and `PiBackend`. Import them
-  from their adapter modules instead, for example
-  `from daydream.backends.claude import ClaudeBackend` or
-  `from daydream.backends.pi import PiBackend`. Selecting a backend through
-  `create_backend` or configuration is unchanged
-  ([#1762](https://github.com/existential-birds/daydream/pull/1762)).
 - The `daydream benchmark` command, the `daydream.benchmark` package and the
   `benchmark` extra: both the public ReviewBench lane (`reviewbench harbor-export`
   and `harbor-run`, #1759) and the private Harbor benchmark workspace (`init`,
