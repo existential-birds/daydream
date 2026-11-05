@@ -21,6 +21,8 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.backends.codex import CodexLifecycleError
+from daydream.backends.lifecycle import BackendLifecycleFailure
 from daydream.review_source_refs import SOURCE_SELECTORS_SCHEMA
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
@@ -407,10 +409,28 @@ async def test_optional_supporting_paths_are_confined_without_rejecting_valid_de
     assert all('PRIVATE_OUTSIDE_SOURCE' not in call['prompt'] for call in review.backend.calls)
 
 
+class _LookalikeLifecycleError(CodexLifecycleError):
+    """A polymorphic payload that must not receive the exact adapter projection."""
+
+
+_REAP_FAILURE = BackendLifecycleFailure(stage="process_reap", allowance_s=5.0, terminal_received=True,
+                                        stdout_eof=True, process_returncode=None)
+
+
+@pytest.mark.parametrize(("error", "diagnostic"), [
+    (RuntimeError("PRIVATE_PROVIDER_DETAIL"), "RuntimeError: review invocation failed (backend_failure)."),
+    (CodexLifecycleError(_REAP_FAILURE),
+     "Codex process_reap timeout after 5s: actual child exit was not observed; turn.completed received, "
+     "stdout EOF observed, child exit not observed; review incomplete. Automatic retry disabled after completion."),
+    (_LookalikeLifecycleError(_REAP_FAILURE),
+     "_LookalikeLifecycleError: review invocation failed (backend_failure)."),
+], ids=["generic", "codex_lifecycle", "lookalike"])
 async def test_unadmitted_backend_failure_remains_failed_after_a_shared_stop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception, diagnostic: str,
 ) -> None:
-    """A pipeline-budget stop after a failed batch cannot relabel that attempted work as unattempted."""
+    """A pipeline-budget stop after a failed batch cannot relabel that attempted work as unattempted.
+
+    Only the exact Codex lifecycle error projects its closed diagnostic; other failures stay generic."""
     review = many_file_review(tmp_path, monkeypatch, count=9, docs_count=0)
     review.backend.fanout_concurrency = 1
     monkeypatch.setenv('DAYDREAM_PI_RETRY_ATTEMPTS', '1')
@@ -425,7 +445,7 @@ async def test_unadmitted_backend_failure_remains_failed_after_a_shared_stop(
         nonlocal attempts
         attempts += 1
         timer.advance(61)
-        raise RuntimeError('PRIVATE_PROVIDER_DETAIL')
+        raise error
 
     assert await review.run(review_profile=_profile_with_pipeline(
         reviewer_investigation_budget_s=480, review_wall_budget_s=60)) == 0
@@ -436,6 +456,7 @@ async def test_unadmitted_backend_failure_remains_failed_after_a_shared_stop(
     assert scope['reason_codes'] == ['backend_failure', 'host_pipeline_budget_exhaustion']
     assert data['findings'] == []
     assert all(event['metadata']['admitted'] is False for event in stage_ends(review, 'python'))
+    assert f'python: {diagnostic}\nReview limit exhausted: pipeline_budget_exceeded' in data['review_warnings']
 
 
 async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
