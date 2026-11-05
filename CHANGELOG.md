@@ -101,11 +101,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#1767](https://github.com/existential-birds/daydream/issues/1767)).
 - A complete review with no findings now posts a short COMMENT review saying so
   when the latest Daydream review on the same PR, for the same commit or one it
-  supersedes, is a "Review incomplete" (or failed) notice. Before, the clean
-  rerun posted nothing, so the incomplete notice stayed the newest Daydream
-  review. The earlier notice is never edited, dismissed or minimized, nothing is
-  approved unless `approve_on_clean` already allowed it, and a complete clean
-  review with no earlier notice still posts nothing. Both `--comment` and
+  supersedes, is an unfinished notice ("Review incomplete", "Review failed" or
+  "Review completeness unavailable"). Before, the clean rerun posted nothing, so
+  the unfinished notice stayed the newest Daydream review. The earlier notice is
+  never edited, dismissed or minimized, and nothing is approved unless
+  `approve_on_clean` already allowed it. Without an earlier notice, a complete
+  clean review posts nothing beyond that approval. Both `--comment` and
   `post-findings` follow this
   ([#1766](https://github.com/existential-birds/daydream/issues/1766)).
 
