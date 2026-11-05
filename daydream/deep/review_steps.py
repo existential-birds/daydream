@@ -303,7 +303,7 @@ async def _step_intent(ctx: FlowContext) -> None:
     """
     deep_state = DeepState(ctx.data)
     with review_stage(deep_state, "intent"):
-        from daydream.backends.pi import PiBackend
+        from daydream.backends import is_adapter_instance
         from daydream.deep.diff import _diff_changed_files
         from daydream.exploration import FileInfo
         from daydream.extensions import get_registry
@@ -405,7 +405,8 @@ async def _step_intent(ctx: FlowContext) -> None:
                 backend = ctx.backend_for("intent")
                 strategy = ctx.strategy("intent")
                 advisory_paths: list[str] = []
-                if (isinstance(backend, PiBackend) and getattr(backend, "supports_tools_disabled", False)
+                if (is_adapter_instance(backend, "PiBackend")
+                        and getattr(backend, "supports_tools_disabled", False)
                         and not resolve_run_context(ctx.run_context).policy.interactive
                         and get_registry().prompt("intent") is build_intent_prompt
                         and strategy == build_default_profile().strategies["intent"].content):

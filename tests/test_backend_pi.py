@@ -4,8 +4,6 @@ import asyncio
 import hashlib
 import json
 import os
-import subprocess
-import sys
 import tempfile
 import uuid
 from pathlib import Path
@@ -31,7 +29,6 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
-    create_backend,
 )
 from daydream.backends._subprocess import (
     DEFAULT_STREAM_IDLE_TIMEOUT_S,
@@ -51,7 +48,6 @@ from tests.harness.fake_cli_process import (
 from tests.harness.fake_clock import FakeClock
 from tests.harness.pi_replay import FIXTURES_DIR, make_mock_process, make_mock_process_from_fixture
 from tests.harness.process_replay import replay_process
-from tests.harness.protocol_cli import install_protocol_cli
 from tests.harness.protocol_cli_assertions import make_cancel_probe
 from tests.harness.trajectory import make_recorder
 
@@ -147,42 +143,6 @@ async def test_interrupted_pi_updates_retain_only_admitted_progress(tmp_path: Pa
                 monkeypatch=mp, tmp_path=_case_dir(tmp_path, index), kind=kind
             )
 
-
-
-def test_ordinary_pi_fresh_process_does_not_load_host_admission_endpoint(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Ordinary Pi runs without a host endpoint; all-extras imports can hide unwanted eager endpoint loading."""
-    fixture = install_protocol_cli(tmp_path / "external", "pi")
-    target = tmp_path / "repo"
-    target.mkdir()
-    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setenv("PI_PROVIDER", "nous")
-    monkeypatch.delenv("PI_API_KEY", raising=False)
-    script = """
-import asyncio
-import sys
-from pathlib import Path
-# Forbid admission endpoint loading in a fresh ordinary invocation.
-assert not any(name == "daydream" or name.startswith("daydream.") for name in sys.modules)
-sys.modules["daydream.host_tools_server"] = None
-from daydream.backends.pi import PiBackend
-from daydream.backends import ResultEvent, TextEvent
-
-async def main():
-    events = [event async for event in PiBackend(model="fixture-model").execute(
-        Path(sys.argv[1]), "Ordinary Pi call", persist_session=False)]
-    assert any(isinstance(event, ResultEvent) for event in events)
-    assert [event.text for event in events if isinstance(event, TextEvent)] == ["CURRENT_REASONING_CANARY"]
-
-asyncio.run(main())
-assert sys.modules["daydream.host_tools_server"] is None
-"""
-    result = subprocess.run([sys.executable, "-c", script, str(target)], capture_output=True, text=True, timeout=10)
-    assert result.returncode == 0, result.stderr
-    (observation,) = fixture.read_observations()
-    assert observation["process_outcome"] == "success"
 
 
 def test_backend_execution_input_rejects_explicit_osprey() -> None:
@@ -393,11 +353,6 @@ async def test_cancel_terminates_then_kills(monkeypatch: pytest.MonkeyPatch) -> 
     await backend.cancel()
     assert proc.terminate_calls == 1 and proc.kill_calls == 1
     assert proc.returncode == -9 and proc.reaped
-
-
-def test_create_backend_invalid_includes_pi_in_message() -> None:
-    with pytest.raises(ValueError, match="pi"):
-        create_backend("invalid")
 
 
 async def test_default_model_does_not_override_pi_settings(pi_workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:

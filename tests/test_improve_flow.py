@@ -9,7 +9,8 @@ import anyio
 import pytest
 
 from daydream import git_ops, runner as runner_module
-from daydream.backends import AgentEvent, Backend, ClaudeBackend, ResultEvent, TextEvent
+from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
+from daydream.backends.claude import ClaudeBackend
 from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS, PHASE_DEFAULT_MODELS, VET_BATCH_MAX_FINDINGS
 from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.deep.detection import StackAssignment

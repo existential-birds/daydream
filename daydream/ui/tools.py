@@ -111,10 +111,11 @@ def _redacted_bash_command(
     display variant strips it. The complete value is redacted before truncation
     so a credential cannot be shortened into an unmatchable fragment.
     """
-    from daydream.backends.codex import display_shell_command
     from daydream.redaction import redact_structured_text
 
     if name == "shell":
+        from daydream.backends.codex import display_shell_command
+
         command = display_shell_command(command)
     command = redact_structured_text(command)
     if len(command) > max_chars:

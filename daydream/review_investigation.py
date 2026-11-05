@@ -14,9 +14,7 @@ from daydream import agent, clock
 
 if TYPE_CHECKING:
     from daydream.review_stage_inputs import StageInputFactory
-from daydream.backends import Backend
-from daydream.backends.codex import codex_lifecycle_diagnostic
-from daydream.backends.pi import PiBackend
+from daydream.backends import Backend, is_adapter_instance
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import StackAssignment
 from daydream.host_tools import (
@@ -365,7 +363,7 @@ class ReviewInvestigation:
             transport_schema = review_stage_submission_schema(stage_schema)
             submission_schema = review_stage_admission_schema(transport_schema)
             canonical_schema = review_stage_admission_schema(stage_schema)
-            native_admission = isinstance(backend, PiBackend)
+            native_admission = is_adapter_instance(backend, "PiBackend")
             # Only a host-tool submission can be corrected within the invocation.
             state['submission_transport'] = 'host_tool' if native_admission else 'final_output'
             state["response_contract"] = {"schema": transport_schema, "skeleton": {
@@ -417,7 +415,7 @@ class ReviewInvestigation:
                         binding = HostToolBinding(deadline=self.budget.deadline, accept=accept_submission)
                         kwargs['host_tools'] = binding
                     # Submission transport is a prospective Pi planning hint; RequestEvent owns output authority.
-                    if isinstance(backend, PiBackend) and not (
+                    if native_admission and not (
                         kwargs.get("tools_disabled") or kwargs.get("finalization")
                         or kwargs.get("validate_structured_output") is False):
                         state["max_attempts"] = 1
@@ -469,7 +467,12 @@ class ReviewInvestigation:
                     self.failed_invocation = True
                     self._continuable_failure = classify_failure(exc).failure_class not in {
                         FailureClass.AUTH_CONFIG, FailureClass.SCHEMA, FailureClass.TOOL_POLICY, FailureClass.PERMANENT}
-                    self.failure_diagnostic = (codex_lifecycle_diagnostic(exc)
+                    codex_diagnostic = None
+                    if is_adapter_instance(exc, "CodexLifecycleError"):
+                        from daydream.backends.codex import codex_lifecycle_diagnostic
+
+                        codex_diagnostic = codex_lifecycle_diagnostic(exc)
+                    self.failure_diagnostic = (codex_diagnostic
                         or f"{type(exc).__name__}: review invocation failed ({self.reason}).")
                     fatal = exc if isinstance(exc, HostToolFatal) else binding.fatal_error if binding else None
                     if fatal is not None:

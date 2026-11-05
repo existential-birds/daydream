@@ -176,6 +176,8 @@ Read the protocols in [backends/__init__.py](daydream/backends/__init__.py) and 
 adapter being changed, plus [lifecycle evidence](docs/observability.md#codex-lifecycle-evidence)
 and the relevant contracts below.
 
+- Keep adapters and their SDKs lazy, per [the common package contract](daydream/backends/__init__.py)
+  and [its fresh-process proof](tests/test_backend_lifecycle.py).
 - Attempt cancellation closes only that invocation's stream; backend-wide
   cancellation belongs to run shutdown. Preserve terminal metrics on errors.
 - Codex success requires the latest public turn to complete, stdout EOF, and an

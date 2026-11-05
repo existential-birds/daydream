@@ -22,6 +22,7 @@ from daydream.backends import (
     TurnEndEvent,
 )
 from daydream.backends.codex import CodexBackend
+from daydream.config import REVIEWER_TOOL_CALL_BUDGET
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.test_review_completion import record, scopes
 from tests.deep_orchestrator.test_review_investigation import (
@@ -130,7 +131,7 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
                 record(), description='FAILED_ATTEMPT_MARKER'))]
         else:
             assert stage['progress'] == stage['candidates'] == []
-            assert stage['observed_tool_starts'] == 4 and stage['remaining_tool_calls'] == 44
+            assert stage['observed_tool_starts'] == 4 and stage['remaining_tool_calls'] == REVIEWER_TOOL_CALL_BUDGET - 4
             prompt = review.backend.calls[-1]['prompt']
             assert 'PRIVATE_UNKNOWN_PROPERTY_MARKER' not in prompt and 'FAILED_ATTEMPT_MARKER' not in prompt
             rejection = stage['schema_rejection']
@@ -153,9 +154,10 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
     assert metadata[0]['admitted'] is False and metadata[0]['attempt_tool_starts'] == 4
     assert metadata[0]['schema_rejection']['error_count'] > 0
     assert metadata[1]['attempt'] == 2 and metadata[1]['observed_tool_starts'] == 8
-    assert metadata[1]['remaining_tool_calls'] == 40
+    assert metadata[1]['remaining_tool_calls'] == REVIEWER_TOOL_CALL_BUDGET - 8
     assert metadata[1]['admitted'] is True
-    assert metadata[-1]['observed_tool_starts'] == 12 and metadata[-1]['remaining_tool_calls'] == 36
+    assert metadata[-1]['observed_tool_starts'] == 12
+    assert metadata[-1]['remaining_tool_calls'] == REVIEWER_TOOL_CALL_BUDGET - 12
     measurements = assert_host_dispatch_measurements(review)
     assert all(item['attempt'] == 1 for item in measurements)
     retry_scopes = {item['stage_scope_id'] for item in measurements

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Daydream loads a native backend adapter and its SDK only when a run or phase
+  selects it. CLI help, configuration and Codex, Pi or Osprey runs no longer
+  import the Claude Agent SDK or unused adapters, which cuts startup memory per
+  process. A run loads every adapter it can select when it starts, so a broken
+  Claude SDK still fails before any work in runs that use Claude
+  ([#1713](https://github.com/existential-birds/daydream/issues/1713),
+  [#1762](https://github.com/existential-birds/daydream/pull/1762)).
+- Each staged reviewer's default tool-call budget rises from 48 to 120, still
+  scaled by diff size and batch count. The whole-change structure review spends
+  about 1.5 calls per changed file just reading its inputs, so reviews of about 15
+  or more files often ran out before submitting. `[pipeline]
+  reviewer_tool_call_budget` in a review profile still overrides it
+  ([#1762](https://github.com/existential-birds/daydream/pull/1762)).
+
 ### Removed
 
 - The `daydream benchmark` command, the `daydream.benchmark` package and the

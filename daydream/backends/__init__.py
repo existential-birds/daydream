@@ -5,27 +5,62 @@ request facts; MetricsEvent owns turn usage, CostEvent owns invocation totals,
 and TurnEndEvent closes a recorder step. Generation events describe provider
 boundaries using host-local correlators. A terminal ResultEvent may precede an
 exception, so its presence does not imply successful execution.
+
+This common package imports no native adapter. Runs load the adapters they can
+select at start through ``load_adapters``, so a broken SDK fails before any work;
+``create_backend`` loads only the selected adapter. Adapter classes are imported
+from their own modules (``daydream.backends.claude`` and so on), never from here.
+Consumers that only need to recognize an adapter object use ``is_adapter_instance``,
+which never imports an adapter. tests/test_backend_lifecycle.py proves the module
+graph in a fresh interpreter.
 """
 
 from __future__ import annotations
 
+import importlib
 import logging
 import math
 import os
 import re
+import sys
 import unicodedata
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass, field, fields
 from functools import partial
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Literal, Protocol, Union, get_args, get_origin, get_type_hints
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    Protocol,
+    TypeGuard,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+    overload,
+)
 
 from daydream.redaction import redact_structured_text
 from daydream.retry_policy import coerce_declared_retry_allowance
 from daydream.timeutil import now_iso
 
 logger = logging.getLogger(__name__)
+
+# Shared read-only Bash families; shell controls are rejected separately.
+# Claude enforces this list and inspection prompts render the same list.
+READ_ONLY_BASH_ALLOWLIST: tuple[str, ...] = (
+    "ls",
+    "cat",
+    "git status",
+    "git ls-files",
+    "daydream search",
+    "git log",
+    "git show",
+    "git blame",
+    "git diff",
+)
 
 
 @dataclass(frozen=True)
@@ -247,6 +282,8 @@ class AuditIsolationError(RuntimeError):
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
+
+    from daydream.backends.pi import PiBackend
 
 
 #
@@ -995,6 +1032,8 @@ def create_backend(
     from daydream.config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
 
     if name == "claude":
+        from daydream.backends.claude import ClaudeBackend
+
         return ClaudeBackend(
             model=model or DEFAULT_CLAUDE_MODEL,
             reasoning_effort=reasoning_effort,
@@ -1013,6 +1052,8 @@ def create_backend(
             execution_input=execution_input,
         )
     if name == "pi":
+        from daydream.backends.pi import PiBackend
+
         return PiBackend(
             model=model,
             cwd=cwd,
@@ -1022,6 +1063,8 @@ def create_backend(
     if name == "osprey":
         if execution_input is not None:
             raise ValueError("explicit BackendExecutionInput is not supported for osprey")
+        from daydream.backends.osprey import OspreyBackend
+
         return OspreyBackend(
             model=model,
             cwd=cwd,
@@ -1031,9 +1074,38 @@ def create_backend(
     raise ValueError(f"Unknown backend: {name!r}. Expected 'claude', 'codex', 'pi', or 'osprey'.")
 
 
-from daydream.backends.claude import ClaudeBackend, MaxTurnsError  # noqa: E402
-from daydream.backends.osprey import OspreyBackend  # noqa: E402
-from daydream.backends.pi import PiBackend  # noqa: E402
+_ADAPTER_MODULES = frozenset({"claude", "codex", "osprey", "pi"})
+# Adapter classes consumers recognize without importing their adapter module.
+_RECOGNIZED_ADAPTER_CLASSES: Mapping[str, str] = MappingProxyType({
+    "CodexLifecycleError": "codex",
+    "OspreyBackend": "osprey",
+    "PiBackend": "pi",
+})
+
+
+def load_adapters(names: Iterable[str]) -> None:
+    """Import the named adapters now; unknown names are left to create_backend's diagnostics."""
+    for name in sorted(set(names) & _ADAPTER_MODULES):
+        importlib.import_module(f"{__name__}.{name}")
+
+
+@overload
+def is_adapter_instance(value: object, class_name: Literal["PiBackend"]) -> TypeGuard[PiBackend]: ...
+
+
+@overload
+def is_adapter_instance(value: object, class_name: Literal["CodexLifecycleError", "OspreyBackend"]) -> bool: ...
+
+
+def is_adapter_instance(value: object, class_name: str) -> bool:
+    """Return isinstance(value, adapter class) without importing the adapter.
+
+    An adapter object cannot exist before its module loads, so an unloaded
+    adapter matches nothing; subclasses match exactly as with isinstance.
+    """
+    module = sys.modules.get(f"{__name__}.{_RECOGNIZED_ADAPTER_CLASSES[class_name]}")
+    return module is not None and isinstance(value, getattr(module, class_name))
+
 
 __all__ = [
     "AUDIT_ROOT_ISOLATION",
@@ -1042,7 +1114,6 @@ __all__ = [
     "AuditIsolationError",
     "Backend",
     "BackendExecutionInput",
-    "ClaudeBackend",
     "ClaudeRequestConfig",
     "CodexRequestConfig",
     "ContinuationToken",
@@ -1051,13 +1122,11 @@ __all__ = [
     "GenerationEndEvent",
     "GenerationStartEvent",
     "JsonValue",
-    "MaxTurnsError",
     "MetricsEvent",
     "ModelUsageTotals",
-    "OspreyBackend",
     "OspreyRequestConfig",
-    "PiBackend",
     "PiRequestConfig",
+    "READ_ONLY_BASH_ALLOWLIST",
     "ReasoningChoicePart",
     "RequestEvent",
     "RetryPolicy",
@@ -1071,5 +1140,7 @@ __all__ = [
     "TurnEndEvent",
     "create_backend",
     "effective_fanout_concurrency",
+    "is_adapter_instance",
+    "load_adapters",
     "unix_ms_to_ns",
 ]

@@ -40,6 +40,7 @@ from claude_agent_sdk.types import (
 
 from daydream.backends import (
     AUDIT_ROOT_ISOLATION,
+    READ_ONLY_BASH_ALLOWLIST,
     AgentEvent,
     BackendExecutionInput,
     ClaudeRequestConfig,
@@ -57,20 +58,6 @@ from daydream.backends import (
     resolve_fanout_concurrency,
 )
 from daydream.config import TEST_WALL_BUDGET_S
-
-# Shared read-only Bash families; shell controls are rejected separately.
-# _render_bash_allowlist renders this same list into inspection prompts.
-READ_ONLY_BASH_ALLOWLIST: tuple[str, ...] = (
-    "ls",
-    "cat",
-    "git status",
-    "git ls-files",
-    "daydream search",
-    "git log",
-    "git show",
-    "git blame",
-    "git diff",
-)
 
 # Non-posix shlex splits controls into characters, including redirection.
 # Leading parentheses are checked separately; mid-word parentheses produce

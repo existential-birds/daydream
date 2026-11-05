@@ -34,17 +34,17 @@ def test_large_diff_expands_review_allowances_without_changing_small_reviews() -
         assert review_scale_for_scope() > 1
         limits = review_limits_for_scope(ReviewLimits())
         assert limits.investigation_s > 480
-        assert limits.tool_calls > 48
+        assert limits.tool_calls > 120
         # Batch scaling takes the larger multiplier, never the product: tier 6 already covers 12 batches.
         assert review_limits_for_scope(ReviewLimits(), stages=12) == limits
         assert review_limits_for_scope(ReviewLimits(), stages=40) == ReviewLimits(
-            investigation_s=4800, finalization_s=1200, tool_calls=480)
+            investigation_s=4800, finalization_s=1200, tool_calls=1200)
     with review_deadline_scope(2700, diff=small, scale_deadline=True):
         assert review_limits_for_scope(ReviewLimits()) == ReviewLimits()
         assert review_limits_for_scope(ReviewLimits(), stages=4) == ReviewLimits()
         # Partial allowances round up: five batches need a second one.
         assert review_limits_for_scope(ReviewLimits(), stages=5) == ReviewLimits(
-            investigation_s=960, finalization_s=240, tool_calls=96)
+            investigation_s=960, finalization_s=240, tool_calls=240)
 
 async def test_checkpoint_survives_hung_stream_without_finalizer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

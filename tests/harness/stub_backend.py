@@ -13,11 +13,11 @@ import pytest
 from daydream.backends import (
     AgentEvent,
     ContinuationToken,
-    MaxTurnsError,
     ResultEvent,
     TextEvent,
     ToolStartEvent,
 )
+from daydream.backends.claude import MaxTurnsError
 from daydream.deep.records import record_issues_or_empty, record_uid, stack_name_from_uid
 from tests.harness.review_result import merge_result
 

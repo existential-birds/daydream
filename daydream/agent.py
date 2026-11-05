@@ -34,10 +34,9 @@ from daydream.backends import (
     TextEvent,
     ToolStartEvent,
     TurnEndEvent,
+    is_adapter_instance,
 )
-from daydream.backends.codex import supervisor_shell_command
 from daydream.backends.lifecycle import BackendLifecycleCollector, BackendLifecycleSnapshot
-from daydream.backends.pi import PiBackend
 from daydream.config import BUDGET_CLEANUP_GRACE_S
 from daydream.diagnostics import exception_text, sanitize_verbose_message
 from daydream.extensions import get_registry
@@ -352,7 +351,7 @@ async def run_agent(
         # Host composition also covers wholesale extension prompt overrides.
         # Read-only Pi has only its stock bounded tools: no shell, Git or helper.
         search_guidance = REPOSITORY_SEARCH_GUIDANCE
-        if read_only and isinstance(backend, PiBackend):
+        if read_only and is_adapter_instance(backend, "PiBackend"):
             # Composed review prompts embed the shell guidance; substitute it in place.
             search_guidance = READ_ONLY_PI_SEARCH_GUIDANCE
             prompt = prompt.replace(REPOSITORY_SEARCH_GUIDANCE, search_guidance)
@@ -820,6 +819,8 @@ async def _run_agent(
                                             # Use the strip-only entry point for start-anchored deny patterns.
                                             supervisor_input = event.input
                                             if event.name == "shell" and isinstance(event.input, dict):
+                                                from daydream.backends.codex import supervisor_shell_command
+
                                                 command = event.input.get("command")
                                                 if isinstance(command, str):
                                                     supervisor_input = dict(event.input)
