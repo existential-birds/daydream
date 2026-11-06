@@ -438,11 +438,12 @@ class CodexLifecycleError(CodexError):
 
 
 def codex_lifecycle_diagnostic(error: BaseException) -> str | None:
-    """Project only this adapter's exact host error; reject polymorphic payloads."""
-    try:
-        return lifecycle_failure_diagnostic(error.lifecycle_failure) if type(error) is CodexLifecycleError else None
-    except Exception:  # noqa: BLE001 - malformed diagnostic state must not replace a handled backend failure
+    """Project only this adapter's exact host error; reject polymorphic payloads.
+
+    The projection admits only an exact ``BackendLifecycleFailure`` and never raises."""
+    if type(error) is not CodexLifecycleError:
         return None
+    return lifecycle_failure_diagnostic(getattr(error, "lifecycle_failure", None))
 
 
 def _file_change_events(
