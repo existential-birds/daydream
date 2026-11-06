@@ -13,7 +13,6 @@ from daydream.flows.engine import FlowContext
 from daydream.review_profile import ResolvedProfile, build_default_profile
 from daydream.run_config import FrozenAuthorDescription
 from daydream.run_context import InteractionPolicy, RunContext
-from tests.harness.backend import ScriptedBackend
 from tests.harness.review_result import review_coverage
 
 
@@ -21,8 +20,6 @@ def _context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any, *, variant: str = "default",
 ) -> tuple[FlowContext, list[Any]]:
     paths = ["source.tsx", "scripts/policy.mjs", "README.md", "config.json"]
-    if variant == "many_sources":
-        paths += ["third.py", "fourth.rs"]
     diff = "".join(
         f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+new\n"
         for path in paths
@@ -45,9 +42,7 @@ def _context(
               "dd": dd, "diff": diff[:300], "diff_path": diff_path, "log": "abc Author commit\n",
               "branch": "feature", "exploration_dir": None},
     )
-    backend: Any = ScriptedBackend() if variant == "other_backend" else PiBackend(model="fixture-model")
-    if variant == "no_capability":
-        backend.supports_tools_disabled = False
+    backend = PiBackend(model="fixture-model")
     monkeypatch.setattr(ctx, "backend_for", lambda _: backend)
     calls: list[Any] = []
 
@@ -104,7 +99,7 @@ async def test_advisory_context_does_not_promote_stale_or_missing_author_intent(
     assert "STALE AUTHOR BODY" not in ctx.data["intent_summary"]
 
 
-@pytest.mark.parametrize('matching_head', [False])
+@pytest.mark.parametrize('matching_head', [False, True])
 async def test_frozen_author_context_is_revision_bound_without_network_lookup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any, matching_head: bool,
 ) -> None:

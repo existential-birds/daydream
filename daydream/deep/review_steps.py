@@ -406,7 +406,6 @@ async def _step_intent(ctx: FlowContext) -> None:
                 strategy = ctx.strategy("intent")
                 advisory_paths: list[str] = []
                 if (is_adapter_instance(backend, "PiBackend")
-                        and getattr(backend, "supports_tools_disabled", False)
                         and not resolve_run_context(ctx.run_context).policy.interactive
                         and get_registry().prompt("intent") is build_intent_prompt
                         and strategy == build_default_profile().strategies["intent"].content):
