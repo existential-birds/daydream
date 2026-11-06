@@ -55,7 +55,7 @@ def _prepare_existing_phase_inputs(
         backend,
         work.repo,
         {**{label: path for label, path in captured.items() if path is not None and (
-            path.is_file() or label == "diff" and uses_diff_reference(backend, work.repo, read_only=read_only)
+            path.is_file() or label == "diff" and uses_diff_reference(backend)
         )}, **(required_inputs or {})},
         read_only=read_only,
     )

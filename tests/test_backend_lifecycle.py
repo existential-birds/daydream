@@ -87,7 +87,7 @@ for name in ("codex", "osprey", "pi"):
     assert loaded() - before == {f"daydream.backends.{name}"}, (name, loaded() - before)
     backends[name] = _resolve_backend(config, "review", cwd=target)
     # Consumers recognize adapter objects without importing adapters that were not selected.
-    assert uses_diff_reference(backends[name], target, read_only=True) is (name == "pi")
+    assert uses_diff_reference(backends[name]) is (name == "pi")
     assert loaded() - before == {f"daydream.backends.{name}"}, (name, loaded() - before)
 # runner.run fails at start, before any work, when any phase selects Claude without its SDK.
 try:
