@@ -70,6 +70,6 @@ make typecheck
 make check
 ```
 
-`make check` checks the lock before installation or `uv run` can relock, then runs root install, Ruff, vulture, mypy, coverage-bearing pytest, workflow linting, coverage-report verification, and naming checks. Targeted pytest is plain and avoids the full-suite coverage floor. Run `make rl-check` for changes to the separately locked `rl/daydream_review` project; it is not part of `make check`. Dependency edits require consistent lockfiles. Never disable hooks, tests, or configured gates to force success.
+`make check` checks the lock before installation or `uv run` can relock, then runs root install, Ruff, vulture, mypy, coverage-bearing pytest, workflow linting, coverage-report verification, and naming checks. Targeted pytest is plain and avoids the full-suite coverage floor. Dependency edits require consistent lockfiles. Never disable hooks, tests, or configured gates to force success.
 
 Use relevant evidence for triage and required combined-tree gates for implementation/publication. These commands are not a demand to run the whole suite before classifying every item. Record unavailable checks honestly.

@@ -1,4 +1,4 @@
-"""Acquire review-artifact scoring inputs for frozen capture and sealed RL runs."""
+"""Acquire review-artifact scoring inputs for frozen capture runs."""
 
 from __future__ import annotations
 

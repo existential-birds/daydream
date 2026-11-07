@@ -1,4 +1,4 @@
-.PHONY: install lint typecheck test test-scripts actionlint rl-check check static lockcheck package-check hooks deadcode coverage-report check-naming
+.PHONY: install lint typecheck test test-scripts actionlint check static lockcheck package-check hooks deadcode coverage-report check-naming
 
 # One worker per logical CPU: `auto` counts physical cores, which halves the
 # workers on hyperthreaded cloud runners. CI shards set their own count.
@@ -20,14 +20,9 @@ lint:
 typecheck:
 	uv run mypy daydream tests scripts/ci_*.py
 
-# Whole-project dead-code detection (#935). Both projects' scans live in their
-# own [tool.vulture]; pass --config explicitly so each project's pyproject.toml
-# is resolved. Scan pkg+tests together (one process) so test references keep
-# package symbols alive. Exit 0 == clean. The RL scan uses the root environment
-# because syncing RL's own environment only to parse its source costs far more.
+# Whole-project dead-code detection (#935), configured in [tool.vulture].
 deadcode:
-	uv run vulture --config pyproject.toml daydream tests
-	uv run vulture --config rl/daydream_review/pyproject.toml rl/daydream_review/daydream_review rl/daydream_review/tests
+	uv run vulture daydream tests
 
 # Coverage flags live here (not in global addopts) so targeted runs like
 # `uv run pytest tests/foo.py` stay plain and never trip the floor enforced by
@@ -54,26 +49,6 @@ coverage-report:
 actionlint:
 	uv run actionlint -color .github/workflows/*.yml daydream/templates/workflows/*.yml daydream/templates/workflows/single/*.yml
 
-# Standalone RL project gates, run from its own directory via per-line cd
-# (each recipe line is its own shell). Mirrors ci.yml's rl-check job, including
-# its 'Configure git identity' step: the suite's negative-gate tests commit into
-# throwaway fixtures with no per-repo identity, so without a global identity a
-# contributor machine would fail where CI (which sets it) passes. The identity
-# is injected as rl-check-scoped process environment, never via
-# `git config --global`, which would silently overwrite the invoking user's
-# own identity (a side effect no local gate may cause).
-rl-check: export GIT_AUTHOR_NAME = daydream CI
-rl-check: export GIT_AUTHOR_EMAIL = ci@daydream.invalid
-rl-check: export GIT_COMMITTER_NAME = daydream CI
-rl-check: export GIT_COMMITTER_EMAIL = ci@daydream.invalid
-
-rl-check:
-	cd rl/daydream_review && uv lock --check
-	cd rl/daydream_review && uv sync
-	cd rl/daydream_review && uv run ruff check .
-	cd rl/daydream_review && uv run mypy daydream_review tests
-	cd rl/daydream_review && uv run pytest
-
 # Fail if uv.lock has drifted from pyproject.toml (e.g. a release bumped the
 # version but forgot `uv lock`). Read-only: `--check` never heals the lock, and
 # this must run BEFORE any `uv run`/`uv sync` step, which would silently re-lock.
@@ -82,14 +57,6 @@ lockcheck:
 
 # Run all CI checks locally: lockcheck and the root uv sync --all-extras install
 # step first (both before any uv run heals the lock), matching ci.yml's check job.
-#
-# `rl-check` is deliberately NOT a dependency, mirroring that job: the standalone
-# RL project is separately locked and has its own ci.yml job (own runner, own
-# `uv sync`, Python 3.14), and one of its e2e tests drives the real `claude` CLI
-# — present on a developer machine, absent on that runner, where the test's own
-# `shutil.which` guard skips it. As a `check` dependency it therefore failed the
-# pre-push gate on changes that never touch rl/. Run `make rl-check` when you
-# change rl/daydream_review; its vulture scan still runs here via `deadcode`.
 check: lockcheck install static test coverage-report
 
 # Independent static checks run in parallel, so the gate pays for the slowest

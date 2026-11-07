@@ -2,13 +2,13 @@
 #
 # Three bounded ecosystems, each opening at most 5 pull requests at a time:
 #   - uv @ "/"                  — root workspace dependencies (pyproject.toml / uv.lock)
-#   - uv @ "/rl/daydream_review" — the standalone RL package's own dependencies
+#   - github-actions @ "/"      — third-party action pins
 #   - npm @ "/.github/workflows" — the tracking package.json in the workflows folder
 #     (that is where the manifest lives — do not "fix" this directory to "/");
 #     it tracks the single @openai/codex dependency used by CI.
 #
-# All four run weekly on Mondays (Australia/Brisbane) with grouped minor+patch
-# updates on the three multi-dependency ecosystems, so dependency updates arrive
+# All three run weekly on Mondays (Australia/Brisbane) with grouped minor+patch
+# updates on the two multi-dependency ecosystems, so dependency updates arrive
 # as small, predictable, reviewer-friendly PRs.
 #
 # Reviewers come from the single-rule CODEOWNERS (`* @existential-birds @anderskev`).
@@ -40,29 +40,6 @@ updates:
     # refuses 0.26.0. Hold the pin at 0.25.2 until a fixed version ships.
     ignore:
       - dependency-name: tree-sitter
-
-  # Standalone RL package uv dependencies.
-  - package-ecosystem: uv
-    directory: /rl/daydream_review
-    schedule:
-      interval: weekly
-      day: monday
-      time: "06:00"
-      timezone: Australia/Brisbane
-    open-pull-requests-limit: 5
-    groups:
-      dependencies:
-        patterns:
-          - "*"
-        update-types:
-          - minor
-          - patch
-    commit-message:
-      prefix: chore(deps)
-    # Keep verifier updates deliberate: its v1 CLI, runtime and trace contracts
-    # are exercised by the standalone gate before changing the exact 0.4.0 pin.
-    ignore:
-      - dependency-name: verifiers
 
   # Third-party GitHub Actions. Re-enabled after the hand-maintained SHA→version
   # map in tests/test_workflow_templates.py was deleted: that map, not the SHA

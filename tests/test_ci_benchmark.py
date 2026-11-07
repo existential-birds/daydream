@@ -54,7 +54,7 @@ def _sample(
         jobs.append(_job("coverage", 45 + max(durations), 55 + max(durations)))
     jobs.append(_job("check", gate - 2, gate))
     # A skipped job has no runner cost and must not affect queue/overlap metrics.
-    skipped = _job("rl-check", 1, 999)
+    skipped = _job("static-checks" if count == 1 else "legacy-check", 1, 999)
     skipped["conclusion"] = "skipped"
     jobs.append(skipped)
     return run, jobs

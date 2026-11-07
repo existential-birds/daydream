@@ -90,7 +90,7 @@ hand-edit it.
 Keep discovery read-only and report evidence before editing. Broad discovery
 can fan out into production-owner lanes: runner/CLI/deep flows; backends and
 Git/GitHub transport; artifacts/trajectory/archive/corpus; improve/extensions;
-benchmark/tooling/workflows; and the separately locked RL project if in scope.
+and benchmark/tooling/workflows.
 Assign each agent explicit paths and keep shared harness ownership with one
 coordinator.
 
@@ -152,13 +152,10 @@ preserving existing user changes.
    coverage gate. Preserve coverage settings and exclusions; follow
    [coverage policy](../../../docs/coverage.md) rather than adjusting gates to
    make pruning pass.
-5. For `rl/daydream_review/`, run targeted pytest from that directory and
-   `make rl-check` from the root. Root pytest does not collect RL; `make check`
-   includes its dead-code scan but does not run its test suite.
-6. Obtain a final independent read-only review of the audit changes against the
+5. Obtain a final independent read-only review of the audit changes against the
    pinned baseline, comparing deleted coverage with named keepers. Campaigns
    require the full preservation review in [CAMPAIGN.md](CAMPAIGN.md).
-7. Inspect `git diff --numstat`; count production/tooling, tests, and support
+6. Inspect `git diff --numstat`; count production/tooling, tests, and support
    separately. If runtime reduction is claimed, compare identical selections,
    workers, coverage settings, and environments, including fixture setup cost.
 

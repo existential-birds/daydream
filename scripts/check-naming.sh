@@ -17,19 +17,16 @@ EXCLUDED_PATHS=(
   "scripts/check-naming.sh"           # the gate's own pattern list necessarily names the versioned identifiers
   ".beagle/"                          # planning notes describing the renames themselves
   "CHANGELOG.md"                      # historical release notes; entries name paths as they were at release time
-  "rl/daydream_review/tests/test_env_identity.py"  # deletion-pin test: asserts the v1 package name is gone
 )
 
 # Allowlisted line patterns, combined into one ERE alternation so a single
 # ``grep -vE`` drops allowlisted hits before the report loop. Each alternative
 # names the external contract it covers — keep these narrow so a project-owned
 # versioned name can never hide behind one:
-#   verifiers\.v1     verifiers package: external RL env API protocol name
 #   ATIF              Harbor ATIF trajectory format (vendored, externally versioned)
-#   /inference/v1/    external inference-API endpoint path
 #   honeyhive\.ai/v2  HoneyHive SaaS API version in the URL
 #   opentelemetry.*v1 OpenTelemetry protobuf/API v1 versions
-ALLOWLIST_RE='verifiers\.v1|ATIF|/inference/v1/|honeyhive\.ai/v2|opentelemetry.*v1'
+ALLOWLIST_RE='ATIF|honeyhive\.ai/v2|opentelemetry.*v1'
 
 # One git grep over the tracked tree, excluding the out-of-scope paths above and
 # dropping allowlisted lines before formatting the report. ``|| true`` keeps the
