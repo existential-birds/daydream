@@ -90,7 +90,7 @@ hand-edit it.
 Keep discovery read-only and report evidence before editing. Broad discovery
 can fan out into production-owner lanes: runner/CLI/deep flows; backends and
 Git/GitHub transport; artifacts/trajectory/archive/corpus; improve/extensions;
-benchmark/tooling/workflows; and the separately locked RL project if in scope.
+and benchmark/tooling/workflows.
 Assign each agent explicit paths and keep shared harness ownership with one
 coordinator.
 

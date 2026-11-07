@@ -20,7 +20,7 @@ on:
         type: string
         default: ""
       test_jobs:
-        description: Root pytest jobs (1..20; 1 is the eight-worker benchmark baseline)
+        description: Pytest jobs (1..20; 1 is the eight-worker benchmark baseline)
         type: string
         default: "8"
 
@@ -236,8 +236,8 @@ jobs:
 
       # After runtime provisioning, every check below is a gate step in the Makefile: the ordered
       # check set lives there once (see `make check`). This job adds only the
-      # setup steps, the root-only vulture scan, and the coverage artifact
-      # upload, so a gate change is a one-file edit.
+      # setup steps and the coverage artifact upload, so a gate change is a
+      # one-file edit.
 
       # Reads the freshly checked-out committed uv.lock BEFORE `uv sync` can heal
       # it. Fails if a release bumped pyproject.toml but forgot `uv lock`, so a

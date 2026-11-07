@@ -60,12 +60,10 @@ floor, including for supposedly unrelated failures. Do not change Git identity.
 When commits are authorized, run ordinary commits. A hook failure is a failure;
 preserve the work and report it.
 
-For dependency changes, trace the graph through sibling path-dependency projects
-and generated deployment/runtime locks, including hash or source-fingerprint
-headers. Find authoritative generators in repository scripts/docs, regenerate all
-affected outputs, and check regeneration is stable. Include these files in the
-change's net cost. Do this before the final full gate so ordinary uv commands
-cannot silently repair an omitted lock during verification.
+For dependency changes, regenerate the lockfiles with the repository's own
+commands and include them in the change's net cost. Do this before the final
+full gate so ordinary uv commands cannot silently repair an omitted lock during
+verification.
 
 Append affected surviving test FILE paths, one canonical repo-relative path per
 line, to __APPLY_DIR__/tests-__CHUNK_LABEL__.txt. Include unchanged consumers of

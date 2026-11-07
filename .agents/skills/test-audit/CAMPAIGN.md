@@ -92,7 +92,7 @@ SQLite behavior, and cancellation teardown.
 
 Move unique cases first, then retire duplicates and proven-obsolete seams.
 Check pytest collection and any explicit inventories/CI selectors for moved
-tests, including RL's separate job. Keep branch coverage and other verification
+tests. Keep branch coverage and other verification
 gates intact. Record durable ownership lessons in existing scoped guidance only
 when that documentation change is in scope; do not invent line-cap baselines.
 
@@ -141,7 +141,7 @@ before resolving deletion;
 retain the file if the keeper cannot yet preserve its proof.
 
 Rerun the subsystem and shared consumers on the reconciled head, then the
-[full Daydream gates](SKILL.md#validation), including RL checks when applicable.
+[full Daydream gates](SKILL.md#validation).
 Repeat required external proof where the reconciliation affects it. Hook-enabled
 commit/push success is mandatory for any authorized landing.
 

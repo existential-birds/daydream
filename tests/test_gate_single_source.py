@@ -81,7 +81,6 @@ def test_gate_prose_enumerations_match_the_declared_gate() -> None:
         assert listed == declared, f"{rel} enumerates {listed}, the gate declares {declared}"
 
 _CI_WORKFLOW = _ROOT / ".github" / "workflows" / "ci.yml"
-_GATE_JOBS = ("plan", "static-checks", "test-shard", "coverage", "legacy-check", "check")
 
 
 def _execute_shard_plan(
@@ -163,7 +162,7 @@ def test_ci_check_job_is_represented_by_the_declared_gate(monkeypatch: pytest.Mo
     monkeypatch.setenv("MAKEFLAGS", "-w")
     monkeypatch.setenv("MFLAGS", "-w")
     workflow = load_workflow(_CI_WORKFLOW)
-    steps = [step for job in _GATE_JOBS for step in job_steps(workflow, job)]
+    steps = [step for job in workflow["jobs"].values() for step in job["steps"]]
     assert all(reason.strip() for reason in _CI_ONLY_STEPS.values())
     targets = {*_gate_steps(), *_static_steps()}
     for step in steps:

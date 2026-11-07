@@ -20,11 +20,9 @@ lint:
 typecheck:
 	uv run mypy daydream tests scripts/ci_*.py
 
-# Whole-project dead-code detection (#935), configured in [tool.vulture]. Scan
-# pkg+tests together (one process) so test references keep package symbols
-# alive. Exit 0 == clean.
+# Whole-project dead-code detection (#935), configured in [tool.vulture].
 deadcode:
-	uv run vulture --config pyproject.toml daydream tests
+	uv run vulture daydream tests
 
 # Coverage flags live here (not in global addopts) so targeted runs like
 # `uv run pytest tests/foo.py` stay plain and never trip the floor enforced by

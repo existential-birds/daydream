@@ -18,7 +18,7 @@ or if their identity or bypass evidence cannot be verified, every PR runs the
 complete root gate. GitHub omits bypass actors when the caller lacks write access
 to the ruleset; that omitted evidence also keeps the complete gate. This workflow
 does not increase token permissions to obtain it.
-Documentation and RL-only changes follow the same rule; no path allowlist skips
+Documentation-only changes follow the same rule; no path allowlist skips
 the queue gate.
 
 `merge_group: checks_requested` runs the complete root suite with branch
@@ -60,9 +60,6 @@ Queue activation is a separate repository setting change, performed after this
 workflow reaches the default branch. The required check name remains `check`.
 Queue rules must have no bypass actors; administrators use the same verified
 merge path. This workflow never writes repository settings.
-
-The full gate also runs on a manual dispatch. The project and all
-workflow tool installations use Python 3.14.
 
 These three workflows are this repository's own **repository-only Codex dogfood configuration**
 — maintained for this repository and intentionally differing from the packaged workflow templates.
