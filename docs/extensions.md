@@ -190,8 +190,7 @@ attempt owns its endpoint and credentials. `close_attempt()` revokes that endpoi
 `close_authority()` permanently prevents another session. Consumers must close
 assignment authority when cancelling, finishing or superseding its work. Neither
 method discards an accepted result. The binding charges the invocation's
-[budget ledger](runtime.md#budget-ledger) at admission; a provider retry regains
-the failed attempt's starts under the renewal rule.
+[budget ledger](runtime.md#budget-ledger) at admission.
 `protected_submission=True` reserves the last start for the terminal submission
 ([limits](runtime.md#pi-host-tool-lifetime-and-limits)).
 

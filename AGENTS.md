@@ -190,7 +190,7 @@ and the relevant contracts below.
   Keep the SDK pin at least `0.2.111` for cancellation-safe subprocess teardown.
 - No turn limits; bound invocations with the host ledger's absolute deadline and tool
   limit ([budget ledger](docs/runtime.md#budget-ledger)). Read defaults from
-  `config.py` and `agent_retry.py`.
+  `config.py` and `retry_policy_from_environment` in `backends/__init__.py`.
 - Adapters emit native events; `agent_output.py` selects final-turn output and
   `ReviewInvestigation` admits staged domain results before presentation. Retain
   raw events as evidence. Report transport gaps only from public evidence; never

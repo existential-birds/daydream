@@ -1880,7 +1880,7 @@ class PiBackend:
                 raise PiError(str(fatal), retryable=False, category="HOST_TOOLS") from fatal
             if deadline_bound and isinstance(exc, StreamStalledError):
                 # The ledger deadline, not stdout silence, ended this read.
-                raise BudgetExhausted("time") from exc
+                raise BudgetExhausted("Budget ledger deadline reached") from exc
             raise
         except BaseException:
             native_failed = True

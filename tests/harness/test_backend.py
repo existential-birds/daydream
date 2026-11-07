@@ -20,7 +20,7 @@ _SHARED_HARNESS_BACKENDS = (
     ("StubBackend", "tests.harness.stub_backend", "StubBackend"),
     ("PhaseDispatchBackend", "tests.harness.phase_backend", "PhaseDispatchBackend"),
     # Most ImproveStubBackend specializations inherit execute through the
-    # pre/post hooks. Rendezvous wraps the stream lifetime for cancellation,
+    # pre hook. Rendezvous wraps the stream lifetime for cancellation,
     # so its separate protocol declaration also needs signature coverage.
     ("ImproveStubBackend", "tests.harness.improve_backend", "ImproveStubBackend"),
     ("RendezvousImproveBackend", "tests.harness.improve_backend", "RendezvousImproveBackend"),

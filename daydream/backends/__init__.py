@@ -131,12 +131,6 @@ def fanout_concurrency_from_environment(environment: Mapping[str, str], default:
     return _parsed_positive_int(environment, "DAYDREAM_FANOUT_CONCURRENCY", default)
 
 
-# Codex 0.162.1 can await two sequential 45s native shutdown fallbacks after
-# public completion. Retain 5s host headroom; this is a policy, not a native bound.
-# docs/observability.md documents the pinned evidence and unbounded unsubscribe.
-DEFAULT_CODEX_TERMINAL_DRAIN_TIMEOUT_S = 95.0
-
-
 @dataclass(frozen=True)
 class BackendExecutionInput:
     """Run-owned native process settings for one backend kind.
@@ -153,7 +147,10 @@ class BackendExecutionInput:
     pi_agent_dir: Path | None
     stream_idle_timeout_s: float | None
     pi_response_idle_timeout_s: float | None
-    codex_terminal_drain_timeout_s: float = DEFAULT_CODEX_TERMINAL_DRAIN_TIMEOUT_S
+    # Codex 0.162.1 can await two sequential 45s native shutdown fallbacks after
+    # public completion. Retain 5s host headroom; this is a policy, not a native bound.
+    # docs/observability.md documents the pinned evidence and unbounded unsubscribe.
+    codex_terminal_drain_timeout_s: float = 95.0
     codex_process_reap_timeout_s: float = 5.0
     codex_cleanup_timeout_s: float = 10.0
     pi_hosted_read_only: bool = False

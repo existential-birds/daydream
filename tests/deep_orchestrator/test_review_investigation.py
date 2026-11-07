@@ -818,7 +818,7 @@ def test_assessment_rejects_domain_faults_and_irreparable_native_capacity(
         assert scoped._budget_stop_reason() is None
         scoped.budget.charged += 9
     assert fresh(many, limits=ReviewLimits(tool_calls=0))._budget_stop_reason() == 'tool_call_budget_exceeded'
-    assert fresh(many, scope_id=STRUCTURE_STACK_NAME)._scaled_limits == ReviewLimits()
+    assert fresh(many, scope_id=STRUCTURE_STACK_NAME).budget.limit == ReviewLimits().tool_calls
     monkeypatch.setattr(review_result, 'RUN_TARGET_DECISIONS_MAX_BYTES', 1)
     with pytest.raises(HostToolFatal, match='required target IDs') as targets:
         fresh()._assessment(valid, 'first_pass', ['api.py'], [], files=['api.py'], native_sources=True)

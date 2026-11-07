@@ -26,12 +26,18 @@ from daydream.backends import (
 from daydream.backends.codex import CodexBackend
 from daydream.backends.pi import PiBackend
 from daydream.config import RETRY_CIRCUIT_FAILURE_THRESHOLD
-from daydream.host_tools import NATIVE_SUBMIT, HostToolBinding, HostToolFatal, HostToolRejected
+from daydream.host_tools import (
+    NATIVE_SUBMIT,
+    HostToolBinding,
+    HostToolCallBudgetExceeded,
+    HostToolFatal,
+    HostToolRejected,
+)
 from daydream.phases.review_prompts import build_review_stage_system_instruction
 from daydream.prompt_budget import prepare_sanctioned_inputs
 from daydream.prompts.grounding import REVIEW_STOPPING_GUIDANCE
 from daydream.retry_policy import derive_retry_summary
-from daydream.review_budget import BudgetLedger, BudgetStop, ReviewLimits
+from daydream.review_budget import BudgetExhausted, BudgetLedger, BudgetStop, ReviewLimits
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.supervision import RuleBasedToolSupervisor, apply_findings_verdicts
 from daydream.trajectory import DaydreamPhase, RunWriteSnapshot
@@ -91,16 +97,13 @@ async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
 
     backend = ScriptedBackend(responder=stream, model="mock-model")
     recorder = make_recorder(tmp_path)
+    ledger = BudgetLedger("fix", limit=5)
     with anyio.fail_after(5):
         async with recorder:
-            output, continuation, reason = await run_agent(
-                backend,
-                tmp_path,
-                "go",
-                phase=DaydreamPhase.FIX,
-                budget=BudgetLedger("fix", limit=5),
-            )
+            output, continuation, reason = await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.FIX,
+                                                           budget=ledger)
     assert (output, continuation, reason) == ("partial output", None, "tool_call_budget_exceeded")
+    assert ledger.stopped == BudgetStop("fix", "tool_calls", limit=5, spent=5, remaining_at_dispatch=5, reserved=0)
     assert closed and backend.cancel_calls == 0
     trajectory = json.loads(recorder.path.read_text())
     step = _agent_step_with_stop_reason(trajectory)
@@ -164,11 +167,12 @@ async def test_expiry_cleanup_is_shielded_and_bounded_by_the_grace(
     fake.install(monkeypatch)
     monkeypatch.setattr("daydream.agent.BUDGET_CLEANUP_GRACE_S", 0.2)
     start = anyio.current_time()
+    ledger = BudgetLedger("fix", wall_s=5.0)
     with anyio.fail_after(5):
-        output, _, reason = await run_agent(
-            _HangingCloseBackend(), tmp_path, "go", phase=DaydreamPhase.FIX, budget=BudgetLedger("fix", wall_s=5.0)
-        )
+        output, _, reason = await run_agent(_HangingCloseBackend(), tmp_path, "go", phase=DaydreamPhase.FIX,
+                                            budget=ledger)
     assert reason == "wall_budget_exceeded"
+    assert ledger.stopped == BudgetStop("fix", "time", limit=5.0, spent=10.0, remaining_at_dispatch=5.0, reserved=0)
     assert "partial-output-sentinel" in output
     assert anyio.current_time() - start < 3.0  # bounded by the grace, not the teardown
 
@@ -300,6 +304,42 @@ async def test_host_admitted_starts_stay_charged_unless_a_retry_refunds_them(
     assert [call["tool_call_id"] for call in calls] == ["read-1"]
 
 
+@pytest.mark.parametrize(("failure", "reason"), [
+    ("deadline-read", "wall_budget_exceeded"), ("host-deadline", "wall_budget_exceeded"),
+    ("host-allocation", "tool_call_budget_exceeded"), ("after-acceptance", None),
+])
+async def test_ledger_failures_end_the_attempt_as_budget_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, reason: str | None,
+) -> None:
+    """A ledger limit that ends the native stream is an in-flight budget stop, never a retry.
+
+    A host failure after possible acceptance keeps its own handling and is never relabelled.
+    """
+    ledger = BudgetLedger("review", deadline=anyio.current_time() + 60, limit=3)
+    attempts: list[int] = []
+
+    async def stream(*_args: Any, host_tools: HostToolBinding, **_kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
+        attempts.append(1)
+        yield TextEvent(text="partial")
+        if failure == "deadline-read":
+            raise BudgetExhausted("Budget ledger deadline reached")
+        fatal = (HostToolCallBudgetExceeded("allocation spent") if failure == "host-allocation" else
+                 HostToolFatal("deadline spent", code="deadline_expired", preacceptance=failure != "after-acceptance"))
+        raise _RetryableBackendError("native stream failed") from host_tools.fail(fatal)
+
+    backend = ScriptedBackend(model="mock-model", supports_host_tools=True,
+                              retry_policy=RetryPolicy(attempts=2, base_delay_s=0.0, max_delay_s=0.0))
+    monkeypatch.setattr(backend, "execute", stream)
+    binding = HostToolBinding(budget=ledger, accept=lambda payload: payload)
+    with anyio.fail_after(5), (contextlib.nullcontext() if reason else pytest.raises(_RetryableBackendError)):
+        output, _, stopped = await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW,
+                                             host_tools=binding)
+        assert (output, stopped) == ("partial", reason)
+    assert len(attempts) == 1
+    assert (ledger.stopped.dimension if ledger.stopped else None) == (
+        None if reason is None else "time" if reason == "wall_budget_exceeded" else "tool_calls")
+
+
 @pytest.mark.parametrize("retry", [False, True], ids=["one-attempt", "retry-after-denial"])
 async def test_protected_submission_denials_do_not_trip_the_stream_ceiling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retry: bool,
@@ -357,9 +397,9 @@ async def test_a_deadline_that_cuts_the_ladder_during_backoff_is_still_a_ladder_
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     patch_retry_sleep(monkeypatch, fake)
     monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
-    # 1000 (+300 attempt 1) -> 1300 -> 100 s backoff -> 1400 = the deadline.
+    # 1000 (+300 attempt 1) -> 1300 -> backoff capped at the 100 s left -> 1400 = the deadline.
     backend = _retryable_failing_backend(advance=fake.advance, advance_s=300.0)
-    setattr(backend, "retry_policy", RetryPolicy(attempts=20, base_delay_s=100.0, max_delay_s=100.0))
+    setattr(backend, "retry_policy", RetryPolicy(attempts=20, base_delay_s=200.0, max_delay_s=200.0))
     recorder = make_recorder(tmp_path)
     with anyio.fail_after(5):
         async with recorder:
@@ -653,7 +693,7 @@ async def test_cancelling_one_codex_invocation_leaves_its_shared_backend_sibling
     assert (output, reason) == ("sibling done", None)
 
 
-async def test_pi_review_system_is_scoped_and_preserves_retry_and_stage_spend(tmp_path: Path) -> None:
+async def test_pi_review_system_is_scoped_and_a_retry_regains_its_failed_spend(tmp_path: Path) -> None:
     """Review policy reaches only review invocations; a provider retry regains its failed attempt's calls.
 
     The failed attempt spends the stage's whole allocation, so a ledger that did not

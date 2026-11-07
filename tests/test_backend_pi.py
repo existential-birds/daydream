@@ -1140,7 +1140,7 @@ async def test_pi_idle_window_follows_active_tool_calls(
         assert stopped.value.timeout_s == pytest.approx(expected_window) and stopped.value.retryable is True
     else:
         cause = stopped.value.__cause__
-        assert isinstance(stopped.value, BudgetExhausted) and stopped.value.dimension == "time"
+        assert isinstance(stopped.value, BudgetExhausted)
         assert isinstance(cause, StreamStalledError) and cause.timeout_s == pytest.approx(deadline_s)
     assert len(spawner.procs) == 1 and spawner.procs[0].reaped
     # Garbage, negative or non-finite overrides never disable or shorten the window; zero disables it.

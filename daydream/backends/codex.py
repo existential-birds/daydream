@@ -26,7 +26,6 @@ from typing import Any
 
 from daydream import git_ops
 from daydream.backends import (
-    DEFAULT_CODEX_TERMINAL_DRAIN_TIMEOUT_S,
     AgentEvent,
     BackendExecutionInput,
     CodexRequestConfig,
@@ -537,10 +536,10 @@ class CodexBackend:
         self.model = model
         self.reasoning_effort = reasoning_effort
         self._execution_input = execution_input
-        self._terminal_drain_timeout_s = (execution_input.codex_terminal_drain_timeout_s if execution_input
-                                          else DEFAULT_CODEX_TERMINAL_DRAIN_TIMEOUT_S)
-        self._process_reap_timeout_s = execution_input.codex_process_reap_timeout_s if execution_input else 5.0
-        self._cleanup_timeout_s = execution_input.codex_cleanup_timeout_s if execution_input else 10.0
+        allowances = execution_input or BackendExecutionInput  # field defaults are class attributes
+        self._terminal_drain_timeout_s = allowances.codex_terminal_drain_timeout_s
+        self._process_reap_timeout_s = allowances.codex_process_reap_timeout_s
+        self._cleanup_timeout_s = allowances.codex_cleanup_timeout_s
         if execution_input is not None:
             self.fanout_concurrency = execution_input.fanout_concurrency
             self.retry_policy = execution_input.retry_policy

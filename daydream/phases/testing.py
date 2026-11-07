@@ -226,22 +226,6 @@ def _build_fix_prompt(
     return "\n".join(parts) + f"\n\n{GENERATED_FILES_PROMPT_RULE}\n" + _build_fix_style_suffix(concise_mode)
 
 
-def _build_repair_budget_clause(wall_budget_s: float) -> str:
-    """State the allowance the host will actually enforce, and nothing more.
-
-    A repair turn is wall-clock bounded only, so it says so instead of implying a
-    tool-call cap that does not exist.
-    """
-    return (
-        f"\nTurn budget: {wall_budget_s:g}s of wall clock for this whole turn, and "
-        "no tool-call cap is enforced, so spend the calls the diagnosis needs. "
-        "Reaching the wall clock ends the turn mid-work: the partial "
-        "edits are kept and recorded, and the turn is not asked to verify them. "
-        "Prioritise the most likely root cause and land that fix rather than "
-        "covering every candidate.\n"
-    )
-
-
 def _repair_turn_wall_budget_s(
     config: Any,
     *,
@@ -280,29 +264,23 @@ def _repair_turn_wall_budget_s(
     return min(phase_bound, repair_bound)
 
 
-def _compose_repair_prompt(
-    output: str = "",
-    feedback_items: list[dict[str, Any]] | None = None,
-    *,
-    repo: Path | None = None,
-    concise_mode: bool = False,
-    edit_scope: frozenset[str] = frozenset(),
-    wall_budget_s: float = phase_config.DEFAULT_WALL_BUDGET_S,
-    prompt_body: str | None = None,
-) -> str:
-    """Assemble the whole repair prompt: findings, edit authority, and real budget.
+def _compose_repair_prompt(prompt_body: str, *, edit_scope: frozenset[str], wall_budget_s: float) -> str:
+    """Add edit authority and the real budget to the registry's ``fix`` prompt.
 
     One composer, so the enforcement contract (authorized edit scope) and the
-    debugging workflow cannot drift into a prompt that contradicts itself.
-    ``prompt_body`` carries an extension's override of the ``fix`` prompt; when
-    absent the default renderer runs here.
+    debugging workflow cannot drift into a prompt that contradicts itself. The
+    turn is wall-clock bounded only, so the clause states no tool-call cap.
     """
-    prompt = prompt_body if prompt_body is not None else _build_fix_prompt(
-        output, feedback_items, repo=repo, concise_mode=concise_mode,
-    )
     if edit_scope:
-        prompt += _build_fix_scope_clause(edit_scope, edit_scope)
-    return prompt + _build_repair_budget_clause(wall_budget_s)
+        prompt_body += _build_fix_scope_clause(edit_scope, edit_scope)
+    return prompt_body + (
+        f"\nTurn budget: {wall_budget_s:g}s of wall clock for this whole turn, and "
+        "no tool-call cap is enforced, so spend the calls the diagnosis needs. "
+        "Reaching the wall clock ends the turn mid-work: the partial "
+        "edits are kept and recorded, and the turn is not asked to verify them. "
+        "Prioritise the most likely root cause and land that fix rather than "
+        "covering every candidate.\n"
+    )
 
 
 def _build_setup_investigator_prompt(test_output: str) -> str:
@@ -624,15 +602,12 @@ async def phase_test_and_heal(
             allow_standalone=allow_standalone,
         )
         fix_prompt = _compose_repair_prompt(
-            output, feedback_items,
-            repo=work.repo,
-            concise_mode=_backend_concise_fix_prompts(repair_instance),
-            edit_scope=footprint.run_allowed_paths,
-            wall_budget_s=wall_budget_s,
-            prompt_body=get_registry().prompt("fix")(
+            get_registry().prompt("fix")(
                 output, feedback_items, repo=work.repo,
                 concise_mode=_backend_concise_fix_prompts(repair_instance),
             ),
+            edit_scope=footprint.run_allowed_paths,
+            wall_budget_s=wall_budget_s,
         )
         fix_prompt = append_extended_facts(fix_prompt, recipe)
         input_tree_key = capture_tree_key()

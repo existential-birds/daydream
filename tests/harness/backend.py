@@ -28,8 +28,8 @@ _DEFAULT_TURN: Turn = (ResultEvent(structured_output=None, continuation=None),)
 
 
 class ScriptedBackend:
-    """Record execute arguments in calls and expose ordered prompt, continuation,
-    schema and read-only projections. Count cancellation separately."""
+    """Record execute arguments in calls and expose ordered prompt, schema and
+    read-only projections. Count cancellation separately."""
 
     def __init__(self, script: Sequence[Turn] | None = None, *, events: Turn | None = None,
         responses_by_schema: Sequence[tuple[dict[str, Any] | None, Turn]] | None = None,
@@ -72,10 +72,6 @@ class ScriptedBackend:
     def last_prompt(self) -> str:
         """The most recent prompt, or ``""`` if never called."""
         return self.calls[-1]["prompt"] if self.calls else ""
-
-    @property
-    def continuations(self) -> list[Any]:
-        return [call["continuation"] for call in self.calls]
 
     @property
     def schemas(self) -> list[dict[str, Any] | None]:

@@ -364,14 +364,9 @@ class BudgetLedger:
 
 
 class BudgetExhausted(Exception):
-    """A ledger limit, not a liveness failure, ended a backend read."""
+    """The ledger deadline, not a liveness failure, ended a backend read."""
 
     retryable = False
-
-    def __init__(self, dimension: BudgetDimension) -> None:
-        super().__init__("Budget ledger deadline reached" if dimension == "time"
-                         else "Budget ledger tool-call allocation exhausted")
-        self.dimension = dimension
 
 
 class ReviewBudgetExceeded(RuntimeError):

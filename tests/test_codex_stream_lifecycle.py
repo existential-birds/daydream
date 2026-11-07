@@ -16,16 +16,19 @@ from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.codex import CodexBackend, CodexError
 from daydream.backends.lifecycle import BackendLifecycleCollector
 from daydream.trajectory import DaydreamPhase
-from tests.harness.codex_lifecycle_cli import LifecycleMode, install_codex_lifecycle_cli
+from tests.harness.codex_lifecycle_cli import CodexLifecycleCli, LifecycleMode, install_codex_lifecycle_cli
 from tests.harness.codex_replay import make_mock_process
 from tests.harness.processes import wait_for_process_group_gone
 from tests.harness.trajectory import make_recorder
 
 
-def _bounded_codex(**allowances: Any) -> CodexBackend:
-    """Shorten postterminal allowances through the run-owned input after the fixture is on PATH."""
+def _bounded_codex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: LifecycleMode,
+                   **allowances: Any) -> tuple[CodexLifecycleCli, CodexBackend]:
+    """Put the fixture on PATH, then shorten postterminal allowances through the run-owned input."""
+    fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode=mode)
+    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
     execution = BackendExecutionInput.from_environment(dict(os.environ), backend="codex")
-    return CodexBackend(model="fixture-model", execution_input=replace(execution, **allowances))
+    return fixture, CodexBackend(model="fixture-model", execution_input=replace(execution, **allowances))
 
 
 @pytest.mark.parametrize("mode,category,expected_metrics", [
@@ -36,9 +39,7 @@ async def test_delayed_consumer_drains_finished_child_without_skipping_latest_tu
     category: str | None, expected_metrics: int,
 ) -> None:
     """Consumer latency cannot invent drain failure or hide buffered latest-turn events."""
-    fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode=mode)
-    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
-    backend = _bounded_codex(codex_terminal_drain_timeout_s=0.2)
+    fixture, backend = _bounded_codex(tmp_path, monkeypatch, mode, codex_terminal_drain_timeout_s=0.2)
     seen: list[AgentEvent] = []
     error: CodexError | None = None
     collector = BackendLifecycleCollector(attempt=1, started_at=asyncio.get_running_loop().time(),
@@ -82,10 +83,8 @@ async def test_finished_child_postdeadline_chatter_cannot_remove_the_drain_bound
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Even a zero-exit child cannot force unlimited buffered event processing after expiry."""
-    fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode="completed_chatter")
-    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
+    _, backend = _bounded_codex(tmp_path, monkeypatch, "completed_chatter", codex_terminal_drain_timeout_s=0.2)
     seen: list[AgentEvent] = []
-    backend = _bounded_codex(codex_terminal_drain_timeout_s=0.2)
     async with asyncio.timeout(3):
         with pytest.raises(CodexError, match="terminal_drain") as failure:
             async for event in backend.execute(tmp_path, "synthetic lifecycle request"):
@@ -105,11 +104,9 @@ async def test_completed_codex_turn_has_bounded_failure_and_retains_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: LifecycleMode, stage: str,
 ) -> None:
     """Drain/reap expiry retains public terminal metrics without reporting success."""
-    fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode=mode)
-    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
+    fixture, backend = _bounded_codex(tmp_path, monkeypatch, mode, codex_terminal_drain_timeout_s=0.15,
+                                      codex_process_reap_timeout_s=0.15, codex_cleanup_timeout_s=0.5)
     seen: list[AgentEvent] = []
-    backend = _bounded_codex(codex_terminal_drain_timeout_s=0.15, codex_process_reap_timeout_s=0.15,
-                             codex_cleanup_timeout_s=0.5)
     terminal_observed = False
     # Cold fixture startup is separate from the bounded postterminal behavior.
     async with asyncio.timeout(15) as watchdog:
@@ -176,10 +173,9 @@ async def test_codex_cleanup_expiry_preserves_primary_drain_error_and_recorded_e
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A second cleanup expiry cannot replace a completed turn's drain failure or evidence."""
-    fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode="terminal_open_stdout")
-    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
+    fixture, backend = _bounded_codex(tmp_path, monkeypatch, "terminal_open_stdout",
+                                      codex_terminal_drain_timeout_s=0.1, codex_cleanup_timeout_s=0.000001)
     recorder = make_recorder(tmp_path)
-    backend = _bounded_codex(codex_terminal_drain_timeout_s=0.1, codex_cleanup_timeout_s=0.000001)
     async with asyncio.timeout(3):
         with pytest.raises(CodexError, match="terminal_drain") as failure:
             async with recorder:

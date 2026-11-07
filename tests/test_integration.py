@@ -48,18 +48,13 @@ _FULL_FLOW_ISSUE = {"id": 1, "description": "Add type hints to function", "file"
 
 
 class _WorktreeMutatingBackend(PhaseDispatchBackend):
-    """Fake only the backend; fix/commit turns perform the requested real Git edits."""
+    """Fake only the backend; fix turns perform the requested real edit."""
 
     async def execute(
         self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
     ) -> AsyncGenerator[AgentEvent, None]:
         if prompt.startswith("Fix this issue") or prompt.startswith("Fix these"):
             (cwd / "main.py").write_text("def hello() -> str:\n    return 'world'\n")
-        elif prompt.startswith("The daydream changes are already staged"):
-            run_id = prompt.split("Daydream-Run: ", 1)[1].splitlines()[0]
-            version = prompt.split("Daydream-Version: ", 1)[1].splitlines()[0]
-            # The index is pre-staged by _do_commit (issue #543) — commit it.
-            _commit(cwd, f"fix: add type hints\n\nDaydream-Run: {run_id}\nDaydream-Version: {version}")
         async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 

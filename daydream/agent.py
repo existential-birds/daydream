@@ -209,7 +209,7 @@ class _EventStreamScope:
 
 
 _STOP_DIMENSIONS: dict[str | None, BudgetDimension] = {
-    "wall_budget_exceeded": "time", "pipeline_budget_exceeded": "time", "tool_call_budget_exceeded": "tool_calls",
+    "wall_budget_exceeded": "time", "tool_call_budget_exceeded": "tool_calls",
 }
 
 
@@ -220,7 +220,7 @@ def _ledger_stop(exc: Exception, host_tools: HostToolBinding | None) -> str | No
     acceptance; every other failure keeps its own handling.
     """
     if isinstance(exc, BudgetExhausted):
-        return "wall_budget_exceeded" if exc.dimension == "time" else "tool_call_budget_exceeded"
+        return "wall_budget_exceeded"
     fatal = host_tools.fatal_error if host_tools is not None else None
     if fatal is None or not fatal.preacceptance or fatal not in (exc, exc.__cause__):
         return None
@@ -411,10 +411,10 @@ async def run_agent(
                 review_stage_scope_id=review_stage_scope_id,
                 host_tools=host_tools,
             )
-        except Exception:
+        finally:
+            # One stop record per budget stop, including one that ends in an exception.
             if turn.stopped is not None:
                 observed.attrs(turn.stopped.attributes())
-            raise
         if evidence is not None and review_limits is not None and result[2] in {
             "wall_budget_exceeded", "tool_call_budget_exceeded",
         }:
@@ -460,9 +460,6 @@ async def run_agent(
             result = (result[0], result[1], "pipeline_budget_exceeded")
         if output_schema is not None and not investigation and not isinstance(result[0], str):
             present_result(console, context.policy, progress_callback, result[0])
-        if (dimension := _STOP_DIMENSIONS.get(result[2])) is not None:
-            # One stop record per budget stop: the invocation ledger's limit, spend and remainder.
-            observed.attrs((turn.stopped or turn.stop(dimension)).attributes())
         observed.output(result[0])
         observed.finish(1 if result[2] else 0, reason=result[2])
         return result

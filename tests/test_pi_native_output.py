@@ -384,7 +384,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     if retried:
         # The late provider failure is retried in a fresh conversation with the identical assignment, and the
         # failed attempt's seven starts are refunded: the retry receives the original fifteen-call allocation.
-        assert assignments_seen.pop(1) == assignments_seen[0]
+        retry_assignment = assignments_seen.pop(1)
+        assert retry_assignment == assignments_seen[0]
         original, repeated = (json.dumps(native_provider.requests[index]["messages"]) for index in (0, 4))
         assert "tool-call allocation is 15 calls" in original and "tool-call allocation is 15 calls" in repeated
         assert ("Retry dispatch-time snapshot (supersedes the earlier invocation allocation): "

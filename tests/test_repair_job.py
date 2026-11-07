@@ -47,18 +47,6 @@ from tests.harness.git_helpers import commit as git_commit, git, init_repo, writ
 _RESULT = ResultEvent(structured_output=None, continuation=None)
 
 
-def _policy(**overrides: Any) -> RepairJobPolicy:
-    """Build a job policy; the four bounds are keyword defaults."""
-    fields: dict[str, Any] = {
-        "execution_s": 1800.0,
-        "job_total_s": 7200.0,
-        "max_executions": 4,
-        "reserve_s": 60.0,
-    }
-    fields.update(overrides)
-    return RepairJobPolicy(**fields)
-
-
 def _job(**overrides: Any) -> RepairJobRecord:
     """Build a job record; the identity and the start-captured policy are defaults."""
     fields: dict[str, Any] = {
@@ -67,7 +55,7 @@ def _job(**overrides: Any) -> RepairJobRecord:
         "failure_identity": "sha256:0123456789abcdef",
         "authorized_scope": ("src/handler.py", "tests/test_a.py"),
         "policy_revision": 3,
-        "policy": _policy(),
+        "policy": RepairJobPolicy(execution_s=1800.0, job_total_s=7200.0, max_executions=4, reserve_s=60.0),
     }
     fields.update(overrides)
     return RepairJobRecord(**fields)
@@ -130,8 +118,8 @@ def test_job_bounds_exhaust_and_operator_grant_is_recorded_apart_from_usage() ->
 
     Replenishment is auditable and separate from historical usage.
     """
-    assert _job(executions=4, policy=_policy(max_executions=4)).next_action() == RepairAction.EXHAUSTED
-    job = _job(consumed_s=7200.0, executions=2, policy=_policy())
+    assert _job(executions=4).next_action() == RepairAction.EXHAUSTED
+    job = _job(consumed_s=7200.0, executions=2)
     assert job.next_action() == RepairAction.EXHAUSTED
     with pytest.raises(ValueError, match="reason"):
         job.grant_allowance(1800.0, reason="   ")

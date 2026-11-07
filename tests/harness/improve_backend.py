@@ -243,9 +243,6 @@ class ImproveStubBackend:
         """
         return None
 
-    async def _post_execute(self, prompt: str, **turn_kwargs: Any,) -> None:
-        """Per-turn hook run after the dispatch body has been fully consumed."""
-
     def _record_call(self, cwd: Path, prompt: str, marker: str, **turn_kwargs: Any) -> None:
         """Append one per-turn call record, stamped with the model observed here."""
         self.calls.append({"cwd": cwd, "prompt": prompt, "output_schema": turn_kwargs.get("output_schema"),
@@ -271,7 +268,6 @@ class ImproveStubBackend:
         else:
             async for event in self._execute_body(cwd, prompt, **turn_kwargs):
                 yield event
-        await self._post_execute(prompt, **turn_kwargs)
 
     async def _execute_body(
         self, cwd: Path, prompt: str, output_schema: Any = None, continuation: Any = None, agents: Any = None,
@@ -633,7 +629,6 @@ class RendezvousImproveBackend(ImproveStubBackend):
         self.closed = dict.fromkeys(self.phase_sizes, 0)
         self.closed_before_cleanup: dict[str, list[bool]] = {phase: [] for phase in self.phase_sizes}
         self.completion_order: dict[str, list[int]] = {phase: [] for phase in self.phase_sizes}
-        self.omit_vet_title: str | None = None
         self.low_confidence_tail = False
 
     async def execute(
@@ -686,10 +681,6 @@ class RendezvousImproveBackend(ImproveStubBackend):
                         provenance = {candidate["vet_id"]: candidate["provenance"] for candidate in candidates}
                         for verdict in event.structured_output["verdicts"]:
                             verdict["provenance"] = provenance[verdict["vet_id"]]
-                        if self.omit_vet_title is not None and any(
-                            candidate["title"] == self.omit_vet_title for candidate in candidates
-                        ):
-                            event.structured_output["verdicts"] = event.structured_output["verdicts"][:-1]
                 yield event
         finally:
             self.active[phase] -= 1

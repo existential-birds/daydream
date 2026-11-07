@@ -26,7 +26,7 @@ process.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -99,15 +99,6 @@ class RepairJobPolicy:
     job_total_s: float = DEFAULT_REPAIR_JOB_WALL_S
     max_executions: int = DEFAULT_REPAIR_MAX_EXECUTIONS
     reserve_s: float = REPAIR_JOB_RESERVE_S
-
-    def payload(self) -> dict[str, Any]:
-        """JSON-serializable form of the captured policy."""
-        return {
-            "execution_s": self.execution_s,
-            "job_total_s": self.job_total_s,
-            "max_executions": self.max_executions,
-            "reserve_s": self.reserve_s,
-        }
 
     @classmethod
     def from_payload(cls, raw: object) -> RepairJobPolicy:
@@ -322,7 +313,7 @@ class RepairJobRecord:
             "failure_identity": self.failure_identity,
             "authorized_scope": list(self.authorized_scope),
             "policy_revision": self.policy_revision,
-            "policy": self.policy.payload(),
+            "policy": asdict(self.policy),
             "consumed_s": self.consumed_s,
             "cumulative_cost_usd": self.cumulative_cost_usd,
             "granted_allowance_s": self.granted_allowance_s,
