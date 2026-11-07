@@ -23,11 +23,11 @@ prove correspondence, not understanding, reads, or executed checks.
 Publish findings and typed coverage atomically, bound to the captured run, head,
 merge base, diff key, and scope inventory. Preserve admitted partial findings and
 failure reasons. Incomplete/failed results can post COMMENT notices but cannot
-approve or resolve stale threads. A complete-empty review posts an approval when
-the policy below allows one. Otherwise it posts a COMMENT saying it is complete only
-when the latest Daydream review on its head or an ancestor, by the same login and
-carrying the Daydream footer, is such a notice, and posts nothing in every other
-case. Earlier reviews are never edited, dismissed or minimized.
+approve or resolve stale threads. When a complete review with no findings has
+nothing else to post and approval is not enabled, it posts a COMMENT saying it is
+complete if the latest Daydream review on its head or an ancestor, by the same login
+and carrying the Daydream footer, is such a notice. Earlier reviews are never
+edited, dismissed or minimized.
 Cache/resume must validate the same identities and current typed target
 attribution; missing/damaged proofs restart review.
 If the expected source becomes unavailable, terminal export retains validated
