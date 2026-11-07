@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Committed review (`run_committed_review`) now runs on Claude as well as Pi: select
+  `RunConfig(backend="claude")`. Claude serves `review_source`, `review_admit` and the
+  terminal `structured_output` from a fresh invocation-local Agent SDK MCP server bound
+  to the same host authority, on both SDK client startup routes, with readiness checked
+  before any provider request and the dangerous-command, background-Bash and read-only
+  guards in force. Claude has no sole-terminal-call rule or output-limit preflight; see
+  [Claude host tools](docs/runtime.md#claude-host-tools). Hosted and immutable inputs stay
+  Pi-only. `mcp` is now a direct dependency
+  ([#1647](https://github.com/existential-birds/daydream/issues/1647)).
+
 ### Changed
 
 - **Breaking (0.y.z):** Time and tool-call budgets live on one host ledger per

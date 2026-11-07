@@ -16,7 +16,7 @@ import secrets
 from typing import Any
 
 from daydream import clock, host_tools as policy
-from daydream.host_tools import HostToolBinding, HostToolFatal, HostToolRejected
+from daydream.host_tools import HostToolBinding, HostToolEndpoint, HostToolFatal, HostToolRejected
 
 
 def _bounded_items(value: Any, remaining: int, depth: int = 0) -> int:
@@ -36,14 +36,11 @@ def _bounded_items(value: Any, remaining: int, depth: int = 0) -> int:
     return remaining
 
 
-class PiHostToolServer:
+class PiHostToolServer(HostToolEndpoint):
     """A closable callback endpoint owned by one execution, never a cached backend."""
 
     def __init__(self, binding: HostToolBinding) -> None:
-        self.binding = binding
-        self.ready = False
-        self.closed = False
-        self._closing = False
+        super().__init__(binding)
         self._secret = secrets.token_urlsafe(32)
         self._server: asyncio.Server | None = None
         self._tasks: set[asyncio.Task[None]] = set()
@@ -59,11 +56,8 @@ class PiHostToolServer:
             "max_frame_bytes": policy._MAX_FRAME_BYTES,
             "max_argument_bytes": policy._MAX_ARGUMENT_BYTES,
             **({"allowed_tools": sorted(self.binding.allowed_tools)} if self.binding.allowed_tools is not None else {}),
-            **({"host_tools": self._host_schemas()} if self.binding.host_tools else {}),
+            **({"host_tools": self.host_schemas()} if self.binding.host_tools else {}),
         }
-
-    def _host_schemas(self) -> dict[str, Any]:
-        return {name: tool.schema for name, tool in sorted(self.binding.host_tools.items())}
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(self._connected, "127.0.0.1", 0,
@@ -87,7 +81,7 @@ class PiHostToolServer:
                 error = HostToolFatal("Native host callback transport failed unexpectedly", code="callback_failed",
                                       preacceptance=not self.binding.possibly_accepted)
                 error.__cause__ = completed.exception()
-                self._fail(error)
+                self.fail(error)
 
         task.add_done_callback(finished)
 
@@ -113,15 +107,6 @@ class PiHostToolServer:
         if policy._valid_call_id(call_id):
             response["id"] = call_id
         return response
-
-    def _fatal(self, message: str, *, code: policy.HostToolFailureCode) -> HostToolFatal:
-        return self._fail(HostToolFatal(message, code=code, preacceptance=not self.binding.possibly_accepted))
-
-    def _fail(self, error: HostToolFatal) -> HostToolFatal:
-        # A retired endpoint cannot revoke a newer attempt on the same binding.
-        if self._closing or not self.binding.authority_open:
-            return self.binding.fatal_error or error
-        return self.binding.fail(error)
 
     async def _request(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         admitting = complete = False
@@ -159,13 +144,12 @@ class PiHostToolServer:
                     raise ValueError("chunked requests are unsupported")
                 length = headers.get("content-length", "0")
                 if len(length) > 20 or not length.isdigit() or int(length) > policy._MAX_FRAME_BYTES:
-                    await self._reply(writer, 413, self._error(self._fatal(
+                    await self._reply(writer, 413, self._error(self.fatal(
                         f"Host request exceeds the {policy._MAX_FRAME_BYTES} whole-frame byte limit",
                         code="invalid_frame")))
                     return
                 body = await reader.readexactly(int(length))
-                if self._closing or (not self.binding.authority_open and not self.binding.accepted
-                                     and self.binding.fatal_error is None):
+                if not self.current():
                     return
                 value = json.loads(body) if body else {}
                 if not isinstance(value, dict):
@@ -175,8 +159,8 @@ class PiHostToolServer:
                     if path != "/submit":
                         self.binding.ensure_open()
                     if not self.ready:
-                        raise self._fatal("Native tool readiness was not established before admission/submission",
-                                          code="native_readiness")
+                        raise self.fatal("Native tool readiness was not established before admission/submission",
+                                         code="native_readiness")
                 try:
                     _bounded_items(value, policy._MAX_ITEMS)
                 except (ValueError, UnicodeError, RecursionError) as exc:
@@ -194,18 +178,19 @@ class PiHostToolServer:
                     await self._reply(writer, 200, {"ready": self.ready, "remaining_ms": remaining_ms})
                     return
                 if method != "POST":
-                    await self._reply(writer, 405, self._error(self._fatal(
+                    await self._reply(writer, 405, self._error(self.fatal(
                         "Native host endpoint requires POST", code="invalid_frame"), submission_id))
                     return
                 if path == "/ready":
                     self.binding.ensure_open()
+                    host = value.get("host_tools", {})
                     if (not {"tool_name", "schema"} <= set(value) <= {"tool_name", "schema", "native_limits",
                                                                          "host_tools"}
-                            or self.binding.schema is None
-                            or value["tool_name"] != policy.NATIVE_SUBMIT or value["schema"] != self.binding.schema
-                            or value.get("host_tools", {}) != self._host_schemas()):
-                        raise self._fatal("Native terminal or host tool schemas differ from the bound schemas",
-                                          code="native_readiness")
+                            or value["tool_name"] != policy.NATIVE_SUBMIT
+                            or not isinstance(host, dict) or policy.NATIVE_SUBMIT in host):
+                        raise self.fatal("Native terminal or host tool schemas differ from the bound schemas",
+                                         code="native_readiness")
+                    self.confirm({**host, policy.NATIVE_SUBMIT: value["schema"]})
                     # Refuse a model that cannot hold this invocation before any provider work.
                     self.binding.check_native_limits(value.get("native_limits"))
                     self.ready = True
@@ -239,21 +224,21 @@ class PiHostToolServer:
                     complete = True
                     await self._reply(writer, 200, {"id": submission_id, "result": result})
                     return
-                await self._reply(writer, 404, self._error(self._fatal(
+                await self._reply(writer, 404, self._error(self.fatal(
                     "Unknown native host endpoint", code="invalid_frame"), submission_id))
         except (HostToolRejected, HostToolFatal) as exc:
             complete = True
             if isinstance(exc, HostToolRejected) and submitting and self.binding.possibly_accepted:
                 # A trusted callback failure after its mutation boundary cannot
                 # be presented as a correctable semantic rejection.
-                exc = self._fatal("Host acceptance outcome is unconfirmed", code="callback_failed")
+                exc = self.fatal("Host acceptance outcome is unconfirmed", code="callback_failed")
             await self._reply(writer, 200, self._error(exc, submission_id))
         except (ValueError, UnicodeError, RecursionError, asyncio.IncompleteReadError) as exc:
             if authenticated:
                 failure = HostToolFatal("Invalid bounded native host request cannot be correlated safely",
                                         code="invalid_frame", preacceptance=not self.binding.possibly_accepted)
                 failure.__cause__ = exc
-                error = self._fail(failure)
+                error = self.fail(failure)
                 await self._reply(writer, 400, self._error(error, submission_id))
             else:
                 await self._reply(writer, 400, {"error": "Invalid bounded host frame"})
@@ -263,7 +248,7 @@ class PiHostToolServer:
             failure = HostToolFatal("Native host callback failed unexpectedly", code="callback_failed",
                                     preacceptance=not self.binding.possibly_accepted)
             failure.__cause__ = exc
-            error = self._fail(failure)
+            error = self.fail(failure)
             # Unexpected callback failure may have crossed the acceptance boundary;
             # keep its native result generic and prohibit replay via the binding.
             try:

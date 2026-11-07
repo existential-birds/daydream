@@ -46,6 +46,7 @@ from daydream.review_source_refs import source_options
 from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
 from daydream.run_config import RunConfig
 from daydream.trajectory import get_current_recorder
+from tests.harness.claude_provider import LoopbackProvider, Turn, claude_cli_env, tool
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import (
     commit,
@@ -670,6 +671,21 @@ async def test_hosted_policy_refuses_unsupported_authority_before_source_prepara
     """Each unsupported authority is refused before any checkout effect; the agent-dir removal runs last."""
     for fault in ("preparation", "backend", "invalid-model", "output-overlap", "missing-agent-dir"):
         await _hosted_policy_case(review_inputs, operator_policy, fault)
+
+
+async def test_backends_without_host_tools_are_refused_before_source_preparation(
+    review_inputs: StageInputFactory,
+) -> None:
+    """Discovery and challenge need native host tools; others fail before any checkout or dispatch."""
+    repo = review_inputs.work.source
+    before = git(repo, "worktree", "list", "--porcelain")
+    for name in ("codex", "osprey"):
+        with pytest.raises(ValueError, match=f"requires a backend with native host tools.*'{name}'"):
+            await run_committed_review(CommittedReviewRequest(
+                repo, review_inputs.revision["merge_base_sha"], config=RunConfig(backend=name, output_mode="review"),
+            ))
+    assert git(repo, "worktree", "list", "--porcelain") == before
+    assert not (repo / ".daydream").exists()
 
 
 async def _hosted_policy_case(
@@ -2005,3 +2021,95 @@ async def test_failed_revising_challenge_is_superseded_by_the_challenge_that_jud
     work = {record["work_id"]: record for record in sealed["work"]}
     assert work["work:2"]["state"] == "superseded" and work["work:3"]["parents"] == ["work:2"]
     assert sealed["findings"][0]["revised_by"] == "work:2" and sealed["terminal_result"]["analysis_state"] == "complete"
+
+
+async def test_claude_committed_review_completes_through_the_run_local_sdk_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real bundled CLI reviews captured source and challenges in a distinct conversation.
+
+    Discovery reads exact captured bytes through review_source, corrects a domain rejection and
+    submits; the fresh challenge confirms the claim. Outputs, trajectory, native contexts and
+    execution entries come from the production program, not a substituted dispatcher.
+    """
+    repo = tmp_path / "subject"
+    base = {"api.py": "VALUE = 1\n", "caller.py": "TOTAL = 10 / 1\n"}
+    seed_feature_branch(repo, base=base, feature={name: text.replace("1", "0") for name, text in base.items()})
+    steps: dict[str, int] = {}
+    claims: list[dict[str, Any]] = []
+
+    def assignment(body: dict[str, Any]) -> dict[str, Any]:
+        system = body["system"]
+        text = system if isinstance(system, str) else "".join(block.get("text", "") for block in system)
+        return _assignment({"review_system_instructions": text})
+
+    def last_result(body: dict[str, Any]) -> tuple[bool, list[str]]:
+        block = [item for message in body["messages"] if isinstance(message["content"], list)
+                 for item in message["content"] if item.get("type") == "tool_result"][-1]
+        content = block["content"] if isinstance(block["content"], list) else [{"text": block["content"]}]
+        return block.get("is_error", False), [part["text"] for part in content]
+
+    def respond(body: dict[str, Any]) -> Turn:
+        work = assignment(body)
+        step = steps[work["kind"]] = steps.get(work["kind"], 0) + 1
+        if work["kind"] == "challenge":
+            claim = work["claims"][0]
+            verdict = {"uid": claim["uid"], "revision": claim["revision"], "verdict": "confirmed",
+                       "grounds": "The caller divides by the changed value.", "evidence_refs": []}
+            return (tool("verdict", "mcp__daydream__structured_output", {"verdicts": [verdict], "claims": []})
+                    if step == 1 else Turn(text="Challenge complete."))
+        targets = work["work"]["targets"]["ids"]
+        decisions = [{"target_id": target, "status": "reviewed", "reason": "Captured change inspected.",
+                      "evidence_refs": []} for target in targets]
+        if step == 1:
+            return tool("lookup", "mcp__daydream__review_source", {"target_id": targets[0], "path": None,
+                                                                   "cursor": None})
+        failed, texts = last_result(body)
+        if step == 2:
+            # Exact captured diff bytes arrive as their own block beside the target's source options.
+            assert not failed and texts[1].startswith("diff --git")
+            option = next(item for item in json.loads(texts[0])["target"]["source_options"] if item["side"] == "new")
+            claims.append({"uid": "", "revision": 0, "source_uids": [], "title": "Zero divides the caller",
+                           "payload": {"claim": "VALUE becomes zero.", "trigger": "The caller divides by it.",
+                                       "consequence": "Requests fail.", "grounds": "The captured change sets zero.",
+                                       "file": option["path"], "line": 1, "evidence_refs": [
+                                           {key: option[key] for key in ("source_id", "basis", "source_range")}]}})
+            return tool("unplanned", "mcp__daydream__structured_output",
+                        {"targets": [{**decisions[0], "target_id": "unplanned"}], "claims": []})
+        if step == 3:
+            assert failed and "choose a planned target" in texts[0]
+            return tool("submit", "mcp__daydream__structured_output", {"targets": decisions, "claims": claims})
+        return Turn(text="Discovery complete.")
+
+    provider = LoopbackProvider(respond)
+    claude_cli_env(monkeypatch, provider, tmp_path / "home")
+    request = CommittedReviewRequest(repo, git(repo, "rev-parse", "main"), config=RunConfig(
+        backend="claude", output_mode="review",
+        review_profile=_profile_with_pipeline(reviewer_investigation_budget_s=90, reviewer_tool_call_budget=10)))
+    with provider.serving():
+        result = await run_committed_review(request)
+    provider.check()
+    value = result.to_dict()
+    assert result.output_installed and result.capture_state == "complete"
+    assert json.loads((repo / ".daydream/committed-review.json").read_text()) == value
+    assert "Zero divides the caller" in (repo / ".review-output.md").read_text()
+    assert [claim["disposition"] for claim in value["claims"]] == ["confirmed"] and len(value["findings"]) == 1
+    assert value["terminal_result"]["analysis_state"] == "complete"
+    contexts = value["settings"]["native_contexts"]
+    assert {kind: (context["backend"], context["phase"]) for kind, context in contexts.items()} == {
+        "discovery": ("claude", "review"), "challenge": ("claude", "arbiter")}
+    assert all(len(context["configuration_identity"]) == 64 for context in contexts.values())
+    assert [{key: entry[key] for key in ("assignment", "accepted", "settled", "cleanup_complete", "reason",
+                                         "observed_starts", "overshoot")} for entry in value["execution"]] == [
+        {"assignment": "discovery", "accepted": True, "settled": True, "cleanup_complete": True, "reason": None,
+         "observed_starts": 3, "overshoot": 0},
+        {"assignment": "challenge", "accepted": True, "settled": True, "cleanup_complete": True, "reason": None,
+         "observed_starts": 1, "overshoot": 0}]
+    # The challenge is a distinct native conversation: it starts without discovery history.
+    challenge = next(body for body in provider.requests if assignment(body)["kind"] == "challenge")
+    assert not any(message["role"] == "assistant" for message in challenge["messages"])
+    assert "discovery assignment" not in json.dumps(challenge["messages"])
+    trajectory = root_trajectory(repo)
+    assert trajectory["session_id"] == value["run_id"]
+    calls = [call["function_name"] for step in trajectory["steps"] for call in step.get("tool_calls") or []]
+    assert calls.count("mcp__daydream__structured_output") == 3

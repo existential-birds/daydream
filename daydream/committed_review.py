@@ -1,4 +1,4 @@
-"""Review captured source with native Pi, revision-sensitive challenge and sealed coverage."""
+"""Review captured source with native host tools, revision-sensitive challenge and sealed coverage."""
 
 from __future__ import annotations
 
@@ -27,8 +27,7 @@ from daydream.artifact_visibility import (
     resolve_private_workspace_owner,
 )
 from daydream.artifacts.ownership import operational_worktree_root
-from daydream.backends import BackendExecutionInput, effective_fanout_concurrency
-from daydream.backends.pi import PiBackend
+from daydream.backends import Backend, BackendExecutionInput, effective_fanout_concurrency
 from daydream.committed_review_model import (
     ADMIT_TOOL,
     ASSIGNMENT_POLICIES,
@@ -83,7 +82,7 @@ from daydream.review_result import (
 )
 from daydream.review_source_refs import _SubmissionSources, source_id
 from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
-from daydream.run_config import RunConfig
+from daydream.run_config import RunConfig, _resolved_backend_name
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 from daydream.runner import _resolve_backend
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow
@@ -842,19 +841,19 @@ async def _run_committed_review(
 
     source = request.source.resolve(strict=True)
     hosted = request.hosted_policy
+    hosted_input: BackendExecutionInput | None = None
     if hosted is None:
         config = deepcopy(request.config)
-        execution_input = BackendExecutionInput.from_environment(dict(os.environ), backend="pi")
         config.target = str(source)
         if config.file_config is None:
             config.file_config = load_file_config(source)
     else:
         from daydream.config_file import DaydreamFileConfig
 
-        execution_input = hosted.execution_input(source)
+        hosted_input = hosted.execution_input(source)
         config = RunConfig(
             target=str(source), backend=hosted.backend, model=hosted.model, output_mode="review",
-            reasoning_effort=execution_input.pi_thinking or "high", file_config=DaydreamFileConfig(),
+            reasoning_effort=hosted_input.pi_thinking or "high", file_config=DaydreamFileConfig(),
             review_profile=ResolvedProfile(deepcopy(hosted.profile.profile), "operator"),
             archive=False, run_eval=False, non_interactive=True,
         )
@@ -887,7 +886,8 @@ async def _run_committed_review(
         raise ValueError("pipeline.reviewer_tool_call_budget must preserve both discovery and challenge "
                          "submission capacity")
     strategies = build_default_profile().strategies | profile.profile.strategies
-    backends: dict[str, PiBackend] = {}
+    backends: dict[str, Any] = {}
+    inputs_by_kind: dict[str, BackendExecutionInput] = {}
     settings: dict[str, Any] = {
         "profile_name": profile.name,
         "profile_digest": profile.digest,
@@ -923,11 +923,19 @@ async def _run_committed_review(
             key: provenance[key] for key in ("title", "body", "context")
         }
     for kind, phase in [("discovery", "review"), ("challenge", "arbiter")]:
-        backend = _resolve_backend(config, phase, cwd=source, execution_input=execution_input)
-        if not isinstance(backend, PiBackend):
-            raise ValueError("committed review currently requires native Pi for discovery and challenge")
+        name = _resolved_backend_name(config, phase)
+        refusal = (f"committed review {kind} requires a backend with native host tools (pi or claude); "
+                   f"{name!r} does not serve them")
+        try:
+            inputs_by_kind[kind] = (hosted_input if hosted_input is not None
+                                    else BackendExecutionInput.from_environment(dict(os.environ), backend=name))
+        except ValueError:
+            raise ValueError(refusal) from None
+        backend: Any = _resolve_backend(config, phase, cwd=source, execution_input=inputs_by_kind[kind])
+        if not getattr(backend, "supports_host_tools", False):
+            raise ValueError(refusal)
         backends[kind] = backend
-        settings["native_contexts"][kind] = {"backend": "pi", **backend.bind_review_context(source), "phase": phase}
+        settings["native_contexts"][kind] = {"backend": name, **backend.bind_review_context(source), "phase": phase}
         if hosted is not None:
             await backend.validate_hosted_policy()
     if prepared_source is not None:
@@ -989,7 +997,8 @@ async def _run_committed_review(
             None if hosted is None else hosted.output_dir / "trajectory.json",
         )
         capture = _RunWriteCapture(session_id=run_id)
-        artifacts = _RunArtifacts(session, owner, trajectory, capture, None, execution_input=execution_input)
+        artifacts = _RunArtifacts(session, owner, trajectory, capture, None,
+                                  execution_input=inputs_by_kind["discovery"])
         if request.immutable_input is None:
             assert work.captured_source is not None
             diff = work.captured_source.diff
@@ -1139,7 +1148,7 @@ class _Schedule:
     capacity carries forward and overshoot is observed, never charged.
     """
 
-    def __init__(self, review: Review, backends: dict[str, PiBackend], tool_calls: int,
+    def __init__(self, review: Review, backends: dict[str, Backend], tool_calls: int,
                  settings: dict[str, Any], *, started: float, deadline: float, adaptive: bool) -> None:
         self.review, self.backends, self.settings = review, backends, settings
         self.ledger = BudgetLedger("committed", deadline=deadline, limit=tool_calls, investigation=True,

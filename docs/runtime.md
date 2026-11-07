@@ -64,7 +64,9 @@ because a failed replacement may preserve an older complete artifact.
 ## Committed-review request/result
 
 `daydream.committed_review.run_committed_review(CommittedReviewRequest(source, base))`
-reviews a captured committed diff through native Pi. `local=True` selects the net
+reviews a captured committed diff through a native host-tool backend, Pi or Claude
+([capabilities](extensions.md#invocation-scoped-host-tools)); discovery and challenge
+backends without host tools are refused before source preparation. `local=True` selects the net
 base-to-final-working change described below. Committed capture excludes working-tree
 edits, external diff drivers and text conversion; inert materialization supplies raw
 Git blobs even when the original checkout uses filters/EOL conversion.
@@ -118,7 +120,8 @@ settings (Pi 1.4.0 defaults when unset, labelled as such). The host requires the
 instructions and prompt, the largest single tool result (64 KiB), one recommended
 32 KiB batch, the compaction reserve and kept context to fit, estimated at three
 bytes per token, and requires output for that batch; otherwise it fails with an
-actionable `native_capacity` error. Larger batches up to the 128 KiB argument bound
+actionable `native_capacity` error. Claude exposes no output limit before work, so it
+has no capacity preflight; see [Claude host tools](#claude-host-tools). Larger batches up to the 128 KiB argument bound
 remain admissible; an oversized `review_admit` is a correctable rejection. Daydream never writes native model registries or settings.
 
 Review alone owns planned targets, semantic claim revisions, mandatory challenge
@@ -142,6 +145,8 @@ Without a hosted policy, Pi's CLI resolves model/provider/thinking/trust/authent
 configuration context; stock read/search tools, model-visible cwd and AGENTS context
 use captured source. Daydream forwards explicit phase/environment overrides and
 rejects drift in opaque configuration identities, while credentials remain live.
+Claude's SDK resolves its own authentication and user settings live; its opaque identity
+covers only the selected model, effort and pinned SDK.
 Profile discovery/arbitration strategies cannot disable host obligations.
 
 The run's artifact session stages the report then atomically writes the
@@ -483,7 +488,8 @@ and is never re-based. A carved child allocation charges and refunds its ancesto
 too. `reserved` records calls already withheld for later work; `start_floor` refuses a
 dispatch whose remaining calls cannot fit its minimum work. Without host tools,
 `run_agent` charges each observed tool start; a `HostToolBinding` charges the same
-ledger at `/admit`, before Pi emits the start, and its deadline reads the ledger.
+ledger when it admits a native start (Pi's `/admit`, Claude's PreToolUse hook) before
+the start runs, and its deadline reads the ledger.
 Starts refused for the protected submission slot or over the limit are observed,
 never charged.
 
@@ -582,10 +588,9 @@ Committed-review bindings set `protected_submission=True`: the last start belong
 including parallel-batch members, is counted in `denied_starts` and refused with
 correctable `capacity_protected` without charging or closing authority; a bounded
 number of denials then fails closed. `capacity()` reports both counts; the ledger
-observes denied starts without charging them. Pi denies prospectively at `/admit`, so a denied
-start is still observed and reported as [overshoot](observability.md#committed-review-evidence)
-that never reduces later reserves. Committed review is Pi-only; for other adapters, which
-do not serve host tools, Claude and Codex only observe starts.
+observes denied starts without charging them. Pi and Claude deny prospectively at admission,
+so a denied start is still observed and reported as [overshoot](observability.md#committed-review-evidence)
+that never reduces later reserves. Codex and Osprey serve no host tools and only observe starts.
 
 A binding may also declare charged nonterminal host tools (`HostTool`). Pi registers
 them in the existing extension; `/admit` charges each start, and `/call` serves
@@ -609,7 +614,42 @@ usage and truthful incomplete coverage; see
 Endpoint credentials stay outside persisted configuration/public evidence.
 Bindings and resources belong to one invocation; sibling shutdown is isolated.
 Enforcement works without recording or tracing. See
-[supported capabilities](extensions.md#invocation-scoped-pi-host-tools).
+[supported capabilities](extensions.md#invocation-scoped-host-tools).
+
+### Claude host tools
+
+Claude serves the same binding through the Agent SDK on both client startup routes.
+Each attempt gets a fresh in-process SDK MCP server named `daydream` with
+`review_source`, `review_admit` and `structured_output` at their exact bound schemas
+(`mcp__daydream__<tool>` to the model), loaded directly with results inline up to the
+host result bound. Native tools are `Read`, `Grep`, `Glob` and `Bash`; strict MCP
+configuration excludes other servers, and native `StructuredOutput` is not offered.
+The dangerous-command and background-Bash guards stay on; the read-only guard also
+allows exactly the three host names, never a wildcard (`allowed_tools` only preapproves
+under the bypass permission mode). Improve's audit root, finalization, continuation,
+agents, writes and persisted sessions are refused before any client starts. The
+assignment's system instructions become Claude's system prompt.
+
+- Readiness: before the first provider request, this exact server must have served
+  `tools/list` with the bound schemas and `get_mcp_status()` must report it connected
+  with exactly those tools, within the setup and ledger deadlines; otherwise the
+  invocation fails `native_readiness`.
+- Admission: a PreToolUse hook admits and charges every hooked native start before it
+  runs; the MCP handler serves only the start whose `claudecode/toolUseId` metadata
+  matches, else `native_correlation`. A raising SDK hook fails open, so hooks and the
+  handler never raise: rejections become denials or tool errors that reach the model.
+  Calls the CLI rejects with its own input validation never reach a hook and are not charged.
+- Terminal rule: the CLI runs a generation's first tool before later blocks arrive, so
+  Claude cannot require a sole terminal call. Acceptance closes authority at once; later
+  starts are denied without charge or failure and observed as overshoot.
+- Settlement: a successful result after acceptance settles; a native error keeps the
+  admission and usage and is not retried. A host fatal interrupts the conversation,
+  which is not an instant stop. Closing an invocation closes its attempt before it
+  interrupts and drains its own client; disconnecting closes the SDK bridge within its
+  5 s grace, and a retired attempt's hook or handler changes nothing.
+- Capacity: no output limit is available before work, so no capacity preflight runs.
+  The terminal context window and output limit are recorded, never estimated
+  ([evidence](observability.md#claude-host-tool-lifecycle-evidence)).
 
 ## Validation and repair
 

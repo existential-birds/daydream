@@ -174,9 +174,9 @@ comparison/owner acceptance; final retirement is #1687.
 and `PLAN_WRITER_CONTRACT_INSTRUCTIONS`. Host assembly owns deterministic repair
 and pointered issues. Legacy Markdown-only output blocks plan publication.
 
-## Invocation-scoped Pi host tools
+## Invocation-scoped host tools
 
-Pi review stages bind `HostToolBinding(budget=ledger, accept=...)` through
+Review stages bind `HostToolBinding(budget=ledger, accept=...)` through
 `run_agent(budget=ledger, host_tools=..., output_schema=..., result_schema=...)`; a bare
 `HostToolBinding(deadline=...)` builds its own ledger, which `run_agent` then uses. The synchronous
 callback prepares and atomically admits one complete canonical stage or raises
@@ -194,11 +194,18 @@ method discards an accepted result. The binding charges the invocation's
 `protected_submission=True` reserves the last start for the terminal submission
 ([limits](runtime.md#pi-host-tool-lifetime-and-limits)).
 
-The packaged native extensions and bounded authenticated loopback endpoint require
-Pi 1.4.0 for the verified completion/tool APIs. They confirm the active terminal
-tool/schema and intended endpoint before provider work. Missing/overridden tools,
-tools-disabled or incompatible modes fail explicitly. There is no filesystem
-reader, filesystem grant protocol or MCP runtime extra. Bindings may declare charged
+| Backend | Verified versions | Transport | Readiness before provider work | Terminal submission | Capacity preflight |
+|---|---|---|---|---|---|
+| Pi | 1.4.0 | Packaged extension, authenticated loopback HTTP | `/ready` exact schemas and model limits | Sole call in a completed generation | `contextWindow`, `maxTokens`, compaction |
+| Claude | SDK 0.2.174, bundled CLI 2.1.310 | In-process SDK MCP server, PreToolUse admission | Served `tools/list` schemas and connected `get_mcp_status()` | Acceptance closes authority; later starts are overshoot | Unavailable; terminal limits recorded |
+| Codex, Osprey | Not supported ([#1646](https://github.com/existential-birds/daydream/issues/1646), [#1648](https://github.com/existential-birds/daydream/issues/1648), [#1649](https://github.com/existential-birds/daydream/issues/1649)) | — | — | — | — |
+
+An unsupported required guarantee rejects the workflow; it never switches harness.
+Pi's packaged native extensions require Pi 1.4.0 for the verified completion/tool
+APIs and confirm the active terminal tool/schema and intended endpoint before
+provider work. [Claude host tools](runtime.md#claude-host-tools) describes the
+Agent SDK differences. Missing/overridden tools, tools-disabled or incompatible
+modes fail explicitly. There is no filesystem reader or filesystem grant protocol. Bindings may declare charged
 nonterminal host tools; committed review uses `review_source` and `review_admit`
 (see [committed review](runtime.md#committed-review-requestresult)), while staged
 deep review declares none.

@@ -159,7 +159,7 @@ async def test_claude_finalization_keeps_schema_and_guards_without_shared_mutati
     for callback in callbacks:
         assert await callback({"tool_name": "StructuredOutput"}, "schema", {}) == {}
     final_guard = callbacks[-1]
-    for tool in ["Read", "Bash", "Grep", "mcp__external__query", "Agent", None]:
+    for tool in ["Read", "Bash", "Grep", "mcp__external__query", "mcp__daydream__structured_output", "Agent", None]:
         decision = await final_guard({"tool_name": tool}, "blocked", {})
         assert decision["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert not any(isinstance(event, ToolStartEvent) for event in final_events)
