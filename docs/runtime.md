@@ -632,9 +632,11 @@ assignment's system instructions become Claude's system prompt.
 
 - Readiness: before the first provider request, this exact server instance must have
   served `tools/list` and `get_mcp_status()` must report it connected with exactly the
-  bound tool names, within the setup and ledger deadlines; otherwise the invocation
-  fails `native_readiness`. The server builds its tools from the bound schemas, so the
-  CLI exposes no separate schema to compare.
+  bound tool names, within the 5 s setup allowance and the ledger deadline. A missing or
+  mismatched registration, or setup that times out before the ledger deadline, fails
+  `native_readiness`; if the ledger deadline passes first, it fails `deadline_expired`.
+  The server builds its tools from the bound schemas, so the CLI exposes no separate
+  schema to compare.
 - Admission: a PreToolUse hook admits and charges every hooked native start before it
   runs; the MCP handler serves only the start whose `claudecode/toolUseId` metadata
   matches, else `native_correlation`. A raising SDK hook fails open, so hooks and the
