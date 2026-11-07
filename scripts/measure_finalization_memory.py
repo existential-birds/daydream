@@ -5,7 +5,8 @@ A standalone ``TrajectoryRecorder`` receives synthetic backend events, with no m
 plus ``--root-invocations`` root invocations. Each scenario runs in a fresh subprocess.
 Per stage it reports the tracemalloc peak above the stage's starting allocation (Python
 heap), the kernel RSS high-water delta (``/proc/self/clear_refs``; includes native
-pydantic-core buffers), bytes read (``/proc/self/io`` rchar) and seconds:
+pydantic-core buffers), bytes read (``/proc/self/io`` rchar; the table prints the archive
+stage's) and seconds:
 
 - ``write``: the root's final write on recorder exit (serialization and snapshot callback);
 - ``runinfo``: ``render_live_run_info`` while the recorder is live;
@@ -13,8 +14,9 @@ pydantic-core buffers), bytes read (``/proc/self/io`` rchar) and seconds:
 - ``archive``: ``finalize_archive_run`` with archive and evaluation enabled;
 - ``capture``: ``capture_run_record`` (trajectory evidence only; no review sidecars).
 
-Linux only. After: ``uv run --frozen python scripts/measure_finalization_memory.py``. Before: extract
-the base with ``git archive <base> daydream | tar -x -C <base tree>``, then, from outside the checkout,
+RSS and bytes read need Linux ``/proc`` and read 0 elsewhere. After:
+``uv run --frozen python scripts/measure_finalization_memory.py``. Before: extract the base with
+``git archive <base> daydream | tar -x -C <base tree>``, then, from outside the checkout,
 ``PYTHONPATH=<base tree> uv run --frozen --project <checkout> python <checkout>/scripts/<this file>``.
 Add ``--forks 10 --body-kb 1 --turns 1000`` for a metadata-heavy row.
 """
@@ -39,7 +41,12 @@ SESSION = "0d1714aa-0000-4000-8000-000000000000"
 STAGES = ("write", "runinfo", "summarize", "archive", "capture")
 
 
+PROC = Path("/proc/self")
+
+
 def _proc_value(path: str, field: str) -> int:
+    if not PROC.is_dir():
+        return 0
     for line in Path(path).read_text().splitlines():
         if line.startswith(field + ":"):
             return int(line.split()[1])
@@ -53,7 +60,8 @@ class Stage:
         self.result, self.name = result, name
 
     def __enter__(self) -> Stage:
-        Path("/proc/self/clear_refs").write_text("5")  # reset VmHWM to the current VmRSS
+        if PROC.is_dir():
+            (PROC / "clear_refs").write_text("5")  # reset VmHWM to the current VmRSS
         self.rss = _proc_value("/proc/self/status", "VmRSS")
         self.traced = tracemalloc.get_traced_memory()[0]
         tracemalloc.reset_peak()
@@ -83,7 +91,12 @@ def _scenario(forks: int, body_kb: int, turns: int, root_invocations: int) -> di
 
     # Import lazily loaded consumers up front so stage figures exclude module loading.
     import daydream.archive.provenance  # noqa: F401
+    import daydream.dataset  # noqa: F401
+    import daydream.dataset_scoring  # noqa: F401
+    import daydream.deep.dedup  # noqa: F401
     import daydream.eval.analyzer  # noqa: F401
+    import daydream.git_ops.immutable  # noqa: F401
+    import daydream.immutable_review  # noqa: F401
     import daydream.retry_policy  # noqa: F401
     from daydream.archive import finalize_archive_run, get_archive_dir
     from daydream.archive.manifest import archive_recorder_provenance_from_snapshot

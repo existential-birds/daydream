@@ -212,6 +212,7 @@ def test_failed_commit_is_not_visible_and_abandoned_staging_recovers_privately(
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         live, = (store.root / "runs").glob("*.tmp")
         assert store.commit_run(run_record("concurrent")).diagnostics == () and live.exists()
+        assert {run["run_id"] for run in read_records(store).runs} == {"run-1", "retry", "concurrent"}
         yield {"schema_version": "ATIF-v1.7", "session_id": "streamed", "trajectory_id": "streamed",
                "agent": {"name": "daydream", "version": "test"},
                "steps": [{"step_id": 1, "source": "user", "message": "review"}]}

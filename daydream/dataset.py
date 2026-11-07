@@ -781,7 +781,8 @@ class LocalRecordStore:
         return member, record
 
     def _members(self, kind: str) -> list[tuple[Record, Record]]:
-        return [self._load(kind, path) for path in sorted((self.root / kind).iterdir())]
+        # Called under the lock after recovery, so a remaining stage belongs to a live writer.
+        return [self._load(kind, path) for path in sorted((self.root / kind).iterdir()) if path.suffix != ".tmp"]
 
     def select_snapshot(
         self, *, observed_before: str, valid_before: str | None = None,
