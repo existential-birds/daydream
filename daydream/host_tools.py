@@ -14,7 +14,7 @@ import asyncio
 import json
 import math
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, Set
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -371,6 +371,22 @@ class HostToolBinding:
                 raise self._reject(schema_error)
             self._pending[call_id] = key
 
+    def observe_start(self, call_id: Any, name: Any) -> None:
+        """Count once a native start that admits no domain work, such as one refused natively.
+
+        With authority open it is admitted like any start (charged, or only observed for a
+        protected or ungranted start) and an exhausted allowance fails closed. After closure
+        or acceptance it is observed overshoot, never charged.
+        """
+        if call_id in self._admitted:
+            return
+        if not self.authority_open or self.fatal_error is not None:
+            self._admitted.add(call_id)
+            self.budget.deny()
+            return
+        with suppress(HostToolRejected):
+            self.admit(call_id, name, None)
+
     def submit(self, call_id: Any, arguments: Any) -> dict[str, Any]:
         """Synchronously accept once, immediately after the final authority/deadline check."""
         if self._accepted_identity is None:
@@ -607,8 +623,8 @@ class HostToolEndpoint:
     """One attempt's native callback transport for a binding, served by an adapter.
 
     Each transport offers exactly ``schemas()`` and becomes ``ready`` only after the
-    native agent confirms them before provider work. A retired endpoint cannot act
-    on, or revoke, a newer attempt of the same binding.
+    native agent confirms its tools before provider work. A retired endpoint cannot
+    act on, or revoke, a newer attempt of the same binding.
     """
 
     def __init__(self, binding: HostToolBinding) -> None:
@@ -623,12 +639,6 @@ class HostToolEndpoint:
     def schemas(self) -> dict[str, Any]:
         """Exact model-visible schemas: nonterminal host tools, then the terminal submission."""
         return {**self.host_schemas(), NATIVE_SUBMIT: self.binding.schema}
-
-    def confirm(self, offered: Any) -> None:
-        """Refuse native tools that differ from the bound schemas, before any provider work."""
-        if self.binding.schema is None or offered != self.schemas():
-            raise self.fatal("Native terminal or host tool schemas differ from the bound schemas",
-                             code="native_readiness")
 
     def current(self) -> bool:
         """Whether a callback may reach the binding; revoked, unfailed and unaccepted authority changes nothing."""

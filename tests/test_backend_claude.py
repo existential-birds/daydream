@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
@@ -392,6 +393,9 @@ async def test_audit_execute_rejects_unsafe_invocation_before_client(patch_sdk: 
                                                    host_tools=binding, **kwargs):
                 pass
         assert "options" not in captured and binding.calls == 0 and binding.schema is None
+    with pytest.raises(ValueError, match="review instructions are served only with host tools"):
+        async for _ in ordinary.execute(root, "audit", review_instructions="Assignment"):
+            pass
     # Only Claude has the snapshot-root tool boundary; the factory refuses every other audit backend.
     for name in ("codex", "pi", "osprey"):
         with pytest.raises(AuditIsolationError) as refused:
@@ -712,35 +716,47 @@ async def test_host_tools_complete_through_both_sdk_startup_routes(
 ) -> None:
     """Real CLI journeys: readiness, exact schemas, inline captured bytes, guards and corrected acceptance.
 
-    The ordinary route settles after acceptance while an independent sibling is cancelled; the
-    run-local route fails natively after acceptance, keeping the admission and terminal usage,
-    and refuses to start when its in-process server is not registered.
+    A sibling is cancelled before the main conversation continues: closed by its consumer on
+    the ordinary route, by task cancellation on the run-local route. The ordinary route
+    settles after acceptance; the run-local route fails natively after acceptance, keeping
+    the admission and terminal usage, stops on a host failure and refuses to start when its
+    in-process server is not registered.
     """
     repo = tmp_path / "subject"
     init_repo(repo)
-    # Near the bound result size: inline delivery needs the host's output-limit settings.
+    # Near the bound result size: inline delivery needs the host's result-size hint.
     source = "".join(f"line {number:06d} \"quoted\" \\\\ value\n" for number in range(3300))
     write_and_stage(repo, "source.py", source)
     commit(repo, "source")
     conversations: dict[str, int] = {}
-    sibling_started = threading.Event()
+    sibling_started, sibling_closed = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
 
     def respond(body: dict[str, Any]) -> Turn:
         system = json.dumps(body.get("system"))
-        role = next((role for role in ("SIBLING", "FAILING") if role in system), "MAIN")
+        (role,) = [role for role in ("MAIN", "SIBLING", "FAILING") if role in system]
         step = conversations[role] = conversations.get(role, 0) + 1
-        if role != "MAIN":
-            sibling_started.set()
-            path = "source.py" if role == "SIBLING" else "missing.py"
-            return tool("other", "mcp__daydream__review_source", {"path": path}) if step == 1 else Turn(
+        if role == "SIBLING":
+            loop.call_soon_threadsafe(sibling_started.set)
+            return tool("other", "mcp__daydream__review_source", {"path": "source.py"}) if step == 1 else Turn(
                 text="stopped")
+        if role == "FAILING":
+            # Without the host's interrupt the model would keep calling for eleven more turns.
+            return tool(f"missing-{step}", "mcp__daydream__review_source", {"path": "missing.py"}) if (
+                step < 12) else Turn(text="stopped")
+        if step == 2:
+            # The main conversation continues only after its sibling is fully cancelled.
+            assert sibling_closed.wait(20)
         script = [
             tool("look", "mcp__daydream__review_source", {"path": "source.py"}),
-            tool("wipe", "Bash", {"command": "rm -rf /"}),
+            # The CLI refuses an unoffered tool before PreToolUse; a denied Bash reaches the guards.
+            tool("write", "Write", {"file_path": "x", "content": "y"}) if route == "run_local"
+            else tool("wipe", "Bash", {"command": "rm -rf /"}),
             tool("batch", "mcp__daydream__review_admit", {"note": "first batch"}),
             tool("invalid", "mcp__daydream__structured_output", {"verdict": "maybe"}),
             tool("final", "mcp__daydream__structured_output", {"verdict": "concern"}),
-            Turn(error_status=400) if route == "run_local" else Turn(text="done"),
+            *([Turn(error_status=400)] if route == "run_local" else [
+                tool("late", "mcp__daydream__review_source", {"path": "source.py"}), Turn(text="done")]),
         ]
         return script[min(step, len(script)) - 1]
 
@@ -749,13 +765,20 @@ async def test_host_tools_complete_through_both_sdk_startup_routes(
     execution = BackendExecutionInput.from_environment(environment, backend="claude") if route == "run_local" else None
     backend = ClaudeBackend(model=MODEL, execution_input=execution)
     captured: list[ClaudeAgentOptions] = []
+    authority_at_disconnect: list[bool] = []
     client_name = "_RunLocalClaudeSDKClient" if route == "run_local" else "ClaudeSDKClient"
     original = getattr(claude_backend, client_name)
+    other = _host_binding(repo, BudgetLedger("sibling", deadline=clock.monotonic() + 60, limit=8), [])
 
     class Recording(original):  # type: ignore[misc,valid-type]
         def __init__(self, *, options: ClaudeAgentOptions, **kwargs: Any) -> None:
             captured.append(options)
             super().__init__(options=options, **kwargs)
+
+        async def disconnect(self) -> None:
+            if self.options.system_prompt == "SIBLING assignment":
+                authority_at_disconnect.append(other.authority_open)
+            await super().disconnect()
 
     monkeypatch.setattr(claude_backend, client_name, Recording)
     installed: list[Any] = []
@@ -763,15 +786,25 @@ async def test_host_tools_complete_through_both_sdk_startup_routes(
     binding = _host_binding(repo, ledger, installed)
     recorder = make_recorder(tmp_path)
 
-    async def sibling() -> HostToolBinding:
-        other = _host_binding(repo, BudgetLedger("sibling", deadline=clock.monotonic() + 60, limit=8), [])
+    async def sibling() -> None:
         stream = backend.execute(repo, "Inspect", output_schema=_VERDICT, read_only=True, persist_session=False,
                                  review_instructions="SIBLING assignment", host_tools=other)
-        async for event in stream:
-            if isinstance(event, ToolStartEvent):
-                break
-        await stream.aclose()
-        return other
+        if route == "ordinary":
+            async for event in stream:
+                if isinstance(event, ToolStartEvent):
+                    break
+            await stream.aclose()
+        else:
+            async def consume() -> None:
+                async for _ in stream:
+                    pass
+
+            consumer = asyncio.create_task(consume())
+            await sibling_started.wait()
+            consumer.cancel()  # CancelledError reaches the adapter mid-stream, not GeneratorExit.
+            with suppress(asyncio.CancelledError):
+                await consumer
+        sibling_closed.set()
 
     async def main() -> Any:
         async with recorder:
@@ -783,17 +816,13 @@ async def test_host_tools_complete_through_both_sdk_startup_routes(
 
     with provider.serving():
         if route == "ordinary":
-            result, cancelled = await asyncio.gather(main(), sibling())
+            result, _ = await asyncio.gather(main(), sibling())
             assert result == ({"final": "concern"}, None, None)
             assert binding.native_settled
-            # Cancelling the sibling closed only its own attempt and settled nothing.
-            assert sibling_started.is_set()
-            assert (cancelled.authority_open, cancelled.accepted, cancelled.native_settled) == (False, False, False)
-            assert cancelled.cleanup_complete
         else:
-            with pytest.raises(ClaudeAgentError, match="400"):
-                await main()
-            assert not binding.native_settled
+            outcomes = await asyncio.gather(main(), sibling(), return_exceptions=True)
+            assert isinstance(outcomes[0], ClaudeAgentError) and "400" in str(outcomes[0])
+            assert outcomes[1] is None and not binding.native_settled
             # An unexpected host callback failure is terminal: the conversation is interrupted
             # and the binding's own failure, not native completion, ends the invocation.
             failing = _host_binding(repo, BudgetLedger("failing", deadline=clock.monotonic() + 60), [])
@@ -803,7 +832,7 @@ async def test_host_tools_complete_through_both_sdk_startup_routes(
                                                host_tools=failing):
                     pass
             assert failed.value.code == "callback_failed" and failing.fatal_error is failed.value
-            assert not failing.accepted and failing.cleanup_complete
+            assert not failing.accepted and failing.cleanup_complete and conversations["FAILING"] < 12
             # A registration fault leaves the model unstarted: no provider request is made.
             before = len(provider.requests)
             monkeypatch.setattr(claude_backend, "_sdk_mcp_servers", lambda options: {})
@@ -814,37 +843,47 @@ async def test_host_tools_complete_through_both_sdk_startup_routes(
                     pass
             assert refused.value.code == "native_readiness" and len(provider.requests) == before
             assert unregistered.cleanup_complete and unregistered.calls == 0
-        provider.check()
+    # The cancelled sibling revoked only its own attempt, before its client disconnected.
+    assert authority_at_disconnect == [False]
+    assert (other.authority_open, other.accepted, other.native_settled, other.cleanup_complete) == (
+        False, False, False, True)
 
-    main_requests = [request for request in provider.requests if "MAIN" in json.dumps(request.get("system"))]
+    main_requests = [request for request in provider.requests
+                     if "MAIN assignment" in json.dumps(request.get("system"))]
     first = main_requests[0]
     # The first provider request already offers exactly the bound host schemas beside the inspection tools.
     offered = {item["name"]: item.get("input_schema") for item in first["tools"]}
-    assert sorted(offered) == sorted(["Bash", "Glob", "Grep", "Read", *_HOST_NAMES])
+    assert set(offered) == {"Bash", "Glob", "Grep", "Read", *_HOST_NAMES}
     assert [offered[name] for name in _HOST_NAMES] == [_BATCH, _LOOKUP, _VERDICT]
-    assert "MAIN assignment" in json.dumps(first["system"])
-    looked_up, wipe, admitted, invalid, final = (_tool_results(request)[0] for request in main_requests[1:6])
+    looked_up, refused_start, admitted, invalid, final = (_tool_results(request)[0]
+                                                          for request in main_requests[1:6])
     assert source in _result_text(looked_up) and not looked_up.get("is_error")
-    assert wipe["is_error"] and "blocked" in _result_text(wipe)
+    assert refused_start["is_error"] and ("No such tool" if route == "run_local" else "blocked") in _result_text(
+        refused_start)
     assert '"admitted":1' in _result_text(admitted) and '"capacity"' in _result_text(admitted)
     assert invalid["is_error"] and 'at $["verdict"]: choose an allowed value' in _result_text(invalid)
     assert '"final":"concern"' in _result_text(final)
-    # Every native start charged the one ledger, including the denied and rejected ones.
+    # Every native start charged the one ledger: guard-denied, CLI-refused and rejected ones too.
+    # A start after acceptance is denied and observed once as overshoot, never charged.
     assert installed == [{"note": "first batch"}, {"verdict": "concern"}]
     assert (binding.accepted_result, binding.calls, ledger.charged, binding.cleanup_complete) == (
         {"final": "concern"}, 5, 5, True)
+    if route == "ordinary":
+        (late,) = _tool_results(main_requests[6])
+        assert late["is_error"] and "assignment has ended" in _result_text(late)
+    assert ledger.observed == (6 if route == "ordinary" else 5)
     # Only exact host names are preapproved; strict MCP config excludes every other server.
     options = captured[0]
-    assert options.allowed_tools == ["Read", "Grep", "Glob", "Bash", *sorted(_HOST_NAMES, key=lambda name: (
-        name.endswith("structured_output"), name))]
-    assert options.tools == ["Read", "Grep", "Glob", "Bash"] and options.strict_mcp_config
-    assert options.output_format is None
+    assert set(options.allowed_tools) == {"Bash", "Glob", "Grep", "Read", *_HOST_NAMES}
+    assert options.strict_mcp_config
     guards = options.hooks["PreToolUse"][0] if options.hooks else None
-    for name, allowed in [*((name, True) for name in _HOST_NAMES), ("mcp__daydream__other", False),
-                          ("mcp__external__review_source", False), ("Write", False), ("Task", False)]:
-        decision = await _decide(guards, {"tool_name": name, "tool_input": {}})
-        assert _is_denied(decision) is (not allowed), name
-    assert _is_denied(await _decide(guards, {"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}}))
+    for name, tool_input, allowed in [
+        *((name, {}, True) for name in _HOST_NAMES), ("mcp__daydream__other", {}, False),
+        ("mcp__external__review_source", {}, False), ("Write", {}, False), ("Task", {}, False),
+        ("Bash", {"command": "rm -rf /"}, False), ("Bash", {"command": "git status", "run_in_background": True}, False),
+    ]:
+        decision = await _decide(guards, {"tool_name": name, "tool_input": tool_input})
+        assert _is_denied(decision) is (not allowed), (name, tool_input)
     # Terminal usage and the host lifecycle survive a native failure after acceptance.
     document = json.loads(recorder.path.read_text())
     assert document["final_metrics"]["total_prompt_tokens"] > 0
@@ -856,11 +895,15 @@ async def test_host_tools_complete_through_both_sdk_startup_routes(
         "claude", True, route == "ordinary", True, 5]
 
 
-async def test_retired_host_callbacks_change_nothing_and_uncorrelated_calls_fail_closed() -> None:
+async def test_retired_host_callbacks_change_nothing_and_uncorrelated_calls_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A retired attempt's hook and MCP handler cannot charge, admit or revoke a newer attempt.
 
     This drives the exact callbacks the SDK invokes; the real CLI journeys above prove
     readiness. Acceptance ends the assignment, so a later start is observed overshoot.
+    Unexpected host failures fail the binding closed instead of escaping: a raising SDK
+    hook would let the start run.
     """
     installed: list[Any] = []
     ledger = BudgetLedger("stale", deadline=clock.monotonic() + 30)
@@ -898,3 +941,16 @@ async def test_retired_host_callbacks_change_nothing_and_uncorrelated_calls_fail
         assert (await call(endpoint, None)).isError
     assert uncorrelated.fatal_error is not None and uncorrelated.fatal_error.code == "native_correlation"
     assert len(installed) == 1 and not uncorrelated.accepted
+    broken = HostToolBinding(deadline=clock.monotonic() + 30, accept=accept)
+    broken.configure_schema(_VERDICT)
+
+    def unexpected(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("host defect")
+
+    monkeypatch.setattr(broken, "submit", unexpected)
+    monkeypatch.setattr(broken, "admit", unexpected)
+    async with broken.attempt(claude_backend._ClaudeHostEndpoint) as endpoint:
+        assert (await call(endpoint, "submitted")).isError
+        assert broken.fatal_error is not None and broken.fatal_error.code == "callback_failed"
+        assert _is_denied(await endpoint.admit(start, "next", {}))
+    assert len(installed) == 1 and not broken.accepted

@@ -630,23 +630,26 @@ under the bypass permission mode). Improve's audit root, finalization, continuat
 agents, writes and persisted sessions are refused before any client starts. The
 assignment's system instructions become Claude's system prompt.
 
-- Readiness: before the first provider request, this exact server must have served
-  `tools/list` with the bound schemas and `get_mcp_status()` must report it connected
-  with exactly those tools, within the setup and ledger deadlines; otherwise the
-  invocation fails `native_readiness`.
+- Readiness: before the first provider request, this exact server instance must have
+  served `tools/list` and `get_mcp_status()` must report it connected with exactly the
+  bound tool names, within the setup and ledger deadlines; otherwise the invocation
+  fails `native_readiness`. The server builds its tools from the bound schemas, so the
+  CLI exposes no separate schema to compare.
 - Admission: a PreToolUse hook admits and charges every hooked native start before it
   runs; the MCP handler serves only the start whose `claudecode/toolUseId` metadata
   matches, else `native_correlation`. A raising SDK hook fails open, so hooks and the
   handler never raise: rejections become denials or tool errors that reach the model.
-  Calls the CLI rejects with its own input validation never reach a hook and are not charged.
+  A start the CLI refuses before PreToolUse (an unoffered tool or its own input
+  validation) is admitted when its tool result arrives, so it is charged once like any start.
 - Terminal rule: the CLI runs a generation's first tool before later blocks arrive, so
   Claude cannot require a sole terminal call. Acceptance closes authority at once; later
-  starts are denied without charge or failure and observed as overshoot.
+  starts are denied without charge or failure and observed once as overshoot.
 - Settlement: a successful result after acceptance settles; a native error keeps the
   admission and usage and is not retried. A host fatal interrupts the conversation,
-  which is not an instant stop. Closing an invocation closes its attempt before it
-  interrupts and drains its own client; disconnecting closes the SDK bridge within its
-  5 s grace, and a retired attempt's hook or handler changes nothing.
+  which is not an instant stop. Every exit, including cancellation, closes the attempt
+  before its own client disconnects; consumer closure also interrupts and drains that
+  client first. Disconnecting closes the SDK bridge within its 5 s grace, and a retired
+  attempt's hook or handler changes nothing.
 - Capacity: no output limit is available before work, so no capacity preflight runs.
   The terminal context window and output limit are recorded, never estimated
   ([evidence](observability.md#claude-host-tool-lifecycle-evidence)).

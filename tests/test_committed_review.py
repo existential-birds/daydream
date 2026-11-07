@@ -25,7 +25,7 @@ from rich.console import Console
 
 from daydream import agent, clock, committed_review, git_ops, json_utils
 from daydream.artifact_visibility import ArtifactSession, artifact_session_active, open_artifact_session
-from daydream.backends import MetricsEvent, TextEvent
+from daydream.backends import MetricsEvent, TextEvent, claude as claude_backend
 from daydream.backends.pi import PiBackend, PiError
 from daydream.committed_review import CommittedReviewRequest, Review, run_committed_review
 from daydream.committed_review_model import RESULT_VERSIONS, planned_work_id, validate_committed_result
@@ -674,10 +674,11 @@ async def test_hosted_policy_refuses_unsupported_authority_before_source_prepara
 
 
 async def test_backends_without_host_tools_are_refused_before_source_preparation(
-    review_inputs: StageInputFactory,
+    review_inputs: StageInputFactory, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Discovery and challenge need native host tools; others fail before any checkout or dispatch."""
     repo = review_inputs.work.source
+    monkeypatch.setattr(committed_review, "open_workspace", lambda *_args, **_kwargs: pytest.fail("source prepared"))
     before = git(repo, "worktree", "list", "--porcelain")
     for name in ("codex", "osprey"):
         with pytest.raises(ValueError, match=f"requires a backend with native host tools.*'{name}'"):
@@ -2086,9 +2087,10 @@ async def test_claude_committed_review_completes_through_the_run_local_sdk_route
     request = CommittedReviewRequest(repo, git(repo, "rev-parse", "main"), config=RunConfig(
         backend="claude", output_mode="review",
         review_profile=_profile_with_pipeline(reviewer_investigation_budget_s=90, reviewer_tool_call_budget=10)))
+    # Committed review must take the run-local SDK route; the ordinary client is unavailable.
+    monkeypatch.setattr(claude_backend, "ClaudeSDKClient", None)
     with provider.serving():
         result = await run_committed_review(request)
-    provider.check()
     value = result.to_dict()
     assert result.output_installed and result.capture_state == "complete"
     assert json.loads((repo / ".daydream/committed-review.json").read_text()) == value

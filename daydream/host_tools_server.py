@@ -183,14 +183,13 @@ class PiHostToolServer(HostToolEndpoint):
                     return
                 if path == "/ready":
                     self.binding.ensure_open()
-                    host = value.get("host_tools", {})
                     if (not {"tool_name", "schema"} <= set(value) <= {"tool_name", "schema", "native_limits",
                                                                          "host_tools"}
-                            or value["tool_name"] != policy.NATIVE_SUBMIT
-                            or not isinstance(host, dict) or policy.NATIVE_SUBMIT in host):
+                            or self.binding.schema is None
+                            or value["tool_name"] != policy.NATIVE_SUBMIT or value["schema"] != self.binding.schema
+                            or value.get("host_tools", {}) != self.host_schemas()):
                         raise self.fatal("Native terminal or host tool schemas differ from the bound schemas",
                                          code="native_readiness")
-                    self.confirm({**host, policy.NATIVE_SUBMIT: value["schema"]})
                     # Refuse a model that cannot hold this invocation before any provider work.
                     self.binding.check_native_limits(value.get("native_limits"))
                     self.ready = True

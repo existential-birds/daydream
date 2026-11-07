@@ -821,7 +821,7 @@ class _ClaudeHostEndpoint(HostToolEndpoint):
 
     def __init__(self, binding: HostToolBinding) -> None:
         super().__init__(binding)
-        self._listed: dict[str, Any] | None = None
+        self._listed = False
         self._sessions = 0
         tools = [mcp_types.Tool.model_validate({
             "name": name, "description": self._description(name), "inputSchema": schema, "_meta": _HOST_TOOL_META,
@@ -836,8 +836,8 @@ class _ClaudeHostEndpoint(HostToolEndpoint):
                 self._sessions -= 1
 
         async def list_tools(_request: mcp_types.ListToolsRequest) -> mcp_types.ServerResult:
-            # Readiness compares what this exact instance served with the bound schemas.
-            self._listed = {tool.name: tool.inputSchema for tool in tools}
+            # Readiness requires that this exact instance, not a same-named server, was listed.
+            self._listed = True
             return mcp_types.ServerResult(mcp_types.ListToolsResult(tools=tools))
 
         async def call_tool(request: mcp_types.CallToolRequest) -> mcp_types.ServerResult:
@@ -868,7 +868,7 @@ class _ClaudeHostEndpoint(HostToolEndpoint):
                     entries = [item for item in status.get("mcpServers", []) if item.get("name") == _HOST_SERVER]
                     entry = cast(dict[str, Any], entries[0]) if len(entries) == 1 else {}
                     state = entry.get("status")
-                    if state not in {None, "pending"} and (state != "connected" or self._listed is not None):
+                    if state not in {None, "pending"} and (state != "connected" or self._listed):
                         break
                     await asyncio.sleep(0.02)
         except TimeoutError:
@@ -876,10 +876,9 @@ class _ClaudeHostEndpoint(HostToolEndpoint):
                 raise self.fatal("Host-tool absolute deadline expired during native setup",
                                  code="deadline_expired") from None
         names = sorted(str(tool.get("name")) for tool in entry.get("tools") or [] if isinstance(tool, dict))
-        if state != "connected" or names != sorted(self.schemas()):
+        if state != "connected" or not self._listed or names != sorted(self.schemas()):
             raise self.fatal(f"Claude did not register the host tools before provider work (status {state!r})",
                              code="native_readiness")
-        self.confirm(self._listed)
         self.ready = True
 
     async def admit(self, input_data: Any, tool_use_id: Any, context: Any) -> HookJSONOutput:
@@ -891,7 +890,7 @@ class _ClaudeHostEndpoint(HostToolEndpoint):
                 return _read_only_deny("This attempt's host-tool authority is closed; no further tool runs")
             if binding.accepted:
                 # Acceptance ended the assignment: observe overshoot without charging or failing it.
-                binding.budget.deny()
+                binding.observe_start(tool_use_id, None)
                 return _read_only_deny("structured_output was accepted and this assignment has ended; "
                                        "make no further tool calls")
             # Exact native host names bind to their binding names; other starts keep their own.
@@ -1223,6 +1222,7 @@ class ClaudeBackend:
         # ResultMessage.structured_output); track their IDs so the matching
         # ToolResultBlocks aren't logged as unmatched_tool_results.
         skipped_tool_ids: set[str] = set()
+        tool_names: dict[str, str] = {}
         terminal_result: ResultEvent | None = None
 
         lifecycle = current_backend_lifecycle() if host_tools is not None else None
@@ -1287,6 +1287,9 @@ class ClaudeBackend:
                 client = ClaudeSDKClient(options=options)
 
             await attempt.enter_async_context(client)
+            if host_tools is not None:
+                # Unwinding revokes this attempt before the client disconnects: closure first.
+                attempt.callback(host_tools.close_attempt)
             self._active_clients.add(client)
             response = client.receive_response()
             response_terminated = False
@@ -1308,6 +1311,7 @@ class ClaudeBackend:
                             elif isinstance(block, ThinkingBlock) and block.thinking:
                                 yield ThinkingEvent(text=block.thinking)
                             elif isinstance(block, ToolUseBlock):
+                                tool_names[block.id] = block.name
                                 if block.name == "StructuredOutput":
                                     # Drift guard: StructuredOutput must stay in the read-only
                                     # allow-set, else this passthrough becomes a mutation hole.
@@ -1349,6 +1353,11 @@ class ClaudeBackend:
                     elif isinstance(msg, UserMessage):
                         for user_block in msg.content:
                             if isinstance(user_block, ToolResultBlock):
+                                if endpoint is not None and endpoint.current():
+                                    # A start the CLI refused before PreToolUse still counts once.
+                                    with suppress(HostToolFatal):  # retained; the conversation stops below
+                                        endpoint.binding.observe_start(
+                                            user_block.tool_use_id, tool_names.get(user_block.tool_use_id))
                                 if user_block.tool_use_id in skipped_tool_ids:
                                     skipped_tool_ids.discard(user_block.tool_use_id)
                                     continue

@@ -2,7 +2,8 @@
 
 ``LoopbackProvider`` records every ``/v1/messages`` request body and answers each
 from the test's ``respond`` script with a tool use, text, or a non-retryable HTTP
-error (retryable statuses would trigger the CLI's own backoff). ``claude_cli_env``
+error (retryable statuses would trigger the CLI's own backoff). A failure inside
+``respond`` is answered with HTTP 400 and re-raised when serving ends. ``claude_cli_env``
 replaces the ambient Claude/Anthropic environment with a hermetic one pointing at
 the provider; the ordinary SDK route merges ``os.environ``, so both routes see it.
 """
@@ -59,7 +60,7 @@ def _events(turn: Turn, index: int) -> bytes:
 
 
 class LoopbackProvider:
-    """A threaded loopback endpoint; scripting failures are re-raised by ``check``."""
+    """A threaded loopback endpoint; scripting failures are re-raised when serving ends."""
 
     def __init__(self, respond: Callable[[dict[str, Any]], Turn]) -> None:
         self.requests: list[dict[str, Any]] = []
@@ -83,7 +84,7 @@ class LoopbackProvider:
                     index = len(provider.requests)
                 try:
                     turn = respond(body)
-                except BaseException as exc:  # noqa: BLE001 - surfaced by check()
+                except BaseException as exc:  # noqa: BLE001 - re-raised when serving ends
                     provider.failures.append(exc)
                     turn = Turn(error_status=400)
                 if turn.error_status is not None:
@@ -113,10 +114,8 @@ class LoopbackProvider:
             self._server.shutdown()
             self._server.server_close()
             thread.join()
-
-    def check(self) -> None:
-        if self.failures:
-            raise self.failures[0]
+            if self.failures:
+                raise self.failures[0]
 
 
 def claude_cli_env(monkeypatch: pytest.MonkeyPatch, provider: LoopbackProvider, home: Path) -> dict[str, str]:
