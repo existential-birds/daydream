@@ -6,7 +6,7 @@ from daydream.training.lineage import LOCKED_FIELDS
 
 _SPEC_FIELDS = {
     "base_model", "tokenizer_renderer", "max_seq_len", "lora_rank", "lora_targets", "optimizer", "learning_rate",
-    "corpus_digest", "split_digest", "profile_policy", "reward_version", "reward_weights", "stack_pins",
+    "corpus_digest", "split_digest", "profile_policy", "reward_version", "reward_weights",
 }
 
 

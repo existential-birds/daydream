@@ -138,9 +138,6 @@
           "type": "string",
           "minLength": 1
         },
-        "source": {
-          "type": "string"
-        },
         "base_sha": {
           "type": "string",
           "pattern": "^[0-9a-f]{40,}$",
@@ -157,12 +154,6 @@
         },
         "diff_ref": {
           "type": "object"
-        },
-        "replay_verification": {
-          "type": [
-            "object",
-            "null"
-          ]
         }
       }
     },

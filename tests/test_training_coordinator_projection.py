@@ -51,11 +51,11 @@ def _v2_record(
             "reply_classifier_version": "rc-1", "rubric_schema_version": "rubric-v2", "as_of": "2026-01-01T00:00:00Z",
             "valid_at": "2026-01-01T00:00:00Z", "split": split, "exclusion_reason": None, "repo_slug": "owner/repo",
         }, "task_identity": {
-            "repo_slug": "owner/repo", "source": "record", "base_sha": BASE_SHA, "head_sha": HEAD_SHA,
+            "repo_slug": "owner/repo", "base_sha": BASE_SHA, "head_sha": HEAD_SHA,
             "diff_digest": hashlib.sha256(DIFF_BODY.encode("utf-8")).hexdigest(),
             "diff_ref": {"content_digest": hashlib.sha256(DIFF_BODY.encode("utf-8")).hexdigest(),
                 "relpath": f"batches/{session_id}/diff.patch",
-            }, "replay_verification": None,
+            },
         },
         "diff": DIFF_BODY,
     }
