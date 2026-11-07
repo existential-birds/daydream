@@ -92,10 +92,24 @@ result cannot prove cleanup. See
 [work item](runtime.md#assignment-policy-and-work) as a separate native invocation;
 concurrent local work uses forked sibling trajectories. Claim UID/revision, verdict
 `work_id` and captured source identify challenge evidence. Execution entries carry
-`work_id`, `allocation`, `observed_starts` and `overshoot`; superseded attempts remain
+`work_id`, `allocation`, `observed_starts` (every observed start) and `overshoot`
+(observed starts that were neither charged nor refunded); superseded attempts remain
 evidence. `settings.native_contexts` holds opaque native
 configuration identities and phase associations; actual generation settings remain
 separate trajectory observations. Credentials stay private and refreshable.
+
+## Budget stops
+
+Every [budget stop](runtime.md#budget-ledger) appears on the trace once, as
+`daydream.budget.owner`, `daydream.budget.dimension` (`time` or `tool_calls`),
+`daydream.budget.limit`, `daydream.budget.spent`, `daydream.budget.remaining_at_dispatch`
+and `daydream.budget.reserved`. The stop that ends an agent invocation is recorded as
+attributes on its agent span, including one that ends in an exception (a provider retry
+hint longer than the remaining deadline). Every other stop is a `daydream.budget.stop`
+event with the same attributes on the active span: a review-finalization turn's stop on
+its agent span, and a dispatch the host refuses before any agent runs on the enclosing
+step or run span. Values are counts or durations in seconds, never monotonic timestamps.
+The ATIF `agent_budget_stop` event keeps only its retry-ladder fields.
 
 ## Codex lifecycle evidence
 

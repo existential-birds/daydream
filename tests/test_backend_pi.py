@@ -8,15 +8,17 @@ import tempfile
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
 import pytest
 
 from daydream.agent import run_agent
+from daydream.agent_retry import _resolve_retry_settings
 from daydream.atif import validate
 from daydream.backends import (
+    Backend,
     BackendExecutionInput,
     CostEvent,
     DiagnosticEvent,
@@ -40,7 +42,7 @@ from daydream.backends.pi import (
     PiBackend,
     PiError,
 )
-from daydream.review_budget import ReviewLimits
+from daydream.review_budget import BudgetExhausted, BudgetLedger, ReviewLimits
 from daydream.trajectory import DaydreamPhase
 from tests.harness.fake_cli_process import (
     install_fake_cli_process,
@@ -110,7 +112,8 @@ async def _interrupted_pi_updates_retain_only_admitted_progress_case(
     async with recorder:
         async with asyncio.TaskGroup() as tasks:
             turn = tasks.create_task(run_agent(
-                PiBackend(model="test-model"), tmp_path, "review", phase=DaydreamPhase.REVIEW, wall_budget_s=0.05,
+                PiBackend(model="test-model"), tmp_path, "review", phase=DaydreamPhase.REVIEW,
+                budget=BudgetLedger("review", wall_s=0.05),
             ))
             with anyio.fail_after(5):
                 await spawner.wait_for_read()
@@ -738,40 +741,26 @@ async def test_pi_truncated_streams_and_exits_classify_without_misattributing_re
 
 
 def test_pi_retry_policy_is_built_from_ambient_environment(caplog: pytest.LogCaptureFixture) -> None:
-    """One actual constructor admits or diagnoses all retry settings from the same captured environment."""
-    cases: list[tuple[dict[str, str], RetryPolicy, list[str]]] = [
-        (
-            {
-                "DAYDREAM_PI_RETRY_ATTEMPTS": "-1",
-                "DAYDREAM_PI_RETRY_BASE_DELAY_S": "nan",
-                "DAYDREAM_PI_RETRY_MAX_DELAY_S": "not-a-float",
-            },
-            RetryPolicy(20, 10.0, 120.0),
-            [
-                "DAYDREAM_PI_RETRY_ATTEMPTS='-1' is negative; using default 20",
-                "DAYDREAM_PI_RETRY_BASE_DELAY_S='nan' is not finite; using default 10",
-                "DAYDREAM_PI_RETRY_MAX_DELAY_S='not-a-float' is not a valid float; using default 120",
-            ],
-        ),
-        (
-            {"DAYDREAM_PI_RETRY_ATTEMPTS": "", "DAYDREAM_PI_RETRY_BASE_DELAY_S": "-1"},
-            RetryPolicy(20, 10.0, 120.0),
-            [
-                "DAYDREAM_PI_RETRY_ATTEMPTS='' is not a valid integer; using default 20",
-                "DAYDREAM_PI_RETRY_BASE_DELAY_S='-1' is negative; using default 10",
-            ],
-        ),
-    ]
-    for environment, expected, warnings in cases:
+    """One parser reads only the attempt count; delays are fixed and deleted settings are ignored.
+
+    Pi construction and run_agent's fallback for a backend without retry settings
+    both diagnose a malformed count once and keep the default instead of failing.
+    """
+    for raw, attempts, warning in (
+        ("-1", 20, "DAYDREAM_PI_RETRY_ATTEMPTS='-1' is negative; using default 20"),
+        ("not-an-integer", 20, "DAYDREAM_PI_RETRY_ATTEMPTS='not-an-integer' is not a valid integer; using default 20"),
+        ("3", 3, None),
+    ):
         caplog.clear()
+        environment = {"DAYDREAM_PI_RETRY_ATTEMPTS": raw, "DAYDREAM_PI_RETRY_BASE_DELAY_S": "nan",
+                       "DAYDREAM_PI_RETRY_MAX_DELAY_S": "0"}
         with patch.dict(os.environ, environment, clear=True), caplog.at_level("WARNING"):
             backend = PiBackend(model="fixture-model")
+            fallback = _resolve_retry_settings(cast(Backend, SimpleNamespace()))
         assert (backend.retry_attempts, backend.retry_base_delay_s, backend.retry_max_delay_s) == (
-            expected.attempts,
-            expected.base_delay_s,
-            expected.max_delay_s,
-        )
-        assert [record.getMessage() for record in caplog.records] == warnings
+            attempts, 10.0, 120.0)
+        assert fallback == RetryPolicy(attempts, 2.0, 120.0)
+        assert [record.getMessage() for record in caplog.records] == ([warning] * 2 if warning else [])
 
 
 # --- P18 Task 1: generation lifecycle + config at the Pi argv/JSONL seam -----
@@ -833,7 +822,6 @@ async def _pi_request_event_config_matches_exact_argv_case(monkeypatch: pytest.M
     assert terminal.session_id == "pi_ses_simple" and terminal.continuation is None
     assert config.continuation_mode == "fresh"
     assert config.model_mode == "single"
-    assert config.max_turns is None  # accepted by daydream, never passed to Pi
     # System preamble is invocation-level content, never a config value.
     assert request.system_prompt is not None
     if mode != "finalization":
@@ -945,7 +933,7 @@ async def test_native_pi_tool_batch_and_resumed_turn_record_literal_observations
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A native conversation preserves heterogeneous observations and partial-turn telemetry."""
-    monkeypatch.delenv("DAYDREAM_PI_FANOUT_CONCURRENCY", raising=False)
+    monkeypatch.delenv("DAYDREAM_FANOUT_CONCURRENCY", raising=False)
     batch = [
         ("blocks", {"content": [{"type": "text", "text": "line1"}, {"type": "text", "text": "line2"}]}),
         ("content", {"content": "raw"}),
@@ -1120,12 +1108,17 @@ async def test_native_pi_tool_batch_and_resumed_turn_record_literal_observations
     assert validate(recorder.path, validate_images=False)
 
 
-@pytest.mark.parametrize(("active_tool", "expected_window"), [(False, 0.05), (True, 0.2)],
-                         ids=["response-window", "active-tool-window"])
+@pytest.mark.parametrize(("active_tool", "deadline_s", "expected_window"),
+                         [(False, None, 0.05), (True, None, 0.2), (True, 0.02, None)],
+                         ids=["response-window", "active-tool-window", "deadline-cut-read"])
 async def test_pi_idle_window_follows_active_tool_calls(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, active_tool: bool, expected_window: float,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, active_tool: bool, deadline_s: float | None,
+    expected_window: float | None,
 ) -> None:
-    """Silence after a finished tool uses the short response window; a running tool keeps the long one."""
+    """Silence after a finished tool uses the short response window; a running tool keeps the long one.
+
+    A ledger deadline shorter than the window ends the read as a budget stop, not an idle stall.
+    """
     tool_end = {"type": "tool_execution_end", "toolCallId": "tool-1",
                 "result": {"content": [{"type": "text", "text": "done"}]}}
     lines = [json.dumps(frame) for frame in (
@@ -1137,11 +1130,18 @@ async def test_pi_idle_window_follows_active_tool_calls(
     monkeypatch.delenv(STREAM_IDLE_TIMEOUT_ENV, raising=False)
     monkeypatch.setattr("daydream.backends.pi.DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S", 0.05)
     monkeypatch.setattr("daydream.backends.pi.DEFAULT_STREAM_IDLE_TIMEOUT_S", 0.2)
+    clock = FakeClock(monotonic_value=100.0).install(monkeypatch)
+    deadline = None if deadline_s is None else clock.monotonic_value + deadline_s
     with anyio.fail_after(1):
-        with pytest.raises(StreamStalledError) as stalled:
-            async for _ in PiBackend(model="test-model").execute(tmp_path, "do the thing"):
+        with pytest.raises(StreamStalledError if expected_window else BudgetExhausted) as stopped:
+            async for _ in PiBackend(model="test-model").execute(tmp_path, "do the thing", deadline=deadline):
                 pass
-    assert stalled.value.timeout_s == pytest.approx(expected_window) and stalled.value.retryable is True
+    if isinstance(stopped.value, StreamStalledError):
+        assert stopped.value.timeout_s == pytest.approx(expected_window) and stopped.value.retryable is True
+    else:
+        cause = stopped.value.__cause__
+        assert isinstance(stopped.value, BudgetExhausted)
+        assert isinstance(cause, StreamStalledError) and cause.timeout_s == pytest.approx(deadline_s)
     assert len(spawner.procs) == 1 and spawner.procs[0].reaped
     # Garbage, negative or non-finite overrides never disable or shorten the window; zero disables it.
     for raw in ("not-a-number", "-5", "nan", "inf"):

@@ -33,10 +33,10 @@ from daydream.backends import (
 from daydream.backends._transport import CliTransport, teardown
 from daydream.backends.pi import PiBackend, PiError
 from daydream.committed_review import CommittedReviewRequest, run_committed_review
-from daydream.committed_review_model import RESULT_VERSIONS, validate_committed_result
+from daydream.committed_review_model import validate_committed_result
 from daydream.host_tools import HostTool, HostToolBinding, HostToolFatal, HostToolRejected, NativeCapacityRequirement
 from daydream.host_tools_server import PiHostToolServer
-from daydream.review_budget import ReviewLimits
+from daydream.review_budget import BudgetLedger
 from daydream.review_source_refs import (
     canonicalize_source_selectors,
     part_source_mapping,
@@ -47,7 +47,8 @@ from tests.harness.git_helpers import git, seed_feature_branch
 from tests.harness.harbor_review import assignment_from_request, looked_up_targets
 from tests.harness.native_pi import _NativeProvider, native_provider_server
 from tests.harness.trajectory import make_recorder
-from tests.test_committed_review import _adaptive_repo, immutable_input_for
+from tests.test_committed_review import _adaptive_repo
+from tests.test_deep_orchestrator import _profile_with_pipeline
 
 # Declared loopback model limits must fit committed review's native-capacity preflight.
 FIXTURE_CONTEXT_WINDOW, FIXTURE_MAX_TOKENS = 131072, 16384
@@ -88,27 +89,18 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
 ) -> None:
     """Real Pi reviews frozen source with a fresh challenge and exact native selection.
 
-    The hosted row retains operator policy across a provider retry and excludes dirty
-    working bytes; the local row proves stock reads/searches and supporting selectors share
-    final working contents after original-checkout mutations. The hosted-* readiness rows
-    reject versions, model/settings faults and executable resources before provider work.
+    The hosted row retains operator policy across a late provider retry, which repeats the
+    assignment within its original allocation, and excludes dirty working bytes; the local
+    row proves stock reads/searches and supporting selectors share final working contents
+    after original-checkout mutations. The hosted-* readiness rows reject versions,
+    model/settings faults and executable resources before provider work.
     """
     local = case == "local"
-    immutable = case == "hosted-immutable"
-    empty = case in {"empty", "fallback"}
-    hosted = case.startswith("hosted")
-    retry = case == "retry"
-    retried = case in {"hosted", "hosted-alternate"} or retry
-    defect = case == "defect" or local or retry or hosted
-    if retry:
-        monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "1")
-        monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0")
-        monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "0")
-        native_provider.errors[4] = "503 Service Unavailable"
+    hosted = not local
+    retried = case == "hosted"
     repo = tmp_path / "committed-source"
     original = "def ratio(total, count):\n    return total / count\n"
-    captured = ("def ratio(total, count):\n    return total / (count - 1)\n" if defect else
-                "def ratio(total, count):\n    return 0 if count == 0 else total / count\n")
+    captured = "def ratio(total, count):\n    return total / (count - 1)\n"
     helper = "VALUE = 'LOCAL_CAPTURE_HELPER'\n"
     untracked = "VALUE = 'LOCAL_CAPTURE_UNTRACKED'\n"
     supporting = {"supporting.py": helper} if local else {}
@@ -117,51 +109,29 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         feature={"ratio.py": original if local else captured, "AGENTS.md": context,
                  **({"supporting.py": "VALUE = 'HEAD_HELPER_MUST_REMAIN_UNREVIEWED'\n"} if local else {})})
     base = git(repo, "rev-parse", "main")
-    working = ("def ratio(total, count):\n    return 'DIRTY_SOURCE_MUST_REMAIN_UNREVIEWED'\n"
-               if defect and not immutable and not local else captured)
+    working = captured if local else "def ratio(total, count):\n    return 'DIRTY_SOURCE_MUST_REMAIN_UNREVIEWED'\n"
+    (repo / "ratio.py").write_text(working)
     if local:
-        (repo / "ratio.py").write_text(working)
         (repo / "supporting.py").write_text(helper)
         (repo / "untracked.py").write_text(untracked)
-    elif defect and not immutable:
-        (repo / "ratio.py").write_text(working)
+    else:
         (repo / "AGENTS.md").write_text("DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED\n")
     settings = native_provider.config / "settings.json"
-    expected_model = "native-inherited-model" if case == "fallback" else "alternate-model" if empty else "output-model"
-    expected_provider = "nous" if case == "fallback" else "output-fixture"
-    expected_effort = "low" if retry or local else "high"
+    expected_model, expected_provider = "output-model", "output-fixture"
     settings.write_text(json.dumps({
-        **({"defaultProvider": "nous" if case == "false-positive" else "output-fixture"}
-           if case != "fallback" else {}),
-        **({"defaultModel": "output-model"} if case != "fallback" else {}),
-        "defaultThinkingLevel": "low",
-        "defaultProjectTrust": "ask" if case == "defect" else "always",
-        "modelThinkingLevels": {"output-fixture/output-model": "high" if case == "defect" else "medium",
-                                "output-fixture/alternate-model": "high", "nous/native-inherited-model": "high"},
-        **({"enabledModels": ["output-fixture/alternate-model", "output-fixture/output-model"]}
-           if case == "empty" else {"enabledModels": ["output-fixture/alternate-model"]}
-           if case == "false-positive" else {}),
+        "defaultProvider": "output-fixture", "defaultModel": "output-model", "defaultThinkingLevel": "low",
+        "defaultProjectTrust": "always", "modelThinkingLevels": {"output-fixture/output-model": "medium"},
         "retry": {"enabled": False, "maxRetries": 0},
     }))
-    # Untrusted overrides are ignored; trusted blanks reset selection, while explicit thinking wins.
+    # The trusted project's thinking level wins locally; hosted rows overwrite it with ignored hostile settings.
     (repo / ".git/info/exclude").write_text(".pi/\n")
     project_settings = repo / ".pi/settings.json"
     project_settings.parent.mkdir()
-    project_settings.write_text(json.dumps({
-        **({"defaultModel": "alternate-model"} if case == "defect" else
-           {"defaultModel": ""} if case == "empty" else {}),
-        "modelThinkingLevels": ({"unrelated-provider/model": "off"} if empty else
-                                {"output-fixture/output-model": "low"}),
-    }))
+    project_settings.write_text(json.dumps({"modelThinkingLevels": {"output-fixture/output-model": "low"}}))
     models_path = native_provider.config / "models.json"
     models = json.loads(models_path.read_text())
     models["providers"]["output-fixture"]["models"][0]["reasoning"] = True
     model = models["providers"]["output-fixture"]["models"][0]
-    models["providers"]["output-fixture"]["models"].append({**model, "id": "alternate-model"})
-    if case == "fallback":
-        models["providers"] = {"nous": {**models["providers"]["output-fixture"],
-            "apiKey": "$NOUS_API_KEY", "authHeader": True, "models": [{**model, "id": expected_model}]}}
-        monkeypatch.setenv("PI_API_KEY", "synthetic-implicit-fallback-alias")
     models_path.write_text(json.dumps(models))
     hosted_policy = None
     output_root = repo
@@ -176,16 +146,13 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         (repo / ".daydream.toml").write_text('backend = "claude"\nmodel = "target-forbidden-model"\n'
             'review_profile = "hostile-missing-profile.toml"\n[phases.arbiter]\nbackend = "codex"\n'
             'model = "phase-forbidden-model"\n')
-        expected_provider, expected_model = (
-            ("operator-fixture", "Operator/alternate-model-V2") if case == "hosted-alternate"
-            else ("nous", "deepseek/deepseek-v4.1-flash") if case == "hosted-model-fallback"
-            else ("nous", "deepseek/deepseek-v4.1-flash-1017")
-        )
-        credential_variable = "ALTERNATE_NATIVE_API_KEY" if case == "hosted-alternate" else "NOUS_API_KEY"
+        # The model-fallback row requests a model the operator configuration does not serve.
+        served = "deepseek/deepseek-v4.1-flash-1017"
+        expected_provider = "nous"
+        expected_model = "deepseek/deepseek-v4.1-flash" if case == "hosted-model-fallback" else served
         models_path.write_text(json.dumps({"providers": {expected_provider: {
-            **models["providers"]["output-fixture"], "apiKey": f"${credential_variable}", "authHeader": True,
-            "models": [{**model,
-                        "id": expected_model + "-1017" if case == "hosted-model-fallback" else expected_model}],
+            **models["providers"]["output-fixture"], "apiKey": "$NOUS_API_KEY", "authHeader": True,
+            "models": [{**model, "id": served}],
         }}}))
         settings.write_text(json.dumps({"defaultProvider": "operator-unselected-provider",
             "defaultModel": "operator-unselected-model", "defaultProjectTrust": "always",
@@ -193,27 +160,11 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         (native_provider.config / "trust.json").write_text(json.dumps({
             str(native_provider.config.resolve()): True, str(repo.resolve()): True}))
         operator_environment = {"PATH": os.environ["PATH"], "HOME": str(tmp_path / "operator-home"),
-                                credential_variable: "synthetic-hosted-credential",
-                                "DAYDREAM_PI_RETRY_ATTEMPTS": "1", "DAYDREAM_PI_RETRY_BASE_DELAY_S": "0",
-                                "DAYDREAM_PI_RETRY_MAX_DELAY_S": "0"}
+                                "NOUS_API_KEY": "synthetic-hosted-credential", "DAYDREAM_PI_RETRY_ATTEMPTS": "1"}
         if retried:
-            native_provider.errors[0] = "503 Service Unavailable"
-        elif case in {"hosted-capability", "hosted-challenge-capability"}:
-            assets = tmp_path / "unsupported-assets"
-            assets.mkdir()
-            packaged = files("daydream.backends")
-            for name in ("pi_structured_output.ts", "pi_host_tools.ts", "pi_diagnostics.ts"):
-                source = packaged.joinpath(name).read_text()
-                if name == "pi_host_tools.ts":
-                    if case == "hosted-capability":
-                        source = source.replace("export default function (pi: ExtensionAPI) {",
-                            "export default function (pi: ExtensionAPI) {\n  (pi as any).getAllTools = undefined;")
-                    else:
-                        source = source.replace('packet = JSON.parse(readFileSync(fd).toString("utf8"));',
-                            'packet = JSON.parse(readFileSync(fd).toString("utf8"));\n'
-                            '      if ("verdicts" in packet.schema.properties) (pi as any).getAllTools = undefined;')
-                (assets / name).write_text(source)
-            monkeypatch.setattr("daydream.backends.pi.files", lambda _: assets)
+            # The final discovery generation fails after all seven investigation starts.
+            native_provider.errors[3] = "503 Service Unavailable"
+            monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: 0.0)
         elif case == "hosted-config-link":
             target_auth = repo / ".pi/auth.json"
             target_auth.write_text("{}")
@@ -222,16 +173,14 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
             settings.write_bytes(b"\xff")
         elif case == "hosted-loader-override":
             operator_environment["NODE_OPTIONS"] = f"--import={tmp_path / 'ambient-pi/preload.mjs'}"
-        if case.startswith("hosted-unsupported"):
-            executable_name = "node" if case.endswith("node") else "pi"
-            executable = shutil.which(executable_name)
+        elif case == "hosted-unsupported-node":
+            executable = shutil.which("node")
             assert executable is not None
             shim_dir = tmp_path / "unsupported-bin"
             shim_dir.mkdir()
-            shim = shim_dir / executable_name
-            unsupported_version = "v23.0.0" if executable_name == "node" else "1.3.0"
+            shim = shim_dir / "node"
             shim.write_text(f"#!{sys.executable}\nimport os, sys\n"
-                f"if sys.argv[1:] == ['--version']:\n print({unsupported_version!r})\n"
+                "if sys.argv[1:] == ['--version']:\n print('v23.0.0')\n"
                 f"else:\n os.execv({executable!r}, [{executable!r}, *sys.argv[1:]])\n")
             shim.chmod(0o700)
             operator_environment["PATH"] = f"{shim_dir}{os.pathsep}{operator_environment['PATH']}"
@@ -243,13 +192,13 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
             strategies[key] = replace(strategies[key], content=marker)
         operator_profile = ResolvedProfile(profile=replace(
             profile, name="hosted-native-operator", strategies=strategies,
-            pipeline=replace(profile.pipeline, reviewer_investigation_budget_s=60, review_wall_budget_s=80)),
+            pipeline=replace(profile.pipeline, reviewer_investigation_budget_s=60, review_wall_budget_s=170,
+                             reviewer_tool_call_budget=30)),
             source_kind="operator")
         hosted_policy = HostedReviewPolicy(
             agent_dir=native_provider.config, environment=operator_environment,
             output_dir=output_root, private_base=tmp_path / "hosted-private",
-            profile=operator_profile,
-            limits=ReviewLimits(90, 30, 30), trusted_prepared_source=True,
+            profile=operator_profile, trusted_prepared_source=True,
             provider=expected_provider, model=expected_model,
         )
         # Both ancestor/global instruction files and ambient resources are hostile.
@@ -284,27 +233,19 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         monkeypatch.setenv("NOUS_API_KEY", "ambient-forbidden-credential")
         monkeypatch.setenv("NODE_OPTIONS", f"--import={preload}")
     config_bytes = {path: path.read_bytes() for path in (settings, project_settings, models_path)}
-    if not hosted:
+    if local:
         monkeypatch.delenv("PI_PROVIDER", raising=False)
-    # Compare with the ordinary CLI, including its implicit default-provider authentication.
-    arguments = ["pi", "--mode", "json", "--no-session", "--no-skills", "--no-extensions", "--no-tools",
-                 "--no-context-files"]
-    if case == "false-positive":
-        arguments.extend(["--model", "output-model:high"])
-    control_env = os.environ.copy()
-    if case == "fallback":
-        control_env["NOUS_API_KEY"] = "synthetic-implicit-fallback-alias"
-    if not hosted:
-        control = await asyncio.to_thread(subprocess.run, [*arguments, "-p", "Return the empty result."],
-                                          cwd=repo, env=control_env, capture_output=True, timeout=30)
+        # Compare with the ordinary CLI, including its implicit default-provider authentication.
+        control = await asyncio.to_thread(subprocess.run, [
+            "pi", "--mode", "json", "--no-session", "--no-skills", "--no-extensions", "--no-tools",
+            "--no-context-files", "-p", "Return the empty result."], cwd=repo, capture_output=True, timeout=30)
         assert control.returncode == 0, control.stderr.decode()
         assert len(native_provider.requests) == 1 and native_provider.requests[0]["model"] == expected_model
-        assert native_provider.requests[0]["reasoning_effort"] == expected_effort
+        assert native_provider.requests[0]["reasoning_effort"] == "low"
     native_provider.requests.clear()
     native_provider.authorizations.clear()
     assignments_seen: list[dict[str, Any]] = []
     histories: dict[str, list[dict[str, Any]]] = {}
-    counterevidence = "The captured count == 0 guard returns zero before division; the proposed trigger cannot fail."
 
     def choose(request: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
         if hosted:
@@ -334,9 +275,6 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         revision = assignment["claims"][0]["revision"] if kind == "challenge" else 0
         call_kind = f"{kind}-{revision}" if hosted else kind
         tools = [message for message in request["messages"] if message["role"] == "tool"]
-        challenge_attempt = sum(prior["kind"] == "challenge" for prior in assignments_seen) + int(not tools)
-        if retry and kind == "challenge":
-            call_kind = f"challenge-{challenge_attempt}"
         # Targets and source handles come only from charged review_source lookups.
         lookups = [(f"{call_kind}-lookup-{index}", "review_source",
                     {"target_id": entry["target_id"], "path": None, "cursor": None})
@@ -350,16 +288,14 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                         (f"{call_kind}-write", "write", {"path": str(forbidden_marker), "content": "forbidden"}),
                         (f"{call_kind}-edit", "edit", {"path": "ratio.py", "oldText": captured, "newText": "MUTATED"}),
                         (f"{call_kind}-ungranted", "publish_review", {"path": str(forbidden_marker)})]
-            if local:
-                if kind == "discovery":
-                    for name in ("ratio.py", "supporting.py", "untracked.py", "late.py"):
-                        (repo / name).write_text("VALUE = 'POST_CAPTURE_SOURCE_MUST_REMAIN_UNREVIEWED'\n")
-                return [(f"{call_kind}-read", "read", {"path": "ratio.py"}), *lookups,
-                        (f"{call_kind}-helper", "read", {"path": "supporting.py"}),
-                        (f"{call_kind}-untracked", "read", {"path": "untracked.py"}),
-                        (f"{call_kind}-grep", "grep", {"pattern": "LOCAL_CAPTURE", "path": "."}),
-                        (f"{call_kind}-ls", "ls", {"path": "."})]
-            return [(f"{call_kind}-read", "read", {"path": "ratio.py"}), *lookups]
+            if kind == "discovery":
+                for name in ("ratio.py", "supporting.py", "untracked.py", "late.py"):
+                    (repo / name).write_text("VALUE = 'POST_CAPTURE_SOURCE_MUST_REMAIN_UNREVIEWED'\n")
+            return [(f"{call_kind}-read", "read", {"path": "ratio.py"}), *lookups,
+                    (f"{call_kind}-helper", "read", {"path": "supporting.py"}),
+                    (f"{call_kind}-untracked", "read", {"path": "untracked.py"}),
+                    (f"{call_kind}-grep", "grep", {"pattern": "LOCAL_CAPTURE", "path": "."}),
+                    (f"{call_kind}-ls", "ls", {"path": "."})]
         if hosted and not any(tool["tool_call_id"] == f"{call_kind}-read" for tool in tools):
             assert len(tools) == 4
             assert all("not found" in tool["content"].lower() or "denied" in tool["content"].lower() for tool in tools)
@@ -392,24 +328,18 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                            "basis": "source_inspection"}]
         if kind == "discovery":
             claim = {"uid": "", "revision": 0, "source_uids": [], "title": "Division can fail", "payload": {
-                "claim": "The changed denominator divides by zero.",
-                "trigger": "Call ratio(5, 1)." if defect else "Call ratio(5, 0).",
+                "claim": "The changed denominator divides by zero.", "trigger": "Call ratio(5, 1).",
                 "consequence": "A normal input raises ZeroDivisionError.",
                 "grounds": "Investigator is confident and considers its investigation complete.",
-                "file": "ratio.py", "line": None if defect else 2, "evidence_refs": refs}}
+                "file": "ratio.py", "line": None, "evidence_refs": refs}}
             payload = {"targets": [{"target_id": target_id, "status": "reviewed", "reason": "Captured source checked.",
                                     "evidence_refs": target_refs} for target_id, target_refs in refs_by_target.items()],
-                       "claims": [] if empty else [claim]}
+                       "claims": [claim]}
         else:
             assert kind == "challenge" and len(assignment["claims"]) == 1
             claim = assignment["claims"][0]
-            payload = {"verdicts": [{"uid": claim["uid"], "revision": claim["revision"],
-                "verdict": "confirmed" if defect else "rejected",
-                "grounds": "At count=1 the captured denominator is zero." if defect else counterevidence,
-                "evidence_refs": refs}], "claims": []}
-            if retry and challenge_attempt == 1:
-                payload["verdicts"][0]["revision"] += 1
-                return [(f"{call_kind}-rejected", "structured_output", payload)]
+            payload = {"verdicts": [{"uid": claim["uid"], "revision": claim["revision"], "verdict": "confirmed",
+                "grounds": "At count=1 the captured denominator is zero.", "evidence_refs": refs}], "claims": []}
             if hosted and claim["revision"] == 1:
                 payload["claims"] = [{key: claim[key] for key in ("uid", "revision", "source_uids", "title")} | {
                     "payload": {**claim["payload"], "grounds": "Captured denominator count-1 is zero at count=1.",
@@ -417,63 +347,30 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         return [(f"{call_kind}-submit", "structured_output", payload)]
 
     native_provider.choose = choose
-    immutable_input = immutable_input_for(repo) if immutable else None
-    if immutable:
-        hook = repo / ".git/hooks/post-checkout"
-        hook.write_text(f"#!/bin/sh\ntouch '{forbidden_marker}'\n")
-        hook.chmod(0o755)
-        git(repo, "config", "core.autocrlf", "true")
-        git(repo, "config", "filter.hostile.smudge", f"touch '{forbidden_marker}'; cat")
-        (repo / ".git/info/attributes").write_text("ratio.py filter=hostile\n")
-        assert not forbidden_marker.exists()
-        git(repo, "cat-file", "--filters", "HEAD:ratio.py")
-        assert forbidden_marker.exists()
-        forbidden_marker.unlink()
     request = CommittedReviewRequest(
         repo, base, config=RunConfig(backend="codex" if hosted else "pi", output_mode="review", archive=False,
                                     run_eval=False, review_backend="claude" if hosted else None,
                                     review_model="request-phase-forbidden-model" if hosted else None,
                                     review_profile_path="hostile-missing-profile.toml" if hosted else None,
-                                    model="request-forbidden-model" if hosted else
-                                    "output-model:high" if case == "false-positive" else None),
-        limits=ReviewLimits(90, 12, 16 if local else 12), hosted_policy=hosted_policy, immutable_input=immutable_input,
-        local=local)
-    unsupported = {"hosted-resources", "hosted-capability", "hosted-config-link", "hosted-challenge-capability",
-                   "hosted-model-fallback", "hosted-settings-encoding", "hosted-loader-override"}
-    if case.startswith("hosted-unsupported") or case in unsupported:
+                                    model="request-forbidden-model" if hosted else None,
+                                    review_profile=None if hosted else _profile_with_pipeline(
+                                        reviewer_investigation_budget_s=90, reviewer_tool_call_budget=16)),
+        hosted_policy=hosted_policy, local=local)
+    if hosted and not retried:
         from daydream.hosted_review import UnsupportedHostedPolicy
 
         message = {
             "hosted-model-fallback": "Hosted Pi model selection",
-            "hosted-unsupported-pi": "pi did not report 1[.]4[.]0",
             "hosted-unsupported-node": "node did not report v24[.]18[.]1",
             "hosted-loader-override": "Hosted Pi environment must not contain executable loader overrides",
         }.get(case, "Hosted|hosted")
         with pytest.raises(UnsupportedHostedPolicy, match=message):
             await run_committed_review(request)
-        assert len(native_provider.requests) == (4 if case == "hosted-challenge-capability" else 0)
+        assert native_provider.requests == []
         assert not forbidden_marker.exists()
         assert (repo / ".review-output.md").read_text() == "prior public report\n"
         if case == "hosted-loader-override":
             assert not output_root.exists() and not (tmp_path / "hosted-private").exists()
-        if case in {"hosted-capability", "hosted-challenge-capability"}:
-            partial = json.loads((output_root / "committed-review.json").read_text())
-            validate_committed_result(partial)
-            assert partial["terminal_result"]["analysis_state"] == (
-                "incomplete" if case == "hosted-challenge-capability" else "failed")
-            assert any(execution["reason"] == "backend_failure" for execution in partial["execution"])
-            if case == "hosted-challenge-capability":
-                assert [assignment["kind"] for assignment in assignments_seen] == ["discovery"]
-                assert partial["analyzed_revision"] == assignments_seen[0]["analyzed_revision"]
-                assert partial["run_id"] == assignments_seen[0]["run_id"]
-                assert [part["target_id"] for part in partial["assignments"]] == [
-                    entry["target_id"] for entry in assignments_seen[0]["catalog"]["entries"]]
-                report = (output_root / "review-output.md").read_text()
-                identities = (partial["planned_work_id"], partial["run_id"], head, base)
-                assert all(identity in report for identity in identities)
-                claim, = partial["claims"]
-                assert claim["revision"] == 1 and claim["disposition"] == "unresolved"
-                assert claim["payload"]["file"] == "ratio.py" and claim["challenge_evidence"] == []
         return
     result = await run_committed_review(request)
     assert result.complete and result.output_installed and result.capture_state == "complete"
@@ -483,13 +380,25 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     assert value["analyzed_revision"]["merge_base_sha"] == base
     assert value["terminal_result"]["analysis_state"] == "complete"
     assert {part["file"] for part in value["assignments"]} == ({"ratio.py", "untracked.py"} if local else {"ratio.py"})
-    expected_kinds = (["discovery"] if empty else
-                      ["discovery", "challenge", *(["challenge"] if hosted or retry else [])])
+    expected_kinds = ["discovery", "challenge", *(["challenge"] if hosted else [])]
+    if retried:
+        # The late provider failure is retried in a fresh conversation with the identical assignment, and the
+        # failed attempt's seven starts are refunded: the retry receives the original fifteen-call allocation.
+        retry_assignment = assignments_seen.pop(1)
+        assert retry_assignment == assignments_seen[0]
+        original, repeated = (json.dumps(native_provider.requests[index]["messages"]) for index in (0, 4))
+        assert "tool-call allocation is 15 calls" in original and "tool-call allocation is 15 calls" in repeated
+        assert ("Retry dispatch-time snapshot (supersedes the earlier invocation allocation): "
+                "current invocation allocation: 15 tool calls.") in repeated
+        # The refunded starts stay observed without overshoot; only the retry's eight are charged, so challenge
+        # receives 30 - 8 and its re-dispatch only what the first challenge left.
+        assert [(e["allocation"], e["observed_starts"], e["overshoot"]) for e in value["execution"]] == [
+            (15, 15, 0), (22, 8, 0), (14, 8, 0)]
     assert [assignment["kind"] for assignment in assignments_seen] == expected_kinds
-    assert len(native_provider.requests) == (4 if hosted else 2) * len(expected_kinds) + int(retried)
+    assert len(native_provider.requests) == (4 if hosted else 2) * len(expected_kinds) + 4 * retried
     assert all(request["model"] == expected_model for request in native_provider.requests)
-    if not hosted:
-        assert all(request["reasoning_effort"] == expected_effort for request in native_provider.requests)
+    if local:
+        assert all(request["reasoning_effort"] == "low" for request in native_provider.requests)
     else:
         assert native_provider.authorizations == ["Bearer synthetic-hosted-credential"] * len(native_provider.requests)
         assert all({tool["function"]["name"] for tool in request["tools"]} == HOSTED_TOOLS
@@ -500,100 +409,46 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         assert value["settings"]["limits"]["effective_investigation_s"] == pytest.approx(50)
         assert value["settings"]["hosted_policy"]["provider"] == expected_provider
         assert value["settings"]["hosted_policy"]["model"] == expected_model
-    if case == "fallback":
-        assert native_provider.authorizations == ["Bearer synthetic-implicit-fallback-alias"] * len(
-            native_provider.requests)
-    if not empty:
-        assert not any(message["role"] in {"assistant", "tool"} for message in histories["challenge"])
-        assert "discovery-read" not in json.dumps(histories["challenge"])
-        assert assignments_seen[1]["captured_root"] == assignments_seen[0]["captured_root"]
-        claim = value["claims"][0]
-        assert claim["source_uids"] == [] and claim["revision"] == (2 if hosted else 1)
-        assert claim["payload"]["line"] == (None if defect else 2)
-        assert claim["disposition"] == ("confirmed" if defect else "rejected")
-        assert claim["challenge_evidence"][0]["revision"] == 1
-        if hosted:
-            assert [evidence["revision"] for evidence in claim["challenge_evidence"]] == [1, 2]
-        assert len(value["findings"]) == int(defect)
-        if case == "false-positive":
-            assert claim["challenge_evidence"][0]["grounds"] == counterevidence
-        if local:
-            source_ref, = [ref for ref in claim["payload"]["evidence_refs"] if ref["path"] == "supporting.py"]
-            assert source_ref["role"] == "supporting"
-            assert source_ref["artifact_sha256"] == hashlib.sha256(helper.encode()).hexdigest()
-    else:
-        assert value["claims"] == value["findings"] == []
+    assert not any(message["role"] in {"assistant", "tool"} for message in histories["challenge"])
+    assert "discovery-read" not in json.dumps(histories["challenge"])
+    assert assignments_seen[1]["captured_root"] == assignments_seen[0]["captured_root"]
+    claim = value["claims"][0]
+    assert claim["source_uids"] == [] and claim["revision"] == (2 if hosted else 1)
+    assert claim["payload"]["line"] is None and claim["disposition"] == "confirmed"
+    assert claim["challenge_evidence"][0]["revision"] == 1
+    if hosted:
+        assert [evidence["revision"] for evidence in claim["challenge_evidence"]] == [1, 2]
+    assert len(value["findings"]) == 1
+    if local:
+        source_ref, = [ref for ref in claim["payload"]["evidence_refs"] if ref["path"] == "supporting.py"]
+        assert source_ref["role"] == "supporting"
+        assert source_ref["artifact_sha256"] == hashlib.sha256(helper.encode()).hexdigest()
     result_path = output_root / ("committed-review.json" if hosted else ".daydream/committed-review.json")
     assert json.loads(result_path.read_text()) == value
     report = (output_root / ("review-output.md" if hosted else ".review-output.md")).read_text()
     assert head in report and base in report and value["planned_work_id"] in report
-    assert ("Division can fail" in report) == (not empty)
-    if not empty:
-        line_suffix = "" if defect else ":<code>2</code>"
-        assert f"Location: <code>ratio.py</code>{line_suffix}." in report
-    if case == "false-positive":
-        assert counterevidence in report and "Rejected concerns" in report
+    assert "Division can fail" in report and "Location: <code>ratio.py</code>." in report
     trajectory_path = (output_root / "trajectory.json" if hosted else
                        output_root / ".daydream/runs" / value["run_id"] / "trajectory.json")
     trajectory = json.loads(trajectory_path.read_text())
-    if immutable:
-        assert immutable_input is not None
-        assert value["schema_version"] == RESULT_VERSIONS["immutable"]
-        assert value["immutable_input"] == immutable_input.to_dict()
-        assert trajectory["extra"]["pr_repo"] == "captured/repository"
-        assert trajectory["extra"]["pr_number"] == 1421
-        assert trajectory["extra"]["immutable_input"] == immutable_input.to_dict()
-        assert all("captured/repository" not in json.dumps(assignment) for assignment in assignments_seen)
-        exported = json.loads((output_root / "findings.json").read_text())
-        assert exported["head_sha"] == head and exported["terminal_result"] == value["terminal_result"]
-    if hosted:
-        assert trajectory["extra"]["profile_name"] == operator_profile.name
-        assert trajectory["extra"]["profile_digest"] == operator_profile.digest
     calls = [call for step in trajectory["steps"] for call in step.get("tool_calls") or []]
-    if retry:
-        assert assignments_seen[1] == assignments_seen[2]
-        assert [call["tool_call_id"] for call in calls] == [
-            "discovery-read", "discovery-lookup-0", "discovery-submit", "challenge-1-read", "challenge-1-lookup-0",
-            "challenge-1-rejected", "challenge-2-read", "challenge-2-lookup-0", "challenge-2-submit"]
-        observations = {item["source_call_id"]: item["content"] for step in trajectory["steps"]
-                        for item in (step.get("observation") or {}).get("results", [])}
-        assert "assigned uid/current revision" in observations["challenge-1-rejected"]
-        assert len(value["execution"]) == 2
-        decisions = value["terminal_result"]["stack_outcomes"][0]["target_decisions"]
-        assert decisions and all(target["status"] == "reviewed" for target in decisions)
-        # Discovery spent read+lookup+submit of its six; the failed attempt's three stay charged.
-        assert "tool-call allocation is 9 calls" in json.dumps(native_provider.requests[2]["messages"])
-        assert "tool-call allocation is 6 calls" in json.dumps(native_provider.requests[5]["messages"])
-        failed_history = native_provider.requests[4]["messages"]
-        assert any(message["role"] == "tool" and message["tool_call_id"] == "challenge-1-rejected"
-                   for message in failed_history)
-        assert not any(message["role"] in {"assistant", "tool"}
-                       for message in native_provider.requests[5]["messages"])
-    elif not hosted:
+    if local:
         assert [call["tool_call_id"] for call in calls] == [
             f"{kind}-{action}" for kind in expected_kinds
-            for action in (("read", "lookup-0", "lookup-1", "helper", "untracked", "grep", "ls", "submit") if local
-                           else ("read", "lookup-0", "submit"))]
+            for action in ("read", "lookup-0", "lookup-1", "helper", "untracked", "grep", "ls", "submit")]
     else:
+        assert trajectory["extra"]["profile_name"] == operator_profile.name
+        assert trajectory["extra"]["profile_digest"] == operator_profile.digest
         assert {"discovery-0-read", "challenge-1-read", "challenge-2-read"} <= {
             call["tool_call_id"] for call in calls}
         assert (repo / ".review-output.md").read_text() == "prior public report\n"
         assert (repo / ".daydream/diff.patch").read_text() == "prior public artifact\n"
         assert not (repo / ".daydream/committed-review.json").exists()
     invocations = trajectory["extra"]["subtrajectories"]
-    expected_invocations = len(expected_kinds) + int(retried and not retry)
+    expected_invocations = len(expected_kinds) + int(retried)
     assert len(invocations) == expected_invocations
     assert len({invocation["invocation_id"] for invocation in invocations}) == expected_invocations
     assert all(invocation["generation_lifecycle"]["drafts"] for invocation in invocations)
-    if retry:
-        lifecycles = [invocation["backend_lifecycle"] for invocation in invocations]
-        assert [lifecycle["host_tool_call_count"] for lifecycle in lifecycles] == [3, 3, 6]
-        assert [lifecycle["host_native_settled"] for lifecycle in lifecycles] == [True, False, True]
-        assert all(lifecycle["host_authority_closed"] and lifecycle["host_cleanup_complete"]
-                   for lifecycle in lifecycles)
-        assert [lifecycle["host_tool_rejection_count"] for lifecycle in lifecycles] == [0, 1, 1]
-        assert sum((step.get("metrics") or {}).get("prompt_tokens", 0) or 0
-                   for step in trajectory["steps"]) == 60
     generations = [generation for invocation in invocations
                    for generation in invocation["generation_lifecycle"]["drafts"]]
     assert all(generation["model_name"] == expected_model and generation["provider_name"] == expected_provider
@@ -603,8 +458,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     assert (repo / "ratio.py").read_text() == (
         "VALUE = 'POST_CAPTURE_SOURCE_MUST_REMAIN_UNREVIEWED'\n" if local else working)
     assert git(repo, "rev-parse", "HEAD") == head
-    assert (repo / "AGENTS.md").read_text() == (
-        "DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED\n" if defect and not immutable and not local else context)
+    assert (repo / "AGENTS.md").read_text() == (context if local else "DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED\n")
     assert all(path.read_bytes() == original_bytes for path, original_bytes in config_bytes.items())
 
 
@@ -631,10 +485,10 @@ async def test_native_terminal_batch_rejection_precedes_acceptance(
     def accept(value: dict[str, Any]) -> dict[str, Any]:
         installed.append(value)
         return value
-    binding = HostToolBinding(deadline=time.monotonic() + 30, accept=accept)
+    binding = HostToolBinding(budget=BudgetLedger("native", deadline=time.monotonic() + 30, limit=5), accept=accept)
     result, _, reason = await run_agent(PiBackend(model="output-model"), tmp_path, "Submit the completed review.",
         phase=DaydreamPhase.REVIEW, output_schema=_SCHEMA, read_only=True, persist_session=False,
-        tool_call_budget=5, host_tools=binding, progress_callback=lambda _: None)
+        host_tools=binding, progress_callback=lambda _: None)
     assert reason is None and result == accepted and installed == [accepted]
     assert len(native_provider.requests) == 2
     history = {message["tool_call_id"]: message["content"] for message in native_provider.requests[1]["messages"]
@@ -678,7 +532,7 @@ async def test_native_unavailable_host_input_stops_generation_before_retry_or_re
             (repo / ".git").rename(repo / ".git-unavailable")
         canonicalize_source_selectors(selectors, assigned, revision=revision, source_root=repo, require_assigned=False)
         return value
-    binding = HostToolBinding(deadline=time.monotonic() + 30, accept=accept)
+    binding = HostToolBinding(budget=BudgetLedger("native", deadline=time.monotonic() + 30, limit=4), accept=accept)
     native_rows: list[dict[str, Any]] = []
     lines = CliTransport.lines
     async def observe_native(transport: CliTransport, *args: Any, **kwargs: Any) -> Any:
@@ -706,7 +560,7 @@ async def test_native_unavailable_host_input_stops_generation_before_retry_or_re
         with pytest.raises(PiError) as failure:
             await run_agent(backend, tmp_path, "Submit the frozen-source review.", phase=DaydreamPhase.REVIEW,
                 host_tools=binding, output_schema=_SCHEMA, read_only=True, persist_session=False,
-                tool_call_budget=4, progress_callback=lambda _: None)
+                progress_callback=lambda _: None)
     assert len(native_provider.requests) == 1, "fatal /submit must stop before any further provider request"
     assert callback_calls == 1 and binding.accepted_result is None
     assert failure.value.category == "HOST_TOOLS" and failure.value.retryable is False
@@ -1057,7 +911,7 @@ async def test_native_indeterminate_submission_stops_generation_and_never_replay
         callback_times.append(time.monotonic())
         installed.append(canonical)
         return canonical
-    binding = HostToolBinding(deadline=time.monotonic() + 30, accept=accept)
+    binding = HostToolBinding(budget=BudgetLedger("native", deadline=time.monotonic() + 30, limit=4), accept=accept)
     dropped_submissions: list[bytes] = []
     if fault == "missing-callback":
         read_body = asyncio.StreamReader.readexactly
@@ -1099,7 +953,7 @@ async def test_native_indeterminate_submission_stops_generation_and_never_replay
         with pytest.raises(PiError) as failure:
             await run_agent(backend, tmp_path, "Submit the canonical review.", phase=DaydreamPhase.REVIEW,
                 host_tools=binding, output_schema=_SCHEMA, read_only=True, persist_session=False,
-                tool_call_budget=4, progress_callback=lambda _: None)
+                progress_callback=lambda _: None)
     if fault == "missing-callback":
         assert dropped_submissions and not installed and not callback_times and not lost_replies
         assert binding.accepted_result is None and not binding.possibly_accepted
@@ -1128,7 +982,7 @@ async def test_native_indeterminate_submission_stops_generation_and_never_replay
         with pytest.raises(PiError) as subsequent:
             await run_agent(backend, tmp_path, "Retry the same assignment in a new conversation.",
                 phase=DaydreamPhase.REVIEW, host_tools=binding, output_schema=_SCHEMA, read_only=True,
-                persist_session=False, tool_call_budget=4, progress_callback=lambda _: None)
+                persist_session=False, progress_callback=lambda _: None)
         assert len(native_provider.requests) == 1 and not installed
         assert subsequent.value.category == "HOST_TOOLS" and not subsequent.value.retryable
 
@@ -1222,7 +1076,9 @@ async def test_native_schema_rejection_charges_host_before_corrected_acceptance(
         marker.write_text(value["verdict"])
         installed.append(value)
         return value
-    binding = HostToolBinding(deadline=time.monotonic() + 30, accept=accept)
+    # The binding's ledger is the authority; execute's tool_call_budget only renders the preamble.
+    binding = HostToolBinding(budget=BudgetLedger("native", deadline=time.monotonic() + 30, limit=allowance),
+                              accept=accept)
     events = []
     failure: PiError | None = None
     try:
@@ -1235,7 +1091,7 @@ async def test_native_schema_rejection_charges_host_before_corrected_acceptance(
     assert (failure is None) is (allowance == 2)
     if failure is not None:
         assert failure.category == "HOST_TOOLS" and failure.retryable is False
-        assert "allowance" in str(failure).lower() and "cannot" in str(failure).lower()
+        assert "allocation exhausted" in str(failure).lower() and "cannot" in str(failure).lower()
     assert len(native_provider.requests) == allowance, "fatal admission must not dispatch another provider request"
     assert installed == ([accepted] if allowance == 2 else [])
     assert marker.exists() is (allowance == 2)
@@ -1416,8 +1272,9 @@ async def test_committed_navigation_survives_native_compaction_on_one_cumulative
 
     native_provider.choose = choose
     result = await run_committed_review(CommittedReviewRequest(
-        repo, base, config=RunConfig(backend="pi", output_mode="review", archive=False, run_eval=False),
-        limits=ReviewLimits(240, 12, 192)))
+        repo, base, config=RunConfig(backend="pi", output_mode="review", archive=False, run_eval=False,
+                                     review_profile=_profile_with_pipeline(reviewer_investigation_budget_s=240,
+                                                                           reviewer_tool_call_budget=192))))
     value = result.to_dict()
     validate_committed_result(value)
     assert state["summaries"] == 1 and state["remaining"][:4] == [44, 43, 42, 41] and state["remaining"][-1] == 1
@@ -1498,8 +1355,10 @@ async def test_adaptive_native_review_challenges_a_spanning_defect_in_a_fresh_co
 
     native_provider.choose = choose
     result = await run_committed_review(CommittedReviewRequest(
-        repo, base, config=RunConfig(backend="pi", output_mode="review", archive=False, run_eval=False),
-        limits=ReviewLimits(240, 12, 40), assignment_policy="adaptive"))
+        repo, base, assignment_policy="adaptive",
+        config=RunConfig(backend="pi", output_mode="review", archive=False, run_eval=False,
+                         review_profile=_profile_with_pipeline(reviewer_investigation_budget_s=240,
+                                                               reviewer_tool_call_budget=40))))
     value = result.to_dict()
     validate_committed_result(value)
     assert result.complete

@@ -13,7 +13,6 @@ from pathlib import Path
 from types import MappingProxyType
 
 from daydream.backends import BackendExecutionInput
-from daydream.review_budget import ReviewLimits
 from daydream.review_profile import ResolvedProfile
 
 HOSTED_PI_TOOLS = frozenset({"read", "find", "ls", "grep", "review_source", "review_admit", "structured_output"})
@@ -39,7 +38,6 @@ class HostedReviewPolicy:
     output_dir: Path
     private_base: Path
     profile: ResolvedProfile
-    limits: ReviewLimits = field(default_factory=ReviewLimits)
     trusted_prepared_source: bool = False
     backend: str = "pi"
     provider: str = "nous"

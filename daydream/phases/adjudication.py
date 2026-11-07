@@ -15,7 +15,7 @@ from daydream.json_utils import validates_schema
 from daydream.phases.inputs import _prepare_existing_phase_inputs, append_extended_facts
 from daydream.phases.schemas import ARBITER_SCHEMA, SUPERVISE_SCHEMA, SUPPRESSION_SCHEMA
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
-from daydream.review_budget import ReviewLimits
+from daydream.review_budget import BudgetLedger, ReviewLimits
 from daydream.review_evidence import FinalizationContext
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.test_execution import load_test_recipe
@@ -162,8 +162,7 @@ async def _adjudicate(
             output_semantics=mode.semantics,
             supplied_context=tuple(supplied_context),
         ),
-        tool_call_budget=phase_config.DEFAULT_TOOL_CALL_BUDGET,
-        wall_budget_s=phase_config.DEFAULT_WALL_BUDGET_S,
+        budget=BudgetLedger("adjudication", wall_s=phase_config.DEFAULT_WALL_BUDGET_S),
         sanctioned_inputs=sanctioned_inputs,
         run_context=resolve_run_context(inputs.get("run_context")),
     )

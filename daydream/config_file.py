@@ -13,8 +13,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from daydream.retry_policy import coerce_declared_retry_allowance
-
 logger = logging.getLogger(__name__)
 
 
@@ -35,8 +33,7 @@ class DaydreamFileConfig:
     operator's additional finite allowance for a job that ran out of time.
     Non-negative bounds preserve zero: a zero group budget intentionally skips
     fixes. Test-command timeouts and diagram/improve bounds must be positive.
-    Invalid declared retry allowances warn before using the default. Test commands
-    preserve whitespace and a safe invalid-type marker for actionable readiness
+    Test commands preserve whitespace and a safe invalid-type marker for actionable readiness
     diagnostics instead of silently coercing malformed values to absent.
 
     ``latency_profile`` is deliberately parsed without validating its vocabulary:
@@ -73,7 +70,6 @@ class DaydreamFileConfig:
     repair_job_wall_s: float | None = None
     repair_max_executions: int | None = None
     repair_grant_job_wall_s: float | None = None
-    retry_recovery_allowance_s: float | None = None
     deep_shard_enabled: bool | None = None
     deep_shard_max_files: int | None = None
     deep_shard_max_bytes: int | None = None
@@ -306,9 +302,6 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         repair_job_wall_s=_coerce_non_negative_float(merged.get("repair_job_wall_s")),
         repair_max_executions=_coerce_non_negative_int(merged.get("repair_max_executions")),
         repair_grant_job_wall_s=_coerce_non_negative_float(merged.get("repair_grant_job_wall_s")),
-        retry_recovery_allowance_s=coerce_declared_retry_allowance(
-            merged.get("retry_recovery_allowance_s"), "retry_recovery_allowance_s"
-        ),
         review_profile=_coerce_review_profile_path(merged.get("review_profile")),
         deep_shard_enabled=_coerce_optional_bool(merged.get("deep_shard_enabled")),
         deep_shard_max_files=_coerce_non_negative_int(merged.get("deep_shard_max_files")),

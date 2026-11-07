@@ -56,14 +56,14 @@ from daydream.backends import (
     TurnEndEvent,
     _admit_json_value,
     _admit_native_unix_ms,
-    _parsed_nonnegative_float,
-    _parsed_nonnegative_int,
-    resolve_fanout_concurrency,
+    fanout_concurrency_from_environment,
+    retry_policy_from_environment,
     unix_ms_to_ns,
 )
 from daydream.backends._subprocess import (
     DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S,
     DEFAULT_STREAM_IDLE_TIMEOUT_S,
+    StreamStalledError,
     stream_idle_timeout_s,
 )
 from daydream.backends._transport import (
@@ -74,10 +74,11 @@ from daydream.backends._transport import (
     teardown,
 )
 from daydream.backends.lifecycle import current_backend_lifecycle
-from daydream.config import DEFAULT_PI_MODEL, DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
+from daydream.config import DEFAULT_PI_MODEL
 from daydream.host_tools import HostToolBinding
 from daydream.redaction import _PEM_HEADER, _PEM_KEY_REDACTED_MARKER, redact_structured_text
 from daydream.retry_policy import classify_failure, parse_message_retry_hint
+from daydream.review_budget import BudgetExhausted
 
 # Mirror Codex's generous stdout cap so large JSONL events (big file reads,
 # patch payloads) do not trip asyncio's "chunk is longer than limit" guard.
@@ -293,10 +294,9 @@ def render_pi_preamble(wall_budget_s: float | None, tool_call_budget: int | None
     """Render the preamble with the invocation's actual allowances.
 
     Requirement 17: the numbers are rendered, never hardcoded, and the tool-call
-    sentence says exactly what is true. ``DEFAULT_TOOL_CALL_BUDGET`` is ``None``,
-    so the common case has no ceiling to honour — an uncapped turn is described as
-    uncapped rather than as a strict budget, and the wall allowance the host did
-    impose is stated instead.
+    sentence says exactly what is true. ``wall_budget_s`` is the time left until the
+    ledger deadline (``None`` is unbounded); an uncapped turn is described as uncapped
+    rather than as a strict budget.
     """
     wall = f"{float(wall_budget_s):g} seconds" if wall_budget_s is not None else "unbounded"
     if tool_call_budget is None:
@@ -316,8 +316,6 @@ def render_pi_preamble(wall_budget_s: float | None, tool_call_budget: int | None
         if staged else '- Read the diff first. If a diff file or git output is in your context, start\n'
         '  there; only explore files referenced by the diff or their direct imports.'))
 
-
-_PI_SYSTEM_PREAMBLE = render_pi_preamble(DEFAULT_WALL_BUDGET_S, DEFAULT_TOOL_CALL_BUDGET)
 
 
 def _pi_submission_assignment(review_instructions: str | None) -> dict[str, Any] | None:
@@ -348,24 +346,6 @@ def _pi_submission_assignment(review_instructions: str | None) -> dict[str, Any]
     return value
 
 
-def pi_system_preamble(
-    wall_budget_s: float | None = DEFAULT_WALL_BUDGET_S, tool_call_budget: int | None = None, *, staged: bool = False
-) -> str:
-    """Render this invocation's preamble, defaulting to the module allowances.
-
-    A turn granted a ceiling other than ``DEFAULT_WALL_BUDGET_S`` must not be told
-    about the default: the rendered allowance has to be the one the host actually
-    imposes, or the model plans against time it does not have. Omitted wall
-    allowance retains the adapter's standalone default; explicit ``None`` means
-    the caller imposes no wall deadline. Tool-call ``None`` is likewise uncapped.
-    """
-    wall = wall_budget_s
-    calls = DEFAULT_TOOL_CALL_BUDGET if tool_call_budget is None else tool_call_budget
-    if not staged and wall == DEFAULT_WALL_BUDGET_S and calls == DEFAULT_TOOL_CALL_BUDGET:
-        return _PI_SYSTEM_PREAMBLE
-    return render_pi_preamble(wall, calls, staged=staged)
-
-
 _PI_FINALIZATION_PREAMBLE = """\
 Serialize the completed task using only the supplied context and completed evidence.
 Return exactly the requested output format. Tools are disabled. Do not investigate,
@@ -374,9 +354,6 @@ when no defect is substantiated; preserve truthful incomplete coverage.
 """
 
 
-_PI_DEFAULT_RETRY_ATTEMPTS = 20
-_PI_DEFAULT_RETRY_BASE_DELAY = 10.0
-_PI_DEFAULT_RETRY_MAX_DELAY = 120.0
 _PI_DEFAULT_FANOUT_CONCURRENCY = 10
 
 STREAM_DROP_SIGNATURES = (
@@ -407,24 +384,6 @@ def _warn_migration_mismatch_once(key: str, message: str, *args: object) -> None
         return
     _warned_migration_mismatches.add(key)
     logger.warning(message, *args)
-
-
-def _pi_retry_attempts() -> int:
-    return _parsed_nonnegative_int(
-        os.environ, "DAYDREAM_PI_RETRY_ATTEMPTS", _PI_DEFAULT_RETRY_ATTEMPTS
-    )
-
-
-def _pi_retry_base_delay() -> float:
-    return _parsed_nonnegative_float(
-        os.environ, "DAYDREAM_PI_RETRY_BASE_DELAY_S", _PI_DEFAULT_RETRY_BASE_DELAY
-    )
-
-
-def _pi_retry_max_delay() -> float:
-    return _parsed_nonnegative_float(
-        os.environ, "DAYDREAM_PI_RETRY_MAX_DELAY_S", _PI_DEFAULT_RETRY_MAX_DELAY
-    )
 
 
 # Permanent conditions precede transient matches. Bare "provider" is too
@@ -705,12 +664,11 @@ class PiBackend:
             self.retry_base_delay_s = self.retry_policy.base_delay_s
             self.retry_max_delay_s = self.retry_policy.max_delay_s
         else:
-            self.fanout_concurrency = resolve_fanout_concurrency(
-                "DAYDREAM_PI_FANOUT_CONCURRENCY", _PI_DEFAULT_FANOUT_CONCURRENCY
-            )
-            self.retry_attempts = _pi_retry_attempts()
-            self.retry_base_delay_s = _pi_retry_base_delay()
-            self.retry_max_delay_s = _pi_retry_max_delay()
+            self.fanout_concurrency = fanout_concurrency_from_environment(os.environ, _PI_DEFAULT_FANOUT_CONCURRENCY)
+            policy = retry_policy_from_environment(os.environ, backend="pi")
+            self.retry_attempts = policy.attempts
+            self.retry_base_delay_s = policy.base_delay_s
+            self.retry_max_delay_s = policy.max_delay_s
         self._transports: list[CliTransport] = []
 
     @property
@@ -878,14 +836,13 @@ class PiBackend:
         output_schema: dict[str, Any] | None = None,
         continuation: ContinuationToken | None = None,
         agents: dict[str, Any] | None = None,
-        max_turns: int | None = None,
         read_only: bool = False,
         persist_session: bool = True,
         finalization: bool = False,
         review_instructions: str | None = None,
         tools_disabled: bool = False,
         validate_structured_output: bool = True,
-        wall_budget_s: float | None = DEFAULT_WALL_BUDGET_S,
+        deadline: float | None = None,
         tool_call_budget: int | None = None,
         host_tools: HostToolBinding | None = None,
     ) -> AsyncGenerator[AgentEvent, None]:
@@ -898,10 +855,10 @@ class PiBackend:
         read_only allows read/find/ls/grep. finalization disables tools, substitutes
         serialization instructions, and caps thinking at low while preserving lower
         settings. tools_disabled keeps normal instructions/thinking and uses stdin.
-        Pi cannot enforce max_turns: callers must enforce an absolute deadline.
-        wall_budget_s/tool_call_budget state the allowances the caller is actually
-        enforcing, so the preamble describes this turn rather than the defaults.
-        Stdout silence raises retryable StreamStalledError; run_agent starts a fresh
+        The absolute ``deadline`` (else the host-tool ledger's) and tool_call_budget
+        state the allowances the caller enforces; the preamble renders the remaining
+        seconds. A read cut short by that deadline raises BudgetExhausted. Stdout
+        silence raises retryable StreamStalledError; run_agent starts a fresh
         subprocess for each retry.
         """
         if self._execution_input is not None:
@@ -918,6 +875,7 @@ class PiBackend:
                 "Pi backend does not support exploration subagents; use --backend claude for exploration."
             )
 
+        budget_deadline = deadline if deadline is not None else host_tools.deadline if host_tools is not None else None
         if self._hosted_read_only:
             from daydream.hosted_review import HOSTED_PI_TOOLS
 
@@ -926,7 +884,7 @@ class PiBackend:
                     or self._review_context is None):
                 raise _unsupported_hosted_policy(
                     "Hosted Pi requires a fresh, nonpersistent read-only invocation with bound native host submission")
-            host_tools.restrict(deadline=None, tool_call_budget=None, allowed_tools=HOSTED_PI_TOOLS)
+            host_tools.restrict(allowed_tools=HOSTED_PI_TOOLS)
             if host_tools.allowed_tools != HOSTED_PI_TOOLS:
                 raise _unsupported_hosted_policy("Hosted Pi requires the exact operator read/search/submission grant")
 
@@ -941,11 +899,6 @@ class PiBackend:
                               category="HOST_TOOLS", retryable=False)
             assert output_schema is not None
             host_tools.configure_schema(output_schema)
-            # run_agent passes the residual allocation on retries; the binding
-            # stores an original cumulative limit, so account for earlier starts.
-            host_tools.restrict(deadline=(clock.monotonic() + wall_budget_s) if wall_budget_s is not None else None,
-                                tool_call_budget=(host_tools.calls + tool_call_budget)
-                                if tool_call_budget is not None else None)
 
         review_context = self._review_context
         self._check_review_context()
@@ -1012,8 +965,9 @@ class PiBackend:
         system_prompt = (
             _PI_FINALIZATION_PREAMBLE
             if finalization
-            else pi_system_preamble(wall_budget_s, tool_call_budget, staged=bool(review_instructions
-                                                and "Staged review contract:" in review_instructions))
+            else render_pi_preamble(
+                None if budget_deadline is None else max(0.0, budget_deadline - clock.monotonic()),
+                tool_call_budget, staged=bool(review_instructions and "Staged review contract:" in review_instructions))
         )
         if review_instructions and not finalization:
             system_prompt += (
@@ -1127,6 +1081,8 @@ class PiBackend:
         host_failure_generation_id: str | None = None
         terminal_total_emitted = False
         host_server = None
+        # Whether the ledger deadline, not a liveness window, bounds the current read.
+        deadline_bound = False
 
         transport: CliTransport | None = None
 
@@ -1233,8 +1189,7 @@ class PiBackend:
             )
 
         # P18 Task 1: closed typed effective-config admission from the exact
-        # argv built above. max_turns is accepted-but-not-enforced by Pi (no
-        # native flag) so it stays None. Native schemas validate tool arguments, not provider decoding.
+        # argv built above. Native schemas validate tool arguments, not provider decoding.
         if lifecycle is not None:
             lifecycle.request_prepared()
         yield RequestEvent(
@@ -1398,14 +1353,16 @@ class PiBackend:
             setup_deadline = clock.monotonic() + host_policy._SETUP_TIMEOUT_S + 2 if host_tools else None
 
             def line_timeout() -> float | None:
-                ordinary = tool_idle_timeout_s if active_tool_calls > 0 else response_idle_timeout_s
-                if host_tools is None:
-                    return ordinary
-                bound = host_tools.deadline
+                # Idle and setup windows are liveness checks; the ledger deadline is a budget stop.
+                nonlocal deadline_bound
+                now = clock.monotonic()
+                window = tool_idle_timeout_s if active_tool_calls > 0 else response_idle_timeout_s
                 if not host_ready and setup_deadline is not None:
-                    bound = min(bound, setup_deadline)
-                remaining = max(0.0, bound - clock.monotonic())
-                return min(ordinary, remaining) if ordinary is not None else remaining
+                    setup = max(0.0, setup_deadline - now)
+                    window = setup if window is None else min(window, setup)
+                remaining = None if budget_deadline is None else max(0.0, budget_deadline - now)
+                deadline_bound = remaining is not None and (window is None or remaining <= window)
+                return remaining if deadline_bound else window
 
             async for raw_line in transport.lines(line_timeout):
                 if not raw_line:
@@ -1885,7 +1842,7 @@ class PiBackend:
                     category="STREAM_TRUNCATION",
                 )
 
-        except Exception:
+        except Exception as exc:
             native_failed = True
             await cleanup()
             if pending_response is not None:
@@ -1921,6 +1878,9 @@ class PiBackend:
                               "generation_id": host_failure_generation_id or last_generation_id,
                               **cause_metadata})
                 raise PiError(str(fatal), retryable=False, category="HOST_TOOLS") from fatal
+            if deadline_bound and isinstance(exc, StreamStalledError):
+                # The ledger deadline, not stdout silence, ended this read.
+                raise BudgetExhausted("Budget ledger deadline reached") from exc
             raise
         except BaseException:
             native_failed = True

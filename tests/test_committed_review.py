@@ -20,6 +20,7 @@ from typing import Any
 
 import anyio
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from rich.console import Console
 
 from daydream import agent, clock, committed_review, git_ops, json_utils
@@ -29,13 +30,16 @@ from daydream.backends.pi import PiBackend, PiError
 from daydream.committed_review import CommittedReviewRequest, Review, run_committed_review
 from daydream.committed_review_model import RESULT_VERSIONS, planned_work_id, validate_committed_result
 from daydream.deep.detection import StackAssignment
+from daydream.extensions.registry import Registry
 from daydream.git_ops.captured_source import capture_source
 from daydream.host_tools import HostToolBinding, HostToolFatal, HostToolRejected
 from daydream.hosted_review import HostedReviewPolicy, UnsupportedHostedPolicy
 from daydream.hunk_index import write_hunk_index
 from daydream.immutable_review import ImmutableReviewInput
+from daydream.observability.config import ObservabilityConfig
+from daydream.observability.runtime import trace_run
 from daydream.pr_review import post_findings_from_artifact
-from daydream.review_budget import ReviewLimits
+from daydream.review_budget import BudgetLedger, BudgetStop
 from daydream.review_profile import ResolvedProfile, build_default_profile
 from daydream.review_result import validate_terminal_result
 from daydream.review_source_refs import source_options
@@ -53,6 +57,7 @@ from tests.harness.git_helpers import (
     write_and_stage,
 )
 from tests.harness.trajectory import root_trajectory
+from tests.test_deep_orchestrator import _profile_with_pipeline
 
 
 def _matches_link_destination(destination: Any, target: Path, *, dir_fd: int | None) -> bool:
@@ -67,7 +72,7 @@ def _matches_link_destination(destination: Any, target: Path, *, dir_fd: int | N
 
 @pytest.fixture
 def operator_policy(tmp_path: Path) -> HostedReviewPolicy:
-    """Nominal isolated authority; each journey owns its faults and explicit budgets."""
+    """Nominal isolated authority under the default profile; each journey owns its faults."""
     operator = tmp_path / "operator"
     operator.mkdir()
     return HostedReviewPolicy(
@@ -172,9 +177,20 @@ def _forge_completion(value: dict[str, Any]) -> None:
     validate_terminal_result(terminal)
 
 
+def _open(review: Review, work_id: str) -> HostToolBinding:
+    """Open planned work on its own ledger, as the schedule opens one dispatch."""
+    binding, _ = review.open(work_id, budget=BudgetLedger("test", deadline=clock.monotonic() + 30))
+    return binding
+
+
+def _assign(review: Review, kind: str) -> HostToolBinding:
+    """Plan one work item for every available responsibility of kind and open it."""
+    (work_id,) = review.plan(kind)
+    return _open(review, work_id)
+
+
 async def _submit(review: Review, kind: str, value: dict[str, Any]) -> dict[str, Any]:
-    binding, schema = review.assignment(kind, deadline=clock.monotonic() + 30)
-    binding.configure_schema(schema)
+    binding = _assign(review, kind)
     async with binding.session():
         binding.admit("terminal", "structured_output", value, terminal=True)
         return binding.submit("terminal", value)
@@ -201,7 +217,7 @@ async def test_review_revision_admission_and_sealing_contracts(
 
 async def _challenge_case(review_inputs: StageInputFactory, change: str) -> None:
     """Each semantic field renews challenge; legacy phase tests have no revision authority."""
-    review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
+    review = Review(review_inputs, "domain")
     await _submit(review, "discovery", _discovery(review_inputs))
     previous = review.pending()[0]
     revised = {k: deepcopy(previous[k]) for k in ("uid", "revision", "source_uids", "title", "payload")}
@@ -234,8 +250,7 @@ async def _challenge_case(review_inputs: StageInputFactory, change: str) -> None
             assert pending[0]["uid"] != previous["uid"] and pending[0]["source_uids"] == [previous["uid"]]
         else:
             assert pending[0]["challenge_evidence"][0]["revision"] == 1
-            stale_binding, schema = review.assignment("challenge", deadline=clock.monotonic() + 30)
-            stale_binding.configure_schema(schema)
+            stale_binding = _assign(review, "challenge")
             async with stale_binding.session():
                 with pytest.raises(HostToolRejected, match="current revision"):
                     stale = {"verdicts": [verdict], "claims": []}
@@ -252,7 +267,7 @@ async def _challenge_case(review_inputs: StageInputFactory, change: str) -> None
         assert rejected["challenge_evidence"][-1]["grounds"] == rejection["grounds"]
         assert all(c["uid"] != pending[0]["uid"] for c in value["findings"])
     with pytest.raises(ValueError, match="sealed"):
-        review.assignment("challenge", deadline=clock.monotonic() + 30)
+        _assign(review, "challenge")
 
 
 async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: pytest.MonkeyPatch, fault: str) -> None:
@@ -265,7 +280,7 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
         review_inputs.captured_source = capture_source(
             review_inputs.work.repo, review_inputs.canonical[0].path.parent / "capture",
             base_sha=review_inputs.revision['merge_base_sha'], head_sha=review_inputs.revision['head_sha'], local=False)
-    review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
+    review = Review(review_inputs, "domain")
     await _submit(review, "discovery", _discovery(review_inputs))
     prior = review.pending()
     update = {"verdicts": [_verdict(review_inputs, prior[0])], "claims": [_proposal(review_inputs)]}
@@ -277,8 +292,7 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
         update["claims"] = [deepcopy(compact) for _ in range(127)]
     if fault == "invalid-selector":
         update["claims"][0]["payload"]["evidence_refs"][0]["source_id"] = "source:" + "f" * 64
-    binding, schema = review.assignment("challenge", deadline=clock.monotonic() + 30)
-    binding.configure_schema(schema)
+    binding = _assign(review, "challenge")
     injected = False
     real_open = os.open
     async with binding.session():
@@ -294,7 +308,7 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
                 if Path(path) == review_inputs.canonical[0].path and not injected:
                     injected = True
                     if fault == "deadline":
-                        binding.deadline = clock.monotonic() - 1
+                        binding.budget.deadline = clock.monotonic() - 1
                     else:
                         binding.close_authority()
                 return fd
@@ -335,20 +349,13 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
 
     async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, str | None]:
         assignment = _assignment(kwargs)
-        recovery = kwargs["investigation_budget"].retry_recovery_budget
         dispatches.append(
-            {"kind": assignment["kind"], "allocation": kwargs["tool_call_budget"], "deadline": kwargs["deadline"],
-             "recovery_spent": recovery.spent_s, "recovery_active": recovery.active}
+            {"kind": assignment["kind"], "allocation": kwargs["budget"].limit, "deadline": kwargs["budget"].deadline}
         )
-        if assignment["kind"] == "discovery":
-            # Retry overhead spent by discovery must stay spent for every later work item.
-            recovery.charge(1.5)
         if assignment["kind"] == "discovery" and challenge == "cancelled":
             captures.append(cwd)
         binding = kwargs["host_tools"]
         bindings.append(binding)
-        binding.configure_schema(kwargs["output_schema"])
-        binding.restrict(deadline=kwargs["deadline"], tool_call_budget=kwargs["tool_call_budget"])
         async with binding.session():
             if assignment["kind"] == "challenge" and challenge == "cancelled":
                 recorder = get_current_recorder()
@@ -363,13 +370,12 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
                     await asyncio.Event().wait()
             if assignment["kind"] == "discovery":
                 value = _discovery(review_inputs)
-                for number in range(kwargs["tool_call_budget"] - 1):
+                for number in range(kwargs["budget"].limit - 1):
                     binding.admit(f"read-{number}", "read", {})
             else:
                 value = {"verdicts": [_verdict(review_inputs, assignment["claims"][0])], "claims": []}
             binding.admit("terminal", "structured_output", value, terminal=True)
             accepted = binding.submit("terminal", value)
-            kwargs["investigation_budget"].observed_tool_starts += binding.calls
             if assignment["kind"] == "challenge" and failed_after_acceptance:
                 raise RuntimeError("native failed after host acceptance")
             binding.native_settled = True
@@ -403,8 +409,8 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         config=RunConfig(
             backend="pi", output_mode="review",
             trajectory_hub_repo="fixture/requested-export" if challenge == "hub-export" else None,
+            review_profile=_profile_with_pipeline(reviewer_investigation_budget_s=90, reviewer_tool_call_budget=10),
         ),
-        limits=ReviewLimits(90, 12, 10),
     )
     if challenge == "hub-export":
         with pytest.raises(ValueError, match="external export"):
@@ -470,10 +476,6 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     assert value["analyzed_revision"]["head_sha"] == review_inputs.revision["head_sha"]
     assert value["claims"] and [e["assignment"] for e in value["execution"]] == ["discovery", "challenge"]
     assert dispatches[0]["allocation"] == dispatches[1]["allocation"] == 5
-    # One cumulative retry-recovery ledger: challenge previously received a fresh allowance.
-    assert all(d["recovery_spent"] >= 1.5 for d in dispatches[1:])
-    # Activated for the whole review window up front, so a local failure cannot clamp it.
-    assert all(d["recovery_active"] for d in dispatches)
     # The broad default never decomposes; cross-assignment is an explicit host no-op.
     assert value["settings"]["assignment_policy"] == {"name": "broad", "decomposed": False,
                                                      "planned_assignments": 1, "cross_assignment": "not_applicable"}
@@ -533,11 +535,9 @@ async def test_local_capture_corruption_retains_challenged_findings_and_unfinish
             verdict = _verdict(review_inputs, assignment['claims'][0], evidence_refs=selectors('api.py'))
             value = {'verdicts': [verdict], 'claims': [claim] if new_concern else []}
         binding = kwargs['host_tools']
-        binding.restrict(deadline=kwargs['deadline'], tool_call_budget=kwargs['tool_call_budget'])
         async with binding.session():
             binding.admit('terminal', 'structured_output', value, terminal=True)
             accepted = binding.submit('terminal', value)
-            kwargs['investigation_budget'].observed_tool_starts += binding.calls
             binding.native_settled = True
         if assignment['kind'] == 'challenge':
             if corruption == 'assigned-delete':
@@ -548,8 +548,9 @@ async def test_local_capture_corruption_retains_challenged_findings_and_unfinish
 
     monkeypatch.setattr(committed_review, 'agent', SimpleNamespace(run_agent=execute, console=agent.console))
     result = await run_committed_review(CommittedReviewRequest(
-        repo, review_inputs.revision['merge_base_sha'], local=True, limits=ReviewLimits(90, 12, 12),
-        config=RunConfig(backend='pi', output_mode='review', ignore_paths=['support']),
+        repo, review_inputs.revision['merge_base_sha'], local=True,
+        config=RunConfig(backend='pi', output_mode='review', ignore_paths=['support'], review_profile=(
+            _profile_with_pipeline(reviewer_investigation_budget_s=90, reviewer_tool_call_budget=12))),
     ))
     value = result.to_dict()
     assert result.output_installed and not result.complete
@@ -627,7 +628,6 @@ async def test_committed_capture_cleanup_keeps_ownership_after_session_close(
 
     async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, None]:
         binding = kwargs["host_tools"]
-        binding.configure_schema(kwargs["output_schema"])
         async with binding.session():
             value = _discovery(review_inputs)
             value["claims"] = []
@@ -718,7 +718,7 @@ async def _hosted_policy_case(
 
 
 async def _sealed_result_case(review_inputs: StageInputFactory, corruption: str) -> None:
-    review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
+    review = Review(review_inputs, "domain")
     await _submit(review, "discovery", _discovery(review_inputs))
     concern = review.pending()[0]
     verdict = _verdict(review_inputs, concern)
@@ -911,7 +911,6 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     (tmp_path / "malformed-global").write_text("this is not valid Git configuration\n")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "malformed-global"))
     monkeypatch.setenv("GIT_EXEC_PATH", str(tmp_path / "missing-git-exec"))
-    policy = replace(operator_policy, limits=ReviewLimits(60, 10, 10))
     attempts: list[str] = []
 
     def forbidden(*args: Any, **kwargs: Any) -> Any:
@@ -944,7 +943,6 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
         assert "captured/repository" not in prompt + instructions and '"pr_number"' not in prompt + instructions
         assert "Historical captured title" in instructions
         binding = kwargs["host_tools"]
-        binding.configure_schema(kwargs["output_schema"])
         async with binding.session():
             part = _looked_up(binding)[0]
             assert part["source_options"][0]["source_id"] == "source:1"
@@ -973,7 +971,7 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
 
     def fail_install(source: Any, destination: Any, **kwargs: Any) -> None:
         nonlocal injected
-        target = policy.output_dir / "findings.json"
+        target = operator_policy.output_dir / "findings.json"
         if outcome == "install-failure" and _matches_link_destination(
             destination, target, dir_fd=kwargs.get("dst_dir_fd")
         ):
@@ -984,7 +982,8 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
 
     monkeypatch.setattr(os, "link", fail_install)
     review_request = CommittedReviewRequest(
-        repo, envelope["materialization"]["requested_base_sha"], hosted_policy=policy, immutable_input=identity,
+        repo, envelope["materialization"]["requested_base_sha"], hosted_policy=operator_policy,
+        immutable_input=identity,
     )
     with monkeypatch.context() as analysis_boundaries:
         for owner, names in ((process, ("_run_gh", "_run_gh_async")),
@@ -1007,7 +1006,7 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
                 def write_then_cancel(body: bytes) -> int:
                     written = int(write(body))
                     if not preserved:
-                        prepared, = (policy.private_base / "immutable-inputs").iterdir()
+                        prepared, = (operator_policy.private_base / "immutable-inputs").iterdir()
                         leaf = next(p for p in (prepared / ".git/objects").glob("*/*")
                                     if p.stat().st_ino == os.fstat(fd).st_ino)
                         parent = leaf.parent.with_name("preserved-parent")
@@ -1038,8 +1037,8 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
             with pytest.raises(ArtifactVisibilityError, match="explicit artifact destination changed during recovery"):
                 await run_committed_review(review_request)
             assert injected and attempts == [] and not marker.exists()
-            assert (policy.output_dir / "findings.json").read_bytes() == b"competing bytes"
-            frozen, = (policy.private_base / "runtime").glob("*/runs/*/frozen")
+            assert (operator_policy.output_dir / "findings.json").read_bytes() == b"competing bytes"
+            frozen, = (operator_policy.private_base / "runtime").glob("*/runs/*/frozen")
             retained, = frozen.glob(".explicit/*/committed-review.json")
             value = json.loads(retained.read_text())
             validate_committed_result(value)
@@ -1055,7 +1054,7 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
                 expected_comparison_sha=envelope["provenance"]["comparison_base_sha"],
             )
             assert exported.terminal_result == value["terminal_result"]
-            assert list((policy.private_base / "runtime").glob("*/unreconciled/publish-*"))
+            assert list((operator_policy.private_base / "runtime").glob("*/unreconciled/publish-*"))
             assert not (repo / ".daydream").exists()
             return
         result = await run_committed_review(review_request)
@@ -1065,18 +1064,18 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     assert value["schema_version"] == RESULT_VERSIONS["immutable"] and value["immutable_input"] == envelope
     # Only the no-diff journey completes here: nothing changed, so no native turn runs.
     assert result.complete and seen == []
-    exported_value = json.loads((policy.output_dir / "findings.json").read_text())
+    exported_value = json.loads((operator_policy.output_dir / "findings.json").read_text())
     assert exported_value["schema_version"] == 3 and exported_value["findings"] == []
     assert exported_value["head_sha"] == envelope["provenance"]["head_sha"]
     assert exported_value["terminal_result"] == value["terminal_result"]
-    trajectory = json.loads((policy.output_dir / "trajectory.json").read_text())
+    trajectory = json.loads((operator_policy.output_dir / "trajectory.json").read_text())
     assert trajectory["extra"]["pr_repo"] == "captured/repository"
     assert trajectory["extra"]["pr_number"] == 1421
     assert trajectory["extra"]["immutable_input"] == envelope
     assert not (repo / ".daydream").exists()
     # The offline export is postable against its captured provenance and approves when clean.
     assert post_findings_from_artifact(
-        tmp_path, policy.output_dir / "findings.json", pr_number=1421, repo="captured/repository",
+        tmp_path, operator_policy.output_dir / "findings.json", pr_number=1421, repo="captured/repository",
         head_sha=envelope["provenance"]["head_sha"], console=Console(),
         base_sha=envelope["provenance"]["requested_base_sha"],
         comparison_sha=envelope["provenance"]["comparison_base_sha"],
@@ -1360,8 +1359,6 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
         instructions = kwargs["review_system_instructions"]
         assignment = _assignment(kwargs)
         binding: HostToolBinding = kwargs["host_tools"]
-        binding.configure_schema(kwargs["output_schema"])
-        binding.restrict(deadline=kwargs["deadline"], tool_call_budget=kwargs["tool_call_budget"])
         async with binding.session():
             if assignment["kind"] == "challenge":
                 claim, = assignment["claims"]
@@ -1371,7 +1368,6 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
                 value = {"verdicts": [verdict], "claims": []}
                 binding.admit("challenge-final", "structured_output", value, terminal=True)
                 accepted = binding.submit("challenge-final", value)
-                kwargs["investigation_budget"].observed_tool_starts += binding.calls
                 binding.native_settled = True
                 return accepted, None, None
             catalog = assignment["catalog"]
@@ -1407,11 +1403,12 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
                                 "file": late_target["file"], "line": None, "evidence_refs": observed["late_refs"]}}]}
                 receipt = _charged(binding, "review_admit", batch)
                 assert receipt["progress"]["decided"] == start + len(batch["targets"])
-            kwargs["investigation_budget"].observed_tool_starts += binding.calls
         raise PiError("native discovery failed after progressive admissions")
 
     monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=execute, console=agent.console))
-    result = await run_committed_review(CommittedReviewRequest(repo, base, limits=ReviewLimits(600, 60, 8000)))
+    result = await run_committed_review(CommittedReviewRequest(repo, base, config=RunConfig(
+        backend="pi", output_mode="review",
+        review_profile=_profile_with_pipeline(reviewer_investigation_budget_s=600, reviewer_tool_call_budget=8000))))
     value = result.to_dict()
     validate_committed_result(value)
 
@@ -1463,9 +1460,8 @@ async def test_lookup_is_read_only_and_cursor_bound(tmp_path: Path) -> None:
     seed_feature_branch(repo, base={"api.py": "VALUE = 1\n", "uni.py": "TEXT = ''\n", "helper.py": "H = 1\n"},
                         feature={"api.py": "VALUE = 0\n", "uni.py": "TEXT = '\u00e9\u00e9\u00e9'\n",
                                  "helper.py": "H = 1\n"})
-    review = Review(_inputs(repo, tmp_path / "inputs", ["api.py", "uni.py"]), "domain",
-                    deadline=clock.monotonic() + 60)
-    binding, _ = review.assignment("discovery", deadline=clock.monotonic() + 30)
+    review = Review(_inputs(repo, tmp_path / "inputs", ["api.py", "uni.py"]), "domain")
+    binding = _assign(review, "discovery")
     async with binding.session():
         path_page = _charged(binding, "review_source", {"target_id": None, "path": "api.py", "cursor": None})
         assert path_page["status"] == "complete" and {e["file"] for e in path_page["entries"]} == {"api.py"}
@@ -1500,8 +1496,8 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(rev
     leave no decision, claim or coverage reservation, earlier decisions are final,
     oversized batches are refused, and sealing types undecided targets per target.
     """
-    review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
-    binding, _ = review.assignment("discovery", deadline=clock.monotonic() + 30)
+    review = Review(review_inputs, "domain")
+    binding = _assign(review, "discovery")
     first, second = (part["target_id"] for part in review.assignments[:2])
 
     def decision(target: str, **fields: Any) -> dict[str, Any]:
@@ -1540,19 +1536,22 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(rev
 async def test_denied_over_limit_discovery_start_cannot_spend_protected_challenge_reserve(
     review_inputs: StageInputFactory, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The binding charges a denied over-limit start; the program must not let it shrink challenge.
+    """A denied over-limit start is observed overshoot; it must not shrink challenge.
 
     Previously challenge received the shared ledger's remainder, so discovery's
     rejected extra start (charged before the limit check) consumed one protected call.
+    The challenge re-dispatch the host refuses for want of calls runs no agent, so its
+    budget stop is a trace event.
     """
     allocations: list[tuple[str, int]] = []
 
     async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, str | None]:
         kind = "discovery" if kwargs["phase"].value == "review" else "challenge"
-        allocations.append((kind, kwargs["tool_call_budget"]))
+        budget = kwargs["budget"]
+        budget.dispatch()  # run_agent's dispatch-time snapshot
+        allocation = budget.limit
+        allocations.append((kind, allocation))
         binding: HostToolBinding = kwargs["host_tools"]
-        binding.configure_schema(kwargs["output_schema"])
-        binding.restrict(deadline=kwargs["deadline"], tool_call_budget=kwargs["tool_call_budget"])
         async with binding.session():
             if kind == "discovery":
                 parts = _looked_up(binding)
@@ -1562,23 +1561,40 @@ async def test_denied_over_limit_discovery_start_cannot_spend_protected_challeng
                                      for part in parts], "claims": [_proposal(review_inputs)]}
                 binding.admit("terminal", "structured_output", value, terminal=True)
                 accepted = binding.submit("terminal", value)
-                for number in range(kwargs["tool_call_budget"]):  # The last start is over the limit.
+                for number in range(allocation):  # The last start is over the limit.
                     with suppress(HostToolFatal):
                         binding.admit(f"extra-{number}", "read", {})
-                assert binding.calls == kwargs["tool_call_budget"] + 1
+                assert binding.calls == allocation + 1
             else:
+                # Challenge spends its whole share and leaves the claim unresolved.
+                for number in range(allocation - 1):
+                    binding.admit(f"read-{number}", "read", {})
                 claim = _owner(binding).pending()[0]
-                value = {"verdicts": [_verdict(review_inputs, claim)], "claims": []}
+                value = {"verdicts": [_verdict(review_inputs, claim, verdict="unresolved",
+                                               grounds="Counterevidence search is unfinished.")], "claims": []}
                 binding.admit("terminal", "structured_output", value, terminal=True)
                 accepted = binding.submit("terminal", value)
-            kwargs["investigation_budget"].observed_tool_starts += binding.calls
             binding.native_settled = True
+        if kind == "discovery":
+            budget.stop("tool_calls")  # run_agent records the budget stop it returns
         return accepted, None, "tool_call_budget_exceeded" if kind == "discovery" else None
 
     monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=execute, console=agent.console))
-    result = await run_committed_review(CommittedReviewRequest(
-        review_inputs.work.source, review_inputs.revision["merge_base_sha"], limits=ReviewLimits(90, 12, 10)))
+    exporter = InMemorySpanExporter()
+    registry = Registry()
+    registry.register_trace_exporter("memory", lambda _: exporter)
+    async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review") as run:
+        profile = _profile_with_pipeline(reviewer_investigation_budget_s=90, reviewer_tool_call_budget=10)
+        result = await run_committed_review(CommittedReviewRequest(
+            review_inputs.work.source, review_inputs.revision["merge_base_sha"],
+            config=RunConfig(backend="pi", output_mode="review", review_profile=profile)))
+        run.finish(0)
     assert allocations == [("discovery", 5), ("challenge", 5)] and result.output_installed
+    discovery = result.to_dict()["execution"][0]
+    assert (discovery["allocation"], discovery["observed_starts"], discovery["overshoot"]) == (5, 6, 1)
+    refused = BudgetStop("committed", "tool_calls", limit=10, spent=10, remaining_at_dispatch=0, reserved=0)
+    assert [dict(event.attributes or {}) for span in exporter.get_finished_spans() for event in span.events
+            if event.name == "daydream.budget.stop"] == [refused.attributes()]
 
 
 async def test_claim_lines_inside_continuation_fragments_use_summarized_spans(tmp_path: Path) -> None:
@@ -1592,10 +1608,10 @@ async def test_claim_lines_inside_continuation_fragments_use_summarized_spans(tm
     seed_feature_branch(repo, base={"keep.py": "KEEP = 1\n"},
                         feature={"keep.py": "KEEP = 1\n", "big.py": "".join(f"ITEM_{n} = {n}\n" for n in range(20000))})
     inputs = _inputs(repo, tmp_path / "inputs", ["big.py"])
-    review = Review(inputs, "domain", deadline=clock.monotonic() + 60)
+    review = Review(inputs, "domain")
     planned = review.assignments[-1]
     assert planned["kind"] == "continuation" and planned["source_refs"][0]["source_range"] is None
-    binding, _ = review.assignment("discovery", deadline=clock.monotonic() + 30)
+    binding = _assign(review, "discovery")
     lookup = binding.host_tools["review_source"].callback
     late = lookup({"target_id": planned["target_id"], "path": None, "cursor": None})["target"]
     assert late["fragment_line_offset"] == planned["fragment_line_offset"]
@@ -1625,10 +1641,10 @@ async def test_challenge_verdict_must_name_the_claim_revision_current_at_admissi
     marked the newer revision confirmed without evidence, and made sealing raise so
     every admitted finding was lost.
     """
-    review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
+    review = Review(review_inputs, "domain")
     await _submit(review, "discovery", _discovery(review_inputs))
     claim = review.pending()[0]
-    binding, _ = review.assignment("challenge", deadline=clock.monotonic() + 30)
+    binding = _assign(review, "challenge")
     revised = {key: deepcopy(claim[key]) for key in ("uid", "revision", "source_uids", "title", "payload")}
     revised["payload"].update(grounds="Refined grounds change the semantic payload.",
                               evidence_refs=_selectors(review_inputs))
@@ -1699,19 +1715,17 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
         assignment = _assignment(kwargs)
         work, binding = assignment["work"], kwargs["host_tools"]
         work_id, targets = work["work_id"], work["targets"]["ids"]
-        dispatches.append({**work, "binding": binding, "allocation": kwargs["tool_call_budget"],
+        # Each dispatch's own ledger carries the host split; siblings never share a count.
+        budget = kwargs["budget"]
+        dispatches.append({**work, "binding": binding, "allocation": budget.limit, "deadline": budget.deadline,
                            "claims": assignment["claims"]})
-        binding.restrict(deadline=kwargs["deadline"], tool_call_budget=kwargs["tool_call_budget"])
         if scenario == "native-capacity" and work_id == "work:1":
             # The assignment cannot fit the native model before provider work; the host splits it.
             binding.fail(HostToolFatal("native limits cannot fit this assignment", code="native_capacity"))
             raise PiError("native capacity preflight failed")
-        try:
-            async with binding.session():
-                accepted = await local(work, binding, targets, cwd, assignment, kwargs["tool_call_budget"])
-                binding.native_settled = True
-        finally:
-            kwargs["investigation_budget"].observed_tool_starts += binding.calls
+        async with binding.session():
+            accepted = await local(work, binding, targets, cwd, assignment, budget.limit)
+            binding.native_settled = True
         return accepted, None, None
 
     def submit(binding: HostToolBinding, value: dict[str, Any]) -> dict[str, Any]:
@@ -1809,8 +1823,9 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
     monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=execute, console=agent.console))
     calls = 8 if scenario == "undecomposed" else 40
     with anyio.fail_after(60):
-        result = await run_committed_review(CommittedReviewRequest(
-            repo, base, limits=ReviewLimits(90, 12, calls), assignment_policy="adaptive"))
+        result = await run_committed_review(CommittedReviewRequest(repo, base, assignment_policy="adaptive",
+            config=RunConfig(backend="pi", output_mode="review", review_profile=_profile_with_pipeline(
+                reviewer_investigation_budget_s=90, reviewer_tool_call_budget=calls))))
     value = result.to_dict()
     validate_committed_result(value)
     work = {record["work_id"]: record for record in value["work"]}
@@ -1835,6 +1850,12 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
     challenges = [d for d in dispatches if d["kind"] == "challenge"]
     if scenario == "empty-local":
         assert allocations[2:] == [("work:3", "cross_assignment", 11), ("work:4", "challenge", 29)]
+        # Phase deadlines are carved from the one review window that settings record.
+        limits = value["settings"]["limits"]
+        local_deadline, cross_deadline, challenge_deadline = (dispatches[i]["deadline"] for i in (0, 2, 3))
+        assert dispatches[1]["deadline"] == local_deadline
+        assert cross_deadline - local_deadline == pytest.approx(limits["protected_cross_assignment_s"])
+        assert challenge_deadline - cross_deadline == pytest.approx(limits["protected_challenge_s"])
     if scenario == "follow-up":
         parent, follow = work["work:1"], next(r for r in value["work"] if r["kind"] == "follow_up")
         assert parent["state"] == "superseded" and follow["parents"] == ["work:1"]
@@ -1871,11 +1892,10 @@ async def test_supersession_transfers_exactly_the_unfinished_targets_of_closed_w
     still admitted after supersession, would lose or double-credit responsibility.
     """
     repo, _ = _adaptive_repo(tmp_path)
-    review = Review(_inputs(repo, tmp_path / "inputs", sorted(_ADAPTIVE_FILES)), "domain",
-                    deadline=clock.monotonic() + 60)
+    review = Review(_inputs(repo, tmp_path / "inputs", sorted(_ADAPTIVE_FILES)), "domain")
     targets = tuple(part["target_id"] for part in review.assignments)
     parent_id, sibling_id = review.plan("discovery", [targets[:3], targets[3:]])
-    parent, _ = review.open(parent_id, deadline=clock.monotonic() + 30)
+    parent = _open(review, parent_id)
     async with parent.session():
         with pytest.raises(HostToolRejected, match="not assigned to this work"):
             _charged(parent, "review_admit", {"targets": _decide(parent, targets[3:4]), "claims": []})
@@ -1889,7 +1909,7 @@ async def test_supersession_transfers_exactly_the_unfinished_targets_of_closed_w
     with pytest.raises(HostToolFatal, match="closed"):
         async with parent.session():
             pytest.fail("superseded authority reopened")
-    child, _ = review.open(child_id, deadline=clock.monotonic() + 30)
+    child = _open(review, child_id)
     async with child.session():
         _charged(child, "review_admit", {"targets": _decide(child, targets[1:3]), "claims": []})
     sealed = review.seal({})
@@ -1918,24 +1938,24 @@ async def test_unfinished_challenge_revisions_transfer_to_a_fresh_challenge(
     without a parent, so the stale failure kept the review incomplete; and a live
     challenge could revise a revision another live challenge held, erasing its duty.
     """
-    review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
+    review = Review(review_inputs, "domain")
     await _submit(review, "discovery", _discovery(review_inputs))
     _clean(review, "work:1")
     claim = review.pending()[0]
-    failed, _ = review.assignment("challenge", deadline=clock.monotonic() + 30)
+    failed = _assign(review, "challenge")
     async with failed.session():
         _charged(failed, "review_admit", {"verdicts": [_verdict(
             review_inputs, claim, verdict="unresolved", grounds="Counterevidence search is unfinished.")],
             "claims": []})
     failed.close_authority()
     _clean(review, "work:2", "host_wall_budget_exhaustion")
-    reviser, _ = review.assignment("challenge", deadline=clock.monotonic() + 30)
+    reviser = _assign(review, "challenge")
     revised = {key: deepcopy(claim[key]) for key in ("uid", "revision", "source_uids", "title", "payload")}
     revised["payload"].update(grounds="Revised grounds.", evidence_refs=_selectors(review_inputs))
     async with reviser.session():
         _charged(reviser, "review_admit", {"verdicts": [], "claims": [revised]})
         # The new revision belongs to a fresh challenge; its live author cannot revise it away.
-        judge, _ = review.assignment("challenge", deadline=clock.monotonic() + 30)
+        judge = _assign(review, "challenge")
         again = {**revised, "revision": 2, "payload": {**revised["payload"], "grounds": "Third grounds."}}
         with pytest.raises(HostToolRejected, match="currently assigned"):
             _charged(reviser, "review_admit", {"verdicts": [], "claims": [again]})
@@ -1965,18 +1985,18 @@ async def test_failed_revising_challenge_is_superseded_by_the_challenge_that_jud
     The new revision had no holder, so the next challenge had no parent and the stale
     failure kept the review incomplete after the revision was resolved elsewhere.
     """
-    review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
+    review = Review(review_inputs, "domain")
     await _submit(review, "discovery", _discovery(review_inputs))
     _clean(review, "work:1")
     claim = review.pending()[0]
-    reviser, _ = review.assignment("challenge", deadline=clock.monotonic() + 30)
+    reviser = _assign(review, "challenge")
     revised = {key: deepcopy(claim[key]) for key in ("uid", "revision", "source_uids", "title", "payload")}
     revised["payload"].update(grounds="Revised grounds.", evidence_refs=_selectors(review_inputs))
     async with reviser.session():
         _charged(reviser, "review_admit", {"verdicts": [], "claims": [revised]})
     reviser.close_authority()
     _clean(review, "work:2", "host_wall_budget_exhaustion")
-    judge, _ = review.assignment("challenge", deadline=clock.monotonic() + 30)
+    judge = _assign(review, "challenge")
     async with judge.session():
         value = {"verdicts": [_verdict(review_inputs, review.pending()[0])], "claims": []}
         judge.admit("terminal", "structured_output", value, terminal=True)

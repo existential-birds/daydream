@@ -68,9 +68,9 @@ from daydream.hosted_review import HOSTED_PI_TOOLS, HostedReviewPolicy, Unsuppor
 from daydream.hunk_index import write_hunk_index
 from daydream.immutable_review import ImmutableReviewInput
 from daydream.json_utils import canonical_json, validate_json_schema
+from daydream.observability.spans import record_budget_stop
 from daydream.prompt_budget import SanctionedInputUnavailable
-from daydream.retry_policy import RetryRecoveryBudget
-from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
+from daydream.review_budget import BudgetDimension, BudgetLedger
 from daydream.review_profile import ResolvedProfile, build_default_profile, resolve_from_runconfig
 from daydream.review_result import (
     AnalyzedRevision,
@@ -93,12 +93,14 @@ from daydream.workspace import WorkContext, open_workspace
 
 @dataclass(frozen=True)
 class CommittedReviewRequest:
-    """Select pinned committed or final working source; no edit or external posting authority."""
+    """Select pinned committed or final working source; no edit or external posting authority.
+
+    Limits: docs/runtime.md#committed-review-requestresult.
+    """
 
     source: Path
     base: str
     config: RunConfig = field(default_factory=lambda: RunConfig(backend="pi", output_mode="review"))
-    limits: ReviewLimits = field(default_factory=ReviewLimits)
     hosted_policy: HostedReviewPolicy | None = None
     immutable_input: ImmutableReviewInput | None = None
     immutable_bundle: Path | None = None
@@ -116,6 +118,8 @@ _RESPONSIBILITY_PAGE = 256
 _FANOUT_CEILING = 10
 # One investigation start plus the protected structured_output start.
 _MIN_WORK_CALLS = 2
+# Bounded evidence finalization reserved after the review deadline.
+_FINALIZATION_S = 120
 
 
 @dataclass
@@ -172,10 +176,9 @@ class Review:
     """
 
     def __init__(
-        self, inputs: StageInputFactory, run_id: str, *, deadline: float,
-        allowed_tools: frozenset[str] | None = None,
+        self, inputs: StageInputFactory, run_id: str, *, allowed_tools: frozenset[str] | None = None,
     ) -> None:
-        self.inputs, self.run_id, self.deadline = inputs, run_id, deadline
+        self.inputs, self.run_id = inputs, run_id
         self._allowed_tools = allowed_tools
         self.assignments = deepcopy([part.assignment for part in inputs.parts])
         self._index = {part["target_id"]: index for index, part in enumerate(self.assignments)}
@@ -452,13 +455,6 @@ class Review:
             self._claim_owner.update(dict.fromkeys(work.claims.items(), work_id))
         return identifiers
 
-    def assignment(
-        self, kind: str, *, deadline: float, reserves: dict[str, Any] | None = None,
-    ) -> tuple[HostToolBinding, dict[str, Any]]:
-        """Plan one work item for every available responsibility of kind and open it."""
-        (work_id,) = self.plan(kind)
-        return self.open(work_id, deadline=deadline, reserves=reserves)
-
     # Progressive admission ------------------------------------------------------------
 
     def _receipt(self, work: _Work, final: bool, decisions: int, touched: list[dict[str, Any]]) -> dict[str, Any]:
@@ -473,9 +469,12 @@ class Review:
         }
 
     def open(
-        self, work_id: str, *, deadline: float, reserves: dict[str, Any] | None = None,
+        self, work_id: str, *, budget: BudgetLedger, reserves: dict[str, Any] | None = None,
     ) -> tuple[HostToolBinding, dict[str, Any]]:
-        """Open the single native capability for one planned work item, with charged host navigation."""
+        """Open the single native capability for one planned work item, with charged host navigation.
+
+        The binding charges the dispatch's ``budget``, which the schedule carves within the review deadline.
+        """
         work = self.work[work_id]
         if self._sealed or work.binding is not None or work.superseded_by:
             raise ValueError("Review is sealed or this work is not plannable")
@@ -548,8 +547,7 @@ class Review:
                     # Only identities this submission touches are rechecked; sibling updates
                     # elsewhere never invalidate it.
                     binding.ensure_open()
-                    if self._sealed or work.binding is not binding or work.superseded_by \
-                            or clock.monotonic() >= self.deadline:
+                    if self._sealed or work.binding is not binding or work.superseded_by:
                         raise HostToolFatal("Review authority has closed", code="authority_closed")
                     if kind == "challenge" and set(verdicts) & judged:
                         raise HostToolRejected("verdicts: use each assigned uid/current revision at most once")
@@ -632,7 +630,7 @@ class Review:
                 raise HostToolFatal('Captured review input is unavailable', code='input_unavailable') from exc
 
         binding = HostToolBinding(
-            deadline=min(deadline, self.deadline), accept=lambda value: admit(value, final=True),
+            budget=budget, accept=lambda value: admit(value, final=True),
             allowed_tools=self._allowed_tools, reserves=reserves, protected_submission=True,
             host_tools={LOOKUP_TOOL: HostTool(LOOKUP_SCHEMA, self.lookup),
                         ADMIT_TOOL: HostTool(schema, lambda value: admit(value, final=False), mutating=True)},
@@ -691,6 +689,7 @@ class Review:
                 # Planned, abandoned or closed-without-acceptance work is unfinished, never success.
                 failures[record["work_id"]] = {ReasonCode.EVIDENCE_INCOMPLETE.value}
         current = [record for record in records if record["state"] != "superseded"]
+
         kinds = {entry["assignment"] for entry in self.execution if entry["work_id"] is not None}
         if self.assignments and not kinds & INVESTIGATION_KINDS:
             global_reasons.add(ReasonCode.EVIDENCE_INCOMPLETE.value)
@@ -698,10 +697,9 @@ class Review:
             scopes_complete = True
             for index, shard in enumerate(self._shards):
                 identifiers = {part["target_id"] for part in shard}
-                reasons = set(global_reasons)
-                for record in current:
-                    if record["kind"] in INVESTIGATION_KINDS and identifiers & set(record["targets"]):
-                        reasons |= failures.get(record["work_id"], set())
+                contributing = [record for record in current if record["kind"] in INVESTIGATION_KINDS
+                                and identifiers & set(record["targets"])]
+                reasons = set(global_reasons).union(*(failures.get(r["work_id"], set()) for r in contributing))
                 if not all(self._decisions.get(t, {}).get("status") == "reviewed" for t in identifiers):
                     reasons.add(ReasonCode.EVIDENCE_INCOMPLETE.value)
                 scopes_complete &= not reasons
@@ -722,8 +720,8 @@ class Review:
                 # A single broad assignment has no assignment boundary to investigate across.
                 cross_reasons = set()
                 coverage.record_phase("cross_assignment", "complete", noop=True)
-            challenge_reasons = set(global_reasons).union(
-                *(failures.get(r["work_id"], set()) for r in current if r["kind"] == "challenge"))
+            challenges = [r for r in current if r["kind"] == "challenge"]
+            challenge_reasons = set(global_reasons).union(*(failures.get(r["work_id"], set()) for r in challenges))
             if self._claims and "challenge" not in kinds or self.pending() or not scopes_complete or cross_reasons:
                 challenge_reasons.add(ReasonCode.EVIDENCE_INCOMPLETE.value)
             coverage.record_phase(
@@ -872,20 +870,22 @@ async def _run_committed_review(
         raise ValueError(
             "committed review uses its run-owned bundle; external export routes belong to entry integration"
         )
-    limits = request.limits if hosted is None else hosted.limits
-    if (
-        any(
-            type(t) not in {int, float} or not math.isfinite(t) or t <= 0
-            for t in (limits.investigation_s, limits.finalization_s)
-        )
-        or type(limits.tool_calls) is not int
-    ):
-        raise ValueError("committed review requires finite positive time and integer tool allowances")
     if request.assignment_policy not in ASSIGNMENT_POLICIES:
         raise ValueError(f"assignment_policy must be one of {sorted(ASSIGNMENT_POLICIES)}")
-    if limits.tool_calls < 2:
-        raise ValueError("tool allowance must preserve both discovery and challenge submission capacity")
     profile = config.review_profile = config.review_profile or resolve_from_runconfig(config)
+    pipeline = profile.profile.pipeline
+    investigation_s, wall_s = pipeline.reviewer_investigation_budget_s, pipeline.review_wall_budget_s
+    tool_calls = pipeline.reviewer_tool_call_budget
+    if (
+        any(type(t) not in {int, float} or not math.isfinite(t) for t in (investigation_s, wall_s))
+        or type(tool_calls) is not int
+    ):
+        raise ValueError("committed review requires finite profile time and integer tool allowances")
+    if min(investigation_s + _FINALIZATION_S, wall_s) <= _FINALIZATION_S:
+        raise ValueError("profile investigation and wall allowances cannot preserve finalization capacity")
+    if tool_calls < 2:
+        raise ValueError("pipeline.reviewer_tool_call_budget must preserve both discovery and challenge "
+                         "submission capacity")
     strategies = build_default_profile().strategies | profile.profile.strategies
     backends: dict[str, PiBackend] = {}
     settings: dict[str, Any] = {
@@ -894,9 +894,9 @@ async def _run_committed_review(
         "profile_source": profile.source_kind,
         "permissions": "read_only",
         "limits": {
-            "investigation_s": limits.investigation_s,
-            "finalization_s": limits.finalization_s,
-            "tool_calls": limits.tool_calls,
+            "investigation_s": investigation_s,
+            "finalization_s": _FINALIZATION_S,
+            "tool_calls": tool_calls,
         },
         "native_contexts": {},
         "navigation": {
@@ -1017,17 +1017,11 @@ async def _run_committed_review(
             revision=revision,
             artifact_session=session, allow_standalone=False, read_only=True,
         ))
-        investigation_s = min(limits.investigation_s, profile.profile.pipeline.reviewer_investigation_budget_s)
-        finish = started + min(
-            investigation_s + limits.finalization_s, profile.profile.pipeline.review_wall_budget_s
-        )
-        if finish - started <= limits.finalization_s:
-            raise ValueError("profile wall allowance cannot preserve finalization capacity")
-        review_deadline = finish - limits.finalization_s
+        finish = started + min(investigation_s + _FINALIZATION_S, wall_s)
         review = await anyio.to_thread.run_sync(lambda: Review(
-            inputs, run_id, deadline=review_deadline, allowed_tools=None if hosted is None else HOSTED_PI_TOOLS,
+            inputs, run_id, allowed_tools=None if hosted is None else HOSTED_PI_TOOLS,
         ))
-        schedule = _Schedule(review, backends, limits, settings, started=started, deadline=review_deadline,
+        schedule = _Schedule(review, backends, tool_calls, settings, started=started, deadline=finish - _FINALIZATION_S,
                              adaptive=request.assignment_policy == "adaptive")
         recorder = _open_recorder(
             config=config, target_dir=captured_root, work=work,
@@ -1128,44 +1122,56 @@ def _split(total: int, count: int) -> list[int]:
     return [base + (index < extra) for index in range(count)]
 
 
-class _Schedule:
-    """Host-dispatched required work on one cumulative tool, wall-clock and retry-recovery ledger.
+def _remaining(ledger: BudgetLedger) -> int:
+    """Remaining calls of a capped schedule ledger."""
+    remaining = ledger.remaining_tool_calls
+    assert remaining is not None
+    return remaining
 
-    Later required work (cross-assignment, challenge, finalization) is protected before
-    earlier work is allocated; unspent capacity carries forward, overshoot never does.
+
+class _Schedule:
+    """Host-dispatched required work on one cumulative schedule ledger of tool calls and wall clock.
+
+    Later required work (cross-assignment, challenge, finalization) is protected by carving
+    earlier phases below it: the investigation ledger holds half the calls until half the
+    window, and its local ledger leaves the cross-assignment floor. Each dispatch charges
+    its own child ledger, so charges roll up while siblings never share a count; unspent
+    capacity carries forward and overshoot is observed, never charged.
     """
 
-    def __init__(self, review: Review, backends: dict[str, PiBackend], limits: ReviewLimits,
+    def __init__(self, review: Review, backends: dict[str, PiBackend], tool_calls: int,
                  settings: dict[str, Any], *, started: float, deadline: float, adaptive: bool) -> None:
-        self.review, self.backends, self.limits, self.settings = review, backends, limits, settings
-        self.deadline = deadline
+        self.review, self.backends, self.settings = review, backends, settings
+        self.ledger = BudgetLedger("committed", deadline=deadline, limit=tool_calls, investigation=True,
+                                   start_floor=1)
         window = deadline - started
-        self.investigation_calls = limits.tool_calls // 2
+        investigation_calls = tool_calls // 2
         self.batches = [tuple(part["target_id"] for part in batch) for batch in review.inputs.assignment_batches]
-        cross_calls = max(_MIN_WORK_CALLS, self.investigation_calls // 4)
+        cross_calls = max(_MIN_WORK_CALLS, investigation_calls // 4)
         # Decompose only into assignments that each retain a usable allocation.
         self.decompose = adaptive and len(self.batches) > 1 and (
-            self.investigation_calls - cross_calls >= _MIN_WORK_CALLS * len(self.batches))
-        self.local_calls = self.investigation_calls - (cross_calls if self.decompose else 0)
-        self.cross_deadline = started + window / 2
-        self.local_deadline = started + window * (3 / 8 if self.decompose else 1 / 2)
-        # One run-wide recovery window: activated against the review deadline, so the first
-        # failing work cannot clamp it for later phases; agent.run_agent narrows the allowance.
-        self.recovery = RetryRecoveryBudget(math.inf)
-        self.recovery.activate(started, deadline)
-        self.spent = self.local_spent = 0
-        challenge = {"challenge_tool_calls": limits.tool_calls - self.investigation_calls,
-                     "challenge_s": round(deadline - self.cross_deadline, 3), "finalization_s": limits.finalization_s}
+            investigation_calls - cross_calls >= _MIN_WORK_CALLS * len(self.batches))
+        cross_deadline = started + window / 2
+        local_deadline = started + window * (3 / 8 if self.decompose else 1 / 2)
+        # Each phase ledger records the calls withheld from it for later required work.
+        cross_floor = cross_calls if self.decompose else 0
+        self.investigation = self.ledger.carve("committed:investigation", limit=investigation_calls,
+                                               deadline=cross_deadline, reserved=tool_calls - investigation_calls)
+        self.local = self.investigation.carve(
+            "committed:local", limit=investigation_calls - cross_floor, deadline=local_deadline,
+            reserved=self.investigation.reserved + cross_floor)
+        challenge = {"challenge_tool_calls": tool_calls - investigation_calls,
+                     "challenge_s": round(deadline - cross_deadline, 3), "finalization_s": _FINALIZATION_S}
         self.cross_reserves = challenge
         self.local_reserves = ({"cross_assignment_tool_calls": cross_calls,
-                                "cross_assignment_s": round(self.cross_deadline - self.local_deadline, 3),
+                                "cross_assignment_s": round(cross_deadline - local_deadline, 3),
                                 **challenge} if self.decompose else challenge)
         settings["limits"].update(
-            effective_investigation_s=window, protected_challenge_s=deadline - self.cross_deadline,
-            protected_finalization_s=limits.finalization_s,
-            protected_challenge_tool_calls=limits.tool_calls - self.investigation_calls,
+            effective_investigation_s=window, protected_challenge_s=deadline - cross_deadline,
+            protected_finalization_s=_FINALIZATION_S,
+            protected_challenge_tool_calls=tool_calls - investigation_calls,
             **({"protected_cross_assignment_tool_calls": cross_calls,
-                "protected_cross_assignment_s": self.cross_deadline - self.local_deadline} if self.decompose else {}),
+                "protected_cross_assignment_s": cross_deadline - local_deadline} if self.decompose else {}),
         )
         settings["assignment_policy"] = {
             "name": "adaptive" if adaptive else "broad", "decomposed": self.decompose,
@@ -1177,22 +1183,27 @@ class _Schedule:
         review = self.review
         if not self.decompose:
             (work_id,) = review.plan("discovery")
-            await self._dispatch(work_id, self.investigation_calls, self.local_deadline, self.local_reserves)
+            await self._dispatch(work_id, self.local, self.local_reserves)
         else:
             await self._round(review.plan("discovery", self.batches), recorder)
-            while clock.monotonic() < self.local_deadline and (groups := self._follow_ups()):
-                if self.local_calls - self.local_spent < _MIN_WORK_CALLS * len(groups):
+            while groups := self._follow_ups():
+                # A refused follow-up records the local ledger's stop on the trace.
+                dimension: BudgetDimension | None = (
+                    "time" if self.local.expired() else
+                    "tool_calls" if _remaining(self.local) < _MIN_WORK_CALLS * len(groups) else None)
+                if dimension is not None:
+                    record_budget_stop(self.local.stop(dimension))
                     break
                 await self._round(review.plan("follow_up", groups), recorder)
             # Required regardless of local results; it inherits every still-unfinished target.
             (work_id,) = review.plan("cross_assignment")
-            await self._dispatch(work_id, self.investigation_calls - self.local_spent, self.cross_deadline,
-                                 self.cross_reserves)
+            await self._dispatch(work_id, self.investigation, self.cross_reserves)
         attempted: set[tuple[str, int]] = set()
         last: dict[str, Any] | None = None
         retried = False
         while pending := {(claim["uid"], claim["revision"]) for claim in review.pending()}:
-            if self.limits.tool_calls - self.spent < 1 or clock.monotonic() >= self.deadline:
+            if (exhausted := _remaining(self.ledger) < 1) or self.ledger.expired():
+                record_budget_stop(self.ledger.stop("tool_calls" if exhausted else "time"))
                 break
             fresh = not pending <= attempted
             progressed = last is not None and review.work[last["work_id"]].progress > 0
@@ -1203,8 +1214,8 @@ class _Schedule:
             retried = not fresh and not progressed
             attempted |= pending
             (work_id,) = review.plan("challenge")
-            last = await self._dispatch(work_id, self.limits.tool_calls - self.spent, self.deadline,
-                                        {"finalization_s": self.limits.finalization_s})
+            # Each re-dispatch receives only what earlier challenges left; nothing is renewed.
+            last = await self._dispatch(work_id, self.ledger, {"finalization_s": _FINALIZATION_S})
 
     def _follow_ups(self) -> list[tuple[str, ...]]:
         """Closed local work keeps unfinished targets; follow up only after admitted progress."""
@@ -1228,27 +1239,26 @@ class _Schedule:
         async def child(work_id: str, allocation: int) -> None:
             async with limiter, maybe_fork(recorder, f"committed-{work_id}"):
                 try:
-                    await self._dispatch(work_id, allocation, self.local_deadline, self.local_reserves, local=True)
+                    await self._dispatch(work_id, self.local, self.local_reserves, allocation=allocation)
                 except UnsupportedHostedPolicy as exc:
                     unsupported.append(exc)
 
         async with anyio.create_task_group() as group:
-            for work_id, allocation in zip(
-                    work_ids, _split(self.local_calls - self.local_spent, len(work_ids)), strict=True):
+            for work_id, allocation in zip(work_ids, _split(_remaining(self.local), len(work_ids)), strict=True):
                 group.start_soon(child, work_id, allocation)
         if unsupported:
             raise unsupported[0]
 
-    async def _dispatch(self, work_id: str, allocation: int, deadline: float, reserves: dict[str, Any], *,
-                        local: bool = False) -> dict[str, Any]:
+    async def _dispatch(self, work_id: str, parent: BudgetLedger, reserves: dict[str, Any], *,
+                        allocation: int | None = None) -> dict[str, Any]:
+        """Run one work item on its own ledger carved from ``parent`` (its remaining calls by default)."""
         review, profile = self.review, self.settings
         kind = review.work[work_id].kind
-        budget = ReviewInvestigationBudget(replace(self.limits, tool_calls=allocation), deadline,
-                                           retry_recovery_budget=self.recovery)
+        budget = parent.carve(f"committed:{kind}", limit=allocation, reserved=parent.reserved)
         backend = self.backends["challenge" if kind == "challenge" else "discovery"]
         repo = review.inputs.work.repo
         work = review.work[work_id]
-        binding, schema = review.open(work_id, deadline=deadline, reserves=reserves)
+        binding, schema = review.open(work_id, budget=budget, reserves=reserves)
         pending = review.pending()
         assignment = {
             "kind": kind,
@@ -1289,10 +1299,7 @@ class _Schedule:
                 result_schema=receipt_schema(kind),
                 read_only=True,
                 persist_session=False,
-                deadline=deadline,
-                investigation_budget=budget,
-                tool_call_budget=allocation,
-                tool_call_start_floor=1,
+                budget=budget,
                 review_system_instructions=instructions,
                 review_stage_scope_id=work_id,
                 host_tools=binding,
@@ -1316,9 +1323,6 @@ class _Schedule:
             reason = (ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION if exhausted else reason_for_exception(exc)).value
         finally:
             binding.close_authority()
-            observed = budget.observed_tool_starts
-            # Denied protected starts are reported overshoot, never charged to later reserves.
-            charged = min(max(0, observed - binding.denied_starts), allocation)
             entry = {
                 "assignment": kind,
                 "work_id": work_id,
@@ -1328,11 +1332,11 @@ class _Schedule:
                 "reason": reason
                 if reason is not None
                 else (ReasonCode.BACKEND_FAILURE.value if not settled or not binding.cleanup_complete else None),
-                "allocation": allocation,
-                "observed_starts": observed,
-                "overshoot": observed - charged,
+                "allocation": budget.limit,
+                "observed_starts": budget.observed,
+                # Denied and over-limit starts are observed overshoot, never charged to later reserves;
+                # a retried attempt's refunded starts are neither.
+                "overshoot": max(0, budget.observed - budget.refunded - budget.charged),
             }
             review.execution.append(entry)
-        self.spent += charged
-        self.local_spent += charged if local else 0
         return entry

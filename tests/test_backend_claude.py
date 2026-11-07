@@ -30,7 +30,6 @@ from daydream.backends import (
 from daydream.backends.claude import (
     ClaudeAgentError,
     ClaudeBackend,
-    MaxTurnsError,
     _RunLocalClaudeSDKClient,
     _RunLocalSubprocessCLITransport,
 )
@@ -267,24 +266,6 @@ async def test_error_result_raises_instead_of_clean_empty_result(patch_sdk: Any)
     result = next(e for e in events if isinstance(e, ResultEvent))
     assert (result.session_id, result.finish_reason, result.continuation) == ("failed-session", "error", None)
     assert (result.duration_ms, result.duration_api_ms) == (120, 100)
-
-
-async def test_max_turns_result_raises_typed_error(patch_sdk: Any) -> None:
-    """A turn-cap error preserves its subtype even when SDK result text is absent."""
-    patch_sdk(
-        scripted_client(
-            [
-                MockAssistantMessage(content=[MockTextBlock(text="working on it")]),
-                MockResultMessage(total_cost_usd=None, is_error=True, result=None, subtype="error_max_turns"),
-            ]
-        )
-    )
-    backend = ClaudeBackend(model="opus")
-    with pytest.raises(MaxTurnsError) as excinfo:
-        async for _ in backend.execute(Path("/tmp"), "Review this"):
-            pass
-    assert excinfo.value.subtype == "error_max_turns"
-    assert isinstance(excinfo.value, ClaudeAgentError)
 
 
 def test_unsupported_reasoning_effort_fails_at_construction() -> None:

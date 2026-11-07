@@ -16,7 +16,6 @@ from daydream.config import (
     DEFAULT_DIAGRAM_MIN_BRANCH_POINTS,
     DEFAULT_DIAGRAM_MIN_CODE_FILES,
     DEFAULT_DIAGRAM_MIN_MODULES,
-    DEFAULT_TOOL_CALL_BUDGET,
     DEFAULT_WALL_BUDGET_S,
     DIAGRAM_KINDS,
     DIAGRAM_MODES,
@@ -60,7 +59,7 @@ from daydream.prompt_budget import (
     truncate_utf8_to_budget,
 )
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
-from daydream.review_budget import review_deadline
+from daydream.review_budget import BudgetLedger, review_deadline
 from daydream.trajectory import (
     DaydreamPhase,
     LifecycleReasonCode,
@@ -348,9 +347,7 @@ async def _diagram_turn(
                 output_schema=schema,
                 continuation=continuation,
                 read_only=True,
-                wall_budget_s=DEFAULT_WALL_BUDGET_S,
-                deadline=review_deadline(discovery=False),
-                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                budget=BudgetLedger("diagram", wall_s=DEFAULT_WALL_BUDGET_S, deadline=review_deadline(discovery=False)),
                 sanctioned_inputs=sanctioned_inputs,
                 run_context=ctx.run_context,
             )

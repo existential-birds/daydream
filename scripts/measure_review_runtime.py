@@ -241,8 +241,11 @@ def test_pagination_preserves_tenant_archive_and_cursor_filters():
     backend = MeasuredPi(args.model, cwd=repo, reasoning_effort=args.thinking)
     kwargs = {}
     if "review_limits" in inspect.signature(run_agent).parameters:
+        # Review limits already bound the turn by investigation plus finalization.
         from daydream.review_budget import ReviewLimits
         kwargs["review_limits"] = ReviewLimits(args.investigation_s, args.finalization_s, args.tool_calls)
+    else:
+        kwargs["wall_budget_s"] = args.investigation_s + args.finalization_s
     if "finalization_context" in inspect.signature(run_agent).parameters:
         from daydream.review_evidence import FinalizationContext
         kwargs["finalization_context"] = FinalizationContext(
@@ -261,7 +264,6 @@ def test_pagination_preserves_tenant_archive_and_cursor_filters():
         async with recorder:
             result, _, reason = await run_agent(
                 backend, repo, prompt, phase=DaydreamPhase.DEEP, output_schema=PER_STACK_RECORD_SCHEMA,
-                wall_budget_s=args.investigation_s + args.finalization_s,
                 run_context=RunContext(InteractionPolicy(quiet=True, interactive=False)), **kwargs,
             )
     except Exception as exc:

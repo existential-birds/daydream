@@ -7,13 +7,12 @@ import math
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from daydream import clock
 from daydream.config import REVIEWER_BATCHES_PER_ALLOWANCE, REVIEWER_TOOL_CALL_BUDGET
-from daydream.retry_policy import RetryRecoveryBudget
 
 _HOST_TOOL_SUBMISSION_GUIDANCE = """
 Submit using structured_output alone in a completed native generation. Host rejection returns a correlated tool
@@ -96,14 +95,15 @@ Confirmed candidates require a concrete finding; other dispositions
 use finding=null. Keep notes and grounds compact with a concrete location, trigger and consequence.
 A valid decision may rely on supplied diff/context or useful ordinary investigation; no particular source-read call
 is required. The cumulative scope allowance, per-invocation tool allocation and absolute reviewer deadline are hard
-limits across stages and retries. Every observed tool start counts, including failures and structured submissions.
+limits across stages; the deadline also spans retries. Every observed tool start counts, including failures and
+structured submissions, until a provider retry refunds its failed attempt's starts.
 For native Pi output, the host reserves minimum input-read and submission capacity for known later stages; work that
 cannot fit the current minimum stops before dispatch. Newly discovered concerns can require additional capacity.
 Use remaining_work and the invocation allocation to preserve the current structured submission; this planning floor
 does not stop ordinary tools prospectively. Each member of a parallel tool batch consumes a start. Static budget
 fields are dispatch-time snapshots; the host enforces cumulative spending and the absolute deadline. Native Pi emits
 at most one final-submission warning per native attempt when exactly one call remains; it is a system instruction,
-not a recurring counter. A retry receives only its reduced effective allowance. For native Pi, keep one available
+not a recurring counter. A provider retry regains failed-attempt calls, not time. For native Pi, keep one available
 call for structured_output. Continue concrete unresolved assigned checks while tool/time capacity permits;
 submit when those checks settle. Unused capacity is expected. When only submission capacity remains,
 submit truthful unfinished decisions.
@@ -200,31 +200,173 @@ def review_deadline(*, discovery: bool) -> float | None:
     return deadlines[0 if discovery else 1] if deadlines is not None else None
 
 
-@dataclass
-class ReviewInvestigationBudget:
-    """Observed spend and an absolute deadline for one staged reviewer.
+BudgetDimension = Literal["time", "tool_calls"]
 
-    Native execution may precede its start event. Track received starts, including over-limit ones; this ledger
-    promises neither prospective tool admission nor unseen buffered events.
+
+@dataclass(frozen=True)
+class BudgetStop:
+    """Facts of one budget stop: durations and counts only, never monotonic values."""
+
+    owner: str
+    dimension: BudgetDimension
+    limit: float
+    spent: float
+    remaining_at_dispatch: float
+    reserved: int
+
+    def diagnostic(self) -> str:
+        """Numbers first, so a bounded coverage diagnostic never truncates them."""
+        unit = "s" if self.dimension == "time" else " calls"
+        return (f"Budget stop ({self.dimension}): spent {self.spent:g} of {self.limit:g}{unit}, "
+                f"{self.remaining_at_dispatch:g}{unit} remaining at dispatch, {self.reserved} calls reserved "
+                f"for later work; owner {self.owner}.")
+
+    def attributes(self) -> dict[str, Any]:
+        """The ``daydream.budget.*`` trace attributes (agent span or ``daydream.budget.stop`` event)."""
+        return {f"daydream.budget.{key}": value for key, value in asdict(self).items()}
+
+
+@dataclass(eq=False)
+class BudgetLedger:
+    """One budget owner's absolute deadline and charged tool-call count.
+
+    ``deadline`` is absolute on ``clock.monotonic()``. A relative ``wall_s`` is anchored
+    once, when ``run_agent`` starts after admission, and is never re-based. ``charged``
+    counts authorized tool starts against ``limit``; ``observed`` also counts refused
+    and over-limit starts. A retry after a retryable provider failure refunds that
+    attempt's charges; elapsed time and compaction never renew anything. A carved child
+    charges and refunds its ancestors too, so parallel siblings never share a count.
+    ``reserved`` records calls already withheld from ``limit`` for later work.
+    ``start_floor`` refuses a dispatch whose remaining calls cannot fit minimum work.
+    ``investigation`` marks a reviewer's cumulative ledger, whose dispatch-time
+    snapshots are rendered to the model.
     """
 
-    limits: ReviewLimits
-    deadline: float
-    observed_tool_starts: int = 0
+    owner: str
+    deadline: float | None = None
+    limit: int | None = None
+    wall_s: float | None = None
+    start_floor: int = 0
+    reserved: int = 0
+    investigation: bool = False
     shared_deadline: float | None = None
-    retry_recovery_budget: RetryRecoveryBudget | None = None
+    parent: BudgetLedger | None = field(default=None, repr=False)
+    charged: int = 0
+    observed: int = 0
+    refunded: int = 0
+    started: float | None = None
+    stopped: BudgetStop | None = field(default=None, init=False)
+    _dispatched: tuple[float, int] | None = field(default=None, init=False, repr=False)
 
     @classmethod
-    def from_limits(cls, limits: ReviewLimits, *, stages: int = 1) -> ReviewInvestigationBudget:
+    def from_limits(cls, owner: str, limits: ReviewLimits, *, stages: int = 1) -> BudgetLedger:
         """Resolve diff and batch scaling once; serialization time is never investigation time."""
         scaled = review_limits_for_scope(limits, stages=stages)
         shared = review_deadline(discovery=scaled.discovery)
-        deadline = clock.monotonic() + scaled.investigation_s
-        return cls(scaled, deadline if shared is None else min(deadline, shared), shared_deadline=shared)
+        started = clock.monotonic()
+        deadline = started + scaled.investigation_s
+        return cls(owner, deadline=deadline if shared is None else min(deadline, shared), limit=scaled.tool_calls,
+                   start_floor=1, investigation=True, shared_deadline=shared, started=started)
+
+    def _chain(self) -> Iterator[BudgetLedger]:
+        ledger: BudgetLedger | None = self
+        while ledger is not None:
+            yield ledger
+            ledger = ledger.parent
+
+    def anchor(self) -> BudgetLedger:
+        """Fix a relative wall allowance to an absolute deadline, once."""
+        now = clock.monotonic()
+        if self.started is None:
+            self.started = now
+        if self.wall_s is not None:
+            bound = now + self.wall_s
+            self.deadline = bound if self.deadline is None else min(self.deadline, bound)
+            self.wall_s = None
+        return self
+
+    def begin(self) -> BudgetLedger:
+        """Start one invocation: a reused ledger forgets the previous dispatch and stop."""
+        self.stopped = None
+        self._dispatched = None
+        return self
+
+    def carve(self, owner: str, *, limit: int | None = None, deadline: float | None = None,
+              reserved: int = 0, start_floor: int | None = None) -> BudgetLedger:
+        """Allocate a child within this ledger's remaining calls and deadline."""
+        self.anchor()
+        remaining = self.remaining_tool_calls
+        if remaining is not None:
+            limit = remaining if limit is None else min(limit, remaining)
+        bounds = [bound for bound in (self.deadline, deadline) if bound is not None]
+        return BudgetLedger(
+            owner, deadline=min(bounds) if bounds else None, limit=limit, reserved=reserved,
+            start_floor=self.start_floor if start_floor is None else start_floor,
+            investigation=self.investigation, shared_deadline=self.shared_deadline, parent=self,
+            started=clock.monotonic(),
+        )
 
     @property
-    def remaining_tool_calls(self) -> int:
-        return max(0, self.limits.tool_calls - self.observed_tool_starts)
+    def remaining_tool_calls(self) -> int | None:
+        remaining: int | None = None
+        for ledger in self._chain():
+            if ledger.limit is not None:
+                own = max(0, ledger.limit - ledger.charged)
+                remaining = own if remaining is None else min(remaining, own)
+        return remaining
+
+    def remaining_s(self) -> float | None:
+        return None if self.deadline is None else max(0.0, self.deadline - clock.monotonic())
+
+    def expired(self) -> bool:
+        return self.deadline is not None and clock.monotonic() >= self.deadline
+
+    def charge(self) -> bool:
+        """Observe one tool start and charge it, unless the allocation is spent."""
+        exhausted = self.remaining_tool_calls == 0
+        for ledger in self._chain():
+            ledger.observed += 1
+            ledger.charged += not exhausted
+        return not exhausted
+
+    def deny(self) -> None:
+        """Observe one start refused without charge."""
+        for ledger in self._chain():
+            ledger.observed += 1
+
+    def dispatch(self) -> int:
+        """Snapshot one attempt's dispatch; the returned count is its refund point."""
+        self._dispatched = (clock.monotonic(), self.charged)
+        return self.charged
+
+    def refund(self, since: int) -> None:
+        """Refund charges made after the ``since`` dispatch snapshot; time is never refunded."""
+        amount = max(0, self.charged - since)
+        for ledger in self._chain():
+            ledger.charged -= amount
+            ledger.refunded += amount
+
+    def stop(self, dimension: BudgetDimension) -> BudgetStop:
+        """Record the facts of the limit that stopped this owner; a dispatch-free stop reports now."""
+        now = clock.monotonic()
+        dispatched_at, charged_at = self._dispatched or (now, self.charged)
+        if dimension == "time":
+            started = self.started if self.started is not None else dispatched_at
+            deadline = self.deadline if self.deadline is not None else now
+            self.stopped = BudgetStop(
+                self.owner, dimension, round(max(0.0, deadline - started), 3), round(max(0.0, now - started), 3),
+                round(max(0.0, deadline - dispatched_at), 3), self.reserved)
+        else:
+            limit = self.limit if self.limit is not None else self.charged
+            self.stopped = BudgetStop(self.owner, dimension, limit, self.charged, max(0, limit - charged_at),
+                                      self.reserved)
+        return self.stopped
+
+
+class BudgetExhausted(Exception):
+    """The ledger deadline, not a liveness failure, ended a backend read."""
+
+    retryable = False
 
 
 class ReviewBudgetExceeded(RuntimeError):

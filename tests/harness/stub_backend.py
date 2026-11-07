@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -17,11 +17,8 @@ from daydream.backends import (
     TextEvent,
     ToolStartEvent,
 )
-from daydream.backends.claude import MaxTurnsError
 from daydream.deep.records import record_issues_or_empty, record_uid, stack_name_from_uid
 from tests.harness.review_result import merge_result
-
-PARTIAL_FIX_MARKER = "// PARTIAL BROKEN EDIT -- max turns exhausted mid-fix\n"
 
 
 def review_stage_state(prompt: str) -> dict[str, Any] | None:
@@ -58,111 +55,42 @@ def review_stage_result(prompt: str, issues: list[dict[str, Any]]) -> dict[str, 
     return stage_result(state, candidates=candidates)
 
 
-class _StubRetryableError(RuntimeError):
-    """Default transport-shaped failure for ``fix_retryable_failures``."""
-
-    retryable = True
-
-
 class StubBackend:
     """Emit realistic review/fix results and record calls for pipeline assertions."""
 
     model = "mock-model"
 
-    def __init__(self, target: Path, *, model: str = "mock-model", shared_calls: list[dict[str, Any]] | None = None,
-    ) -> None:
+    def __init__(self, target: Path, *, model: str = "mock-model") -> None:
         self.model = model
         self._target = target
         # Backend fan-out hint; tests override it for deterministic group ordering.
         self.fanout_concurrency: int = 4
-        # Optional model-tagged call log shared across cached backend instances.
-        self._shared = shared_calls
         # Parse severity selects arbiter targets; merge_echo_records exposes revisions.
         self.parse_severity: str | None = None
         self.merge_echo_records: bool = False
-        # Omit all arbiter verdicts to exercise fail-open retention of selected records.
-        self.arbiter_omit_verdicts: bool = False
         # Fail only this shard (e.g. arbiter-group-1) for fail-open/resume tests.
         self.arbiter_fail_group: str | None = None
-        # Per-stack findings can vary file/severity/confidence to control suppression
-        # selection. suppression_keep applies to every suppression-review verdict.
+        # Per-stack findings can vary file/severity/confidence to control suppression selection.
         self.parse_by_stack: dict[str, dict[str, Any]] | None = None
-        self.suppression_keep: bool = True
         self.calls: list[dict[str, Any]] = []
         # Recommendation verdict for issue 1; "contradicts" changes the fix prompt.
         self.verifier_verdict: str = "consistent"
-        self.verifier_unverified_assumptions: list[str] = []
-        # Per-finding verdict overrides apply only on round 1. Otherwise findings
-        # resolve at fix_verify_resolve_after_round and remain unresolved before it.
-        self.fix_verify_verdicts: dict[int, dict[str, Any]] | None = None
-        self.fix_verify_resolve_after_round: int = 1
         # Forbidden legacy TEST dispatch count: real suites use host commands.
         self.test_suite_calls: int = 0
         # Override for the merge agent's item list (None -> default three-item payload).
         self.merge_items: list[dict[str, Any]] | None = None
         # Emit unstructured prose to exercise merge salvage.
         self.merge_emit_str: str | None = None
-        # Emit a bare item list instead of the {"items": [...]} envelope.
-        self.merge_emit_bare_list: list[dict[str, Any]] | None = None
         # Optional LLM supervisor verdicts keyed by canonical item id.
         self.supervise_verdicts: dict[int, dict[str, Any]] | None = None
-        # Optional deferred Write tool pairs for the built-in tool-supervisor tests.
-        self.deferred_write_pairs: list[str] | None = None
-        # Append prompt markers with a read/write interleave: per-file serialization
-        # must preserve order, while per-item fan-out would lose or reorder appends.
-        self.fix_append_path: Path | None = None
-        # Fail this file's fix while allowing sibling groups to finish.
-        self.fix_fail_file: str | None = None
         # Fail this file's batched turn; its per-finding fallback turns succeed.
         self.fail_batched_fix_file: str | None = None
-        # Run away only during this file's batch. The real run_agent wall timeout
-        # raises into per-finding fallback, which shares the time already consumed.
-        # Events sleep runaway_batched_sleep_s or advance the injected clock.
-        self.runaway_batched_fix_file: str | None = None
-        self.runaway_batched_sleep_s: float = 0.05
-        # Run away only for a single-item turn naming this file, testing a group
-        # deadline without a fallback loop.
-        self.runaway_single_fix_file: str | None = None
-        # Yield no events and sleep(0) until this gate opens, so a sibling can
-        # finish deterministically before the runaway begins.
-        self.runaway_gate: Callable[[], bool] | None = None
-        # Completed fix basenames, recorded after ResultEvent consumption. Unlike
-        # sentinel files, this evidence survives the fix-footprint guard.
-        self.completed_fix_files: list[str] = []
-        # Charge clock_advance_per_event_s through the injected clock instead of
-        # runaway sleeps; never both. Only run_agent enforces deadlines.
-        self.clock_advance: Callable[[float], None] | None = None
-        self.clock_advance_per_event_s: float = 0.0
-        # Fail each file's first N fix turns with fix_retryable_error (or the
-        # default). Each failure charges one clock step before raising; later turns
-        # succeed, unless the real group deadline cuts the retry ladder first.
-        self.fix_retryable_failures: int = 0
-        self.fix_retryable_error: Exception | None = None
-        # Restrict retry failures to this basename; sibling files succeed at once.
-        self.fix_retryable_file: str | None = None
-        self._fix_retry_counts: dict[str, int] = {}
-        # Write a broken partial edit, then raise MaxTurnsError. The orchestrator
-        # must restore the file and save a recovery patch.
-        self.fix_partial_then_maxturns: str | None = None
-        # Required fix turns; a lower max_turns raises before applying the edit.
-        self.fix_turns_needed: int = 0
-        # Stray untracked path created by the failing group, outside its key file;
-        # it survives tree protection and must appear in fix_leftover_untracked.
-        self.fix_orphan_file: str | None = None
-        # Existing untracked user file damaged by the same failed turn.  The
-        # run-wide terminal guard must restore its exact pre-run bytes.
-        self.fix_damage_protected_file: str | None = None
         # Repo-relative generated path created by a successful fix turn.
         self.fix_new_generated: str | None = None
         # Repo-relative historical generated path modified by a test-healing
         # fix turn, plus an optional new generated path created by that turn.
         self.heal_fix_generated: str | None = None
         self.heal_fix_new_generated: str | None = None
-        # Repo-relative tracked path outside the reviewed diff edited by a
-        # test-healing turn, with the line it appends. Exercises the early
-        # full confinement that must run before the suite is rerun.
-        self.heal_fix_unauthorized: str | None = None
-        self.heal_fix_unauthorized_line: str = "\n# unauthorized healing edit\n"
         # Text a healing turn emits as its partial diagnosis and then never
         # finishes: the real run_agent wall budget ends the turn, so the host
         # records an interrupted repair rather than a completed one.
@@ -172,39 +100,17 @@ class StubBackend:
         # leaves the work it was mid-way through on disk.
         self.heal_fix_authorized: str | None = None
         self.heal_fix_authorized_line: str = "\n# healing edit\n"
-        # Authorized untracked path the healing turn creates with this content.
-        self.heal_fix_authorized_new: str | None = None
-        self.heal_fix_authorized_new_text: str = "// added by the healing turn\n"
-        # Report a focused verification run the healing turn claims it ran. A
-        # claim, never a canonical result.
-        self.heal_fix_focused_claim: str | None = None
-        # Fail each healing turn's first N invocations with a transport-shaped
-        # error, so the retry ladder is exercised inside one execution.
-        self.heal_fix_retryable_failures: int = 0
-        self.heal_fix_retryable_error: Exception | None = None
-        self._heal_retry_counts: int = 0
-        # Emit a runaway ToolStartEvent burst without a result to exercise budgets.
-        self.runaway_fix: bool = False
-        # Runaway pacing; zero still yields via sleep(0). Positive values can trip
-        # the wall limit before the tool limit. An injected clock replaces sleeps.
+        # Partial-repair runaway pacing; zero still yields via sleep(0). Positive
+        # values can trip the wall limit before the tool limit.
         self.runaway_fix_sleep_s: float = 0.0
         # Append a real tracked edit so recommended-change patches can capture it.
         self.fix_edit_line: str | None = None
-        # Runaway wonder or named per-stack review: tool events without a result.
+        # Runaway wonder: tool events without a result.
         self.runaway_alternatives: bool = False
-        self.runaway_stack: str | None = None
-        # Emit this many tool calls before a normal wonder result, testing whether
-        # a tool-call ceiling truncates a long but terminating review.
-        self.alternatives_tool_calls: int = 0
         # When True, the alternatives branch raises instead of answering.
         self.fail_alternatives: bool = False
         # Arbiter continuation session that merge can resume.
         self.arbiter_session_id: str | None = None
-        # Convention name identifying the run that wrote exploration artifacts.
-        self.exploration_sentinel: str | None = None
-        # Fail exploration specialists: pre_scan must degrade to incomplete
-        # artifacts without a cache key.
-        self.fail_exploration: bool = False
         # Per-kind author/repair spec queue; repeat its last entry when exhausted.
         # An absent queue returns an empty spec, which grounds to an omission.
         self.diagram_specs: dict[str, list[dict[str, Any]]] = {}
@@ -254,24 +160,6 @@ class StubBackend:
         return None
 
 
-    def _tick(self) -> None:
-        """Charge one configured event step to the injected clock, if present."""
-        if self.clock_advance is not None:
-            self.clock_advance(self.clock_advance_per_event_s)
-
-    def _is_runaway(self, prompt: str, pl: str) -> bool:
-        """Whether this turn should emit the unbounded budget-tripping burst."""
-        if self.runaway_alternatives and (
-            "would you have done this differently" in pl or "evaluate the implementation" in pl
-        ):
-            return True
-        if (self.runaway_stack is not None
-            and "you are reviewing the" in pl
-            and f"you are reviewing the {self.runaway_stack} stack" in pl
-        ):
-            return True
-        return False
-
     def _apply_parse_by_stack_override(self, prompt: str, issue: dict[str, Any]) -> list[dict[str, Any]]:
         """Apply the named stack's override and optional same-location extra issue.
 
@@ -317,40 +205,31 @@ class StubBackend:
         return issues
 
     async def _runaway_burst(self, prefix: str, sleep_s: float) -> AsyncIterator[AgentEvent]:
-        """Emit 500 tool calls without a result, advancing the injected clock or sleeping."""
+        """Emit 500 tool calls without a result, sleeping after each."""
         for n in range(500):
             yield ToolStartEvent(id=f"{prefix}-{n}", name="Bash", input={"command": "find /"})
-            if self.clock_advance is not None:
-                self._tick()
-            else:
-                await anyio.sleep(sleep_s)
+            await anyio.sleep(sleep_s)
 
     async def execute(
         self, cwd: Path, prompt: str, output_schema: Any = None, continuation: Any = None, agents: Any = None,
-        max_turns: Any = None, read_only: bool = False, persist_session: bool = True,
+        read_only: bool = False, persist_session: bool = True,
     ) -> AsyncIterator[AgentEvent]:
         call = {"cwd": cwd, "prompt": prompt, "output_schema": output_schema, "agents": agents, "model": self.model,
-            "continuation": continuation, "max_turns": max_turns, "read_only": read_only,
+            "continuation": continuation, "read_only": read_only,
             "persist_session": persist_session,
         }
         self.calls.append(call)
-        if self._shared is not None:
-            self._shared.append(call)
         pl = prompt.lower()
-
-        if self._is_runaway(prompt, pl):
-            # No ResultEvent: run_agent must terminate this burst through its budgets.
-            async for event in self._runaway_burst("tc", 0):
-                yield event
-            return
 
         # Check alternatives before intent: their prompt embeds the intent summary.
         if "would you have done this differently" in pl or "evaluate the implementation" in pl:
+            if self.runaway_alternatives:
+                # No ResultEvent: run_agent must terminate this burst through its budgets.
+                async for event in self._runaway_burst("tc", 0):
+                    yield event
+                return
             if self.fail_alternatives:
                 raise RuntimeError("alternatives blew up")
-            for n in range(self.alternatives_tool_calls):
-                yield ToolStartEvent(id=f"alt-tc-{n}", name="Read", input={"file_path": "api.py"})
-                await anyio.sleep(0)
             yield TextEvent(text="")
             yield ResultEvent(structured_output={"issues": [{"id": 1, "title": "Inconsistent greeting wording",
                             "description": "'universe' diverges from 'world' in docs", "recommendation": "align copy",
@@ -390,9 +269,7 @@ class StubBackend:
         # Specialists emit structured payloads plus raw JSON text, which the
         # production display gate must suppress.
         if "you are the **pattern-scanner** specialist" in pl:
-            if self.fail_exploration:
-                raise RuntimeError("exploration unavailable")
-            payload = {"conventions": [{"name": self.exploration_sentinel or "OpenAPI First",
+            payload = {"conventions": [{"name": "OpenAPI First",
                         "description": "openapi.yaml is the HTTP contract", "source": "AGENTS.md",
                     }
                 ], "guidelines": [],
@@ -401,12 +278,8 @@ class StubBackend:
             yield ResultEvent(structured_output=payload, continuation=None)
             return
         if "you are the **dependency-tracer** specialist" in pl:
-            if self.fail_exploration:
-                raise RuntimeError("exploration unavailable")
             payload = {"affected_files": [],
-                "dependencies": [
-                    {"source": "App.tsx", "target": "api.py", "relationship": self.exploration_sentinel or "calls"}
-                ],
+                "dependencies": [{"source": "App.tsx", "target": "api.py", "relationship": "calls"}],
             }
             yield TextEvent(text=json.dumps(payload))
             yield ResultEvent(structured_output=payload, continuation=None)
@@ -475,7 +348,7 @@ class StubBackend:
                 if group_match is not None and group_match.group(1) == self.arbiter_fail_group:
                     raise RuntimeError(f"stub: forced failure of {self.arbiter_fail_group}")
             findings: list[dict[str, Any]] = []
-            if in_match is not None and not self.arbiter_omit_verdicts:
+            if in_match is not None:
                 arb_inputs = json.loads(Path(in_match.group(1)).read_text())
                 for entry in arb_inputs:
                     findings.append({
@@ -495,18 +368,17 @@ class StubBackend:
             )
             return
 
-        # Echo suppression IDs. keep=False drops borderline findings; keep=True
-        # retains cited findings. Its role sentence uniquely selects this branch.
+        # Echo suppression IDs with keep=True, retaining cited findings. Its role
+        # sentence uniquely selects this branch.
         if "you are the suppression reviewer" in pl:
             in_match = re.search(r"listed in (\S+suppression-input\.json)", prompt)
             sup_findings: list[dict[str, Any]] = []
             if in_match is not None:
                 sup_inputs = json.loads(Path(in_match.group(1)).read_text())
                 for entry in sup_inputs:
-                    sup_findings.append({"sup_id": entry["sup_id"], "keep": self.suppression_keep,
+                    sup_findings.append({"sup_id": entry["sup_id"], "keep": True,
                             "severity": entry.get("severity") or "low", "confidence": entry.get("confidence") or "LOW",
-                            "description": entry.get("description") or "finding",
-                            "rationale": ("confirmed by code" if self.suppression_keep else "no confirming evidence"),
+                            "description": entry.get("description") or "finding", "rationale": "confirmed by code",
                             "evidence": entry.get("evidence") or "",
                         }
                     )
@@ -521,9 +393,6 @@ class StubBackend:
             if self.merge_emit_str is not None:
                 yield TextEvent(text=self.merge_emit_str)
                 yield ResultEvent(structured_output=None, continuation=None)
-                return
-            if self.merge_emit_bare_list is not None:
-                yield ResultEvent(structured_output=self.merge_emit_bare_list, continuation=None)
                 return
             if self.merge_echo_records:
                 # Echo arbiter revisions from current envelope or legacy bare records.
@@ -600,11 +469,6 @@ class StubBackend:
 
         # Fix sentinels make gate authorization observable in real-path tests.
         if pl.startswith("fix this issue") or pl.startswith("fix these"):
-            if self.runaway_fix:
-                # A missing result lets the real budgets terminate the fix turn.
-                async for event in self._runaway_burst("tc", self.runaway_fix_sleep_s):
-                    yield event
-                return
             # Single-finding prompts carry "File: <path>"; batched prompts name the
             # one target file in their "Fix these N issues in <path>:" header.
             m = re.search(r"^File: (.+)$", prompt, re.M)
@@ -614,68 +478,12 @@ class StubBackend:
             fixed_file = m.group(1).strip() if m else "unknown"
             # phase_fix emits an absolute path when the file exists on disk; the stub keys fixes by basename.
             fixed_name = Path(fixed_file).name
-            # Charge failed backend time before raising; the real invocation deadline
-            # must bound retries. Later attempts apply the normal fix.
-            if ((self.fix_retryable_file is None or self.fix_retryable_file == fixed_name)
-                and self._fix_retry_counts.get(fixed_name, 0) < self.fix_retryable_failures
-            ):
-                self._fix_retry_counts[fixed_name] = self._fix_retry_counts.get(fixed_name, 0) + 1
-                self._tick()
-                raise self.fix_retryable_error or _StubRetryableError(f"stub: retryable fix failure for {fixed_name}")
-            # Run away for this file only when no batched header is present.
-            if (self.runaway_single_fix_file is not None
-                and m is not None
-                and batched_hdr is None
-                and fixed_name == self.runaway_single_fix_file
-            ):
-                while self.runaway_gate is not None and not self.runaway_gate():
-                    await anyio.sleep(0)
-                async for event in self._runaway_burst("stc", self.runaway_fix_sleep_s):
-                    yield event
-                return
-            # The real wall timeout raises into per-finding fallback.
-            if (self.runaway_batched_fix_file is not None
-                and batched_hdr is not None
-                and fixed_name == self.runaway_batched_fix_file
-            ):
-                async for event in self._runaway_burst("btc", self.runaway_batched_sleep_s):
-                    yield event
-                return
             # Fail this file's batch so its per-finding fallback runs.
             if (self.fail_batched_fix_file is not None
                 and batched_hdr is not None
                 and fixed_name == self.fail_batched_fix_file
             ):
                 raise RuntimeError(f"stub: batched fix failure for {fixed_name}")
-            if self.fix_partial_then_maxturns is not None and fixed_name == self.fix_partial_then_maxturns:
-                edit_target = Path(fixed_file) if Path(fixed_file).is_absolute() else (cwd / fixed_file)
-                edit_target.write_text(PARTIAL_FIX_MARKER)
-                if self.fix_orphan_file is not None:
-                    orphan = cwd / self.fix_orphan_file
-                    orphan.parent.mkdir(parents=True, exist_ok=True)
-                    orphan.write_text("// stray file from a dead fix agent\n")
-                if self.fix_damage_protected_file is not None:
-                    (cwd / self.fix_damage_protected_file).write_bytes(b"damaged by failed fixer")
-                raise MaxTurnsError(f"stub: max turns exhausted mid-fix for {fixed_name}")
-            if self.fix_fail_file is not None and fixed_name == self.fix_fail_file:
-                raise RuntimeError(f"stub fix failure for {fixed_name}")
-            if max_turns is not None and self.fix_turns_needed > max_turns:
-                raise MaxTurnsError(
-                    f"stub: fix for {fixed_name} needs {self.fix_turns_needed} turns, capped at {max_turns}"
-                )
-            if self.deferred_write_pairs is not None:
-                for index, path in enumerate(self.deferred_write_pairs, start=1):
-                    edit_target = Path(path) if Path(path).is_absolute() else cwd / path
-                    yield ToolStartEvent(id=f"deferred-write-{index}", name="Write",
-                        input={"file_path": str(edit_target), "content": "backend resumed"},
-                    )
-                    self._tick()
-                    edit_target.write_text("backend resumed")
-                yield TextEvent(text="Applied the deferred writes.")
-                self._tick()
-                yield ResultEvent(structured_output=None, continuation=None)
-                self.completed_fix_files.append(fixed_name)
-                return
             (cwd / ".daydream-fix-applied").write_text("applied\n")  # legacy sentinel
             (cwd / f".fixed-{fixed_name.replace('.', '_')}").write_text("applied\n")
             if self.fix_new_generated is not None:
@@ -686,18 +494,8 @@ class StubBackend:
                 edit_target = Path(fixed_file) if Path(fixed_file).is_absolute() else (cwd / fixed_file)
                 if edit_target.exists():
                     edit_target.write_text(edit_target.read_text() + self.fix_edit_line)
-            if self.fix_append_path is not None and fixed_name == self.fix_append_path.name:
-                # Append all handed-off markers in prompt/severity order.
-                toks = re.findall(r"marker-\d+", prompt) or ["?"]
-                append_path = cwd / self.fix_append_path.relative_to(self._target)
-                cur = append_path.read_text() if append_path.exists() else ""
-                await anyio.sleep(0)  # deterministic interleave point
-                append_path.write_text(cur + "".join(t + "\n" for t in toks))
             yield TextEvent(text="Applied the fix.")
-            self._tick()
             yield ResultEvent(structured_output=None, continuation=None)
-            self._tick()
-            self.completed_fix_files.append(fixed_name)
             return
 
         # Role-based recommendation dispatch; the phase persists the verdicts.
@@ -705,7 +503,7 @@ class StubBackend:
             yield TextEvent(text="")
             yield ResultEvent(structured_output={"verdicts": [{
                             "issue_id": 1, "verdict": self.verifier_verdict, "evidence": "stub",
-                            "unverified_assumptions": list(self.verifier_unverified_assumptions),
+                            "unverified_assumptions": [],
                         }
                     ]
                 }, continuation=None,
@@ -716,18 +514,8 @@ class StubBackend:
         if "post-fix fix-verifier agent" in pl:
             if not read_only:
                 raise AssertionError("fix-verify turn must arrive read_only=True")
-            round_match = re.search(r"(?:Round (\d+) of up to 3 check passes|Verification pass (\d+))", prompt,)
-            round_num = int(next(group for group in round_match.groups() if group)) if round_match else 1
-            ids = [int(i) for i in re.findall(r"(?m)^(\d+)\. \[", prompt)]
-            verdicts = []
-            for i in ids:
-                override = (self.fix_verify_verdicts or {}).get(i)
-                if override is not None and round_num == 1:
-                    verdicts.append(dict(override))
-                elif round_num < self.fix_verify_resolve_after_round:
-                    verdicts.append({"issue_id": i, "verdict": "unresolved", "reason": "stub: round still fumbling"})
-                else:
-                    verdicts.append({"issue_id": i, "verdict": "resolved", "reason": "stub"})
+            verdicts = [{"issue_id": int(i), "verdict": "resolved", "reason": "stub"}
+                        for i in re.findall(r"(?m)^(\d+)\. \[", prompt)]
             yield TextEvent(text="")
             yield ResultEvent(structured_output={"verdicts": verdicts}, continuation=None,)
             return
@@ -735,24 +523,10 @@ class StubBackend:
         # The healing sentinel proves re-entry; environmental failures must leave
         # it absent.
         if pl.startswith("the tests failed"):
-            # The retry ladder shares one execution deadline, so a provider that
-            # fails a turn twice must still land inside the same allowance.
-            if self._heal_retry_counts < self.heal_fix_retryable_failures:
-                self._heal_retry_counts += 1
-                self._tick()
-                raise self.heal_fix_retryable_error or _StubRetryableError(
-                    "stub: retryable repair failure"
-                )
             if self.heal_fix_authorized is not None:
                 edited = cwd / self.heal_fix_authorized
                 if edited.exists():
                     edited.write_text(edited.read_text() + self.heal_fix_authorized_line)
-            if self.heal_fix_authorized_new is not None:
-                created = cwd / self.heal_fix_authorized_new
-                created.parent.mkdir(parents=True, exist_ok=True)
-                created.write_text(self.heal_fix_authorized_new_text)
-            if self.heal_fix_focused_claim is not None:
-                yield TextEvent(text=self.heal_fix_focused_claim)
             if self.heal_fix_partial is not None:
                 # Diagnosis, then no result: only the host budget can end this
                 # turn, which is exactly the interrupted repair under test.
@@ -769,11 +543,6 @@ class StubBackend:
                 new_generated = cwd / self.heal_fix_new_generated
                 new_generated.parent.mkdir(parents=True, exist_ok=True)
                 new_generated.write_text("-- new healing migration\n")
-            if self.heal_fix_unauthorized is not None:
-                unauthorized = cwd / self.heal_fix_unauthorized
-                unauthorized.write_text(
-                    unauthorized.read_text() + self.heal_fix_unauthorized_line
-                )
             yield TextEvent(text="Attempted to fix the test failures.")
             yield ResultEvent(structured_output=None, continuation=None)
             return

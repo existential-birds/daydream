@@ -70,7 +70,7 @@ def _over_limit_reader(payload: bytes) -> asyncio.StreamReader:
 async def _collect(
     backend: OspreyBackend, lines: list[dict[str, object]], *, returncode: int = 0,
     output_schema: dict[str, Any] | None = None, continuation: ContinuationToken | None = None,
-    agents: dict[str, Any] | None = None, max_turns: int | None = None, read_only: bool = False,
+    agents: dict[str, Any] | None = None, read_only: bool = False,
     persist_session: bool = True, stderr_lines: list[str] | None = None, stderr_held_open: bool = False,
     stdout_reader: asyncio.StreamReader | None = None, stderr_reader: asyncio.StreamReader | None = None,
     workspace: Path = Path("/repo"),
@@ -85,7 +85,7 @@ async def _collect(
             event
             async for event in backend.execute(
                 workspace, "prompt", output_schema=output_schema, continuation=continuation, agents=agents,
-                max_turns=max_turns, read_only=read_only, persist_session=persist_session,
+                read_only=read_only, persist_session=persist_session,
             )
         ]
     return events, spawner
@@ -361,14 +361,13 @@ async def test_osprey_resume_and_fork_continuation_modes() -> None:
             osprey_session(*_p18_osprey_events()),
             continuation=token,
             output_schema=schema,
-            max_turns=3,
             read_only=True,
         )
         argv = list(spawner.argvs[-1])
         assert flag in argv
         assert argv[argv.index(flag) + 1] == "s-9"  # token session drives argv
         assert argv[:3] == ["fake", "agent", "--events-jsonl"]
-        assert "--read-only" in argv and argv[argv.index("--max-turns") + 1] == "3"
+        assert "--read-only" in argv
         assert argv[argv.index("--approval") + 1] == "deny-untrusted"
         assert not Path(argv[argv.index("--output-schema") + 1]).exists()
         request = next(e for e in events if isinstance(e, RequestEvent))

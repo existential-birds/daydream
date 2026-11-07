@@ -31,6 +31,7 @@ from daydream.phases.schemas import (
     FIX_VERIFY_VERDICTS_SCHEMA,
     RECOMMENDATION_VERDICTS_SCHEMA,
 )
+from daydream.review_budget import BudgetLedger
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.test_execution import (
     load_test_recipe,
@@ -74,8 +75,7 @@ async def _run_verifier(
         work.repo,
         prompt,
         output_schema=schema,
-        tool_call_budget=phase_config.DEFAULT_TOOL_CALL_BUDGET,
-        wall_budget_s=phase_config.DEFAULT_WALL_BUDGET_S,
+        budget=BudgetLedger("verify", wall_s=phase_config.DEFAULT_WALL_BUDGET_S),
         phase=DaydreamPhase.VERIFY,
         read_only=True,
         run_context=run_context,

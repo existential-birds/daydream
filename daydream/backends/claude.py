@@ -55,7 +55,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
-    resolve_fanout_concurrency,
+    fanout_concurrency_from_environment,
 )
 from daydream.config import TEST_WALL_BUDGET_S
 
@@ -502,14 +502,6 @@ class ClaudeAgentError(Exception):
     """Translate an SDK is_error result into a failure instead of a clean empty review."""
 
 
-class MaxTurnsError(ClaudeAgentError):
-    """A ClaudeAgentError carrying the SDK turn-cap subtype for trajectory recording."""
-
-    def __init__(self, message: str, *, subtype: str = "error_max_turns") -> None:
-        super().__init__(message)
-        self.subtype = subtype
-
-
 def _denies_git_output_option(argv: list[str], start: int) -> bool:
     """Reject --output and --output= after the matched Git family in argv[start:].
 
@@ -854,9 +846,7 @@ class ClaudeBackend:
             self.fanout_concurrency = execution_input.fanout_concurrency
             self.retry_policy = execution_input.retry_policy
         else:
-            self.fanout_concurrency = resolve_fanout_concurrency(
-                "DAYDREAM_FANOUT_CONCURRENCY", 8
-            )
+            self.fanout_concurrency = fanout_concurrency_from_environment(os.environ, 8)
         self._active_clients: set[ClaudeSDKClient] = set()
 
     async def execute(
@@ -866,7 +856,6 @@ class ClaudeBackend:
         output_schema: dict[str, Any] | None = None,
         continuation: ContinuationToken | None = None,
         agents: dict[str, AgentDefinition] | None = None,
-        max_turns: int | None = None,
         read_only: bool = False,
         persist_session: bool = True,
         finalization: bool = False,
@@ -915,7 +904,6 @@ class ClaudeBackend:
             model=self.model,
             output_format=output_format,
             max_buffer_size=10 * 1024 * 1024,
-            max_turns=max_turns,
             extra_args={"no-session-persistence": None} if not persist_session else {},
             effort=effort,
         )
@@ -1014,7 +1002,6 @@ class ClaudeBackend:
             config=ClaudeRequestConfig(
                 finalization=finalization,
                 tools_count=len(options.tools) if isinstance(options.tools, list) else None,
-                max_turns=max_turns,
                 read_only=read_only,
                 persist_session=persist_session,
                 continuation_mode="resume" if resume_applied else "fresh",
@@ -1164,10 +1151,6 @@ class ClaudeBackend:
                         if msg.is_error:
                             yield terminal_result
                             detail = msg.result or msg.subtype or "unknown error"
-                            if msg.subtype == "error_max_turns":
-                                raise MaxTurnsError(
-                                    f"Claude agent run failed: {detail}", subtype="error_max_turns",
-                                )
                             raise ClaudeAgentError(f"Claude agent run failed: {detail}")
 
                 yield terminal_result or ResultEvent(

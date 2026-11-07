@@ -35,6 +35,7 @@ from daydream.prompts.authorial_intent import (
     AUTHORITATIVE_INTENT_BLOCK,
 )
 from daydream.review_budget import (
+    BudgetLedger,
     ReviewLimits,
 )
 from daydream.review_evidence import FinalizationContext
@@ -182,8 +183,7 @@ async def phase_cross_stack_merge(
                               ("intent authority", AUTHORITATIVE_INTENT_BLOCK
                                if intent_authoritative else "Intent is advisory context.")),
         ),
-        tool_call_budget=phase_config.DEFAULT_TOOL_CALL_BUDGET,
-        wall_budget_s=phase_config.REVIEW_WALL_BUDGET_S,
+        budget=BudgetLedger("merge", wall_s=phase_config.REVIEW_WALL_BUDGET_S),
         sanctioned_inputs=sanctioned_inputs,
         run_context=run_context,
     )

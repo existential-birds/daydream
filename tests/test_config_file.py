@@ -59,7 +59,6 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(
     assert (config.diagram_mode, config.diagram_min_branch_points) == ("off", 6)
 
     dotfile.write_text(
-        "retry_recovery_allowance_s = -5\n"
         "precision_mode = 1\napprove_on_clean = 1\nscope_issue_filing = 1\n"
         'supervisor = "unknown"\nsupervisor_deny_globs = [1]\n'
         'tool_supervisor = "unknown"\ntool_bash_deny = [1]\n'
@@ -74,8 +73,6 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(
 
     degraded = load_file_config(tmp_path)
 
-    assert degraded.retry_recovery_allowance_s is None
-    assert any("retry_recovery_allowance_s=-5" in rec.message for rec in caplog.records)
     assert (degraded.precision_mode, degraded.approve_on_clean, degraded.scope_issue_filing) == (None, None, None)
     assert (degraded.supervisor, degraded.supervisor_deny_globs) == (None, [])
     assert (degraded.tool_supervisor, degraded.tool_bash_deny) == (None, [])

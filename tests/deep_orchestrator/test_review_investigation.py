@@ -77,8 +77,6 @@ class StagedBackend(EmptyReviewBackend):
             yield ResultEvent(structured_output=output, continuation=None)
             return
         kwargs.pop('review_instructions', None)
-        kwargs.pop('wall_budget_s', None)
-        kwargs.pop('tool_call_budget', None)
         async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
@@ -433,9 +431,6 @@ async def test_unadmitted_backend_failure_remains_failed_after_a_shared_stop(
     Only the exact Codex lifecycle error projects its closed diagnostic; other failures stay generic."""
     review = many_file_review(tmp_path, monkeypatch, count=9, docs_count=0)
     review.backend.fanout_concurrency = 1
-    monkeypatch.setenv('DAYDREAM_PI_RETRY_ATTEMPTS', '1')
-    monkeypatch.setenv('DAYDREAM_PI_RETRY_BASE_DELAY_S', '0')
-    monkeypatch.setenv('DAYDREAM_PI_RETRY_MAX_DELAY_S', '0')
     timer = FakeClock(monotonic_value=clock.monotonic()).install(monkeypatch)
     patch_retry_sleep(monkeypatch, timer)
     attempts = 0
@@ -456,7 +451,11 @@ async def test_unadmitted_backend_failure_remains_failed_after_a_shared_stop(
     assert scope['reason_codes'] == ['backend_failure', 'host_pipeline_budget_exhaustion']
     assert data['findings'] == []
     assert all(event['metadata']['admitted'] is False for event in stage_ends(review, 'python'))
-    assert f'python: {diagnostic}\nReview limit exhausted: pipeline_budget_exceeded' in data['review_warnings']
+    # The refused later batch leads with the scope ledger's stop facts: its shared deadline (the 60 s wall
+    # less the 12 s synthesis reserve) had passed when the failed batch ended at 61 s.
+    assert (f'python: {diagnostic}\nBudget stop (time): spent 61 of 48s, 0s remaining at dispatch, 0 calls '
+            'reserved for later work; owner stage:python. Review limit exhausted: pipeline_budget_exceeded'
+            in data['review_warnings'])
 
 
 async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
@@ -584,7 +583,6 @@ async def test_stage_preparation_cannot_renew_the_original_invocation_wall_clamp
     real_run = ReviewInvestigation.run
 
     async def explicitly_bounded(self: ReviewInvestigation, *args: Any, **kwargs: Any) -> Any:
-        kwargs.pop('wall_budget_s', None)
         kwargs['wall_budget_s'] = 3600
         return await real_run(self, *args, **kwargs)
 
@@ -804,19 +802,23 @@ def test_assessment_rejects_domain_faults_and_irreparable_native_capacity(
         context.outage_circuit.record_failure(clock.monotonic())
     assert batches._continuation_admitted({'run_context': context}) is False
     assert (batches.reason, batches.failure_class) == ('backend_failure', 'outage_circuit')
-    batches.budget.observed_tool_starts = batches.budget.limits.tool_calls
+    while batches.budget.charge():
+        pass
+    calls = ReviewLimits().tool_calls
     assert batches._continuation_admitted({}) is False
     assert (batches.reason, batches.failure_class, batches.failure_diagnostic) == (
-        'tool_call_budget_exceeded', 'quantitative_exhaustion', 'Review limit exhausted: tool_call_budget_exceeded')
+        'tool_call_budget_exceeded', 'quantitative_exhaustion',
+        f'Budget stop (tool_calls): spent {calls} of {calls} calls, 0 calls remaining at dispatch, 0 calls reserved '
+        'for later work; owner stage:python. Review limit exhausted: tool_call_budget_exceeded')
     # Ordinary per-batch spend still reaches every batch of a many-batch scope; a zero allowance
     # still stops dispatch, and Structure's single integration stage keeps the base allowance.
     many = [[{**part, 'target_id': f'api.py#{index}'}] for index in range(12)]
     scoped = fresh(many)
     for _ in many:
         assert scoped._budget_stop_reason() is None
-        scoped.budget.observed_tool_starts += 9
+        scoped.budget.charged += 9
     assert fresh(many, limits=ReviewLimits(tool_calls=0))._budget_stop_reason() == 'tool_call_budget_exceeded'
-    assert fresh(many, scope_id=STRUCTURE_STACK_NAME).budget.limits == ReviewLimits()
+    assert fresh(many, scope_id=STRUCTURE_STACK_NAME).budget.limit == ReviewLimits().tool_calls
     monkeypatch.setattr(review_result, 'RUN_TARGET_DECISIONS_MAX_BYTES', 1)
     with pytest.raises(HostToolFatal, match='required target IDs') as targets:
         fresh()._assessment(valid, 'first_pass', ['api.py'], [], files=['api.py'], native_sources=True)

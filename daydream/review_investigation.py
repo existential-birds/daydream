@@ -25,6 +25,7 @@ from daydream.host_tools import (
     HostToolRejected,
 )
 from daydream.json_utils import SchemaRejection, validates_schema
+from daydream.observability.spans import record_budget_stop
 from daydream.phases.review_prompts import build_review_stage_system_instruction
 from daydream.phases.schemas import (
     review_stage_admission_schema,
@@ -44,7 +45,7 @@ from daydream.repository_paths import (
     valid_repository_file_path,
 )
 from daydream.retry_policy import FailureClass, classify_failure
-from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
+from daydream.review_budget import BudgetLedger, ReviewLimits, review_limits_for_scope
 from daydream.review_evidence import ReviewEvidence
 from daydream.review_rationale import NOTE_ORIGIN_SCHEMA
 from daydream.review_result import (
@@ -135,8 +136,9 @@ class ReviewInvestigation:
         self.handoff: dict[str, list[Any]] = {name: [] for name in ('progress', 'notes', 'candidates')}
         self._base_limits = limits if limits is not None else ReviewLimits()
         # Structure runs one integration stage although its batches list every changed file.
-        self.budget = ReviewInvestigationBudget.from_limits(self._base_limits, stages=(
-            1 if self.scope_id == STRUCTURE_STACK_NAME else len(assignment_batches)))
+        stages = 1 if self.scope_id == STRUCTURE_STACK_NAME else len(assignment_batches)
+        self._scaled_limits = review_limits_for_scope(self._base_limits, stages=stages)
+        self.budget = BudgetLedger.from_limits(f"stage:{self.scope_id}", self._base_limits, stages=stages)
         self._effective_allowance_s = 0.0
         self._deadline_bound = ('pipeline_budget' if self.budget.deadline == self.budget.shared_deadline
                                 else 'reviewer_investigation_budget')
@@ -186,17 +188,16 @@ class ReviewInvestigation:
         self._input_factory = input_factory
         # One invocation clamp covers preparation, every stage and all retries.
         # Passing only a relative wall allowance to run_agent would renew it after
-        # preparation and again for each later stage.
+        # preparation and again for each later stage; the scope ledger carries it instead.
         started = clock.monotonic()
-        for bound, label in ((agent_kwargs.get('deadline'), 'caller_deadline'),
-                             (started + agent_kwargs['wall_budget_s']
-                              if agent_kwargs.get('wall_budget_s') is not None else None,
+        deadline, wall_budget_s = agent_kwargs.pop('deadline', None), agent_kwargs.pop('wall_budget_s', None)
+        for bound, label in ((deadline, 'caller_deadline'),
+                             (started + wall_budget_s if wall_budget_s is not None else None,
                               'invocation_wall_budget')):
-            if bound is not None and bound < self.budget.deadline:
+            if bound is not None and bound < self._deadline:
                 self.budget.deadline = bound
                 self._deadline_bound = label
-        self._effective_allowance_s = max(0.0, self.budget.deadline - started)
-        agent_kwargs = {**agent_kwargs, 'deadline': self.budget.deadline}
+        self._effective_allowance_s = max(0.0, self._deadline - started)
         # Preserve the scope failure independently of each later attempt's status.
         # Full diagnostics for every attempt remain in their phase evidence.
         failure: tuple[str | None, bool, str | None, str | None] | None = None
@@ -266,14 +267,33 @@ class ReviewInvestigation:
         """Only ordinary invocation failures permit a later independent batch."""
         return self.failed_invocation and self.reason == 'backend_failure' and self._continuable_failure
 
+    @property
+    def _deadline(self) -> float:
+        """The scope ledger always has an absolute deadline."""
+        assert self.budget.deadline is not None
+        return self.budget.deadline
+
+    @property
+    def _remaining_calls(self) -> int:
+        """The scope ledger always caps tool calls."""
+        remaining = self.budget.remaining_tool_calls
+        assert remaining is not None
+        return remaining
+
     def _budget_stop_reason(self) -> str | None:
         """Use the original controlling bound when classifying an exhausted reviewer."""
-        if self.budget.remaining_tool_calls <= 0:
+        if self._remaining_calls <= 0:
             return 'tool_call_budget_exceeded'
-        if clock.monotonic() >= self.budget.deadline:
+        if clock.monotonic() >= self._deadline:
             return ('pipeline_budget_exceeded' if self.budget.deadline == self.budget.shared_deadline
                     else 'wall_budget_exceeded')
         return None
+
+    def _refused(self, reason: str) -> str:
+        """A refusal before dispatch leads with the scope ledger's stop facts, numbers first."""
+        stop = self.budget.stop('tool_calls' if reason == 'tool_call_budget_exceeded' else 'time')
+        record_budget_stop(stop)
+        return f'{stop.diagnostic()} Review limit exhausted: {reason}'
 
     def _continuation_admitted(self, agent_kwargs: dict[str, Any]) -> bool:
         """A new batch cannot evade shared stopping conditions after an invocation failure."""
@@ -286,7 +306,7 @@ class ReviewInvestigation:
         self.reason = reason
         self.failed_invocation = False
         self.failure_class = 'quantitative_exhaustion' if reason != 'backend_failure' else 'outage_circuit'
-        self.failure_diagnostic = (f'Review limit exhausted: {reason}' if reason != 'backend_failure' else
+        self.failure_diagnostic = (self._refused(reason) if reason != 'backend_failure' else
                                    'Review stopped: provider outage circuit denied a later batch.')
         return False
 
@@ -316,10 +336,10 @@ class ReviewInvestigation:
             'closed_candidate_ids': [decision['candidate_id'] for decision in closed_decisions],
             'assigned_candidate_ids': candidate_ids,
             'target_diff_bytes': {path: self.diff_weights.get(path, 1) for path in files},
-            'observed_tool_starts': self.budget.observed_tool_starts,
-            'remaining_tool_calls': self.budget.remaining_tool_calls,
-            'hard_tool_call_allowance': self.budget.remaining_tool_calls,
-            'advisory_tool_call_target': min(target, self.budget.remaining_tool_calls)}
+            'observed_tool_starts': self.budget.observed,
+            'remaining_tool_calls': self._remaining_calls,
+            'hard_tool_call_allowance': self._remaining_calls,
+            'advisory_tool_call_target': min(target, self._remaining_calls)}
 
     def _reference_options(self, stage: str, targets: list[str]) -> dict[str, list[dict[str, Any]]]:
         """Offer bounded source identities, never a claim that a source was read."""
@@ -348,7 +368,7 @@ class ReviewInvestigation:
         self.reason = self._budget_stop_reason()
         if self.reason is not None:
             self.failure_class = 'quantitative_exhaustion'
-            self.failure_diagnostic = f'Review limit exhausted: {self.reason}'
+            self.failure_diagnostic = self._refused(self.reason)
             return False
         candidate_ids = candidate_ids or []
         assignment_parts = assignment_parts or []
@@ -383,7 +403,8 @@ class ReviewInvestigation:
             input_failure = ''
             accepted = False
             binding: HostToolBinding | None = None
-            starts_before = self.budget.observed_tool_starts
+            stage_budget: BudgetLedger | None = None
+            starts_before = self.budget.observed
             candidate_count = 0
             async with phase_scope(DaydreamPhase.DEEP, stage=f'review-{stage.replace('_', '-')}') as transition:
                 prior_admitted = self.admitted_stages
@@ -401,19 +422,8 @@ class ReviewInvestigation:
                             canonical_schema=canonical_schema, binding=binding,
                             revalidate=lambda: prepared.revalidate(backend, cwd, kwargs.get('read_only', False)))
 
-                    if native_admission:
-                        def accept_submission(submitted: Any) -> dict[str, Any]:
-                            """Prepare and install one whole stage without yielding authority."""
-                            assert binding is not None
-                            binding.ensure_open()
-                            if not validates_schema(submitted, submission_schema):
-                                raise HostToolRejected(
-                                    'Review stage fields do not match response_contract.schema; '
-                                    'supply every required judgment and remove unknown fields.')
-                            return admit(submitted, binding)
-
-                        binding = HostToolBinding(deadline=self.budget.deadline, accept=accept_submission)
-                        kwargs['host_tools'] = binding
+                    # This invocation's ledger charges the scope ledger; native admission narrows it below.
+                    allowance: dict[str, int] = {}
                     # Submission transport is a prospective Pi planning hint; RequestEvent owns output authority.
                     if native_admission and not (
                         kwargs.get("tools_disabled") or kwargs.get("finalization")
@@ -432,28 +442,41 @@ class ReviewInvestigation:
                         remaining.update(remaining_submission_start_floor=1 + future_batches + triage_stages,
                                          current_stage_total_start_floor=floor,
                                          reserved_future_tool_starts=reserve)
-                        state['hard_tool_call_allowance'] = max(0, self.budget.remaining_tool_calls - reserve)
-                        caller_bound = kwargs.get('tool_call_budget')
-                        kwargs['tool_call_budget'] = (min(caller_bound, state['hard_tool_call_allowance'])
-                            if caller_bound is not None else state['hard_tool_call_allowance'])
-                        state['hard_tool_call_allowance'] = kwargs['tool_call_budget']
-                        kwargs['tool_call_start_floor'] = floor
+                        state['hard_tool_call_allowance'] = max(0, self._remaining_calls - reserve)
+                        allowance = {'limit': state['hard_tool_call_allowance'], 'reserved': reserve,
+                                     'start_floor': floor}
                         state['advisory_tool_call_target'] = min(state['advisory_tool_call_target'],
                                                                state['hard_tool_call_allowance'])
                         if state['hard_tool_call_allowance'] < floor:
                             self.reason = 'tool_call_budget_exceeded'
+                    stage_budget = self.budget.carve(f'stage:{self.scope_id}/{stage}', **allowance)
+                    if native_admission:
+                        def accept_submission(submitted: Any) -> dict[str, Any]:
+                            """Prepare and install one whole stage without yielding authority."""
+                            assert binding is not None
+                            binding.ensure_open()
+                            if not validates_schema(submitted, submission_schema):
+                                raise HostToolRejected(
+                                    'Review stage fields do not match response_contract.schema; '
+                                    'supply every required judgment and remove unknown fields.')
+                            return admit(submitted, binding)
+
+                        binding = HostToolBinding(budget=stage_budget, accept=accept_submission)
+                        kwargs['host_tools'] = binding
                     if self.reason is None:
                         stage_prompt = prompt_builder(state)
                         output, _, self.reason = await agent.run_agent(
                             backend, cwd, stage_prompt, phase=DaydreamPhase.DEEP, output_schema=transport_schema,
                             review_stage_scope_id=transition.scope_id,
                             review_system_instructions=build_review_stage_system_instruction(state),
-                            require_full_schema=True, investigation_budget=self.budget, review_evidence=evidence,
+                            require_full_schema=True, budget=stage_budget, review_evidence=evidence,
                             schema_rejection_guard=lambda value: self._retryable(
                                 value, stage, targets, candidate_ids, files=assigned_files),
                             advisory_tool_call_target=state['advisory_tool_call_target'], **kwargs)
                     else:
                         output = None
+                        # The native start floor refused this dispatch.
+                        record_budget_stop(stage_budget.stop('tool_calls'))
                     prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
                 except SanctionedInputUnavailable as exc:
                     self.reason = 'evidence_incomplete'
@@ -501,8 +524,7 @@ class ReviewInvestigation:
                             for target in output['targets']]}
                         present_result(agent.console, context.policy, agent_kwargs.get("progress_callback"), display)
                 finally:
-                    if self.reason in {'tool_call_budget_exceeded', 'wall_budget_exceeded', 'pipeline_budget_exceeded',
-                                       'model_budget_exhaustion'}:
+                    if self.reason in {'tool_call_budget_exceeded', 'wall_budget_exceeded', 'pipeline_budget_exceeded'}:
                         self.failure_class = 'quantitative_exhaustion'
                     elif self.assertion_failure_class is not None:
                         self.failure_class = self.assertion_failure_class
@@ -525,10 +547,13 @@ class ReviewInvestigation:
                                   'quantitative_exhaustion': 'Review limit exhausted'}
                         label = labels.get(self.failure_class or '', 'Review stopped')
                         self.failure_diagnostic = f"{label}: {self.reason}{input_failure}"
+                        if stage_budget is not None and stage_budget.stopped is not None:
+                            # The invocation ledger's stop facts lead, so bounded coverage keeps them.
+                            self.failure_diagnostic = f"{stage_budget.stopped.diagnostic()} {self.failure_diagnostic}"
                     transition.extra.update(
-                        review_scope_id=self.scope_id, observed_tool_starts=self.budget.observed_tool_starts,
+                        review_scope_id=self.scope_id, observed_tool_starts=self.budget.observed,
                         investigation_base_budget_s=self._base_limits.investigation_s,
-                        investigation_scaled_budget_s=self.budget.limits.investigation_s,
+                        investigation_scaled_budget_s=self._scaled_limits.investigation_s,
                         investigation_effective_allowance_s=self._effective_allowance_s,
                         investigation_limit=self._deadline_bound,
                         remaining_tool_calls=self.budget.remaining_tool_calls,
@@ -537,7 +562,7 @@ class ReviewInvestigation:
                         assigned_target_ids=targets, assigned_candidate_ids=candidate_ids or [],
                         admitted=self.admitted_stages > prior_admitted, stop_reason=self.reason,
                         logical_stage=stage, attempt=attempt,
-                        attempt_tool_starts=self.budget.observed_tool_starts - starts_before,
+                        attempt_tool_starts=self.budget.observed - starts_before,
                         schema_rejection=actual_rejection.to_dict() if actual_rejection else None,
                         schema_retry_eligible=retry_rejection is not None,
                         retry_feedback=rejection.to_dict() if rejection else None, native_output=evidence.native_output,

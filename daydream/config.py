@@ -31,10 +31,6 @@ REVIEWER_TOOL_CALL_BUDGET = 120
 # default, above the 7-12 calls per batch observed in #1746.
 REVIEWER_BATCHES_PER_ALLOWANCE = 4
 
-# Use wall time to bound exploratory turns; tool counts can truncate valid
-# investigation. Each call site may still supply an explicit ceiling.
-DEFAULT_TOOL_CALL_BUDGET: int | None = None
-
 # Allow target test suites more wall time than ordinary turns while bounding hangs.
 TEST_WALL_BUDGET_S = 3600.0
 
@@ -47,11 +43,6 @@ BUDGET_CLEANUP_GRACE_S = 10.0
 # so coordinated recovery cannot lag a single retry ladder.
 RETRY_CIRCUIT_FAILURE_THRESHOLD = 3
 RETRY_CIRCUIT_PROBE_INTERVAL_S = 30.0
-
-# Charge every backoff and retry attempt to a separate recovery allowance,
-# activated by the first retryable failure. Exhaustion re-raises without dispatch.
-# File/environment overrides are supported; zero disables recovery.
-DEFAULT_RETRY_RECOVERY_ALLOWANCE_S = 300.0
 
 # Bound cumulative fix cost/time per file group across all turns and retries.
 # Thread the group deadline into each call for mid-call enforcement; configurable

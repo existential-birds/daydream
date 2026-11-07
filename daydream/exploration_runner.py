@@ -15,7 +15,7 @@ import anyio
 from daydream import git_ops, review_profile as _rp
 from daydream.agent import run_agent
 from daydream.backends import effective_fanout_concurrency
-from daydream.config import DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
+from daydream.config import DEFAULT_WALL_BUDGET_S
 from daydream.exploration import (
     Convention,
     Dependency,
@@ -34,7 +34,7 @@ from daydream.prompts.exploration_subagents import (
     build_test_mapper_prompt,
     mapping_source_files,
 )
-from daydream.review_budget import ReviewLimits, review_scale_for_scope
+from daydream.review_budget import BudgetLedger, ReviewLimits, review_scale_for_scope
 from daydream.review_evidence import FinalizationContext
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.trajectory import (
@@ -67,9 +67,9 @@ _PRE_SCAN_TIMEOUT_SECONDS = (
     _PRE_SCAN_REVIEW_LIMITS.investigation_s + _PRE_SCAN_REVIEW_LIMITS.finalization_s + 30
 )
 
-# Cap subagents at 50 turns: on large repos they otherwise exhaust their
-# context window and lose track of the task (D-06 graceful degradation).
-EXPLORATION_MAX_TURNS = 50
+# Cap unbounded surveys at 50 tool calls: on large repos they otherwise exhaust
+# their context window and lose track of the task (D-06 graceful degradation).
+EXPLORATION_TOOL_CALL_LIMIT = 50
 
 _PRE_SCAN_STRATEGIES = (
     "exploration.pattern_scan", "exploration.dependency_trace", "exploration.test_mapping",
@@ -291,7 +291,6 @@ async def pre_scan(
     results: dict[str, Any] = {}
     specialist_failed = False
 
-    specialist_max_turns = EXPLORATION_MAX_TURNS
     recorder = get_current_recorder()
     limiter = anyio.CapacityLimiter(
         effective_fanout_concurrency(10, backend)
@@ -311,7 +310,7 @@ async def pre_scan(
         ):
             try:
                 structured, _, budget_reason = await run_agent(
-                    backend, repo_root, prompt, output_schema=schema, max_turns=specialist_max_turns,
+                    backend, repo_root, prompt, output_schema=schema,
                     phase=DaydreamPhase.EXPLORATION,
                     read_only=True,
                     review_limits=_PRE_SCAN_REVIEW_LIMITS,
@@ -322,8 +321,7 @@ async def pre_scan(
                         "in the schema. Do not review defects. Omit unconfirmed mappings; empty arrays are valid.",
                         supplied_context=(("change diff", diff_text),),
                     ),
-                    wall_budget_s=DEFAULT_WALL_BUDGET_S * review_scale_for_scope(),
-                    tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                    budget=BudgetLedger("exploration", wall_s=DEFAULT_WALL_BUDGET_S * review_scale_for_scope()),
                     run_context=run_context,
                 )
                 if budget_reason:
@@ -453,11 +451,10 @@ async def repo_scan(
                         strategy=strategies[_SURVEY_STRATEGY],
                     ),
                     output_schema=PATTERN_SCANNER_SCHEMA,
-                    max_turns=EXPLORATION_MAX_TURNS,
                     phase=DaydreamPhase.EXPLORATION,
                     read_only=True,
-                    wall_budget_s=DEFAULT_WALL_BUDGET_S,
-                    tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                    budget=BudgetLedger("repo-survey", wall_s=DEFAULT_WALL_BUDGET_S,
+                                        limit=EXPLORATION_TOOL_CALL_LIMIT),
                     run_context=run_context,
                 )
                 if isinstance(structured, dict):

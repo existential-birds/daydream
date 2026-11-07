@@ -505,15 +505,6 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
                 group_max_serial_items=_resolve_config_value(
                     config, "group_max_serial_items", DEFAULT_GROUP_MAX_SERIAL_ITEMS
                 ),
-                # One cumulative retry-overhead allowance per file group, read
-                # directly (not via ``_resolve_config_value``) because it is
-                # tri-state: unset must stay None so ``run_agent`` applies its
-                # default instead of reading it as an explicit disable.
-                retry_recovery_allowance_s=(
-                    config.file_config.retry_recovery_allowance_s
-                    if config.file_config is not None
-                    else None
-                ),
                 exploration_dir=exploration_dir,
                 test_map_path=test_map_path,
                 footprint=state.footprint,

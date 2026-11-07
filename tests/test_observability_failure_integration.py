@@ -40,7 +40,8 @@ _FLOW_IMPORTS = """
 import anyio
 import json
 from daydream.agent import run_agent
-from daydream.extensions import FlowStep, Stop, ToolDecision
+from daydream.extensions import FlowStep, Stop
+from daydream.review_budget import BudgetLedger
 from daydream.trajectory import DaydreamPhase
 """
 _SINGLE_AGENT_BODY = """
@@ -60,14 +61,12 @@ def isolated_operator_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "0.5")
 
 
-def _flow(ext_dir: ExtDir, *, body: str | None = None, controls: str = "", veto: bool = False) -> None:
+def _flow(ext_dir: ExtDir, *, body: str | None = None, controls: str = "") -> None:
     source = _FLOW_IMPORTS + "\nasync def probe(ctx):\n"
     source += textwrap.indent(body or _SINGLE_AGENT_BODY.format(controls=controls), "    ")
     source += "\ndef register(r):\n"
     source += "    r.register_phase(FlowStep(name='trace-failures', run=probe))\n"
     source += "    r.set_flow('trace-failures', ['trace-failures'])\n"
-    if veto:
-        source += "    r.register_tool_supervisor(lambda name, args, *, phase: ToolDecision(True, 'protected path'))\n"
     ext_dir.write_module(source)
 
 
@@ -88,8 +87,6 @@ class _ActiveToolBackend:
     model = "active-tool-model"
 
     def __init__(self) -> None:
-        self.active = anyio.Event()
-        self.cancelled = False
         self.finished = False
 
     async def execute(self, _cwd: Path, prompt: str, *_args: Any, **_kwargs: Any) -> AsyncGenerator[AgentEvent]:
@@ -98,13 +95,12 @@ class _ActiveToolBackend:
             yield TextEvent("partial response before interruption")
             yield CostEvent(0.005, 5, 1)
             yield ToolStartEvent("open-tool", "Write", {"path": "protected.py"})
-            self.active.set()
             await anyio.sleep_forever()
         finally:
             self.finished = True
 
     async def cancel(self) -> None:
-        self.cancelled = True
+        """Backend-wide shutdown is not part of this scenario."""
 
 async def test_runner_cleanup_outage_preserves_captured_root_and_review_output(
     ext_dir: ExtDir, feature_branch_repo: Path,
@@ -145,16 +141,13 @@ async def test_runner_cleanup_outage_preserves_captured_root_and_review_output(
     assert "review completed during outage" in json.dumps(record["trajectories"]["value"])
 
 
-async def test_runner_partial_outcome_preserves_veto_and_budget_reasons(
+async def test_runner_partial_outcome_preserves_the_budget_stop_record(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    interruption = "wall"
-    controls = {"supervisor": "", "tools": "tool_call_budget=0,", "wall": "wall_budget_s=0.5,"}[interruption]
-    reason = {"supervisor": "tool_vetoed:Write", "tools": "tool_call_budget_exceeded", "wall": "wall_budget_exceeded"}[
-        interruption
-    ]
-    _flow(ext_dir, controls=controls, veto=interruption == "supervisor")
+    """A tool-call stop keeps its partial output and records one stop on the agent span."""
+    reason = "tool_call_budget_exceeded"
+    _flow(ext_dir, controls="budget=BudgetLedger('review:sample', limit=0),")
     backend = _ActiveToolBackend()
     install_backend(backend)
     with otlp_collector() as collector:
@@ -177,8 +170,13 @@ async def test_runner_partial_outcome_preserves_veto_and_budget_reasons(
     finalization, = [span for span in spans if attributes(span).get("daydream.step") == "artifact-finalization"]
     assert finalization["parentSpanId"] == root["spanId"]
     assert finalization["status"]["code"] == "STATUS_CODE_OK"
-    assert attributes(tool)["daydream.outcome"] == reason.split(":")[0]
-    assert tool["status"]["message"] == reason.split(":")[0]
+    assert attributes(tool)["daydream.outcome"] == reason
+    assert tool["status"]["message"] == reason
+    assert {key: value for key, value in attributes(agent).items() if key.startswith("daydream.budget.")} == {
+        "daydream.budget.owner": "review:sample", "daydream.budget.dimension": "tool_calls",
+        "daydream.budget.limit": 0, "daydream.budget.spent": 0, "daydream.budget.remaining_at_dispatch": 0,
+        "daydream.budget.reserved": 0,
+    }
     assert tool["events"][-1]["name"] == "exception"
     assert attributes(attempt)["gen_ai.usage.input_tokens"] == 5
     assert attributes(attempt)["gen_ai.usage.cost"] == 0.005

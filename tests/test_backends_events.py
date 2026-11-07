@@ -24,9 +24,9 @@ def test_admission_contract_construction_rejects_wrong_types() -> None:
     rejected: list[tuple[type[Any], dict[str, Any], str]] = [
         (EffectiveRequestConfig, {"temperature": True}, "temperature"),
         (EffectiveRequestConfig, {"temperature": float("nan")}, "temperature"),
-        (EffectiveRequestConfig, {"max_turns": True}, "max_turns"),
-        (EffectiveRequestConfig, {"max_turns": -1}, "max_turns"),
-        (EffectiveRequestConfig, {"max_turns": 2**63}, "max_turns"),
+        (OspreyRequestConfig, {"turn_timeout": True}, "turn_timeout"),
+        (OspreyRequestConfig, {"turn_timeout": -1}, "turn_timeout"),
+        (OspreyRequestConfig, {"turn_timeout": 2**63}, "turn_timeout"),
         (EffectiveRequestConfig, {"read_only": 1}, "read_only"),
         (EffectiveRequestConfig, {"continuation_mode": "restart"}, "continuation_mode"),
         (ClaudeRequestConfig, {"permission_mode": "default"}, "permission_mode"),

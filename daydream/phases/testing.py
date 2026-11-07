@@ -68,6 +68,7 @@ from daydream.phases.test_evidence import (
     test_command_fact,
 )
 from daydream.redaction import redact_text
+from daydream.review_budget import BudgetLedger
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.test_execution import (
     TestRecipe,
@@ -122,7 +123,6 @@ def _capture_repair_checkpoint(
     footprint: AuthorizedFixFootprint,
     repair_instance: Backend,
     wall_budget_s: float,
-    tool_call_budget: int | None,
     elapsed_s: float,
     config: Any,
     recipe: TestRecipe | None,
@@ -143,8 +143,6 @@ def _capture_repair_checkpoint(
         artifact_dir_for(work.repo, session=artifact_session, allow_standalone=allow_standalone) / "deep"
     )
     consumed: dict[str, float] = {"wall_budget_s": wall_budget_s, "elapsed_s": elapsed_s}
-    if tool_call_budget is not None:
-        consumed["tool_call_budget"] = float(tool_call_budget)
     checkpoint = RepairCheckpoint(
         job_id=job_id,
         execution_id=execution_id,
@@ -228,26 +226,6 @@ def _build_fix_prompt(
     return "\n".join(parts) + f"\n\n{GENERATED_FILES_PROMPT_RULE}\n" + _build_fix_style_suffix(concise_mode)
 
 
-def _build_repair_budget_clause(wall_budget_s: float, tool_call_budget: int | None) -> str:
-    """State the allowance the host will actually enforce, and nothing more.
-
-    A repair turn is wall-clock bounded; whether it is also tool-call bounded is
-    a fact about the resolved configuration, so an uncapped turn says so instead
-    of implying a cap that does not exist.
-    """
-    if tool_call_budget is None:
-        tool_line = "no tool-call cap is enforced, so spend the calls the diagnosis needs"
-    else:
-        tool_line = f"tool-call budget: {tool_call_budget} calls"
-    return (
-        f"\nTurn budget: {wall_budget_s:g}s of wall clock for this whole turn, and "
-        f"{tool_line}. Reaching the wall clock ends the turn mid-work: the partial "
-        "edits are kept and recorded, and the turn is not asked to verify them. "
-        "Prioritise the most likely root cause and land that fix rather than "
-        "covering every candidate.\n"
-    )
-
-
 def _repair_turn_wall_budget_s(
     config: Any,
     *,
@@ -286,30 +264,23 @@ def _repair_turn_wall_budget_s(
     return min(phase_bound, repair_bound)
 
 
-def _compose_repair_prompt(
-    output: str = "",
-    feedback_items: list[dict[str, Any]] | None = None,
-    *,
-    repo: Path | None = None,
-    concise_mode: bool = False,
-    edit_scope: frozenset[str] = frozenset(),
-    wall_budget_s: float = phase_config.DEFAULT_WALL_BUDGET_S,
-    tool_call_budget: int | None = phase_config.DEFAULT_TOOL_CALL_BUDGET,
-    prompt_body: str | None = None,
-) -> str:
-    """Assemble the whole repair prompt: findings, edit authority, and real budget.
+def _compose_repair_prompt(prompt_body: str, *, edit_scope: frozenset[str], wall_budget_s: float) -> str:
+    """Add edit authority and the real budget to the registry's ``fix`` prompt.
 
     One composer, so the enforcement contract (authorized edit scope) and the
-    debugging workflow cannot drift into a prompt that contradicts itself.
-    ``prompt_body`` carries an extension's override of the ``fix`` prompt; when
-    absent the default renderer runs here.
+    debugging workflow cannot drift into a prompt that contradicts itself. The
+    turn is wall-clock bounded only, so the clause states no tool-call cap.
     """
-    prompt = prompt_body if prompt_body is not None else _build_fix_prompt(
-        output, feedback_items, repo=repo, concise_mode=concise_mode,
-    )
     if edit_scope:
-        prompt += _build_fix_scope_clause(edit_scope, edit_scope)
-    return prompt + _build_repair_budget_clause(wall_budget_s, tool_call_budget)
+        prompt_body += _build_fix_scope_clause(edit_scope, edit_scope)
+    return prompt_body + (
+        f"\nTurn budget: {wall_budget_s:g}s of wall clock for this whole turn, and "
+        "no tool-call cap is enforced, so spend the calls the diagnosis needs. "
+        "Reaching the wall clock ends the turn mid-work: the partial "
+        "edits are kept and recorded, and the turn is not asked to verify them. "
+        "Prioritise the most likely root cause and land that fix rather than "
+        "covering every candidate.\n"
+    )
 
 
 def _build_setup_investigator_prompt(test_output: str) -> str:
@@ -630,18 +601,13 @@ async def phase_test_and_heal(
             artifact_session=artifact_session,
             allow_standalone=allow_standalone,
         )
-        tool_call_budget = phase_config.DEFAULT_TOOL_CALL_BUDGET
         fix_prompt = _compose_repair_prompt(
-            output, feedback_items,
-            repo=work.repo,
-            concise_mode=_backend_concise_fix_prompts(repair_instance),
-            edit_scope=footprint.run_allowed_paths,
-            wall_budget_s=wall_budget_s,
-            tool_call_budget=tool_call_budget,
-            prompt_body=get_registry().prompt("fix")(
+            get_registry().prompt("fix")(
                 output, feedback_items, repo=work.repo,
                 concise_mode=_backend_concise_fix_prompts(repair_instance),
             ),
+            edit_scope=footprint.run_allowed_paths,
+            wall_budget_s=wall_budget_s,
         )
         fix_prompt = append_extended_facts(fix_prompt, recipe)
         input_tree_key = capture_tree_key()
@@ -649,8 +615,7 @@ async def phase_test_and_heal(
         try:
             partial_output, continuation_token, abort_reason = await agent.run_agent(
                 repair_instance, work.repo, fix_prompt, phase=DaydreamPhase.FIX,
-                tool_call_budget=tool_call_budget,
-                wall_budget_s=wall_budget_s,
+                budget=BudgetLedger("test-repair", wall_s=wall_budget_s),
                 run_context=run_context,
             )
         except Exception as exc:
@@ -666,7 +631,7 @@ async def phase_test_and_heal(
                     abort_reason=None, base_tree_key=input_tree_key,
                     retained_tree_key=capture_tree_key(), footprint=footprint,
                     repair_instance=repair_instance, wall_budget_s=wall_budget_s,
-                    tool_call_budget=tool_call_budget, elapsed_s=time.monotonic() - started,
+                    elapsed_s=time.monotonic() - started,
                     config=config, recipe=recipe, artifact_session=artifact_session,
                     allow_standalone=allow_standalone,
                 )
@@ -699,7 +664,7 @@ async def phase_test_and_heal(
                 abort_reason=abort_reason, base_tree_key=input_tree_key,
                 retained_tree_key=capture_tree_key(), footprint=footprint,
                 repair_instance=repair_instance, wall_budget_s=wall_budget_s,
-                tool_call_budget=tool_call_budget, elapsed_s=time.monotonic() - started,
+                elapsed_s=time.monotonic() - started,
                 config=config, recipe=recipe, artifact_session=artifact_session,
                 allow_standalone=allow_standalone,
             )

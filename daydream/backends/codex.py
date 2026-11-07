@@ -26,7 +26,6 @@ from typing import Any
 
 from daydream import git_ops
 from daydream.backends import (
-    DEFAULT_CODEX_TERMINAL_DRAIN_TIMEOUT_S,
     AgentEvent,
     BackendExecutionInput,
     CodexRequestConfig,
@@ -41,8 +40,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
-    _parsed_positive_float,
-    resolve_fanout_concurrency,
+    fanout_concurrency_from_environment,
 )
 from daydream.backends._subprocess import DEFAULT_CODEX_STREAM_IDLE_TIMEOUT_S, StreamStalledError, stream_idle_timeout_s
 from daydream.backends._transport import (
@@ -538,20 +536,15 @@ class CodexBackend:
         self.model = model
         self.reasoning_effort = reasoning_effort
         self._execution_input = execution_input
-        self._terminal_drain_timeout_s = execution_input.codex_terminal_drain_timeout_s if execution_input else (
-            _parsed_positive_float(os.environ, "DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S",
-                                   DEFAULT_CODEX_TERMINAL_DRAIN_TIMEOUT_S))
-        self._process_reap_timeout_s = execution_input.codex_process_reap_timeout_s if execution_input else (
-            _parsed_positive_float(os.environ, "DAYDREAM_CODEX_PROCESS_REAP_TIMEOUT_S", 5.0))
-        self._cleanup_timeout_s = execution_input.codex_cleanup_timeout_s if execution_input else (
-            _parsed_positive_float(os.environ, "DAYDREAM_CODEX_CLEANUP_TIMEOUT_S", 10.0))
+        allowances = execution_input or BackendExecutionInput  # field defaults are class attributes
+        self._terminal_drain_timeout_s = allowances.codex_terminal_drain_timeout_s
+        self._process_reap_timeout_s = allowances.codex_process_reap_timeout_s
+        self._cleanup_timeout_s = allowances.codex_cleanup_timeout_s
         if execution_input is not None:
             self.fanout_concurrency = execution_input.fanout_concurrency
             self.retry_policy = execution_input.retry_policy
         else:
-            self.fanout_concurrency = resolve_fanout_concurrency(
-                "DAYDREAM_FANOUT_CONCURRENCY", 8
-            )
+            self.fanout_concurrency = fanout_concurrency_from_environment(os.environ, 8)
         self._transports: list[CliTransport] = []
         # Disposable read-only checkouts shared across concurrent execute() calls
         # (built once per cwd, refcounted; cleaned up when the last holder exits).
@@ -561,12 +554,11 @@ class CodexBackend:
     async def execute(
         self, cwd: Path, prompt: str, output_schema: dict[str, Any] | None = None,
         continuation: ContinuationToken | None = None, agents: dict[str, Any] | None = None,
-        max_turns: int | None = None, read_only: bool = False, persist_session: bool = True,
-        finalization: bool = False,
+        read_only: bool = False, persist_session: bool = True, finalization: bool = False,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Observe the adapter delivery boundary while preserving invocation-local cleanup."""
         lifecycle = current_backend_lifecycle()
-        stream = self._execute(cwd, prompt, output_schema, continuation, agents, max_turns,
+        stream = self._execute(cwd, prompt, output_schema, continuation, agents,
                                read_only, persist_session, finalization)
         async with aclosing(stream):
             async for event in stream:
@@ -581,7 +573,6 @@ class CodexBackend:
         output_schema: dict[str, Any] | None = None,
         continuation: ContinuationToken | None = None,
         agents: dict[str, Any] | None = None,
-        max_turns: int | None = None,
         read_only: bool = False,
         persist_session: bool = True,
         finalization: bool = False,
@@ -812,9 +803,9 @@ class CodexBackend:
                 prompt = _rebind_source_paths(prompt, cwd, execution_cwd)
 
             # P18 Task 1: closed typed effective-config admission from the
-            # exact argv built above. max_turns and persist_session are
-            # accepted-but-not-passed on this CLI surface, so they stay
-            # None (documented unavailability, never an effective claim).
+            # exact argv built above. persist_session is accepted-but-not-passed
+            # on this CLI surface, so it stays None (documented unavailability,
+            # never an effective claim).
             codex_resume_applied = (
                 continuation is not None and continuation.backend == "codex"
             )

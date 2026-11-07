@@ -23,6 +23,7 @@ from daydream.host_tools import (
     HostToolRejected,
     NativeCapacityRequirement,
 )
+from daydream.review_budget import BudgetLedger
 from daydream.review_source_refs import SOURCE_SELECTORS_SCHEMA
 from tests.harness.fake_clock import FakeClock
 
@@ -263,11 +264,13 @@ async def test_http_readiness_requires_matching_terminal_definition_before_submi
         await _http_readiness_requires_matching_terminal_definition_before_submission_case(fault=fault)
 
 
-async def test_native_rejections_spend_original_allowance_and_retry_does_not_renew_it() -> None:
-    """Invalid terminal calls and retries share one allowance and original deadline.
+async def test_binding_charges_one_ledger_that_only_a_refund_renews() -> None:
+    """Admissions charge the invocation ledger and its parent; only a refund renews calls.
 
-    Native event observers charge after starts; this owner proof catches early
-    callback authorization that would let a corrected call outrun that observer.
+    The one proof of ledger arithmetic: invalid terminal calls still spend; a later
+    transport (a retry) cannot renew; over-limit starts are
+    observed, never charged; a refund restores calls but never time. Native event
+    observers charge after starts, so admission must charge before a corrected call.
     """
     installed: list[Any] = []
 
@@ -275,24 +278,29 @@ async def test_native_rejections_spend_original_allowance_and_retry_does_not_ren
         installed.append(value)
         return value
 
-    binding = HostToolBinding(deadline=time.monotonic() + 10, accept=accept)
+    parent = BudgetLedger("committed", deadline=time.monotonic() + 10, limit=5)
+    ledger = parent.carve("committed:discovery", limit=2)
+    binding = HostToolBinding(budget=ledger, accept=accept)
     binding.configure_schema(_SCHEMA)
-    binding.restrict(deadline=None, tool_call_budget=2)
     deadline = binding.deadline
+    assert deadline == parent.deadline
+    snapshot = ledger.dispatch()
     async with binding.session():
         with pytest.raises(HostToolRejected, match="alone"):
             binding.admit("mixed", NATIVE_SUBMIT, _RESULT, terminal=False)
         binding.admit("ordinary", "read", {"path": "/source", "offset": 1, "limit": 2})
-        assert binding.calls == 2
-    binding.restrict(deadline=time.monotonic() + 100, tool_call_budget=99)
-    assert binding.deadline == deadline
+    assert (ledger.charged, parent.charged, binding.remaining_tool_calls) == (2, 2, 0)
     async with binding.session():
-        with pytest.raises(HostToolCallBudgetExceeded, match="Original cumulative tool allowance") as exhausted:
+        with pytest.raises(HostToolCallBudgetExceeded, match="allocation exhausted") as exhausted:
             binding.admit("corrected", NATIVE_SUBMIT, _RESULT, terminal=True)
-        with pytest.raises(HostToolCallBudgetExceeded, match="Original cumulative tool allowance") as repeated:
+        with pytest.raises(HostToolCallBudgetExceeded, match="allocation exhausted") as repeated:
             binding.submit("corrected", _RESULT)
         assert repeated.value is exhausted.value
-    assert binding.calls == 3 and installed == [] and binding.cleanup_complete
+    assert binding.calls == ledger.observed == parent.observed == 3 and ledger.charged == 2
+    assert installed == [] and binding.cleanup_complete
+    ledger.refund(snapshot)
+    assert (ledger.charged, ledger.refunded, parent.charged, parent.remaining_tool_calls) == (0, 2, 0, 5)
+    assert binding.deadline == deadline
 
     # Arguments that cannot be canonical JSON are a correctable rejection, never an admitted start.
     unencodable = HostToolBinding(deadline=time.monotonic() + 10, accept=accept)
@@ -324,8 +332,8 @@ async def test_http_operator_grants_are_frozen_and_retries_only_narrow_them() ->
         rejected = (await client.post("/admit", json={"id": "write", "name": "write", "arguments": None})).json()
         assert rejected["allowed"] is False and rejected["code"] == "permission_denied"
         assert binding.authority_open and installed == []
-    binding.restrict(deadline=None, tool_call_budget=None, allowed_tools=frozenset({NATIVE_SUBMIT}))
-    binding.restrict(deadline=None, tool_call_budget=None, allowed_tools=frozenset({"read", "write", NATIVE_SUBMIT}))
+    binding.restrict(allowed_tools=frozenset({NATIVE_SUBMIT}))
+    binding.restrict(allowed_tools=frozenset({"read", "write", NATIVE_SUBMIT}))
     async with _endpoint(binding) as client:
         assert (await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA})).json()["ready"]
         rejected = (await client.post("/admit", json={"id": "read", "name": "read", "arguments": None})).json()
@@ -362,8 +370,7 @@ async def _last_available_native_call_cannot_invite_an_impossible_correction_cas
         installed.append(value)
         return value
 
-    binding = HostToolBinding(deadline=time.monotonic() + 10, accept=accept)
-    binding.restrict(deadline=None, tool_call_budget=1)
+    binding = HostToolBinding(budget=BudgetLedger("review", deadline=time.monotonic() + 10, limit=1), accept=accept)
     arguments = {
         "schema": {"verdict": "complete", "findings": False},
         "items": {"verdict": "complete", "findings": list(range(130))},
@@ -832,10 +839,9 @@ async def test_http_parallel_batch_cannot_consume_the_protected_submission_start
     def accept(value: dict[str, Any]) -> dict[str, Any]:
         installed.append(value)
         return value
-    binding = HostToolBinding(deadline=time.monotonic() + 10, accept=accept,
+    binding = HostToolBinding(budget=BudgetLedger("review", deadline=time.monotonic() + 10, limit=96), accept=accept,
                               host_tools={"review_source": HostTool(_LOOKUP_SCHEMA, lambda value: value)},
                               protected_submission=case != "unprotected")
-    binding.restrict(deadline=None, tool_call_budget=96)
     async with _endpoint(binding) as client:
         assert (await _ready(client))["ready"] is True
         for index in range(95):
@@ -845,13 +851,14 @@ async def test_http_parallel_batch_cannot_consume_the_protected_submission_start
         if case == "unprotected":
             assert members[0] == {"id": "member-read", "allowed": True}
             assert members[1]["outcome"] == "fatal" and members[1]["code"] == "capacity_exhausted"
-            assert not binding.authority_open and binding.calls == binding.charged_starts == 97
+            assert not binding.authority_open and binding.calls == binding.budget.observed == 97
+            assert binding.budget.charged == 96
             return
         for member in members:
             assert member["allowed"] is False and member["outcome"] == "correctable"
             assert member["code"] == "capacity_protected" and "reserved for structured_output" in member["error"]
         assert binding.authority_open and binding.fatal_error is None
-        assert (binding.calls, binding.denied_starts, binding.charged_starts) == (97, 2, 95)
+        assert (binding.calls, binding.denied_starts, binding.budget.charged) == (97, 2, 95)
         assert binding.remaining_tool_calls == 1
         assert binding.capacity()["protected_submission_calls"] == 1 and binding.capacity()["denied_starts"] == 2
         if case == "denial-bound":
@@ -862,12 +869,12 @@ async def test_http_parallel_batch_cannot_consume_the_protected_submission_start
                                                        "arguments": None})).json()
             assert final["outcome"] == "fatal" and final["code"] == "capacity_exhausted"
             assert not binding.authority_open and binding.denied_starts == policy.PROTECTED_DENIAL_LIMIT + 1
-            assert binding.charged_starts == 95 and installed == []
+            assert binding.budget.charged == 95 and installed == []
             return
         assert (await client.post("/admit", json={"id": "submit", "name": NATIVE_SUBMIT,
                                                   "arguments": _RESULT, "terminal": True})).json()["allowed"]
         assert (await client.post("/submit", json={"id": "submit", "arguments": _RESULT})).json()["accepted"]
-        assert binding.charged_starts == 96 and binding.remaining_tool_calls == 0
+        assert binding.budget.charged == 96 and binding.remaining_tool_calls == 0
         extra = (await client.post("/admit", json={"id": "extra", "name": "read", "arguments": None})).json()
         # Past the allowance a start is terminal, never another denial; acceptance already crossed.
         assert extra["outcome"] == "indeterminate" and extra["code"] == "capacity_exhausted"

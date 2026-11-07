@@ -187,9 +187,11 @@ by this work, claim revision current, retained claim/coverage capacity) and then
 claim ordinals. A sibling conflict is a correctable rejection; closure or deadline
 remains fatal.
 
-All work shares one ledger of observed tool starts, wall clock and a single
-retry-recovery budget, activated for the whole review window so the first failing work
-cannot clamp it for later phases; backoff cannot renew them. Investigation receives half of the
+All work draws on one [budget ledger](#budget-ledger) for the review window; each
+dispatch runs on its own child ledger carved from it, so parallel siblings never share a
+count. Its limits come from the review profile only: `[pipeline]
+reviewer_investigation_budget_s`, `review_wall_budget_s` and `reviewer_tool_call_budget`,
+plus a fixed 120 s finalization reserve. Investigation receives half of the
 tool allowance and challenge the remainder. Under decomposition, cross-assignment keeps
 `max(2, half // 4)` starts; local work runs until 3/8 of the review window,
 cross-assignment until 1/2 and challenge for the rest. Otherwise discovery runs until
@@ -306,12 +308,12 @@ readers validate this binding; earlier readers reject the new fields/population.
 Pass `daydream.hosted_review.HostedReviewPolicy` as
 `CommittedReviewRequest(..., hosted_policy=policy)` to the same
 `run_committed_review` entry point. The trusted host supplies an explicit
-`ResolvedProfile`, `ReviewLimits`, complete child `environment`, isolated
-`agent_dir`, `private_base` for the normal artifact owner, and an initially absent
-`output_dir` whose parent exists. These canonical absolute roots must be disjoint
-from one another and from the source. Request `config` and `limits` are replaced
-by this policy; repository configuration, phase overrides and ambient environment
-cannot supply hosted authority.
+`ResolvedProfile` (which also supplies the review limits), complete child
+`environment`, isolated `agent_dir`, `private_base` for the normal artifact owner,
+and an initially absent `output_dir` whose parent exists. These canonical absolute
+roots must be disjoint from one another and from the source. Request `config` is
+replaced by this policy; repository configuration, phase overrides and ambient
+environment cannot supply hosted authority.
 
 | Supported hosted execution | Required value |
 |---|---|
@@ -346,7 +348,7 @@ checks verify the supported versions and exact tool set before provider work;
 If native readiness fails during an invocation, already admitted work and partial
 coverage are sealed through the normal output session before that error propagates.
 Every investigation work, fresh challenge/rechallenge and retry keeps the same policy
-and cumulative allowances. Tool admission intersects grants before effects, and domain
+and [budget ledger](#budget-ledger). Tool admission intersects grants before effects, and domain
 submission may change only the assigned in-memory Review state.
 
 Trusted host writers publish `review-output.md`, `committed-review.json` and
@@ -464,6 +466,42 @@ Harbor adapter consumes this API; ordinary CLI/bot migration (#1679), broader
 Harbor/native migration (#1639), and supported-default cutover (#1641) remain
 separately owned. This contract does not claim other-backend or large-plan parity.
 
+## Budget ledger
+
+Each budget owner (an invocation, a staged scope or stage such as
+`stage:python/integration`, or committed work such as `committed:challenge`) has one
+[`BudgetLedger`](../daydream/review_budget.py): an absolute `clock.monotonic()` deadline
+and one charged tool-call count. `run_agent` takes it as `budget=` and has no other
+time, tool-call or turn limit; no backend receives a turn limit. A relative `wall_s` is
+anchored once when `run_agent` starts after admission, so queue time is not charged,
+and is never re-based. A carved child allocation charges and refunds its ancestors
+too. `reserved` records calls already withheld for later work; `start_floor` refuses a
+dispatch whose remaining calls cannot fit its minimum work. Without host tools,
+`run_agent` charges each observed tool start; a `HostToolBinding` charges the same
+ledger at `/admit`, before Pi emits the start, and its deadline reads the ledger.
+Starts refused for the protected submission slot or over the limit are observed,
+never charged.
+
+Renewal rule: compaction or summarization never renews a budget. When a retryable
+provider failure leads to a retry, the failed attempt's tool calls are refunded when
+the retry dispatches, because it is a fresh native conversation that must redo the
+lost work; a retry stopped before dispatch refunds nothing. Elapsed time is never refunded. Retries stay bounded by the
+attempt count, the absolute deadline and the outage circuit; a failure after possible
+host acceptance still permits no retry. Paths that do not retry are never refunded,
+including a staged schema re-dispatch and a committed challenge re-dispatch. Committed
+batches admitted before a provider failure stay installed while that attempt's starts
+are refunded with the rest of the attempt.
+
+Every budget stop records its owner, dimension (`time` or `tool_calls`), limit, amount
+spent, amount remaining at dispatch and calls reserved for later work, as durations and
+counts only, and appears on the trace once
+([observability](observability.md#budget-stops)), including a finalization turn's stop
+and a dispatch refused before any agent runs. Staged review also leads its coverage
+diagnostic with those numbers. A read cut short by the ledger deadline and a binding's
+deadline or allocation failure are budget stops (`wall_budget_exceeded`,
+`tool_call_budget_exceeded`), not `StreamStalledError`; idle, setup, drain and cleanup
+timeouts remain liveness checks.
+
 ## Pi host-tool lifetime and limits
 
 Pi keeps its stock read/search tools, offsets and pagination. Ordinary committed reviews
@@ -492,7 +530,7 @@ selectors and shared retention limits before installing the entire stage. A
 correctable payload rejection returns a correlated native error naming the
 field/selector, violated constraint and concrete correction. It changes no
 findings, decisions, notes or retention capacity. Correction uses the same
-conversation and cumulative wall/tool allowance. A rejected real tool start
+conversation and [budget ledger](#budget-ledger). A rejected real tool start
 still consumes that allowance, except a protected-slot denial (below); exhausted
 capacity cannot invite another call.
 Successful acceptance installs state once, returns canonical output and permits
@@ -518,7 +556,7 @@ continuation and retry, and never invite removing the contradiction to obtain
 complete coverage. Foreign or duplicate contradiction IDs remain correctable
 payload faults.
 
-Ordinary transient preacceptance retries use existing cumulative policy. Attempt
+Ordinary transient preacceptance retries follow the [renewal rule](#budget-ledger). Attempt
 closure revokes its endpoint before cleanup; only an unaccepted, nonfatal binding
 with completed cleanup may open another attempt. Explicit capability closure is
 permanent. A retired endpoint cannot revoke or mutate a later attempt. The
@@ -538,8 +576,8 @@ Committed-review bindings set `protected_submission=True`: the last start belong
 `structured_output`. Any other start that would take it, ordinary or host tool and
 including parallel-batch members, is counted in `denied_starts` and refused with
 correctable `capacity_protected` without charging or closing authority; a bounded
-number of denials then fails closed. `capacity()` reports both counts and `run_agent`'s
-stream ceiling excludes denied starts. Pi denies prospectively at `/admit`, so a denied
+number of denials then fails closed. `capacity()` reports both counts; the ledger
+observes denied starts without charging them. Pi denies prospectively at `/admit`, so a denied
 start is still observed and reported as [overshoot](observability.md#committed-review-evidence)
 that never reduces later reserves. Committed review is Pi-only; for other adapters, which
 do not serve host tools, Claude and Codex only observe starts.

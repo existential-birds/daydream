@@ -40,8 +40,8 @@ from daydream.backends.lifecycle import BackendLifecycleCollector, BackendLifecy
 from daydream.config import BUDGET_CLEANUP_GRACE_S
 from daydream.diagnostics import exception_text, sanitize_verbose_message
 from daydream.extensions import get_registry
-from daydream.host_tools import HostToolBinding
-from daydream.observability.spans import agent_scope, attempt_scope
+from daydream.host_tools import HostToolBinding, HostToolCallBudgetExceeded
+from daydream.observability.spans import agent_scope, attempt_scope, record_budget_stop
 from daydream.outage_circuit import CIRCUIT_CLOSED, CIRCUIT_HALF_OPEN
 from daydream.prompt_budget import PreparedSanctionedInputs
 from daydream.prompts.grounding import (
@@ -49,12 +49,15 @@ from daydream.prompts.grounding import (
     REPOSITORY_SEARCH_GUIDANCE,
     REVIEW_STOPPING_GUIDANCE,
 )
-from daydream.retry_policy import (
-    FailureClass,
-    RetryRecoveryBudget,
-    classify_failure,
+from daydream.retry_policy import FailureClass, classify_failure
+from daydream.review_budget import (
+    BudgetDimension,
+    BudgetExhausted,
+    BudgetLedger,
+    ReviewLimits,
+    review_deadline,
+    review_limits_for_scope,
 )
-from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits, review_deadline, review_limits_for_scope
 from daydream.review_evidence import FinalizationContext, ReviewEvidence
 from daydream.run_context import (
     RunContext,
@@ -139,6 +142,7 @@ class _EventStreamScope:
         self._lifecycle = lifecycle
         self._record_lifecycle = record_lifecycle
         self._host_tools = host_tools
+        self.ledger_stop: str | None = None
 
     async def __aenter__(self) -> AgentEventStream:
         self._lifecycle_token = self._lifecycle.bind()
@@ -168,12 +172,22 @@ class _EventStreamScope:
                 self._lifecycle.reset(self._lifecycle_token)
 
     async def events(self) -> AsyncIterator[AgentEvent]:
-        """Observe demand separately from adapter yields and recorder delivery."""
+        """Observe demand separately from adapter yields and recorder delivery.
+
+        A ledger limit that ends the adapter stream (a deadline-cut read or a
+        binding's deadline/allocation failure) ends iteration with ``ledger_stop``
+        set, so it takes the in-flight budget-stop path instead of a retry.
+        """
         while True:
             self._lifecycle.consumer_requested()
             try:
                 event = await anext(self.event_iter)
             except StopAsyncIteration:
+                return
+            except Exception as exc:
+                self.ledger_stop = _ledger_stop(exc, self._host_tools)
+                if self.ledger_stop is None:
+                    raise
                 return
             self._lifecycle.consumer_event()
             yield event
@@ -192,6 +206,27 @@ class _EventStreamScope:
                 self._lifecycle.expiry("cleanup")
         except Exception:  # noqa: BLE001 - cleanup must not mask the invocation outcome
             pass
+
+
+_STOP_DIMENSIONS: dict[str | None, BudgetDimension] = {
+    "wall_budget_exceeded": "time", "tool_call_budget_exceeded": "tool_calls",
+}
+
+
+def _ledger_stop(exc: Exception, host_tools: HostToolBinding | None) -> str | None:
+    """Map a ledger limit that ended an attempt to its budget stop reason, else None.
+
+    A binding failure counts only when it caused this exception before any possible
+    acceptance; every other failure keeps its own handling.
+    """
+    if isinstance(exc, BudgetExhausted):
+        return "wall_budget_exceeded"
+    fatal = host_tools.fatal_error if host_tools is not None else None
+    if fatal is None or not fatal.preacceptance or fatal not in (exc, exc.__cause__):
+        return None
+    if fatal.code == "deadline_expired":
+        return "wall_budget_exceeded"
+    return "tool_call_budget_exceeded" if isinstance(fatal, HostToolCallBudgetExceeded) else None
 
 
 class _LogRedactingConsole(Console):
@@ -240,20 +275,15 @@ async def run_agent(
     progress_callback: Callable[[Text], Any] | None = None,
     continuation: ContinuationToken | None = None,
     agents: dict[str, AgentDefinition] | None = None,
-    max_turns: int | None = None,
     read_only: bool = False,
     persist_session: bool = True,
-    wall_budget_s: float | None = None,
-    deadline: float | None = None,
-    tool_call_budget: int | None = None,
-    retry_recovery_allowance_s: float | None = None,
+    budget: BudgetLedger | None = None,
     validate_structured_output: bool = True,
     require_full_schema: bool = False,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext | None = None,
     review_limits: ReviewLimits | None = None,
-    investigation_budget: ReviewInvestigationBudget | None = None, advisory_tool_call_target: int | None = None,
-    tool_call_start_floor: int = 0,
+    advisory_tool_call_target: int | None = None,
     review_evidence: ReviewEvidence | None = None, schema_rejection_guard: Callable[[Any], bool] | None = None,
     finalization_context: FinalizationContext | None = None,
     tools_disabled: bool = False,
@@ -265,21 +295,31 @@ async def run_agent(
 
     Backend retry, supervision, budget and ATIF semantics live in the invocation
     executor. The outer scope owns exactly the result the phase receives.
-    Stages use investigation_budget and optional bounded review_evidence; failure/cutoff blocks automatic serialization.
-    tool_call_start_floor prevents fresh attempts whose allocation cannot fit the stage's minimum work.
+    ``budget`` is the invocation's one ledger: an absolute deadline and a charged
+    tool-call count. Its relative wall allowance is anchored here, after admission,
+    so queue time is never charged. Reviewer (investigation) ledgers are cumulative
+    across invocations and may use optional bounded review_evidence; failure/cutoff
+    blocks automatic serialization. Host tools charge the same ledger.
     """
     if host_tools is not None:
         if not getattr(backend, "supports_host_tools", False):
             raise NotImplementedError(f"{type(backend).__name__} does not support host tools")
         if tools_disabled or continuation is not None or review_limits is not None:
             raise ValueError("host tools require a fresh tools-enabled invocation without review finalization")
-        deadline = min(deadline, host_tools.deadline) if deadline is not None else host_tools.deadline
+        if budget is None:
+            budget = host_tools.budget
+        elif budget is not host_tools.budget:
+            raise ValueError("host tools must charge the invocation's budget ledger")
+    budget = (budget if budget is not None else BudgetLedger(phase.value)).anchor().begin()
+    investigation = budget.investigation
+    if investigation and budget.deadline is None:
+        raise ValueError("an investigation ledger requires an absolute deadline")
     if tools_disabled and not getattr(backend, "supports_tools_disabled", False):
         raise NotImplementedError(f"{type(backend).__name__} does not support tools_disabled")
     if review_system_instructions is not None:
-        if not tools_disabled and investigation_budget is None:
+        if not tools_disabled and not investigation:
             raise ValueError("review_system_instructions requires tools_disabled=True or a staged investigation")
-        if investigation_budget is None and not getattr(backend, "supports_review_instructions", False):
+        if not investigation and not getattr(backend, "supports_review_instructions", False):
             raise NotImplementedError(f"{type(backend).__name__} does not support review_instructions")
     if sanctioned_inputs is not None:
         # Callers may already have rendered this suffix. Move it after the
@@ -288,27 +328,18 @@ async def run_agent(
         if rendered_suffix and prompt.endswith(rendered_suffix):
             prompt = prompt.removesuffix(rendered_suffix)
     context = resolve_run_context(run_context)
-    if investigation_budget is not None and review_limits is not None:
-        raise ValueError("staged investigation uses investigation_budget instead of review_limits")
+    if investigation and review_limits is not None:
+        raise ValueError("staged investigation uses its ledger instead of review_limits")
     evidence = review_evidence or (ReviewEvidence(output_schema) if review_limits is not None else None)
     review_instructions = review_system_instructions
-    hard_deadline = deadline
-    shared: float | None = None
-    if investigation_budget is not None:
-        shared = investigation_budget.shared_deadline
-        bounds = [investigation_budget.deadline]
-        if deadline is not None:
-            bounds.append(deadline)
-        if wall_budget_s is not None:
-            bounds.append(clock.monotonic() + wall_budget_s)
-        deadline = min(bounds)
-        hard_deadline = deadline
-        remaining_calls = investigation_budget.remaining_tool_calls
-        tool_call_budget = min(tool_call_budget, remaining_calls) if tool_call_budget is not None else remaining_calls
+    turn = budget
+    hard_deadline = budget.deadline
+    shared = budget.shared_deadline
+    if investigation:
         budget_instructions = (
             "Reviewer dispatch-time snapshot: hard wall allowance: "
-            f"{max(0.0, deadline - clock.monotonic()):g} seconds until the absolute deadline; "
-            f"current invocation allocation: {tool_call_budget} tool calls. "
+            f"{budget.remaining_s() or 0.0:g} seconds until the absolute deadline; "
+            f"current invocation allocation: {budget.remaining_tool_calls} tool calls. "
             "Future-stage reserves are already excluded from this allocation; do not subtract them again. "
             + ("The advisory stage call target is a planning hint, not a ceiling. "
                "Useful assigned work may continue within the invocation allocation and deadline. "
@@ -319,31 +350,26 @@ async def run_agent(
         review_limits = review_limits_for_scope(review_limits)
         started = clock.monotonic()
         bounds = [started + review_limits.investigation_s + review_limits.finalization_s]
-        if deadline is not None:
-            bounds.append(deadline)
-        if wall_budget_s is not None:
-            bounds.append(started + wall_budget_s)
+        if budget.deadline is not None:
+            bounds.append(budget.deadline)
         shared = review_deadline(discovery=review_limits.discovery)
         if shared is not None:
             bounds.append(shared)
         hard_deadline = min(bounds)
-        deadline = max(
+        investigation_deadline = max(
             started, min(started + review_limits.investigation_s, hard_deadline - review_limits.finalization_s),
         )
-        investigation_allowance = max(0.0, deadline - started)
-        tool_call_budget = min(tool_call_budget, review_limits.tool_calls) if tool_call_budget is not None else (
-            review_limits.tool_calls
-        )
+        turn = budget.carve(budget.owner, limit=review_limits.tool_calls, deadline=investigation_deadline)
         budget_instructions = (
-            f"Investigation allowance: at most {investigation_allowance:g} seconds and "
-            f"{tool_call_budget} tool calls. " + REVIEW_STOPPING_GUIDANCE
+            f"Investigation allowance: at most {max(0.0, investigation_deadline - started):g} seconds and "
+            f"{turn.limit} tool calls. " + REVIEW_STOPPING_GUIDANCE
         )
-    if investigation_budget is not None or review_limits is not None:
+    if investigation or review_limits is not None:
         prompt += "\n\n" + budget_instructions
         review_instructions = "\n\n".join(
             item for item in (review_system_instructions, budget_instructions) if item
         )
-    search_turn = read_only or review_limits is not None or investigation_budget is not None
+    search_turn = read_only or review_limits is not None or investigation
     if search_turn and not tools_disabled and phase in {
         DaydreamPhase.REVIEW, DaydreamPhase.DEEP, DaydreamPhase.EXPLORATION,
         DaydreamPhase.INTENT, DaydreamPhase.ALTERNATIVES, DaydreamPhase.VERIFY,
@@ -370,32 +396,25 @@ async def run_agent(
         observed.content("traceloop.entity.input", {"prompt": prompt, "output_schema": output_schema})
         try:
             result = await _run_agent(
-                backend, cwd, prompt, phase=phase, output_schema=output_schema, result_schema=result_schema,
-                progress_callback=progress_callback,
-                continuation=continuation, agents=agents, max_turns=max_turns, read_only=read_only,
-                persist_session=persist_session, wall_budget_s=wall_budget_s, deadline=deadline,
-                tool_call_budget=tool_call_budget,
-                retry_recovery_allowance_s=retry_recovery_allowance_s,
+                backend, cwd, prompt, phase=phase, budget=turn, output_schema=output_schema,
+                result_schema=result_schema, progress_callback=progress_callback,
+                continuation=continuation, agents=agents, read_only=read_only,
+                persist_session=persist_session,
                 validate_structured_output=validate_structured_output,
                 require_full_schema=require_full_schema,
                 sanctioned_inputs=sanctioned_inputs,
                 run_context=context,
                 review_evidence=evidence,
-                schema_rejection_guard=schema_rejection_guard, investigation_budget=investigation_budget,
-                tool_call_start_floor=tool_call_start_floor,
+                schema_rejection_guard=schema_rejection_guard,
                 review_instructions=review_instructions,
                 tools_disabled=tools_disabled,
                 review_stage_scope_id=review_stage_scope_id,
                 host_tools=host_tools,
             )
-        except Exception as exc:
-            from daydream.review_result import ReasonCode, reason_for_exception
-            if (investigation_budget is not None or evidence is None or not evidence.valid(evidence.checkpoint)
-                    or reason_for_exception(exc) != ReasonCode.MODEL_BUDGET_EXHAUSTION):
-                raise
-            # Provider turn exhaustion retains this invocation's strictly validated
-            # checkpoint; it cannot establish completed investigation coverage.
-            result = (evidence.checkpoint, None, "error_max_turns")
+        finally:
+            # One stop record per budget stop, including one that ends in an exception.
+            if turn.stopped is not None:
+                observed.attrs(turn.stopped.attributes())
         if evidence is not None and review_limits is not None and result[2] in {
             "wall_budget_exceeded", "tool_call_budget_exceeded",
         }:
@@ -416,16 +435,20 @@ async def run_agent(
                     final_prompt = evidence.finalization_prompt(
                         finalization_context or FinalizationContext(task=phase.value), captured,
                     )
-                    finalized, _, final_reason = await _run_agent(
-                        backend, cwd, final_prompt, phase=phase,
-                        output_schema=output_schema, progress_callback=progress_callback,
-                        require_full_schema=require_full_schema,
-                        read_only=read_only, persist_session=persist_session, finalization=True,
-                        deadline=min(hard_deadline, clock.monotonic() + review_limits.finalization_s),
-                        tool_call_budget=0,
-                        retry_recovery_allowance_s=retry_recovery_allowance_s,
-                        sanctioned_inputs=sanctioned_inputs, run_context=context,
-                    )
+                    final_budget = BudgetLedger(budget.owner, limit=0, deadline=min(
+                        hard_deadline, clock.monotonic() + review_limits.finalization_s)).anchor()
+                    try:
+                        finalized, _, final_reason = await _run_agent(
+                            backend, cwd, final_prompt, phase=phase, budget=final_budget,
+                            output_schema=output_schema, progress_callback=progress_callback,
+                            require_full_schema=require_full_schema,
+                            read_only=read_only, persist_session=persist_session, finalization=True,
+                            sanctioned_inputs=sanctioned_inputs, run_context=context,
+                        )
+                    finally:
+                        # The investigation stop stays on the span's attributes; this one is an event.
+                        if final_budget.stopped is not None:
+                            record_budget_stop(final_budget.stopped)
                     if final_reason is None and (
                         evidence.valid(finalized) or (output_schema is None and isinstance(finalized, str))
                     ):
@@ -440,7 +463,7 @@ async def run_agent(
         if (result[2] == "wall_budget_exceeded" and shared is not None
                 and hard_deadline == shared and clock.monotonic() >= shared):
             result = (result[0], result[1], "pipeline_budget_exceeded")
-        if output_schema is not None and investigation_budget is None and not isinstance(result[0], str):
+        if output_schema is not None and not investigation and not isinstance(result[0], str):
             present_result(console, context.policy, progress_callback, result[0])
         observed.output(result[0])
         observed.finish(1 if result[2] else 0, reason=result[2])
@@ -453,38 +476,34 @@ async def _run_agent(
     prompt: str,
     *,
     phase: DaydreamPhase,
+    budget: BudgetLedger,
     output_schema: dict[str, Any] | None = None,
     result_schema: dict[str, Any] | None = None,
     progress_callback: Callable[[Text], Any] | None = None,
     continuation: ContinuationToken | None = None,
     agents: dict[str, AgentDefinition] | None = None,
-    max_turns: int | None = None,
     read_only: bool = False,
     persist_session: bool = True,
-    wall_budget_s: float | None = None,
-    deadline: float | None = None,
-    tool_call_budget: int | None = None,
-    retry_recovery_allowance_s: float | None = None,
     validate_structured_output: bool = True,
     require_full_schema: bool = False,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext,
     review_evidence: ReviewEvidence | None = None,
     schema_rejection_guard: Callable[[Any], bool] | None = None,
-    investigation_budget: ReviewInvestigationBudget | None = None,
-    tool_call_start_floor: int = 0,
     review_instructions: str | None = None,
     finalization: bool = False,
     tools_disabled: bool = False,
     review_stage_scope_id: str | None = None,
     host_tools: HostToolBinding | None = None,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
-    """Execute attempts under one deadline, retry allowance, and tool budget.
+    """Execute attempts under one budget ledger.
 
     Recorder observation precedes presentation and supervision. Backend failures
     may retry; supervisor failures never do. Each attempt owns and closes its
-    stream. A deadline/tool/veto stop returns partial output and its reason, with
-    bounded cleanup; a pre-dispatch or pre-backoff stop discards failed partials.
+    stream. A retry after a retryable provider failure refunds that attempt's tool
+    charges; elapsed time is never refunded. A deadline/tool/veto stop returns
+    partial output and its reason, with bounded cleanup; a pre-dispatch or
+    pre-backoff stop discards failed partials.
 
     Structured primary and extracted results share the salvage gate. Callers that
     validate downstream may opt out; bounded review finalization is handled by
@@ -497,6 +516,7 @@ async def _run_agent(
     structured_result: Any = None
     result_continuation: ContinuationToken | None = None
     aborted_reason: str | None = None
+    investigation = budget.investigation
     tool_supervisor = get_registry().tool_supervisor_if_registered()
 
     with run_context.backend_registration(backend):
@@ -505,53 +525,17 @@ async def _run_agent(
             # with-shape uniform otherwise (CORE-09 no-op). D-19: no ATIF construction
             # here — only inv.observe()/inv.observe_user_step() against the recorder.
             recorder = get_current_recorder()
-            settings = _resolve_retry_settings(backend, retry_recovery_allowance_s)
-            max_attempts = settings.max_attempts
+            settings = _resolve_retry_settings(backend)
+            max_attempts = settings.attempts
             base_delay = settings.base_delay_s
             max_delay = settings.max_delay_s
-            resolved_allowance = settings.allowance_s
 
-            # One absolute bound covers attempts and backoff; caller deadline wins ties.
+            # One absolute ledger deadline covers attempts and backoff.
             invocation_start = clock.monotonic()
-            effective_deadline = deadline
-            limit_expired = "caller_deadline" if deadline is not None else None
-            if wall_budget_s is not None:
-                wall_deadline = invocation_start + wall_budget_s
-                if deadline is None or not deadline <= wall_deadline:
-                    effective_deadline = wall_deadline
-                    limit_expired = "invocation_wall_budget"
-            recovery = investigation_budget.retry_recovery_budget if investigation_budget is not None else None
-            if recovery is None:
-                recovery = RetryRecoveryBudget(resolved_allowance)
-                if investigation_budget is not None:
-                    investigation_budget.retry_recovery_budget = recovery
-            else:
-                recovery.allowance_s = min(recovery.allowance_s, resolved_allowance)
-            # A recovery ledger may be shared by concurrent work; telemetry reports only
-            # this invocation's own charges, never a sibling's.
-            invocation_recovery_s = 0.0
-
-            def charge_recovery(seconds: float) -> None:
-                nonlocal invocation_recovery_s
-                recovery.charge(seconds)
-                invocation_recovery_s += max(0.0, seconds)
-            if host_tools is not None:
-                host_tools.restrict(deadline=effective_deadline, tool_call_budget=tool_call_budget)
-            native_calls_before = host_tools.calls if host_tools is not None else 0
-            native_denied_before = host_tools.denied_starts if host_tools is not None else 0
-
-            def charged_calls() -> int:
-                # Pi awaits the extension's /admit before writing the start to stdout,
-                # so every streamed start's protected-slot denial is already recorded here.
-                # A denial ahead of its stream event only undercounts; the binding enforces.
-                if host_tools is None:
-                    return tool_calls
-                return tool_calls - (host_tools.denied_starts - native_denied_before)
+            effective_deadline = budget.deadline
             # Telemetry counters for the single invocation: only dispatched
-            # attempts and time actually spent inside them are charged. The
-            # retry-recovery budget is a third, independent accumulator: its
-            # charges are never added to backend_s or backoff_s, so the
-            # backend_s + backoff_s <= elapsed_s invariant holds unchanged.
+            # attempts and time actually spent inside them are charged, so
+            # backend_s + backoff_s <= elapsed_s holds.
             telemetry = _RetryTelemetry()
             cleanup_elapsed_s = 0.0
             # A deadline can end the ladder on either side of a dispatch. The two
@@ -562,7 +546,8 @@ async def _run_agent(
             # Set when the invocation already emitted its one stop record, so the
             # post-loop deadline emitter never writes a second, contradicting one.
             stop_recorded = False
-            tool_calls = 0
+            # Calls a failed attempt charged, refunded only when a retry actually dispatches.
+            pending_refund = 0
 
             def _emit_ladder_stop(
                 stop_reason: str, limit_expired: str = "retry_ladder"
@@ -587,19 +572,12 @@ async def _run_agent(
                         cleanup_elapsed_s=None,
                         retry_stop_reason=stop_reason,
                         circuit_state=run_context.outage_circuit.state(),
-                        retry_recovery_spent_s=invocation_recovery_s + pending,
                         partial_edit_handling="discarded",
                     )
                 except Exception:  # noqa: BLE001 - telemetry must never break the run
                     _logger.exception("failed to record agent retry-ladder stop")
 
-            _logger.debug(
-                "invocation deadline: effective=%s limit=%s caller=%s wall_budget_s=%s",
-                effective_deadline,
-                limit_expired,
-                deadline,
-                wall_budget_s,
-            )
+            _logger.debug("invocation ledger %s: deadline=%s limit=%s", budget.owner, effective_deadline, budget.limit)
 
             for attempt in range(max_attempts + 1):
                 # Reset accumulated state BEFORE the deadline checks: a failed
@@ -614,45 +592,33 @@ async def _run_agent(
                 structured_result = None
                 native_output = False
                 result_continuation = None
-                if investigation_budget is None and host_tools is None:
-                    tool_calls = 0
-                remaining_calls = tool_call_budget - charged_calls() if tool_call_budget is not None else None
-                if host_tools is not None and host_tools.remaining_tool_calls is not None:
-                    native_remaining = host_tools.remaining_tool_calls
-                    remaining_calls = min(remaining_calls, native_remaining) if remaining_calls is not None else (
-                        native_remaining
-                    )
+                remaining_calls = budget.remaining_tool_calls
+                if remaining_calls is not None:
+                    remaining_calls += pending_refund  # what this retry gets once it dispatches
+                refund_point = budget.charged
                 if review_evidence is not None:
                     review_evidence.reset()
                 budget_reason: str | None = None
                 # Never dispatch an attempt once the deadline is spent: the
                 # ladder stops here with the reset state.
-                if effective_deadline is not None and clock.monotonic() >= effective_deadline:
+                if budget.expired():
                     aborted_reason = "wall_budget_exceeded"
                     if host_tools is not None:
                         host_tools.close_authority()
                     partials_discarded_by_deadline = True
                     # When retries or backoff spent time, preserve that overhead in a ladder-stop record.
                     if telemetry.spent_retry_overhead:
-                        _emit_ladder_stop(
-                            "retry_deadline_exhausted",
-                            limit_expired=limit_expired or "invocation_wall_budget",
-                        )
+                        _emit_ladder_stop("retry_deadline_exhausted", limit_expired="invocation_wall_budget")
                         stop_recorded = True
                     break
-                # With host tools the binding's charged ledger (which excludes protected denials) governs.
-                if ((investigation_budget is not None and host_tools is None
-                     and investigation_budget.remaining_tool_calls == 0)
-                    or ((investigation_budget is not None or host_tools is not None)
-                        and remaining_calls is not None and remaining_calls < max(1, tool_call_start_floor))):
+                # The ledger refuses an attempt whose remaining calls cannot fit its minimum work.
+                if remaining_calls is not None and remaining_calls < budget.start_floor:
                     aborted_reason = "tool_call_budget_exceeded"
                     if host_tools is not None:
                         host_tools.close_authority()
                     break
                 # Dispatch bookkeeping: the opening attempt is useful work, every
-                # later one is retry overhead. Retry attempts' backend time is
-                # charged to the recovery budget; the attempt that produces the
-                # first retryable failure is not (activation happens after it).
+                # later one is retry overhead.
                 display = AgentDisplay(
                     console, run_context.policy, progress_callback, structured=output_schema is not None,
                 )
@@ -669,15 +635,16 @@ async def _run_agent(
                             host_tools.close_authority()
                         partials_discarded_by_deadline = True
                         if telemetry.spent_retry_overhead:
-                            _emit_ladder_stop(
-                                "retry_deadline_exhausted", limit_expired=limit_expired or "invocation_wall_budget",
-                            )
+                            _emit_ladder_stop("retry_deadline_exhausted", limit_expired="invocation_wall_budget")
                             stop_recorded = True
                         break
                     telemetry.start_attempt(dispatch_time, retry=attempt > 0)
+                    # The retry is a fresh conversation, so it regains the failed attempts' calls.
+                    budget.refund(budget.charged - pending_refund)
+                    pending_refund = 0
+                    refund_point = budget.dispatch()
                     execute_kwargs: dict[str, Any] = {
                         "agents": agents,
-                        "max_turns": max_turns,
                         "read_only": read_only,
                     }
                     if host_tools is not None:
@@ -696,19 +663,17 @@ async def _run_agent(
                     if not persist_session:
                         execute_kwargs["persist_session"] = False
                     if getattr(backend, "supports_budget_preamble", False):
-                        # Preparation, earlier stages, and retry/backoff time already
-                        # spent the absolute bound. Recovery allowance only gates
-                        # retry overhead; it does not cap a healthy dispatched turn.
-                        execute_kwargs["wall_budget_s"] = (
-                            max(0.0, effective_deadline - dispatch_time) if effective_deadline is not None else None
-                        )
+                        # The absolute ledger deadline already reflects preparation,
+                        # earlier stages and retry/backoff time.
+                        execute_kwargs["deadline"] = effective_deadline
                         execute_kwargs["tool_call_budget"] = remaining_calls
                     attempt_prompt = prompt
-                    if investigation_budget is not None and attempt > 0:
+                    if investigation and attempt > 0:
                         retry_budget_update = (
                             "\n\nRetry dispatch-time snapshot (supersedes the earlier invocation allocation): "
                             f"current invocation allocation: {remaining_calls} tool calls. "
-                            "Failed-attempt calls remain charged; future-stage reserves remain excluded."
+                            "Failed-attempt calls were refunded, elapsed time was not; "
+                            "future-stage reserves remain excluded."
                         )
                         attempt_prompt += retry_budget_update
                         if "review_instructions" in execute_kwargs:
@@ -769,11 +734,9 @@ async def _run_agent(
 
                         with wall_scope:
                             async for event in event_stream_scope.events():
-                                if investigation_budget is not None and isinstance(event, ToolStartEvent):
-                                    investigation_budget.observed_tool_starts += 1
-                                    tool_calls += 1
-                                elif native_output and isinstance(event, ToolStartEvent):
-                                    tool_calls += 1
+                                # Host tools charge the ledger at admission, before Pi emits the start.
+                                over_limit = (isinstance(event, ToolStartEvent) and host_tools is None
+                                              and not budget.charge())
                                 # The sole telemetry observer runs before UI callbacks,
                                 # supervision and budgets can interrupt event handling.
                                 observed.observe(event)
@@ -783,9 +746,9 @@ async def _run_agent(
                                 # ignores RequestEvent (the one armless member).
                                 if inv is not None:
                                     inv.observe(event)
-                                # After expiry, supervise/charge received native starts; reject completions/checkpoints.
-                                deadline_expired = (effective_deadline is not None
-                                                    and clock.monotonic() >= effective_deadline)
+                                # After expiry, supervise/charge received native starts;
+                                # reject completions/checkpoints.
+                                deadline_expired = budget.expired()
                                 if deadline_expired and not (native_output and isinstance(event, ToolStartEvent)):
                                     budget_reason = "wall_budget_exceeded"
                                     break
@@ -796,7 +759,7 @@ async def _run_agent(
                                                      and event.output_schema is not None
                                                      and event.config.schema_emulated is False)
                                 elif isinstance(event, TextEvent) and not native_output:
-                                    if investigation_budget is None:
+                                    if not investigation:
                                         output_parts.append(event.text)
                                     elif event.text:
                                         size = len(event.text.encode())
@@ -839,14 +802,14 @@ async def _run_agent(
                                     if deadline_expired:
                                         budget_reason = "wall_budget_exceeded"
                                         break
-                                    if investigation_budget is None and not native_output:
-                                        tool_calls += 1
-                                    if tool_call_budget is not None and charged_calls() > tool_call_budget:
+                                    if over_limit:
                                         budget_reason = "tool_call_budget_exceeded"
                                         break
 
                                 await display.observe(event)
 
+                            if event_stream_scope.ledger_stop is not None:
+                                budget_reason = event_stream_scope.ledger_stop
                             await display.flush()
 
                         # Abort handling: a spent deadline cut the loop, the wall
@@ -913,14 +876,9 @@ async def _run_agent(
                         # callback may also have installed state before settlement failed.
                         exception_max_retries = 0
                     if attempt < exception_max_retries and classification.retries_allowed:
-                        # Activate the cumulative retry-recovery allowance on the
-                        # first retryable failure, clamped once to whatever the
-                        # effective deadline leaves so the two bounds compose by
-                        # clamping, never by re-basing.
-                        recovery.activate(clock.monotonic(), effective_deadline)
                         # A spent deadline permits no further sleep or dispatch. Discard failed partials
                         # and record any retry overhead already spent.
-                        if effective_deadline is not None and clock.monotonic() >= effective_deadline:
+                        if budget.expired():
                             output_parts = []
                             assistant_turn_bytes, assistant_turn_overflow = 0, False
                             completed_assistant_text = None
@@ -930,18 +888,9 @@ async def _run_agent(
                             aborted_reason = "wall_budget_exceeded"
                             partials_discarded_by_deadline = True
                             if telemetry.spent_retry_overhead:
-                                _emit_ladder_stop(
-                                    "retry_deadline_exhausted",
-                                    limit_expired=limit_expired or "invocation_wall_budget",
-                                )
+                                _emit_ladder_stop("retry_deadline_exhausted", limit_expired="invocation_wall_budget")
                                 stop_recorded = True
                             break
-                        # Spending the recovery allowance ends the ladder too: no
-                        # dispatch, no sleep, straight to the caller with the
-                        # current failure's attributes intact.
-                        if recovery.remaining() <= 0.0:
-                            _emit_ladder_stop("retry_recovery_allowance_exhausted")
-                            raise
                         # The circuit gates retries only; stale open state cannot block a first attempt.
                         # Denial propagates the current failure with its retryable attribute intact.
                         circuit_now = clock.monotonic()
@@ -955,27 +904,20 @@ async def _run_agent(
                         if not admission.allowed:
                             _emit_ladder_stop("circuit_open")
                             raise
-                        # The delay and the ladder's remaining bounds are decided
-                        # by one pure callable: a server hint replaces jitter but
-                        # never extends either budget, and a hint longer than the
-                        # remaining allowance or the remaining deadline stops the
-                        # ladder exactly as exhaustion does.
+                        # The delay and the ladder's remaining bound are decided by
+                        # one pure callable: a server hint replaces jitter but never
+                        # extends the deadline, and a hint longer than the remaining
+                        # deadline stops the ladder exactly as exhaustion does.
                         hint = _retry_hint(exc)
                         delay, delay_stop = _plan_retry_delay(
                             attempt=attempt,
                             base_delay_s=base_delay,
                             max_delay_s=max_delay,
-                            allowance_remaining_s=(
-                                recovery.remaining() if recovery.active else None
-                            ),
-                            deadline_remaining_s=(
-                                None
-                                if effective_deadline is None
-                                else max(effective_deadline - clock.monotonic(), 0.0)
-                            ),
+                            deadline_remaining_s=budget.remaining_s(),
                             hint=hint,
                         )
                         if delay_stop is not None:
+                            budget.stop("time")
                             _emit_ladder_stop(delay_stop)
                             raise
                         # A provider-advertised wait is distinguished in the notice so an
@@ -994,13 +936,7 @@ async def _run_agent(
                         # backoff point: the sleep that follows is retry backoff
                         # (counted in backoff_s) and must not also land in
                         # backend_s, or backend_s + backoff_s would overcount.
-                        charged = telemetry.charge_attempt(clock.monotonic())
-                        if telemetry.attempt_is_retry:
-                            charge_recovery(charged)
-                        # The backoff sleep is retry overhead: charge it to the
-                        # cumulative allowance before sleeping so a later
-                        # failure sees the un-rebased remainder.
-                        charge_recovery(delay)
+                        telemetry.charge_attempt(clock.monotonic())
                         await anyio.sleep(delay)
                         telemetry.backoff_s += delay
                         # Recheck after backoff because a sibling may have opened the circuit.
@@ -1014,6 +950,9 @@ async def _run_agent(
                         ):
                             _emit_ladder_stop("circuit_open")
                             raise
+                        # Every gate passed. This attempt's calls are refunded only if
+                        # the retry dispatches; time is never refunded.
+                        pending_refund += budget.charged - refund_point
                         continue
                     if classification.retries_allowed and exception_max_retries > 0:
                         _emit_ladder_stop("retry_attempts_exhausted")
@@ -1027,25 +966,16 @@ async def _run_agent(
                             raise
                         primary_error.add_note(f"Log text unavailable ({type(exc).__name__[:64]})")
                     finally:
-                        if host_tools is not None:
-                            # HTTP admission can precede a start lost with the native stream.
-                            # Charge that known spend once without fabricating trajectory events.
-                            missing_starts = max(0, host_tools.calls - native_calls_before - tool_calls)
-                            tool_calls += missing_starts
-                            if investigation_budget is not None:
-                                investigation_budget.observed_tool_starts += missing_starts
                         if telemetry.attempt_started_at is not None:
                             # Post-stop cleanup (the bounded backend aclose) is not
                             # dispatched-attempt time: exclude it so backend_s keeps
                             # its documented 'time inside dispatched attempts'
                             # semantics and backend_s + backoff_s can never exceed
                             # elapsed_s (which already subtracts cleanup_elapsed_s).
-                            charged = telemetry.charge_attempt(
-                                clock.monotonic(), cleanup_elapsed_s=cleanup_elapsed_s
-                            )
-                            if telemetry.attempt_is_retry:
-                                charge_recovery(charged)
+                            telemetry.charge_attempt(clock.monotonic(), cleanup_elapsed_s=cleanup_elapsed_s)
 
+            if (dimension := _STOP_DIMENSIONS.get(aborted_reason)) is not None:
+                budget.stop(dimension)
             # Emit at most one stop record. In-flight deadline stops retain partials;
             # pre-dispatch stops discard them. Recorder failure cannot change the return value.
             if (
@@ -1056,7 +986,7 @@ async def _run_agent(
                 try:
                     recorder.emit_agent_budget_stop(
                         phase,
-                        limit_expired=limit_expired or "invocation_wall_budget",
+                        limit_expired="invocation_wall_budget",
                         elapsed_s=clock.monotonic() - invocation_start - cleanup_elapsed_s,
                         backend_s=telemetry.backend_s,
                         backoff_s=telemetry.backoff_s,
@@ -1064,7 +994,6 @@ async def _run_agent(
                         cleanup_elapsed_s=cleanup_elapsed_s,
                         retry_stop_reason=None,
                         circuit_state=run_context.outage_circuit.state(),
-                        retry_recovery_spent_s=invocation_recovery_s,
                         partial_edit_handling=(
                             "discarded" if partials_discarded_by_deadline else "kept"
                         ),
@@ -1133,9 +1062,9 @@ async def _run_agent(
     output = resolve_output(
         structured_result, raw, native_output=native_output, text_overflow=text_overflow,
         output_schema=(result_schema if result_schema is not None else
-                       review_evidence.schema if investigation_budget is not None and review_evidence is not None
+                       review_evidence.schema if investigation and review_evidence is not None
                        else output_schema), validate_structured_output=validate_structured_output,
-        require_full_schema=require_full_schema, staged=investigation_budget is not None,
+        require_full_schema=require_full_schema, staged=investigation,
         schema_rejection_guard=schema_rejection_guard,
     )
     return output, result_continuation, aborted_reason

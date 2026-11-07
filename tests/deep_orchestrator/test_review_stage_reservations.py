@@ -208,9 +208,6 @@ async def test_native_stage_capacity_and_input_failure_preserve_prior_admission(
     backend = NativeStageBackend(review.repo)
     backend.fanout_concurrency = 1
     review.backend = backend
-    monkeypatch.setenv('DAYDREAM_PI_RETRY_ATTEMPTS', '2')
-    monkeypatch.setenv('DAYDREAM_PI_RETRY_BASE_DELAY_S', '0')
-    monkeypatch.setenv('DAYDREAM_PI_RETRY_MAX_DELAY_S', '0')
     admitted: list[dict[str, Any]] = []
     bindings: list[HostToolBinding] = []
     unfinished: list[str] = []

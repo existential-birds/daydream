@@ -45,7 +45,6 @@ class RepairOutcome(StrEnum):
 # The stop vocabulary `reason_for_budget` owns. A reason already outside that
 # table is a non-budget host stop, never a guess about which budget ran out.
 _BUDGET_REASON_CODES = frozenset({
-    ReasonCode.MODEL_BUDGET_EXHAUSTION,
     ReasonCode.HOST_WALL_BUDGET_EXHAUSTION,
     ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION,
     ReasonCode.HOST_PIPELINE_BUDGET_EXHAUSTION,

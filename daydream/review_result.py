@@ -51,7 +51,6 @@ class ReasonCode(StrEnum):
     MALFORMED_ARTIFACT = 'malformed_artifact'
     MISSING_ARTIFACT = 'missing_artifact'
     EVIDENCE_INCOMPLETE = 'evidence_incomplete'
-    MODEL_BUDGET_EXHAUSTION = 'model_budget_exhaustion'
     HOST_WALL_BUDGET_EXHAUSTION = 'host_wall_budget_exhaustion'
     HOST_TOOL_BUDGET_EXHAUSTION = 'host_tool_budget_exhaustion'
     HOST_PIPELINE_BUDGET_EXHAUSTION = 'host_pipeline_budget_exhaustion'
@@ -71,8 +70,6 @@ def reason_for_exception(exc: BaseException) -> ReasonCode:
             return ReasonCode(declared)
         except ValueError:
             pass
-    if type(exc).__name__ == 'MaxTurnsError' or getattr(exc, 'subtype', None) == 'error_max_turns':
-        return ReasonCode.MODEL_BUDGET_EXHAUSTION
     return {
         FailureClass.AUTH_CONFIG: ReasonCode.AUTHENTICATION_FAILURE,
         FailureClass.SCHEMA: ReasonCode.MALFORMED_OUTPUT,
@@ -88,7 +85,6 @@ def reason_for_budget(reason: str) -> ReasonCode:
         'evidence_incomplete': ReasonCode.EVIDENCE_INCOMPLETE,
         'wall_budget_exceeded': ReasonCode.HOST_WALL_BUDGET_EXHAUSTION,
         'tool_call_budget_exceeded': ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION,
-        'error_max_turns': ReasonCode.MODEL_BUDGET_EXHAUSTION,
         'pipeline_budget_exceeded': ReasonCode.HOST_PIPELINE_BUDGET_EXHAUSTION,
     }[reason]
 

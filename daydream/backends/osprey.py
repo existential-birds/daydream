@@ -28,7 +28,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
-    resolve_fanout_concurrency,
+    fanout_concurrency_from_environment,
 )
 from daydream.backends._subprocess import stream_idle_timeout_s
 from daydream.backends._transport import (
@@ -341,7 +341,7 @@ class OspreyBackend:
         self.effort = effort
         self.ultracode = ultracode
         self.osprey_home = osprey_home
-        self.fanout_concurrency = resolve_fanout_concurrency("DAYDREAM_OSPREY_FANOUT_CONCURRENCY", 4)
+        self.fanout_concurrency = fanout_concurrency_from_environment(os.environ, 4)
         self._transports: list[CliTransport] = []
 
     def build_command(
@@ -350,7 +350,6 @@ class OspreyBackend:
         *,
         output_schema_path: str | Path | None = None,
         continuation: ContinuationToken | None = None,
-        max_turns: int | None = None,
         read_only: bool = False,
         persist_session: bool = True,
         tool_search_mode: str | None = None,
@@ -398,7 +397,6 @@ class OspreyBackend:
             args.append("--atif-system-prompt-plaintext")
         if self.immutable_runtime_surface:
             args.append("--immutable-runtime-surface")
-        add_value("--max-turns", max_turns)
         add_value("--turn-timeout", self.turn_timeout)
         add_value("--stream-idle-timeout-secs", self.stream_idle_timeout_secs)
         add_value("--streaming-timeout-secs", self.streaming_timeout_secs)
@@ -465,7 +463,6 @@ class OspreyBackend:
         output_schema: dict[str, Any] | None = None,
         continuation: ContinuationToken | None = None,
         agents: dict[str, Any] | None = None,
-        max_turns: int | None = None,
         read_only: bool = False,
         persist_session: bool = True,
     ) -> AsyncGenerator[AgentEvent, None]:
@@ -502,7 +499,6 @@ class OspreyBackend:
                 prompt,
                 output_schema_path=schema_path,
                 continuation=continuation,
-                max_turns=max_turns,
                 read_only=read_only,
                 persist_session=persist_session,
             )
@@ -594,7 +590,6 @@ class OspreyBackend:
                             immutable_surface=self.immutable_runtime_surface,
                             compress_context=self.compress_context,
                             ultracode=self.ultracode,
-                            max_turns=max_turns,
                             turn_timeout=self.turn_timeout,
                             stream_idle_timeout_secs=self.stream_idle_timeout_secs,
                             streaming_timeout_secs=self.streaming_timeout_secs,
