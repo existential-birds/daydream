@@ -32,9 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every backend. Unset, each backend keeps its default: Pi 10, Claude and Codex 8,
   Osprey 4 ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
 - Every budget stop records its owner, dimension (time or tool calls), limit, spend,
-  remaining amount at dispatch and reserved calls once, as `daydream.budget.*`
-  attributes on the agent span, and leads the coverage diagnostic with those numbers.
-  Stops refused before dispatch record them in the coverage diagnostic. A Pi read cut
+  remaining amount at dispatch and reserved calls once on the trace: as
+  `daydream.budget.*` attributes on the agent span it ends, or as a
+  `daydream.budget.stop` span event for a review-finalization turn's stop and a
+  dispatch refused before any agent runs. Staged review's coverage diagnostic also
+  leads with those numbers. A Pi read cut
   short by the deadline now stops as `wall_budget_exceeded` instead of a retryable
   idle stall that advised widening `DAYDREAM_STREAM_IDLE_TIMEOUT_S`
   ([#1773](https://github.com/existential-birds/daydream/issues/1773)).

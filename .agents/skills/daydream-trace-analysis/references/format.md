@@ -85,7 +85,8 @@ too; absence from the tool list is not proof that an action did not happen.
   work. Read `retry_stop_reason`, `circuit_state` and earlier failures. Retry
   overhead is backoff plus backend retry time; entire invocation duration is not
   retry waste. A budget stop's owner, dimension, limit, spend and remainder are
-  on the agent span's `daydream.budget.*` attributes, not in this event.
+  on the trace (`daydream.budget.*` agent-span attributes or a
+  `daydream.budget.stop` span event), not in this event.
 
 ## Beyond the embedded capture
 

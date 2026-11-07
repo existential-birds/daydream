@@ -63,6 +63,8 @@ class _HostileHint(_HintError):
         pytest.param(_HostileHint("503 Service Unavailable"), lambda cap: cap * 10, 30.0, id="hostile-sample"),
         # An explicit zero server wait takes precedence over the nonzero jitter cap.
         pytest.param(_HintError("503", retry_after=0.0), lambda cap: cap, 0.0, id="zero-hint"),
+        # A hint above the jitter cap and maximum delay is still waited in full.
+        pytest.param(_HintError("503", retry_after=90.0), lambda cap: cap, 90.0, id="hint-over-cap"),
         # A present-but-invalid retry_after is ignored, never coerced to a delay.
         pytest.param(_HintError("503", retry_after="30"), lambda cap: cap, 30.0, id="string-hint"),  # type: ignore[arg-type]
         pytest.param(_HintError("503", retry_after=float("nan")), lambda cap: cap, 30.0, id="nan-hint"),

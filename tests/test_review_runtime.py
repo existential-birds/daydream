@@ -6,9 +6,13 @@ from typing import Any
 
 import anyio
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from daydream.agent import run_agent
 from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent, TurnEndEvent
+from daydream.extensions.registry import Registry
+from daydream.observability.config import ObservabilityConfig
+from daydream.observability.runtime import trace_run
 from daydream.prompt_budget import SanctionedInputUnavailable, inline_context_file, prepare_sanctioned_inputs
 from daydream.review_budget import (
     BudgetLedger,
@@ -87,18 +91,30 @@ async def _hung_finalizer_is_bounded_without_canceling_sibling(tmp_path: Path) -
             yield ToolStartEvent(id="extra", name="read", input={"path": "src.py"})
 
     backend = ScriptedBackend(responder=responder)
+    exporter = InMemorySpanExporter()
+    registry = Registry()
+    registry.register_trace_exporter("memory", lambda _: exporter)
 
     async def sibling() -> None:
         results["sibling"] = await run_agent(backend, tmp_path, "sibling", phase=DaydreamPhase.DEEP)
 
-    with anyio.fail_after(2):
-        async with anyio.create_task_group() as group:
-            group.start_soon(sibling)
-            results["bounded"] = await run_agent(
-                backend, tmp_path, "review", phase=DaydreamPhase.DEEP, review_limits=ReviewLimits(10, 0.02, 0),
-            )
+    async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review") as run:
+        with anyio.fail_after(2):
+            async with anyio.create_task_group() as group:
+                group.start_soon(sibling)
+                results["bounded"] = await run_agent(
+                    backend, tmp_path, "review", phase=DaydreamPhase.DEEP, review_limits=ReviewLimits(10, 0.02, 0),
+                )
+        run.finish(0)
     assert sibling_finished.is_set()
     assert results["bounded"][2] == "tool_call_budget_exceeded"
+    # Both stops reach the trace: the investigation's as the agent span's record, the
+    # timed-out finalization turn's as an event on the same span.
+    (bounded,) = [span for span in exporter.get_finished_spans()
+                  if "daydream.budget.dimension" in (span.attributes or {})]
+    assert (bounded.attributes or {})["daydream.budget.dimension"] == "tool_calls"
+    assert [(event.attributes or {})["daydream.budget.dimension"]
+            for event in bounded.events if event.name == "daydream.budget.stop"] == ["time"]
     assert results["sibling"][0] == "sibling survived"
     assert backend.cancel_calls == 0
 

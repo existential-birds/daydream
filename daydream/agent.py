@@ -41,7 +41,7 @@ from daydream.config import BUDGET_CLEANUP_GRACE_S
 from daydream.diagnostics import exception_text, sanitize_verbose_message
 from daydream.extensions import get_registry
 from daydream.host_tools import HostToolBinding, HostToolCallBudgetExceeded
-from daydream.observability.spans import agent_scope, attempt_scope
+from daydream.observability.spans import agent_scope, attempt_scope, record_budget_stop
 from daydream.outage_circuit import CIRCUIT_CLOSED, CIRCUIT_HALF_OPEN
 from daydream.prompt_budget import PreparedSanctionedInputs
 from daydream.prompts.grounding import (
@@ -435,15 +435,20 @@ async def run_agent(
                     final_prompt = evidence.finalization_prompt(
                         finalization_context or FinalizationContext(task=phase.value), captured,
                     )
-                    finalized, _, final_reason = await _run_agent(
-                        backend, cwd, final_prompt, phase=phase,
-                        budget=BudgetLedger(budget.owner, limit=0, deadline=min(
-                            hard_deadline, clock.monotonic() + review_limits.finalization_s)).anchor(),
-                        output_schema=output_schema, progress_callback=progress_callback,
-                        require_full_schema=require_full_schema,
-                        read_only=read_only, persist_session=persist_session, finalization=True,
-                        sanctioned_inputs=sanctioned_inputs, run_context=context,
-                    )
+                    final_budget = BudgetLedger(budget.owner, limit=0, deadline=min(
+                        hard_deadline, clock.monotonic() + review_limits.finalization_s)).anchor()
+                    try:
+                        finalized, _, final_reason = await _run_agent(
+                            backend, cwd, final_prompt, phase=phase, budget=final_budget,
+                            output_schema=output_schema, progress_callback=progress_callback,
+                            require_full_schema=require_full_schema,
+                            read_only=read_only, persist_session=persist_session, finalization=True,
+                            sanctioned_inputs=sanctioned_inputs, run_context=context,
+                        )
+                    finally:
+                        # The investigation stop stays on the span's attributes; this one is an event.
+                        if final_budget.stopped is not None:
+                            record_budget_stop(final_budget.stopped)
                     if final_reason is None and (
                         evidence.valid(finalized) or (output_schema is None and isinstance(finalized, str))
                     ):

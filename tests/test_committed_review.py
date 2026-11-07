@@ -20,6 +20,7 @@ from typing import Any
 
 import anyio
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from rich.console import Console
 
 from daydream import agent, clock, committed_review, git_ops, json_utils
@@ -29,13 +30,16 @@ from daydream.backends.pi import PiBackend, PiError
 from daydream.committed_review import CommittedReviewRequest, Review, run_committed_review
 from daydream.committed_review_model import RESULT_VERSIONS, planned_work_id, validate_committed_result
 from daydream.deep.detection import StackAssignment
+from daydream.extensions.registry import Registry
 from daydream.git_ops.captured_source import capture_source
 from daydream.host_tools import HostToolBinding, HostToolFatal, HostToolRejected
 from daydream.hosted_review import HostedReviewPolicy, UnsupportedHostedPolicy
 from daydream.hunk_index import write_hunk_index
 from daydream.immutable_review import ImmutableReviewInput
+from daydream.observability.config import ObservabilityConfig
+from daydream.observability.runtime import trace_run
 from daydream.pr_review import post_findings_from_artifact
-from daydream.review_budget import BudgetLedger
+from daydream.review_budget import BudgetLedger, BudgetStop
 from daydream.review_profile import ResolvedProfile, build_default_profile
 from daydream.review_result import validate_terminal_result
 from daydream.review_source_refs import source_options
@@ -1536,16 +1540,10 @@ async def test_denied_over_limit_discovery_start_cannot_spend_protected_challeng
 
     Previously challenge received the shared ledger's remainder, so discovery's
     rejected extra start (charged before the limit check) consumed one protected call.
-    Budget stops lead the coverage diagnostics: discovery's in-flight stop on its scope,
-    and the challenge re-dispatch the host refused for want of calls on its phase.
+    The challenge re-dispatch the host refuses for want of calls runs no agent, so its
+    budget stop is a trace event.
     """
     allocations: list[tuple[str, int]] = []
-    sealed: list[Review] = []
-    real_seal = Review.seal
-
-    def seal(self: Review, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        sealed.append(self)
-        return real_seal(self, *args, **kwargs)
 
     async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, str | None]:
         kind = "discovery" if kwargs["phase"].value == "review" else "challenge"
@@ -1581,22 +1579,22 @@ async def test_denied_over_limit_discovery_start_cannot_spend_protected_challeng
             budget.stop("tool_calls")  # run_agent records the budget stop it returns
         return accepted, None, "tool_call_budget_exceeded" if kind == "discovery" else None
 
-    monkeypatch.setattr(Review, "seal", seal)
     monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=execute, console=agent.console))
-    result = await run_committed_review(CommittedReviewRequest(
-        review_inputs.work.source, review_inputs.revision["merge_base_sha"], config=RunConfig(
-            backend="pi", output_mode="review",
-            review_profile=_profile_with_pipeline(reviewer_investigation_budget_s=90, reviewer_tool_call_budget=10))))
+    exporter = InMemorySpanExporter()
+    registry = Registry()
+    registry.register_trace_exporter("memory", lambda _: exporter)
+    async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review") as run:
+        profile = _profile_with_pipeline(reviewer_investigation_budget_s=90, reviewer_tool_call_budget=10)
+        result = await run_committed_review(CommittedReviewRequest(
+            review_inputs.work.source, review_inputs.revision["merge_base_sha"],
+            config=RunConfig(backend="pi", output_mode="review", review_profile=profile)))
+        run.finish(0)
     assert allocations == [("discovery", 5), ("challenge", 5)] and result.output_installed
     discovery = result.to_dict()["execution"][0]
     assert (discovery["allocation"], discovery["observed_starts"], discovery["overshoot"]) == (5, 6, 1)
-    diagnostics = sealed[0]._coverage.to_dict()["diagnostics"]
-    assert diagnostics["scopes"] == {"committed:00000": (
-        "Budget stop (tool_calls): spent 5 of 5 calls, 5 calls remaining at dispatch, 5 calls reserved for later "
-        "work; owner committed:discovery.")}
-    assert diagnostics["phases"] == {"challenge": (
-        "Budget stop (tool_calls): spent 10 of 10 calls, 0 calls remaining at dispatch, 0 calls reserved for later "
-        "work; owner committed.")}
+    refused = BudgetStop("committed", "tool_calls", limit=10, spent=10, remaining_at_dispatch=0, reserved=0)
+    assert [dict(event.attributes or {}) for span in exporter.get_finished_spans() for event in span.events
+            if event.name == "daydream.budget.stop"] == [refused.attributes()]
 
 
 async def test_claim_lines_inside_continuation_fragments_use_summarized_spans(tmp_path: Path) -> None:

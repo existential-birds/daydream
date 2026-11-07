@@ -25,6 +25,7 @@ from daydream.host_tools import (
     HostToolRejected,
 )
 from daydream.json_utils import SchemaRejection, validates_schema
+from daydream.observability.spans import record_budget_stop
 from daydream.phases.review_prompts import build_review_stage_system_instruction
 from daydream.phases.schemas import (
     review_stage_admission_schema,
@@ -291,6 +292,7 @@ class ReviewInvestigation:
     def _refused(self, reason: str) -> str:
         """A refusal before dispatch leads with the scope ledger's stop facts, numbers first."""
         stop = self.budget.stop('tool_calls' if reason == 'tool_call_budget_exceeded' else 'time')
+        record_budget_stop(stop)
         return f'{stop.diagnostic()} Review limit exhausted: {reason}'
 
     def _continuation_admitted(self, agent_kwargs: dict[str, Any]) -> bool:
@@ -473,7 +475,8 @@ class ReviewInvestigation:
                             advisory_tool_call_target=state['advisory_tool_call_target'], **kwargs)
                     else:
                         output = None
-                        stage_budget.stop('tool_calls')  # The native start floor refused this dispatch.
+                        # The native start floor refused this dispatch.
+                        record_budget_stop(stage_budget.stop('tool_calls'))
                     prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
                 except SanctionedInputUnavailable as exc:
                     self.reason = 'evidence_incomplete'

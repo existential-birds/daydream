@@ -222,7 +222,7 @@ class BudgetStop:
                 f"for later work; owner {self.owner}.")
 
     def attributes(self) -> dict[str, Any]:
-        """The ``daydream.budget.*`` agent-span attributes."""
+        """The ``daydream.budget.*`` trace attributes (agent span or ``daydream.budget.stop`` event)."""
         return {f"daydream.budget.{key}": value for key, value in asdict(self).items()}
 
 

@@ -50,6 +50,7 @@ from daydream.trajectory import get_current_recorder
 
 if TYPE_CHECKING:
     from daydream.observability.runtime import TraceSession
+    from daydream.review_budget import BudgetStop
 
 _logger = logging.getLogger(__name__)
 _scope_attributes: ContextVar[dict[str, Any]] = ContextVar("daydream_trace_attributes", default={})
@@ -340,6 +341,25 @@ def stack_scope(stack: str) -> Iterator[None]:
         yield
     finally:
         _scope_attributes.reset(token)
+
+
+def record_budget_stop(stop: BudgetStop) -> None:
+    """Add a budget stop that no agent span carries as an event on the active span.
+
+    ``run_agent`` writes the stop that ends an invocation as ``daydream.budget.*``
+    attributes on its agent span; a finalization turn's stop and a dispatch the host
+    refuses before any agent runs are ``daydream.budget.stop`` events with those keys.
+    """
+    session = current_session()
+    if session is None:
+        return
+    try:
+        trace.get_current_span().add_event(
+            "daydream.budget.stop",
+            {key: session.policy.value(value) for key, value in stop.attributes().items()},
+        )
+    except Exception:
+        _logger.warning("Trace budget stop could not be recorded")
 
 
 def agent_scope(phase: str, *, backend: str, model: str | None = None) -> SpanScope:

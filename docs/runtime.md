@@ -494,10 +494,10 @@ are refunded with the rest of the attempt.
 
 Every budget stop records its owner, dimension (`time` or `tool_calls`), limit, amount
 spent, amount remaining at dispatch and calls reserved for later work, as durations and
-counts only. `run_agent` emits it once on the agent span
-([observability](observability.md#budget-stops)), and the numbers lead the coverage
-diagnostic. A stop refused before `run_agent` dispatches records the same facts in the
-coverage diagnostic only. A read cut short by the ledger deadline and a binding's
+counts only, and appears on the trace once
+([observability](observability.md#budget-stops)), including a finalization turn's stop
+and a dispatch refused before any agent runs. Staged review also leads its coverage
+diagnostic with those numbers. A read cut short by the ledger deadline and a binding's
 deadline or allocation failure are budget stops (`wall_budget_exceeded`,
 `tool_call_budget_exceeded`), not `StreamStalledError`; idle, setup, drain and cleanup
 timeouts remain liveness checks.
