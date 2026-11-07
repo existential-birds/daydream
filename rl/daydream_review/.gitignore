@@ -1,4 +1,0 @@
-# verifiers `uv run eval` run output
-outputs/
-# daydream wheel staged into the image build context (images/base.Dockerfile)
-images/dist/

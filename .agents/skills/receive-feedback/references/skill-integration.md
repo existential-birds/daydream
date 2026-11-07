@@ -23,6 +23,6 @@ Read current `AGENTS.md` architecture details before changing these areas:
 - Resolve private artifact ownership once and carry that owner/session throughout the run. Join writers before freezing immutable evidence; archive/evaluate/publish after freezing. Preserve snapshot binding and do not broaden backend read roots.
 - Host-owned identity differs from provenance. Preserve `uid`, `item_uid`, and `source_uids` semantics; display numbering is not durable identity.
 - Vendored `daydream/atif/` is updated wholesale, not patched locally. ATIF construction belongs in trajectory code, not phases or UI.
-- Root `pyproject.toml`/`uv.lock` and the standalone RL project have separate gates. Use current repository commands and never bypass hooks.
+- Use current repository gate commands and never bypass hooks.
 
 If reviewer advice conflicts with a documented invariant, verify the underlying problem and choose a solution preserving that invariant. Cite both evidence and constraint; disagreement about a suggested implementation does not automatically invalidate a defect. If resolution requires a product decision or changes beyond authorized scope, identify the dependency and continue independent work.

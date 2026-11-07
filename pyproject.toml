@@ -125,8 +125,6 @@ combine-as-imports = true
 "daydream/atif/**" = ["E", "F", "I", "W"]
 
 [tool.pytest.ini_options]
-# Bare `pytest` must not descend into rl/daydream_review/, a standalone uv
-# project with its own verifiers-based suite and its own lockfile.
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"

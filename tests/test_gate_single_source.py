@@ -80,16 +80,6 @@ def test_gate_prose_enumerations_match_the_declared_gate() -> None:
     for rel, listed in _documented_gate_steps().items():
         assert listed == declared, f"{rel} enumerates {listed}, the gate declares {declared}"
 
-def test_pr_checklist_does_not_claim_the_rl_gate_runs_under_make_check() -> None:
-    """The checklist's `make check` line covers root + workflow checks only."""
-    template = (_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
-    checklist = [line for line in template.splitlines() if line.startswith("- [ ]")]
-    gate_line = next(line for line in checklist if "`make check`" in line)
-
-    assert "RL" not in gate_line, gate_line
-    assert any("`make rl-check`" in line for line in checklist), checklist
-
-
 _CI_WORKFLOW = _ROOT / ".github" / "workflows" / "ci.yml"
 _GATE_JOBS = ("plan", "static-checks", "test-shard", "coverage", "legacy-check", "check")
 
@@ -147,10 +137,7 @@ def test_ci_shard_planner_rejects_counts_without_publishing_a_partial_matrix(
 # CI check-job steps that are deliberately not local gate steps: step name ->
 # the one-line reason. Keep this list small and reasoned; a step that is
 # neither declared here nor a gate invocation fails the guard.
-_CI_ONLY_STEPS: dict[str, str] = {"Run vulture": (
-        "root project only — the standalone RL scan runs in the manual rl-check job, "
-        "so the local gate's wider dead-code scope is not restated here"
-    ),
+_CI_ONLY_STEPS: dict[str, str] = {
     "Install Pi for native output contract tests": (
         "provision the pinned native CLI on the disposable CI runner — the local gate uses contributor-installed "
         "prerequisites without globally installing or replacing them"
@@ -249,4 +236,3 @@ def test_merge_queue_workflow_keeps_complete_gate_on_github_hosted_runners() -> 
         assert final[name]["if"] == "github.event_name == 'merge_group' && needs.plan.outputs.full == 'true'"
     assert final["Upload successful merge-group tree"]["with"]["retention-days"] == 14
     assert final["Upload successful merge-group tree"]["with"]["overwrite"] is True
-    assert jobs["rl-check"]["if"] == "github.event_name == 'workflow_dispatch' && inputs.run_rl"

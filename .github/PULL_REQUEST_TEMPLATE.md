@@ -43,7 +43,6 @@ do not claim a check ran. Unresolved applicable items stay unchecked and block r
 
 - [ ] Repository PR template followed and every required section completed
 - [ ] Root and workflow gate `make check` completed successfully
-- [ ] Standalone RL checks pass via `make rl-check` when changing `rl/daydream_review` (deliberately outside `make check`)
 - [ ] Run `$test-audit` on all test files created or updated in this PR (N/A if no test files changed)
 - [ ] Documentation updated (if applicable)
 - [ ] Semantic Versioning compatibility impact stated in the PR (or N/A with a reason)

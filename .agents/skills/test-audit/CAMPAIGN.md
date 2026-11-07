@@ -36,9 +36,8 @@ is a duplicate.
 
 Include subsystem cases in `tests/contract/`, CLI/integration suites,
 `tests/harness/`, fixtures, packaged workflow/sandbox tests, and applicable
-live/QA scenarios. Include `rl/daydream_review/` only when that separate project
-is part of the authorized subsystem. Give shared files one owner and associate
-each scenario within mixed files with its lane.
+live/QA scenarios. Give shared files one owner and associate each scenario
+within mixed files with its lane.
 
 Done when every owned file and scenario is inventoried, every test declaration
 has exactly one lane, and shared support has a designated owner.

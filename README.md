@@ -49,8 +49,8 @@ and are labeled incomplete. `daydream setup` installs a self-hosted GitHub bot.
 
 Add `--capture-data` to retain immutable run records locally. Capture is opt-in;
 records contain raw evidence. Upload requires an explicitly selected private
-Hugging Face dataset and the `hub` extra. The training pipeline implements
-reward construction → SFT → RFT → online RL; production training has not completed.
+Hugging Face dataset and the `hub` extra. The training pipeline prepares reward,
+SFT, RFT and adapter-handoff artifacts; production training has not completed.
 For agents working on data or experiments: [dataset workflow](docs/runbooks/record-dataset.md),
 [training](docs/training-launch.md). Benchmarks run from
 [code-review-benchmarks](https://github.com/existential-birds/code-review-benchmarks).
