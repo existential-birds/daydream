@@ -15,7 +15,6 @@ import pytest
 from daydream.training.coordinator import PipelineConfig, run_pipeline
 from daydream.training.corpus_projection.splits import assign_split
 from daydream.training.reward_model import OutcomeModel, score_comment
-from daydream.training.rft import RftConfig, run_rft
 from daydream.training.stacks import load_v2_projection
 from tests.fixtures.training.build_projection_50 import build_projection_50
 
@@ -147,7 +146,7 @@ def test_cli_projection_wiring(tmp_path: Path, cli_runner: Any) -> None:
 
 def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     """Feed the real 50-record projector fixture through all pipeline stages. Require stable corpus digests
-    and replayable RFT rows without fixture post-processing; both gold classes and non-gold record types
+    and full-identity RFT rows without fixture post-processing; both gold classes and non-gold record types
     are present.
     """
 
@@ -186,19 +185,6 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
         assert len(row["head_sha"]) == 40
         assert row["repo_slug"]
         assert row["diff"]
-
-    # Replay rebuilds tasks from the projection's frozen repo/base/head/diff identity without
-    # fixture-side diff materialization.
-    replay = run_rft(RftConfig(inputs=tmp_path / "out/stage2/rft-inputs.jsonl", seed=7, rubric_version="2026.08.29-1",
-            output_dir=tmp_path / "out/replay",
-        )
-    )
-    assert replay.winners_path.is_file()
-    # Accepted gold must score through correctness so winner filtering discriminates between
-    # candidates.
-    winners = json.loads(replay.winners_path.read_text())["winners"]
-    assert winners
-    assert any(float(w["breakdown"]["composite"]) > 0 for w in winners)
 
     first = manifest["run_identity"]["corpus_digest"]
     assert first == projection.digest

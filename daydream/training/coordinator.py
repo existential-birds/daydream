@@ -13,6 +13,7 @@ artifacts but cannot publish a new successful manifest.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -23,12 +24,15 @@ from daydream.training.gate import FrozenSplit, GateConfig, GateReport
 from daydream.training.lineage import ResumeAborted, RunIdentity, validate_resume
 from daydream.training.reward import DEFAULT_WEIGHTS, REWARD_VERSION
 from daydream.training.reward_model import OutcomeModel, train_outcome_model
-from daydream.training.rft import validate_full_sha
 from daydream.training.stacks import V2Projection, load_v2_projection
 
 __all__ = ["PipelineConfig", "run_pipeline"]
 
 STAGES: tuple[str, ...] = ("stage0", "stage1", "stage2", "stage3")
+
+# Stage 2 rebuilds every task from full-length hex commit SHAs; longer
+# sha256-style content-address stamps are tolerated.
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40,}")
 
 
 @dataclass(frozen=True)
@@ -192,10 +196,11 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "a record silently"
             )
         for name, value in (("base_sha", base_sha), ("head_sha", head_sha)):
-            try:
-                validate_full_sha(rid, name, value)
-            except ValueError as exc:
-                raise RuntimeError(str(exc)) from exc
+            if not isinstance(value, str) or not _FULL_SHA_RE.fullmatch(value):
+                raise RuntimeError(
+                    f"record {rid!r} carries an invalid {name} {value!r}: stage2 rebuilds every task "
+                    "from a full 40-hex commit sha and never uses a truncated or non-hex identity"
+                )
         # Projection records carry no archived verifier-verdicts file; the
         # record's own adjudicated outcome is its capture-time judgment.
         # Map it onto the shared verdict vocabulary (the labels
@@ -315,7 +320,7 @@ def _run_stage0(
 def _run_stage_artifacts(
     config: PipelineConfig, records: list[dict[str, Any]], stage: str, stage_dir: Path
 ) -> dict[str, Any]:
-    """Write the SFT dataset, RFT replay inputs, or adapter checkpoint.
+    """Write the SFT dataset, RFT inputs, or adapter checkpoint.
 
     Adapter assembly runs on the dry path too, using the validated Stage-0
     model state.

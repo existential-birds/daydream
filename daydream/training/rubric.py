@@ -1,17 +1,12 @@
 """Serialize posterior evidence and derive conservative finding/run labels.
 
 PR merge state is contextual; per-finding human dispositions decide outcome.
-The Stage-0 scoring rubric separately combines learned outcome, subtractive FP
-penalty and intrinsic evidence, with golden overlap retained as telemetry.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
-import types
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 from daydream.training.dispositions import (
@@ -26,7 +21,6 @@ from daydream.training.labeler_signals import (
     PRMergeSignal,
     resolution_to_dict,
 )
-from daydream.training.reward import DEFAULT_WEIGHTS, ScoringInputs, _clip, score_trajectory
 
 PosteriorSource = Literal["pr_review", "local_branch", "none"]
 
@@ -113,196 +107,3 @@ def derive_per_finding_labels(
     if rubric.posterior_source != "pr_review":
         return ["unknown" for _ in per_finding]
     return [resolution.disposition for resolution in per_finding]
-
-
-# Missing signals are renormalized out, never imputed as zero. Intrinsic and
-# golden signals cannot replace the learned outcome term or its Stage-0 gate.
-
-REWARD_VERSION_RUBRIC = "2026.10.01-rubric-1"
-"""Bump on any change to rubric weights, penalty semantics, or composite shape.
-
-Read at call time so a test can monkeypatch
-``daydream.training.rubric.REWARD_VERSION_RUBRIC`` and have
-:func:`score_review` observe the override. Stamped verbatim on breakdowns
-scored under :data:`DEFAULT_RUBRIC_WEIGHTS`; custom weights get a
-``+custom-{fingerprint}`` suffix (same convention as ``reward.py``).
-"""
-
-_PROTOCOL_ATTR = "score_comment"
-"""The one method :func:`score_review` requires of the outcome model."""
-
-
-@dataclass(frozen=True)
-class RubricV2Weights:
-    """Stage-0 term weights; the subtractive FP weight must be positive.
-
-    Custom instances receive a fingerprinted version instead of the canonical
-    DEFAULT_RUBRIC_WEIGHTS stamp. Intrinsic evidence is a signal, never a
-    substitute for the learned outcome term."""
-
-    w_learned_outcome: float = 0.4
-    w_false_positive: float = 0.3
-    w_intrinsic: float = 0.5
-
-    def __post_init__(self) -> None:
-        if self.w_false_positive <= 0:
-            raise ValueError(
-                f"w_false_positive must be > 0 (got {self.w_false_positive!r}); "
-                "the CR-Bench false-positive penalty is load-bearing (M2)."
-            )
-
-
-DEFAULT_RUBRIC_WEIGHTS = RubricV2Weights()
-"""The golden-locked rubric weights; only this instance earns the canonical
-:data:`REWARD_VERSION_RUBRIC` stamp (identity-checked, as in ``reward.py``)."""
-
-def _rubric_fingerprint(weights: RubricV2Weights) -> str:
-    """Stable 8-hex SHA-256 fingerprint of rubric weights (sorted-key JSON).
-
-    Mirrors ``reward._weights_fingerprint``. Pure; no I/O.
-    """
-    payload = {field.name: getattr(weights, field.name) for field in fields(RubricV2Weights)}
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:8]
-
-
-def _validate_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Raise ``ValueError`` naming the finding id on any malformed finding.
-
-    A well-formed finding is a mapping with a string ``text``. No silent skip.
-    """
-    checked: list[dict[str, Any]] = []
-    for i, f in enumerate(findings):
-        if not isinstance(f, dict) or not isinstance(f.get("text"), str):
-            fid = f.get("id") if isinstance(f, dict) else None
-            raise ValueError(f"Malformed finding at index {i} (id={fid!r}): expected a dict with a string 'text'.")
-        checked.append(f)
-    return checked
-
-
-@dataclass(frozen=True)
-class RubricV2Breakdown:
-    """Stage-0 review score with explicit term presence and telemetry.
-
-    learned_outcome is the mean model score; FP penalty is fp/total and
-    signal_to_noise is (total-fp)/total. Ratios are absent at zero total.
-    Golden overlap is telemetry only. intrinsic_composite comes from the shipped
-    intrinsic scorer and may be absent.
-
-    terms carries negative penalties, None for missing signals, and unweighted
-    telemetry. The weighted mean renormalizes present terms, clips to [0, 1],
-    and rounds to four places."""
-
-    learned_outcome: float | None
-    false_positive_penalty: float | None
-    signal_to_noise: float | None
-    golden_overlap: float
-    intrinsic_composite: float | None
-    terms: dict[str, float | None]
-    composite: float
-    reward_version: str
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serializable representation with explicit key order."""
-        return asdict(self)
-
-
-def score_review(
-    model: Any,
-    *,
-    findings: list[dict[str, Any]],
-    fp_count: int,
-    total_findings: int,
-    breakdown: bool = False,
-    gold_texts: frozenset[str] | set[str] | None = None,
-    weights: RubricV2Weights = DEFAULT_RUBRIC_WEIGHTS,
-) -> float | RubricV2Breakdown:
-    """Score a review using model.score_comment(text), returning a scalar or breakdown.
-
-    Reject malformed findings with their index/id and FP counts outside
-    [0, total_findings]. gold_texts affects overlap telemetry only. Missing
-    composite terms are renormalized out; no present term or nonpositive total
-    weight raises ValueError."""
-    if not hasattr(model, _PROTOCOL_ATTR):
-        raise TypeError(f"model must expose {_PROTOCOL_ATTR}(text) -> float; got {type(model).__name__!r}.")
-    if not 0 <= fp_count <= total_findings:
-        raise ValueError(
-            f"fp_count must be in [0, total_findings] (got fp_count={fp_count!r}, total={total_findings!r})."
-        )
-    checked = _validate_findings(findings)
-
-    version = (
-        REWARD_VERSION_RUBRIC
-        if weights is DEFAULT_RUBRIC_WEIGHTS
-        else f"{REWARD_VERSION_RUBRIC}+custom-{_rubric_fingerprint(weights)}"
-    )
-
-    # Learned outcome term (M6 anchor): mean model score over finding texts.
-    learned: float | None = None
-    if checked:
-        learned = sum(float(model.score_comment(str(f["text"]))) for f in checked) / len(checked)
-
-    # CR-Bench terms: penalty magnitude fp/total (subtractive), usefulness
-    # rate (total - fp)/total as Signal-to-Noise telemetry.
-    false_positive_penalty = fp_count / total_findings if total_findings else None
-    signal_to_noise = (total_findings - fp_count) / total_findings if total_findings else None
-
-    # Golden overlap: telemetry only (never a composite substitute, M6).
-    gold = gold_texts or set()
-    golden_overlap = len([f for f in checked if str(f["text"]) in gold]) / len(checked) if checked else 0.0
-
-    # Intrinsic composite: read via score_trajectory, never recomputed here.
-    verdicts = [{"verdict": str(f["verdict"])} for f in checked if f.get("verdict")]
-    total_chars = sum(len(str(f["text"])) for f in checked)
-    intrinsic = score_trajectory(
-        ScoringInputs(
-            verifier_verdicts=verdicts or None,
-            format_valid=True,
-            length=total_chars or None,
-        ),
-        weights=DEFAULT_WEIGHTS,
-    )
-    intrinsic_composite = intrinsic.composite
-
-    terms: dict[str, float | None] = {
-        "learned_outcome": learned,
-        "fp_penalty": -false_positive_penalty if false_positive_penalty is not None else None,
-        "intrinsic_composite": intrinsic_composite,
-        "golden_overlap": golden_overlap,  # telemetry only — never contributes (M6)
-    }
-
-    # Weighted mean over present composite terms, renormalized (missing
-    # signals are None, never 0.0).
-    present: list[tuple[float, float]] = []
-    for name, value in terms.items():
-        if value is None or name == "golden_overlap":
-            continue
-        w = getattr(weights, _TERM_WEIGHTS[name])
-        present.append((w, value))
-    if not present:
-        raise ValueError("No rubric term is present; composite is uncomputable.")
-    weight_sum = sum(w for w, _ in present)
-    if weight_sum <= 0:
-        raise ValueError(f"Invalid RubricV2Weights: sum of present term weights must be > 0 (got {weight_sum!r}).")
-    composite = round(_clip(sum((w / weight_sum) * v for w, v in present), 0.0, 1.0), 4)
-
-    result = RubricV2Breakdown(
-        learned_outcome=learned,
-        false_positive_penalty=false_positive_penalty,
-        signal_to_noise=signal_to_noise,
-        golden_overlap=golden_overlap,
-        intrinsic_composite=intrinsic_composite,
-        terms=terms,
-        composite=composite,
-        reward_version=version,
-    )
-    return result if breakdown else result.composite
-
-
-_TERM_WEIGHTS: types.MappingProxyType[str, str] = types.MappingProxyType(
-    {
-        "learned_outcome": "w_learned_outcome",
-        "fp_penalty": "w_false_positive",
-        "intrinsic_composite": "w_intrinsic",
-    }
-)
-"""Composite-term name → :class:`RubricV2Weights` field name."""
