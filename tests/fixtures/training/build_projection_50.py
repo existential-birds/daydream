@@ -1,7 +1,6 @@
 """Build 50 schema-3 records from observation-v3 evidence through the offline projector."""
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 from daydream.dataset import LocalRecordStore
@@ -25,29 +24,3 @@ def build_projection_50(tmp_path: Path) -> Path:
     result = build_frozen_corpus(config)
     assert result["total"] == 50
     return config.out_dir
-
-
-def main() -> None:
-    """Build in scratch space and copy content to --out; the loader digest depends on bytes, not
-    mtimes.
-    """
-    import argparse
-    import tempfile
-
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=Path, required=True,
-        help="Destination projection directory (e.g. tests/fixtures/training/projection-50)",
-    )
-    args = parser.parse_args()
-    with tempfile.TemporaryDirectory() as tmp:
-        proj_dir = build_projection_50(Path(tmp).resolve())
-        if args.out.exists():
-            shutil.rmtree(args.out)
-        shutil.copytree(proj_dir, args.out)
-    print(f"committed projection fixture written to {args.out}")
-
-
-if __name__ == "__main__":
-    main()
-
-

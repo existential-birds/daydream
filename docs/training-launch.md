@@ -10,8 +10,7 @@ daydream train --projection PROJECTION_DIR --out OUT_DIR --dry-run
 ```
 
 Use the dry run to validate inputs before a real launch. The stage order is
-reward construction/gating → SFT dataset → deterministic RFT inputs → adapter
-handoff.
+reward construction/gating → SFT dataset → adapter handoff.
 The projection is the only training input. Preserve its `_SUCCESS` marker,
 lineage, split digests, original base/head/diff, and benchmark exclusions.
 Load through `training.stacks.load_v2_projection`; revalidate split and corpus

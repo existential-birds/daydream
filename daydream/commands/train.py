@@ -22,8 +22,8 @@ def _build_train_parser() -> argparse.ArgumentParser:
     parser = _TrainParser(
         prog="daydream train",
         description=(
-            "Run the four-stage training pipeline (stage0 gate → stage1 SFT → "
-            "stage2 RFT → stage3 adapter) and write a stage manifest."
+            "Run the training pipeline (stage0 gate → stage1 SFT → stage3 adapter) "
+            "and write a stage manifest."
         ),
     )
     parser.add_argument(
@@ -45,8 +45,8 @@ def _build_train_parser() -> argparse.ArgumentParser:
         "--stage",
         action="append",
         dest="stages",
-        choices=["stage0", "stage1", "stage2", "stage3"],
-        help="Repeatable; run only these stages in the order given (default: all four)",
+        choices=["stage0", "stage1", "stage3"],
+        help="Repeatable; run only these stages in the order given (default: all)",
     )
     parser.add_argument(
         "--base-model",
@@ -71,7 +71,7 @@ def _handle_train_command(argv: list[str]) -> int:
     """Run the coordinator synchronously; gate/validation failures return 1. Dry runs use files without
     an agent backend, SQLite, or GPU.
     """
-    from daydream.training.coordinator import PipelineConfig, run_pipeline
+    from daydream.training.coordinator import STAGES, PipelineConfig, run_pipeline
 
     parser = _build_train_parser()
     args = parser.parse_args(argv)
@@ -79,7 +79,7 @@ def _handle_train_command(argv: list[str]) -> int:
     config = PipelineConfig(
         projection=args.projection,
         out_dir=args.out,
-        stages=tuple(args.stages) if args.stages else ("stage0", "stage1", "stage2", "stage3"),
+        stages=tuple(args.stages) if args.stages else STAGES,
         base_model=args.base_model,
         seed=args.seed,
     )

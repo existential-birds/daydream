@@ -34,7 +34,7 @@ def _record_id(session_id: str, fingerprint: str) -> str:
 
 def _v2_record(
     *, session_id: str, split: str, label: str | None, fingerprint: str, record_type: str = "outcome-finding",
-    tier: str = "gold", finding_text: str | None = None, base_sha: str = BASE_SHA,
+    tier: str = "gold", finding_text: str | None = None,
 ) -> dict[str, Any]:
     """A full v2 record the projector would emit for one finding."""
     record: dict[str, Any] = {
@@ -49,7 +49,7 @@ def _v2_record(
             "reply_classifier_version": "rc-1", "rubric_schema_version": "rubric-v2", "as_of": "2026-01-01T00:00:00Z",
             "valid_at": "2026-01-01T00:00:00Z", "split": split, "exclusion_reason": None, "repo_slug": "owner/repo",
         }, "task_identity": {
-            "repo_slug": "owner/repo", "source": "record", "base_sha": base_sha, "head_sha": HEAD_SHA,
+            "repo_slug": "owner/repo", "source": "record", "base_sha": BASE_SHA, "head_sha": HEAD_SHA,
             "diff_digest": hashlib.sha256(DIFF_BODY.encode("utf-8")).hexdigest(),
             "diff_ref": {"content_digest": hashlib.sha256(DIFF_BODY.encode("utf-8")).hexdigest(),
                 "relpath": f"batches/{session_id}/diff.patch",
@@ -64,7 +64,7 @@ def _v2_record(
 
 
 def _build_projection(
-    tmp_path: Path, *, omit_finding_text: bool = False, base_sha: str = BASE_SHA, n_sessions: int = 80,
+    tmp_path: Path, *, omit_finding_text: bool = False, n_sessions: int = 80,
 ) -> Path:
     """Build gold outcomes plus silver/task-only records in content-derived splits; seed labels so the
     holdout contains both gold classes.
@@ -92,7 +92,7 @@ def _build_projection(
         _place(_v2_record(session_id=sid, split=split_of[sid], label=label, fingerprint="fp",
                 finding_text=None if (omit_finding_text and label == "accepted") else (
                     ACCEPTED_TEXT if label == "accepted" else REJECTED_TEXT
-                ), base_sha=base_sha,
+                ),
             )
         )
     # Non-gold derived record types use their own identity split.
@@ -124,16 +124,10 @@ def _build_projection(
     return out
 
 
-def test_v2_projection_without_finding_text_or_full_sha_fails_closed(tmp_path: Path) -> None:
-    for name, overrides, match in (("missing-text", {"omit_finding_text": True}, "finding_text"),
-                                   ("short-sha", {"base_sha": "abc123"}, "base_sha"),
-                                   ("non-hex-sha", {"base_sha": "z" * 40}, "base_sha")):
-        root = tmp_path / name
-        root.mkdir()
-        proj_dir = _build_projection(root, **overrides)
-        cfg = PipelineConfig(projection=proj_dir, out_dir=root / "out")
-        with pytest.raises(RuntimeError, match=match):
-            run_pipeline(cfg, dry_run=False)
+def test_v2_projection_without_finding_text_fails_closed(tmp_path: Path) -> None:
+    proj_dir = _build_projection(tmp_path, omit_finding_text=True)
+    with pytest.raises(RuntimeError, match="finding_text"):
+        run_pipeline(PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out"), dry_run=False)
 
 
 def test_cli_projection_wiring(tmp_path: Path, cli_runner: Any) -> None:
@@ -147,8 +141,7 @@ def test_cli_projection_wiring(tmp_path: Path, cli_runner: Any) -> None:
 
 def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     """Feed the real 50-record projector fixture through all pipeline stages. Require stable corpus digests
-    and full-identity RFT rows without fixture post-processing; both gold classes and non-gold record types
-    are present.
+    and SFT rows without fixture post-processing; both gold classes and non-gold record types are present.
     """
 
     proj_dir = build_projection_50(tmp_path)
@@ -176,16 +169,7 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
         for line in (tmp_path / "out/stage1/sft-dataset.jsonl").read_text().splitlines()
         if line
     ]
-    rft_rows = [json.loads(line)
-        for line in (tmp_path / "out/stage2/rft-inputs.jsonl").read_text().splitlines()
-        if line
-    ]
-    assert sft_rows and rft_rows
-    for row in rft_rows:
-        assert len(row["base_sha"]) == 40
-        assert len(row["head_sha"]) == 40
-        assert row["repo_slug"]
-        assert row["diff"]
+    assert sft_rows
 
     first = manifest["run_identity"]["corpus_digest"]
     assert first == projection.digest
