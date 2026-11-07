@@ -483,9 +483,9 @@ Starts refused for the protected submission slot or over the limit are observed,
 never charged.
 
 Renewal rule: compaction or summarization never renews a budget. When a retryable
-provider failure leads to a retry, the failed attempt's tool calls are refunded once
-every retry gate has passed, because the retry is a fresh native conversation that
-must redo the lost work. Elapsed time is never refunded. Retries stay bounded by the
+provider failure leads to a retry, the failed attempt's tool calls are refunded when
+the retry dispatches, because it is a fresh native conversation that must redo the
+lost work; a retry stopped before dispatch refunds nothing. Elapsed time is never refunded. Retries stay bounded by the
 attempt count, the absolute deadline and the outage circuit; a failure after possible
 host acceptance still permits no retry. Paths that do not retry are never refunded,
 including a staged schema re-dispatch and a committed challenge re-dispatch. Committed

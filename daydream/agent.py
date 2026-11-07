@@ -541,6 +541,8 @@ async def _run_agent(
             # Set when the invocation already emitted its one stop record, so the
             # post-loop deadline emitter never writes a second, contradicting one.
             stop_recorded = False
+            # Calls a failed attempt charged, refunded only when a retry actually dispatches.
+            pending_refund = 0
 
             def _emit_ladder_stop(
                 stop_reason: str, limit_expired: str = "retry_ladder"
@@ -586,6 +588,8 @@ async def _run_agent(
                 native_output = False
                 result_continuation = None
                 remaining_calls = budget.remaining_tool_calls
+                if remaining_calls is not None:
+                    remaining_calls += pending_refund  # what this retry gets once it dispatches
                 refund_point = budget.charged
                 if review_evidence is not None:
                     review_evidence.reset()
@@ -630,6 +634,9 @@ async def _run_agent(
                             stop_recorded = True
                         break
                     telemetry.start_attempt(dispatch_time, retry=attempt > 0)
+                    # The retry is a fresh conversation, so it regains the failed attempts' calls.
+                    budget.refund(budget.charged - pending_refund)
+                    pending_refund = 0
                     refund_point = budget.dispatch()
                     execute_kwargs: dict[str, Any] = {
                         "agents": agents,
@@ -938,9 +945,9 @@ async def _run_agent(
                         ):
                             _emit_ladder_stop("circuit_open")
                             raise
-                        # Every gate passed: the retry is a fresh conversation, so it
-                        # regains this attempt's tool calls. Time is never refunded.
-                        budget.refund(refund_point)
+                        # Every gate passed. This attempt's calls are refunded only if
+                        # the retry dispatches; time is never refunded.
+                        pending_refund += budget.charged - refund_point
                         continue
                     if classification.retries_allowed and exception_max_retries > 0:
                         _emit_ladder_stop("retry_attempts_exhausted")

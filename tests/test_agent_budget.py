@@ -54,11 +54,13 @@ class _RetryableBackendError(RuntimeError):
     retryable = True
 
 
-def _retryable_failing_backend(*, advance: Callable[[float], None], advance_s: float) -> ScriptedBackend:
+def _retryable_failing_backend(*, advance: Callable[[float], None], advance_s: float,
+                               tool_start: bool = False) -> ScriptedBackend:
     """A ScriptedBackend that advances an injected clock per attempt, then fails retryably."""
     async def responder(*args: Any, **kwargs: Any) -> Any:
         advance(advance_s)
-        return [_RetryableBackendError("transient")]
+        start = [ToolStartEvent(id="read", name="Read", input={"file_path": "a.py"})] if tool_start else []
+        return [*start, _RetryableBackendError("transient")]
     return ScriptedBackend(
         responder=responder, model="mock-model", fanout_concurrency=4,
         retry_policy=RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0),
@@ -393,21 +395,24 @@ async def test_protected_submission_denials_do_not_trip_the_stream_ceiling(
 async def test_a_deadline_that_cuts_the_ladder_during_backoff_is_still_a_ladder_stop(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Backoff is retry overhead even when the deadline prevents the retry from dispatching."""
+    """Backoff is retry overhead even when the deadline prevents the retry from dispatching.
+
+    A retry that never dispatches refunds nothing: the failed attempt's call stays charged.
+    """
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     patch_retry_sleep(monkeypatch, fake)
     monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
     # 1000 (+300 attempt 1) -> 1300 -> backoff capped at the 100 s left -> 1400 = the deadline.
-    backend = _retryable_failing_backend(advance=fake.advance, advance_s=300.0)
+    backend = _retryable_failing_backend(advance=fake.advance, advance_s=300.0, tool_start=True)
     setattr(backend, "retry_policy", RetryPolicy(attempts=20, base_delay_s=200.0, max_delay_s=200.0))
     recorder = make_recorder(tmp_path)
+    ledger = BudgetLedger("fix", deadline=1_400.0, limit=5)
     with anyio.fail_after(5):
         async with recorder:
-            _, _, reason = await run_agent(
-                backend, tmp_path, "go", phase=DaydreamPhase.FIX, budget=BudgetLedger("fix", deadline=1_400.0),
-            )
+            _, _, reason = await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.FIX, budget=ledger)
     assert reason == "wall_budget_exceeded"
     assert backend.call_count == 1                  # the retry never got to dispatch
+    assert (ledger.charged, ledger.refunded) == (1, 0)
     traj, meta = _budget_stop(recorder)
     assert meta["retry_stop_reason"] == "retry_deadline_exhausted"
     assert meta["attempts"] == 0               # no retry attempt was dispatched
