@@ -7,6 +7,7 @@ import os
 import re
 import tempfile
 import threading
+from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from functools import lru_cache
@@ -79,13 +80,14 @@ def umask_derived_mode() -> int:
     return 0o666 & ~_read_umask()
 
 
-def _stage_bytes(path: Path, content: bytes, *, fsync: bool, mode: int | None) -> Path:
-    """Write ``content`` to a sibling temp for ``path`` and return the temp path."""
+def _stage_bytes(path: Path, content: bytes | Iterable[bytes], *, fsync: bool, mode: int | None) -> Path:
+    """Write ``content``, or each chunk it yields, to a sibling temp for ``path`` and return the temp path."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
-            f.write(content)
+            for chunk in (content,) if isinstance(content, bytes) else content:
+                f.write(chunk)
             f.flush()
             if fsync:
                 os.fsync(f.fileno())
@@ -114,16 +116,17 @@ def _publish_staged(path: Path, tmp: Path, *, dir_fsync: bool, mode: int | None)
 
 def atomic_write_bytes(
     path: Path,
-    content: bytes,
+    content: bytes | Iterable[bytes],
     *,
     fsync: bool = True,
     dir_fsync: bool = False,
     mode: int | None = None,
 ) -> None:
-    """Publish bytes through an exclusive sibling temp and atomic rename.
+    """Publish bytes, or streamed chunks, through an exclusive sibling temp and atomic rename.
 
-    Create parents and clean failed temps best-effort. fsync flushes staged bytes;
-    mode chmods both temp and final path; dir_fsync persists the parent rename."""
+    A raising chunk source abandons the write. Create parents and clean failed temps
+    best-effort. fsync flushes staged bytes; mode chmods both temp and final path;
+    dir_fsync persists the parent rename."""
     tmp = _stage_bytes(path, content, fsync=fsync, mode=mode)
     _publish_staged(path, tmp, dir_fsync=dir_fsync, mode=mode)
 

@@ -19,6 +19,7 @@ from daydream.trajectory import (
     TrajectoryDocumentSnapshot,
     compute_timing_summary,
     phase_scope,
+    summarize_run,
 )
 from tests.harness.execution import host_test_command
 from tests.harness.git_helpers import bare_remote, git
@@ -34,20 +35,28 @@ def _snapshot_document(path: Path, payload: dict[str, Any]) -> TrajectoryDocumen
     )
 
 def test_timing_diagnostics_clip_scoped_events_without_synthesizing_forks(tmp_path: Path) -> None:
+    """Sibling documents' review intervals overlap each other and the root's; only their union counts.
+
+    Hand-computed over the wall [0s, 10s]: root [-1s, 4s] clips to [0, 4]; child-a [3, 6]; child-b [5, 7] and
+    [9s, 11s] clipped to [9, 10]. The union [0, 7] + [9, 10] is 8s; child-a's invocation [1, 6.5] fits only the
+    cross-document union, and child-b's [6.5, 9.5] straddles its gap.
+    """
     session = "diagnostics"
     def event(kind: str, scope: str | None, timestamp: str, **extra: Any) -> dict[str, Any]:
         return {"phase": "review", "event": kind, "session_id": session,
             "scope_id": scope, "timestamp": timestamp, **extra,
         }
-    start = "2026-01-01T00:00:00Z"
-    end = "2026-01-01T00:00:10Z"
+    def at(seconds: float) -> str:
+        return f"2026-01-01T00:00:{seconds:09.6f}Z"
+    start = at(0)
+    end = at(10)
     invocation = {"trajectory_id": session, "invocation_id": "duplicate", "phase": "review",
         "started_at": start, "ended_at": end,
     }
     root = {"session_id": session, "trajectory_id": session, "steps": [],
         "extra": {"run_started_at": start, "run_ended_at": end, "phase_events": [
             event("phase_start", "clipped", "2025-12-31T23:59:59Z"),
-            event("phase_end", "clipped", "2026-01-01T00:00:11Z", status="succeeded"),
+            event("phase_end", "clipped", at(4), status="succeeded"),
             event("phase_start", "duplicate", start), event("phase_start", "duplicate", start),
             event("phase_end", "duplicate", end, status="succeeded"),
             event("phase_start", "orphan", start),
@@ -60,23 +69,33 @@ def test_timing_diagnostics_clip_scoped_events_without_synthesizing_forks(tmp_pa
                 "started_at": "invalid", "ended_at": end},
         ]},
     }
-    child = {"session_id": session, "trajectory_id": "child",
-        "steps": [{"timestamp": start}, {"timestamp": end}], "extra": {},
-    }
+    def child(name: str, intervals: dict[str, tuple[str, str]], started: float, ended: float) -> dict[str, Any]:
+        """A sibling whose steps span the whole wall but whose only intervals are its phase events."""
+        return {"session_id": session, "trajectory_id": name,
+            "steps": [{"timestamp": start}, {"timestamp": end}], "extra": {
+                "phase_events": [bound for scope, (started_at, ended_at) in intervals.items() for bound in (
+                    event("phase_start", scope, started_at), event("phase_end", scope, ended_at, status="succeeded"))],
+                "subtrajectories": [{"trajectory_id": name, "invocation_id": f"{name}-review", "phase": "review",
+                    "started_at": at(started), "ended_at": at(ended)}],
+            },
+        }
+    siblings = (child("child-a", {"a": (at(3), at(6))}, 1, 6.5),
+        child("child-b", {"b": (at(5), at(7)), "b-clipped": (at(9), "2026-01-01T00:00:11Z")}, 6.5, 9.5))
     snapshot = RunWriteSnapshot(status="complete", cutoff_at=end, root_trajectory_id=session,
         documents=(_snapshot_document(tmp_path / "trajectory.json", root),
-            _snapshot_document(tmp_path / "child.json", child)),
+            *(_snapshot_document(tmp_path / f"{sibling['trajectory_id']}.json", sibling) for sibling in siblings)),
     )
 
-    summary = compute_timing_summary(snapshot)
+    summary = compute_timing_summary(summarize_run(snapshot))
 
     assert summary is not None
-    assert summary.phase_timings == {"review": {"wall_clock_seconds": 10.0, "occurrences": 1}}
-    assert summary.coverage_ratio == 1.0
+    assert summary.phase_timings == {"review": {"wall_clock_seconds": 8.0, "occurrences": 4}}
+    assert (summary.wall_clock_seconds, summary.attributed_wall_clock_seconds,
+            summary.unattributed_wall_clock_seconds, summary.coverage_ratio) == (10.0, 8.0, 2.0, 0.8)
     assert summary.diagnostics == {"malformed_interval": 4, "duplicate_interval": 1, "orphaned_interval": 2,
         "malformed_invocation": 1, "duplicate_invocation": 1,
     }
-    assert summary.agent_completeness == {"total": 2, "attributed": 0, "unattributed": 2}
+    assert summary.agent_completeness == {"total": 4, "attributed": 1, "unattributed": 3}
 
 
 # --- PhaseEvent.to_dict ----------------------------------------------------

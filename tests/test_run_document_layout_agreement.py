@@ -16,7 +16,7 @@ from daydream.trajectory import (
     TrajectoryDocumentReference,
     TrajectoryDocumentSnapshot,
     default_trajectory_path,
-    snapshot_trajectories,
+    summarize_run,
 )
 from tests.harness.trajectory import trajectory_payload
 
@@ -56,10 +56,11 @@ def test_every_reader_resolves_the_same_document_set(tmp_path: Path) -> None:
     assert {p.relative_to(run_dir).as_posix() for p in collect_trajectory_paths(run_dir)} == canonical
     assert {p.relative_to(run_dir).as_posix() for p in collect_trajectory_paths(daydream_dir)} == canonical
     assert _latest_main_trajectory(daydream_dir) == run_dir / "trajectory.json"
-    # 2. the producer's frozen projection agrees with the analyzer on the same names
-    frozen = snapshot_trajectories(_snapshot(run_dir / "trajectory.json"))
-    assert frozen["main"]["_source_file"] == "trajectory.json"
-    assert [d["_source_file"] for d in frozen["forked"]] == [SIBLING]
+    # 2. the frozen run summary agrees with the analyzer on the same names and retains no step bodies
+    summary = summarize_run(_snapshot(run_dir / "trajectory.json"))
+    assert [(d.source_file, "steps" in d.metadata) for d in summary.documents] == [
+        ("trajectory.json", False), (SIBLING, False),
+    ]
 
     # 3. the archive projection writes the same relative names under its own root
     archive_run_dir = get_archive_dir() / "runs" / SESSION

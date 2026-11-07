@@ -18,6 +18,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+from pydantic import TypeAdapter
+from pydantic_core import to_json
+
 import daydream
 from daydream import timeutil, ui
 from daydream.atif import (
@@ -59,6 +62,7 @@ from daydream.trajectory.types import (
 from daydream.ui import create_console, print_error
 
 _console = create_console()
+_TRAJECTORY_JSON: TypeAdapter[Trajectory] = TypeAdapter(Trajectory)
 
 
 def _warn_partial_write(exc: Exception) -> None:
@@ -811,7 +815,7 @@ class TrajectoryRecorder:
             atomic_write_bytes(document.path, document.json_bytes)
         else:
             document.path.parent.mkdir(parents=True, exist_ok=True)
-            document.path.write_text(document.json_bytes.decode("utf-8"), encoding="utf-8")
+            document.path.write_bytes(document.json_bytes)
         return TrajectoryDocumentReference.written(
             document.trajectory_id, document.path, document.path, document.json_bytes
         )
@@ -848,15 +852,14 @@ class TrajectoryRecorder:
     def _partial_state_key(self, active_summaries: list[dict[str, Any]]) -> str:
         """Return a stable digest of this recorder's current partial state."""
         state = {
-            "steps": [step.model_dump(mode="json") for step in self._snapshot_in_flight_steps()],
+            "steps": self._snapshot_in_flight_steps(),
             "phase_events": [event.to_dict() for event in self._phase_events],
             "subtrajectories": self._subtrajectories,
             "active_subtrajectories": active_summaries,
             "active_dispatches": self._partial_dispatch_summaries(),
             "aborted": self._aborted,
         }
-        encoded = json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()
+        return hashlib.sha256(to_json(state)).hexdigest()
 
     def _prepare_document(
         self,
@@ -894,28 +897,27 @@ class TrajectoryRecorder:
             steps=list(steps),
             snapshot_at=cutoff_at if status == "partial" else None,
         )
-        payload = trajectory.to_json_dict()
+        extra = trajectory.extra = trajectory.extra or {}
         if status == "partial":
             dispatches = self._partial_dispatch_summaries()
             if dispatches:
-                payload.setdefault("extra", {})["active_dispatches"] = dispatches
+                extra["active_dispatches"] = dispatches
             active = (active_summaries if active_summaries is not None
                       else [invocation.summary(partial=True) for invocation in self._active_invocations])
             if active:
-                extra = payload.setdefault("extra", {})
                 safe_active = redact_value(active)
                 if not isinstance(safe_active, list):
                     raise ValueError("active summary redaction returned a non-array")
                 extra["subtrajectories"] = [*extra.get("subtrajectories", []), *safe_active]
         if self._aborted or status == "partial":
-            payload.setdefault("extra", {})["partial"] = True
+            extra["partial"] = True
         path = self.path
         if status == "partial":
             path = partial_document_path(path)
         return TrajectoryDocumentSnapshot(
             trajectory_id=self.trajectory_id,
             path=path,
-            json_bytes=json.dumps(payload, indent=2).encode("utf-8"),
+            json_bytes=_TRAJECTORY_JSON.dump_json(trajectory, indent=2, exclude_none=True, ensure_ascii=True),
         )
 
     def _snapshot_in_flight_steps(self) -> list[Step]:

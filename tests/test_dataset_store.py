@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import stat
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -151,8 +152,15 @@ def test_captured_source_record_binding_is_validated_before_storage(store: Local
 
 
 def test_unsafe_storage_is_refused(tmp_path: Path, store: LocalRecordStore) -> None:
+    small = LocalRecordStore(tmp_path / "small", max_record_bytes=32)
     with pytest.raises(StoreError, match="record_too_large"):
-        LocalRecordStore(tmp_path / "small", max_record_bytes=32).commit_run(run_record())
+        small.commit_run(run_record())
+    # A streamed record is refused at the cap before its documents are pulled, leaving no shard or staging.
+    documents: Iterator[dict[str, Any]] = iter([{}])
+    with pytest.raises(StoreError, match="record_too_large"):
+        small.commit_run(run_record(trajectories={"status": "available", "value": {
+            "root_trajectory_id": "run-1", "status": "complete", "cutoff_at": "2026-10-04T12:01:00Z"}}), documents)
+    assert next(documents) == {} and list((small.root / "runs").iterdir()) == []
     real = tmp_path / "real"
     real.mkdir()
     alias = tmp_path / "alias"
@@ -223,7 +231,7 @@ def test_snapshot_reads_validate_only_pinned_shards(tmp_path: Path) -> None:
             store.read_snapshot(identity)
 
 
-def test_run_sections_require_complete_semantic_payload_and_bound_membership() -> None:
+def test_run_sections_require_complete_semantic_payload_and_bound_membership(tmp_path: Path) -> None:
     field = "trajectories"
     raw = parse_run(run_record())
     raw[field] = {"status": "available", "value": {}}
@@ -235,18 +243,38 @@ def test_run_sections_require_complete_semantic_payload_and_bound_membership() -
     jsonschema.validate(parse_run(raw), run_record_schema())
     summary: dict[str, Any] = {"trajectory_id": "run-1", "invocation_id": "attempt-1", "step_ids": [1],
                                "phase": "review"}
+    agent = {"name": "daydream", "version": "test"}
+    documents = [{"schema_version": "ATIF-v1.7", "session_id": "run-1", "trajectory_id": "run-1", "agent": agent,
+                  "steps": [{"step_id": 1, "source": "user", "message": "review"}],
+                  "extra": {"subtrajectories": [summary]}},
+                 {"schema_version": "ATIF-v1.7", "session_id": "run-1", "trajectory_id": "run-1:child", "agent": agent,
+                  "steps": [{"step_id": 1, "source": "agent", "message": "caf\u00e9 \U0001f600",
+                             "metrics": {"cost_usd": 1.5e-05}}], "extra": {"absent": None}}]
+    value = {"root_trajectory_id": "run-1", "status": "partial", "cutoff_at": "2026-10-04T12:01:00Z"}
+    envelope = run_record(outcome="interrupted", trajectories={"status": "available", "value": value})
     raw = run_record(outcome="interrupted", trajectories={"status": "available", "value": {
-        "root_trajectory_id": "run-1", "status": "partial", "cutoff_at": "2026-10-04T12:01:00Z",
-        "documents": [{"schema_version": "ATIF-v1.7", "session_id": "run-1", "trajectory_id": "run-1",
-                       "agent": {"name": "daydream", "version": "test"},
-                       "steps": [{"step_id": 1, "source": "user", "message": "review"}],
-                       "extra": {"subtrajectories": [summary]}}]}})
+        **value, "documents": documents}})
     restored = parse_run(raw)
     assert restored["outcome"] == "interrupted"
-    assert restored["trajectories"]["value"]["documents"][0]["extra"]["subtrajectories"] == [summary]
+    assert restored["trajectories"]["value"]["documents"] == documents
+    # Capture's one-shot document stream and a whole mapping commit the same canonical bytes.
+    expected = json.dumps(restored, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
+    streamed, mapped = LocalRecordStore(tmp_path / "streamed"), LocalRecordStore(tmp_path / "mapped")
+    assert streamed.commit_run(envelope, (document for document in documents)).committed
+    assert mapped.commit_run(raw).committed
+    shards = [next((store.root / "runs").iterdir()) for store in (streamed, mapped)]
+    assert [shard.read_text(encoding="utf-8") for shard in shards] == [expected, expected]
+    assert not streamed.commit_run(raw).committed
+    with pytest.raises(StoreError, match="immutable_identity_conflict"):
+        mapped.commit_run({**raw, "outcome": "failed"})
+    assert shards[1].read_text(encoding="utf-8") == expected
     summary["step_ids"] = [9]
     with pytest.raises(ValueError, match="invalid RunRecord"):
         parse_run(raw)
+    faulted = LocalRecordStore(tmp_path / "faulted")
+    with pytest.raises(StoreError, match="invalid_or_unknown_record_schema"):
+        faulted.commit_run(envelope, iter(documents))
+    assert list((faulted.root / "runs").iterdir()) == []
 
 
 def test_download_source_read_refuses_unsafe_provenance(

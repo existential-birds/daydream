@@ -1,15 +1,16 @@
-"""Pure timing and invocation-coverage reduction over frozen trajectory bytes."""
+"""Pure timing and invocation-coverage reduction over a frozen run's document summaries."""
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from daydream.timeutil import parse_iso_timestamp
-from daydream.trajectory.layout import PARTIAL_SUFFIX, RUN_DOCUMENT_NAME
-from daydream.trajectory.types import LifecycleStatus, RunWriteSnapshot
+from daydream.trajectory.types import LifecycleStatus
+
+if TYPE_CHECKING:
+    from daydream.trajectory.summary import RunSummary
 
 
 @dataclass(frozen=True)
@@ -88,74 +89,15 @@ def _clip_intervals(
     ]
 
 
-def _snapshot_payloads(write_snapshot: RunWriteSnapshot) -> list[dict[str, Any]]:
-    """Decode readable documents, skipping undecodable ones; a changed reference still raises."""
-    payloads: list[dict[str, Any]] = []
-    for document in write_snapshot.documents:
-        raw = document.read_bytes()
-        try:
-            value = json.loads(raw)
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if isinstance(value, dict):
-            payloads.append(value)
-    return payloads
-
-
-def snapshot_trajectories(write_snapshot: RunWriteSnapshot) -> dict[str, Any]:
-    """Return analyzer-shaped trajectory data from checked document reads.
-
-    ``_source_file`` names each entry by its logical document path, never the
-    private file a reference reads.
-    """
-    main: dict[str, Any] | None = None
-    forked: list[dict[str, Any]] = []
-    for document in write_snapshot.documents:
-        try:
-            payload = json.loads(document.read_bytes())
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError("invalid frozen trajectory JSON") from exc
-        if not isinstance(payload, dict):
-            raise ValueError("frozen trajectory document must be an object")
-        if payload.get("trajectory_id") != document.trajectory_id:
-            raise ValueError("frozen trajectory identity mismatch")
-        copied = dict(payload)
-        copied["_source_file"] = (
-            RUN_DOCUMENT_NAME
-            if document.trajectory_id == write_snapshot.root_trajectory_id
-            else document.path.name.removesuffix(PARTIAL_SUFFIX)
-        )
-        if document.trajectory_id == write_snapshot.root_trajectory_id:
-            if main is not None:
-                raise ValueError("duplicate frozen root trajectory")
-            main = copied
-        else:
-            forked.append(copied)
-    if main is None and write_snapshot.documents:
-        raise ValueError("frozen root trajectory is missing")
-    return {"main": main, "forked": forked}
-
-
-def compute_timing_summary(write_snapshot: RunWriteSnapshot) -> TimingSummary | None:
-    """Reduce one frozen run snapshot without reading live recorder state."""
-    payloads = _snapshot_payloads(write_snapshot)
-    root = next(
-        (payload for payload in payloads if payload.get("trajectory_id") == write_snapshot.root_trajectory_id),
-        None,
-    )
-    if root is None:
-        return None
+def compute_timing_summary(summary: RunSummary) -> TimingSummary | None:
+    """Reduce one frozen run's document summaries without reading live recorder state."""
     diagnostics = {key: 0 for key in _TIMING_DIAGNOSTIC_KEYS}
-    root_extra = _timing_mapping(root.get("extra"))
+    root_extra = _timing_mapping(summary.root.metadata.get("extra"))
     wall_start = _timing_timestamp(root_extra.get("run_started_at"))
-    wall_end_key = "snapshot_at" if write_snapshot.status == "partial" else "run_ended_at"
-    if write_snapshot.status == "partial" and root_extra.get("snapshot_at") != write_snapshot.cutoff_at:
+    wall_end_key = "snapshot_at" if summary.status == "partial" else "run_ended_at"
+    if summary.status == "partial" and root_extra.get("snapshot_at") != summary.cutoff_at:
         return None
-    if (
-        write_snapshot.status == "complete"
-        and write_snapshot.cutoff_at
-        and root_extra.get("run_ended_at") != write_snapshot.cutoff_at
-    ):
+    if summary.status == "complete" and summary.cutoff_at and root_extra.get("run_ended_at") != summary.cutoff_at:
         return None
     wall_end = _timing_timestamp(root_extra.get(wall_end_key))
     wall: tuple[datetime, datetime] | None = None
@@ -165,8 +107,8 @@ def compute_timing_summary(write_snapshot: RunWriteSnapshot) -> TimingSummary | 
         return None
 
     identified: dict[tuple[str, str, str], dict[str, list[datetime]]] = {}
-    for payload in payloads:
-        extra = _timing_mapping(payload.get("extra"))
+    for document in summary.documents:
+        extra = _timing_mapping(document.metadata.get("extra"))
         events = extra.get("phase_events")
         if not isinstance(events, list):
             continue
@@ -226,8 +168,8 @@ def compute_timing_summary(write_snapshot: RunWriteSnapshot) -> TimingSummary | 
 
     invocation_rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
     malformed_invocations = 0
-    for payload in payloads:
-        extra = _timing_mapping(payload.get("extra"))
+    for document in summary.documents:
+        extra = _timing_mapping(document.metadata.get("extra"))
         summaries = extra.get("subtrajectories")
         direct_invocations = (
             [

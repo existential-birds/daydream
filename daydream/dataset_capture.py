@@ -100,7 +100,9 @@ def capture_run_record(
     config: RunConfig, work: WorkContext, outcome: Literal["success", "failed", "interrupted"],
     forbidden_store_roots: tuple[Path, ...] = (),
 ) -> None:
-    """Commit one raw run, without archive reconstruction or trace readback."""
+    """Commit one raw run, without archive reconstruction or trace readback.
+
+    Trajectory documents stream into the store one checked read at a time."""
     from daydream.dataset import LocalRecordStore
     from daydream.dataset_scoring import assemble_scoring_inputs
 
@@ -128,9 +130,6 @@ def capture_run_record(
             acquisition_failures[path.name] = {"status": "failed", "reason": "malformed_json", "raw_text": text}
             return None
 
-    documents = [] if selected is None else [
-        document.validated_payload(artifacts.session_id) for document in selected.documents
-    ]
     claims = []
     for path in sorted(deep.glob("stack-*-records.json")) if review_sources else []:
         payload = read_json(path)
@@ -220,6 +219,9 @@ def capture_run_record(
         return {"status": "available" if value is not None else "failed" if failed else absent,
                 "value": value}
 
+    documents = None if selected is None else (
+        document.validated_payload(artifacts.session_id) for document in selected.documents
+    )
     LocalRecordStore(store_path).commit_run({"schema_version": "daydream.run.v1",
         "run_id": artifacts.session_id, "captured_at": selected.cutoff_at if selected else now_iso_utc(),
         "trace_id": current_run_trace_id(),
@@ -231,7 +233,7 @@ def capture_run_record(
             "patch": patch, "sha256": hashlib.sha256(patch.encode()).hexdigest(),
             "capture": verification.get("recommended-capture.json"),
         } if patch is not None else None),
-        "trajectories": evidence({"documents": documents, "root_trajectory_id": selected.root_trajectory_id,
+        "trajectories": evidence({"root_trajectory_id": selected.root_trajectory_id,
             "status": selected.status, "cutoff_at": selected.cutoff_at} if selected is not None else None),
         "findings": evidence({"claims": claims, "items": canonical_items, "derivation": derivation,
             "terminal_coverage": coverage} if claims or merged is not None or coverage is not None else None,
@@ -242,7 +244,7 @@ def capture_run_record(
         "completeness": {"artifact_acquisition": "failed" if acquisition_failures else "complete",
             "trajectory": "unproduced" if selected is None else selected.status,
             "terminal_review": "unproduced" if coverage is None else "available"},
-    })
+    }, documents)
 
 
 def capture_scoring(inputs: ScoringInputs, review_text: str | None) -> dict[str, Any]:

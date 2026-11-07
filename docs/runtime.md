@@ -721,6 +721,23 @@ outputs and archive, but optional dataset capture skips it rather than record
 incomplete trajectory evidence. Consumers after freeze read references from the
 frozen copy, where a mismatch is an integrity failure.
 
+Finalization holds one trajectory document at a time. After freeze, one summary
+pass (`summarize_run`) reads each selected document once through its
+identity-checked read and keeps only its metadata without `steps` plus compact
+step facts; timing, evaluation and the archive manifest share that
+summary, and nothing is persisted or recorded live for it. Malformed step content
+fails only the evaluation that reads it. Dataset capture streams each checked
+document through the record store's validation into a staged shard under the
+store lock: the record bytes equal the in-memory canonical record, and an
+oversized record is refused as soon as it crosses the size cap. Live run info and
+`daydream summarize` fold documents into the run-info table one at a time. The
+recorder serializes each document once, straight from the ATIF model to bytes:
+two-space indent, ASCII escapes and absent fields omitted. Float spelling may
+differ from older documents (`0.000015` rather than `1.5e-05`); decoded values are
+identical. Serialization is not streamed, because every prepared document is
+retained or written whole. [The finalization measurement](../scripts/measure_finalization_memory.py)
+reports each stage's peak memory, runtime and bytes read.
+
 Finalization reports local JSONL capture, configured upload, archive/evaluation,
 and public installation separately. Later failure cannot revoke a successful
 capture receipt or imply successful public installation. Valid frozen analysis

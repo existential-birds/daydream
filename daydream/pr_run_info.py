@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -41,6 +42,14 @@ def _unavailable(diagnostic: str) -> RunInfoResult:
     )
 
 
+class _Unavailable(Exception):
+    """A retained trajectory invalidated the live view while it was being folded."""
+
+    def __init__(self, diagnostic: str) -> None:
+        super().__init__(diagnostic)
+        self.diagnostic = diagnostic
+
+
 def _print_omitted_child_warning(exc: TrajectoryDocumentIntegrityError) -> None:
     from daydream.agent import console
     from daydream.ui import print_warning
@@ -52,8 +61,8 @@ def render_live_run_info(source: LiveRunInfoSource) -> RunInfoResult:
     """Acquire validated live trajectories and render them while the recorder is active.
 
     The parent comes from recorder memory; completed children are checked reads
-    of the recorder registry's file references, and a missing or changed child
-    is omitted with a warning rather than blocking the post.
+    of the recorder registry's file references, decoded and folded one at a time,
+    and a missing or changed child is omitted with a warning rather than blocking the post.
     Diagnostics are fixed low-cardinality categories. Exception messages,
     session paths, and trajectory contents never cross this boundary.
     """
@@ -81,30 +90,33 @@ def render_live_run_info(source: LiveRunInfoSource) -> RunInfoResult:
     if parent.session_id != session_id or parent.trajectory_id != root_id:
         return _unavailable("run info: trajectory identity invalid")
 
-    trajectories = [parent]
-    seen_ids = {root_id}
-    for reference in references:
-        try:
-            sibling = Trajectory.model_validate_json(reference.read_bytes())
-        except TrajectoryDocumentIntegrityError as exc:
-            _print_omitted_child_warning(exc)
-            continue
-        except Exception:  # noqa: BLE001 - one corrupt retained value invalidates the view
-            return _unavailable("run info: trajectory document invalid")
-        sibling_id = sibling.trajectory_id
-        if (
-            not sibling_id
-            or sibling.session_id != session_id
-            or sibling_id != reference.trajectory_id
-            or sibling_id in seen_ids
-        ):
-            return _unavailable("run info: trajectory identity invalid")
-        seen_ids.add(sibling_id)
-        trajectories.append(sibling)
+    def trajectories() -> Iterator[Trajectory]:
+        yield parent
+        seen_ids = {root_id}
+        for reference in references:
+            try:
+                sibling = Trajectory.model_validate_json(reference.read_bytes())
+            except TrajectoryDocumentIntegrityError as exc:
+                _print_omitted_child_warning(exc)
+                continue
+            except Exception:  # noqa: BLE001 - one corrupt retained value invalidates the view
+                raise _Unavailable("run info: trajectory document invalid") from None
+            sibling_id = sibling.trajectory_id
+            if (
+                not sibling_id
+                or sibling.session_id != session_id
+                or sibling_id != reference.trajectory_id
+                or sibling_id in seen_ids
+            ):
+                raise _Unavailable("run info: trajectory identity invalid")
+            seen_ids.add(sibling_id)
+            yield sibling
 
     try:
         prices = resolve_prices(load_user_prices())
-        markdown = render_run_info(trajectories, prices=prices)
+        markdown = render_run_info(trajectories(), prices=prices)
+    except _Unavailable as exc:
+        return _unavailable(exc.diagnostic)
     except Exception:  # noqa: BLE001 - pricing/rendering cannot block review posting
         return _unavailable("run info: rendering unavailable")
     if markdown == _FALLBACK_MARKDOWN:

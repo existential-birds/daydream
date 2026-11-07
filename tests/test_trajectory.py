@@ -29,7 +29,6 @@ from daydream.backends import (
 )
 from daydream.cli import _signal_handler
 from daydream.trajectory import (
-    RUN_DOCUMENT_NAME,
     DaydreamPhase,
     Invocation,
     RunWriteSnapshot,
@@ -39,7 +38,6 @@ from daydream.trajectory import (
     flush_active_signal_recorders,
     get_current_recorder,
     partial_document_path,
-    snapshot_trajectories,
 )
 from daydream.ui import get_shutdown_panel, set_shutdown_panel
 from tests.harness.trajectory import (
@@ -205,6 +203,9 @@ async def test_filesystem_writer_failure_is_optional(
     assert len(warnings) == 1 and expected in warnings[0]
 
 
+UNICODE_TEXT = 'caf\u00e9 \U0001f600 \u2028\x00'
+
+
 @pytest.mark.parametrize(('label', 'planned', 'identified'), [
     ('auth=Bearer [REDACTED][REDACTED_CREDENTIAL]', 'auth=Bearer [REDACTED][REDACTED_CREDENTIAL]', True),
     ('{"type":"api_key","key":"opaque-first-canary"}', None, True),
@@ -247,7 +248,8 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
                         {'type': 'api_key', 'key': 'opaque-input-canary'}), ToolResultEvent('private', secret, False),
                         RequestEvent(prompt='Private prompt', config=PiRequestConfig(read_only=True),
                             model_name='sk-request-canary', provider_name='public-provider', reasoning_effort='medium'),
-                        CostEvent(input_tokens=0, output_tokens=None, cached_tokens=0, cost_usd=None), TurnEndEvent()]
+                        CostEvent(input_tokens=0, output_tokens=None, cached_tokens=0, cost_usd=1.5e-05),
+                        TurnEndEvent()]
                     for event in events:
                         invocation.observe(event)
                     async with parent.fork('completed-leaf') as leaf:
@@ -264,7 +266,7 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
                             previous = snapshots[-1]
                             root.write_partial()
                             assert snapshots[-1].cutoff_at == previous.cutoff_at
-                            invocation.observe_user_step(prompt='later context with unchanged graph membership')
+                            invocation.observe_user_step(prompt=UNICODE_TEXT)  # Later context, same membership.
                             root.write_partial()
                             snapshot = snapshots[-1]
                             assert snapshot.cutoff_at != previous.cutoff_at
@@ -278,11 +280,14 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
                                 assert parent.trajectory_id == root.session_id + ':' + label
                                 assert second.trajectory_id == root.session_id + ':' + second_label
                             for document in snapshot.documents:
-                                payload = json.loads(document.read_bytes())
+                                raw = document.read_bytes()
+                                payload = json.loads(raw)
                                 assert atif_validate(payload, validate_images=False)
-                                assert '-canary' not in document.read_bytes().decode()
+                                assert raw.isascii() and '-canary' not in raw.decode()
                                 if document.trajectory_id != leaf.trajectory_id:
-                                    assert payload['extra']['snapshot_at'] == snapshot.cutoff_at
+                                    assert (payload['extra']['snapshot_at'], payload['extra']['partial']) == (
+                                        snapshot.cutoff_at, True)
+                                    assert document.path.read_bytes() == raw  # The standalone .partial write.
                                 for entry in payload.get('extra', {}).get('subtrajectories', []):
                                     if reference := entry.get('sibling_trajectory_ref'):
                                         target = documents[entry['trajectory_id']]
@@ -292,10 +297,11 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
                             assert leaf_reference.read_bytes() == completed_bytes  # Standalone writes exact bytes.
                             partial = json.loads(documents[parent.trajectory_id].read_bytes())
                             assert partial['final_metrics']['total_prompt_tokens'] == 0
-                            assert partial['final_metrics'].get('total_completion_tokens') is None
+                            assert 'total_completion_tokens' not in partial['final_metrics']
+                            assert partial['final_metrics']['total_cost_usd'] == 1.5e-05
+                            assert partial['steps'][-1]['message'] == UNICODE_TEXT
                             assert tuple(document.read_bytes() for document in first.documents) == frozen
                             assert '-canary' not in str(parent.path) + str(second.path)
-                            assert snapshot_trajectories(snapshot)['main']['_source_file'] == RUN_DOCUMENT_NAME
                             with pytest.raises(AttributeError):
                                 setattr(snapshot, 'cutoff_at', 'changed')
                             if dispatch is not None:
@@ -516,7 +522,7 @@ async def test_signal_handler_flushes_siblings_despite_a_writer_failure(
     entered = {name: anyio.Event() for name in ('signal-a', 'signal-b')}
     release = {name: anyio.Event() for name in entered}
     children: dict[str, TrajectoryRecorder] = {}
-    writes = Path.write_text
+    writes = Path.write_bytes
     warnings: list[str] = []
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
@@ -532,7 +538,7 @@ async def test_signal_handler_flushes_siblings_despite_a_writer_failure(
                     raise PermissionError('denied sibling')
                 return writes(path, *args, **kwargs)
 
-            monkeypatch.setattr(Path, 'write_text', write)
+            monkeypatch.setattr(Path, 'write_bytes', write)
             monkeypatch.setattr('daydream.ui.print_warning', lambda _console, message: warnings.append(message))
             try:
                 with pytest.raises(KeyboardInterrupt):

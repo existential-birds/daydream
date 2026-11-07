@@ -7,7 +7,7 @@ Pure rendering errors propagate; standalone filesystem rendering falls back.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -115,19 +115,15 @@ class _RunAgg:
 
 
 def render_run_info(
-    trajectories: Sequence[Trajectory],
+    trajectories: Iterable[Trajectory],
     *,
     prices: dict[str, ModelPrice] | None = None,
 ) -> str:
-    """Render validated trajectories with built-in or explicitly supplied effective prices.
+    """Fold validated trajectories, one at a time, with built-in or explicitly supplied effective prices.
     Empty/no-phase input returns fallback markdown. This value-only path performs no
     user-price I/O and propagates unexpected errors to its orchestration provider.
     """
-    if not trajectories:
-        return _render_fallback()
-    if prices is None:
-        prices = resolve_prices()
-    agg = _aggregate(trajectories, prices)
+    agg = _aggregate(trajectories, resolve_prices() if prices is None else prices)
     if not agg.phases:
         return _render_fallback()
     return _render(agg)
@@ -139,30 +135,25 @@ def render_run_info_block(trajectory_paths: Sequence[Path]) -> str:
     caller owns the outer details shell; output includes the version footer.
     """
     try:
-        trajectories = _load_trajectories(trajectory_paths)
-        if not trajectories:
-            return _render_fallback()
         prices = resolve_prices(load_user_prices())
-        return render_run_info(trajectories, prices=prices)
+        return render_run_info(_load_trajectories(trajectory_paths), prices=prices)
     except Exception:  # noqa: BLE001 - K8/M9: comment must always post
         return _render_fallback()
 
 
-def _load_trajectories(paths: Sequence[Path]) -> list[Trajectory]:
+def _load_trajectories(paths: Sequence[Path]) -> Iterator[Trajectory]:
     """Parse each trajectory independently, skipping failed files so surviving forks still
     contribute.
     """
-    out: list[Trajectory] = []
     for p in paths:
         try:
-            data = json.loads(Path(p).read_text(encoding="utf-8"))
-            out.append(Trajectory.model_validate(data))
+            trajectory = Trajectory.model_validate(json.loads(Path(p).read_text(encoding="utf-8")))
         except Exception:  # noqa: BLE001 - per-file resilience
             continue
-    return out
+        yield trajectory
 
 
-def _aggregate(trajectories: Sequence[Trajectory], prices: dict[str, ModelPrice]) -> _RunAgg:
+def _aggregate(trajectories: Iterable[Trajectory], prices: dict[str, ModelPrice]) -> _RunAgg:
     """Aggregate phase-tagged steps, honoring ATIF root-model fallback. Generic backend
     labels do not enter displayed model sets, but still reach pricing to mark unknown
     costs.

@@ -7,13 +7,14 @@ import json
 import os
 import re
 import stat
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from jsonschema import Draft202012Validator
 from pydantic import JsonValue, TypeAdapter
@@ -166,10 +167,26 @@ _VALIDATORS = {"daydream.run.v1": Draft202012Validator(_RUN_SCHEMA),
                "daydream.snapshot.v2": Draft202012Validator(_SNAPSHOT_V2_SCHEMA)}
 
 
+class _InvalidRecord(ValueError):
+    """A record failed current-format validation; the message stays value-free."""
+
+
+_REJECTED = (_InvalidRecord, RecursionError, OverflowError)
+
+
+@contextmanager
+def _invalid(name: str) -> Iterator[None]:
+    try:
+        yield
+    except (ValueError, TypeError, KeyError, UnicodeError) as error:
+        field = "schema_version" if str(error) == "schema_version" else "record"
+        raise _InvalidRecord(f"invalid {name}: {field}") from None
+
+
 def _parse(raw: Mapping[str, Any] | str | bytes, version: str) -> Record:
     name = "ObservationRecord" if version.startswith("daydream.observation.") else (
         "RunRecord" if version == "daydream.run.v1" else "Snapshot")
-    try:
+    with _invalid(name):
         value = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
         if not isinstance(value, dict) or value.get("schema_version") != version or version not in _VALIDATORS:
             raise ValueError("schema_version")
@@ -197,9 +214,62 @@ def _parse(raw: Mapping[str, Any] | str | bytes, version: str) -> Record:
                 if len({member["identity"] for member in value[kind]}) != len(value[kind]):
                     raise ValueError("duplicate snapshot members")
         return dict(json.loads(canonical_json(value)))
-    except (ValueError, TypeError, KeyError, UnicodeError) as error:
-        field = "schema_version" if str(error) == "schema_version" else "record"
-        raise ValueError(f"invalid {name}: {field}") from None
+
+
+def _run_envelope(
+    raw: Mapping[str, Any] | str | bytes, documents: Iterable[Any] | None = None,
+) -> tuple[Record, Iterable[Any] | None]:
+    """Validate a run record with its trajectory documents split out for streaming.
+
+    ``documents`` supplies them separately for a record whose trajectory value omits
+    them. The returned envelope holds a unique placeholder where they splice back in.
+    """
+    with _invalid("RunRecord"):
+        value = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
+        if not isinstance(value, dict):
+            raise ValueError("schema_version")
+        section = value.get("trajectories")
+        payload = section.get("value") if isinstance(section, dict) else None
+        if isinstance(section, dict) and isinstance(payload, dict):
+            if documents is None and isinstance(payload.get("documents"), list):
+                documents = payload["documents"]
+            elif documents is not None and "documents" in payload:
+                raise ValueError("record")
+            if documents is not None:
+                # Each document is validated as it streams; the schema sees one stand-in object.
+                value["trajectories"] = {**section, "value": {**payload, "documents": [{}]}}
+        elif documents is not None:
+            raise ValueError("record")
+    envelope = _parse(value, "daydream.run.v1")
+    if documents is not None:
+        envelope["trajectories"]["value"]["documents"] = f"documents-{uuid4().hex}"
+    return envelope, documents
+
+
+def _run_text(envelope: Record, documents: Iterable[Any] | None) -> Iterator[str]:
+    """Yield the canonical text of a validated envelope, checking and splicing in each streamed document.
+
+    The text equals ``canonical_json`` of the whole record. Source errors propagate
+    unchanged; validation failures raise the value-free ``invalid RunRecord`` error.
+    """
+    text = canonical_json(envelope)
+    if documents is None:
+        yield text
+        return
+    trajectories = envelope["trajectories"]["value"]
+    prefix, suffix = text.split(json.dumps(trajectories["documents"], ensure_ascii=False))
+    checks = _TrajectoryChecks(envelope["run_id"], trajectories["root_trajectory_id"])
+    yield prefix + "["
+    separator = ""
+    for document in documents:
+        with _invalid("RunRecord"):
+            checks.admit(document)
+            encoded = canonical_json(document)
+        yield separator + encoded
+        separator = ","
+    with _invalid("RunRecord"):
+        checks.finish()
+    yield "]" + suffix
 
 
 def _parse_typed(raw: Mapping[str, Any] | str | bytes, *, versions: tuple[str, ...], name: str) -> Record:
@@ -220,7 +290,8 @@ def _parse_typed(raw: Mapping[str, Any] | str | bytes, *, versions: tuple[str, .
 
 
 def parse_run(raw: Mapping[str, Any] | str | bytes) -> Record:
-    return _parse(raw, "daydream.run.v1")
+    envelope, documents = _run_envelope(raw)
+    return dict(json.loads("".join(_run_text(envelope, documents))))
 
 
 def parse_observation(raw: Mapping[str, Any] | str | bytes) -> Record:
@@ -310,34 +381,7 @@ def _validate_run_evidence(run: Record) -> None:
             section["value"][text_key].encode()).hexdigest():
             raise ValueError(f"{name} digest does not match captured content")
     if run["trajectories"]["status"] == "available":
-        payload = run["trajectories"]["value"]
-        _timestamp(payload["cutoff_at"])
-        documents: dict[str, dict[str, Any]] = {}
-        for document in payload["documents"]:
-            Trajectory.model_validate(document)
-            identity = document.get("trajectory_id")
-            if not isinstance(identity, str) or not identity or identity in documents:
-                raise ValueError("trajectory documents need unique identities")
-            if document.get("session_id") != run["run_id"]:
-                raise ValueError("trajectory session_id differs from run_id")
-            documents[identity] = document
-        if payload["root_trajectory_id"] != run["run_id"] or run["run_id"] not in documents:
-            raise ValueError("trajectory root identity differs from run_id")
-        invocation_ids: dict[str, dict[str, Any]] = {}
-        for identity, document in documents.items():
-            summaries = (document.get("extra") or {}).get("subtrajectories", [])
-            if not isinstance(summaries, list):
-                raise ValueError("trajectory invocation summaries must be an ordered array")
-            for summary in summaries:
-                if not isinstance(summary, dict):
-                    raise ValueError("trajectory invocation summary must be a mapping")
-                if "invocation_id" in summary:
-                    _validate_invocation(summary, documents, invocation_ids)
-                elif "trajectory_id" in summary:
-                    # A registered fork can fail before producing a document.
-                    # Keep its recorded identity without inventing a child.
-                    for invocation in summary.get("invocations", []):
-                        _validate_invocation(invocation, documents, invocation_ids)
+        _timestamp(run["trajectories"]["value"]["cutoff_at"])
     items: set[str] = set()
     if run["findings"]["status"] == "available":
         findings = run["findings"]["value"]
@@ -369,22 +413,59 @@ def _validate_run_evidence(run: Record) -> None:
                 raise ValueError("scoring length differs from retained review text without redaction provenance")
 
 
-def _validate_invocation(
-    invocation: dict[str, Any], documents: dict[str, dict[str, Any]],
-    known: dict[str, dict[str, Any]],
-) -> None:
-    invocation_id = invocation.get("invocation_id")
-    document = documents.get(invocation.get("trajectory_id", ""))
-    if not isinstance(invocation_id, str) or not invocation_id or document is None:
-        raise ValueError("invocation requires identity and an existing document")
-    if invocation_id in known and known[invocation_id] != invocation:
-        raise ValueError("invocation identity has conflicting summaries")
-    step_ids = invocation.get("step_ids")
-    actual = {step["step_id"] for step in document["steps"]}
-    if (not isinstance(step_ids, list) or any(type(step_id) is not int for step_id in step_ids)
-            or len(set(step_ids)) != len(step_ids) or not set(step_ids) <= actual):
-        raise ValueError("invocation step membership references absent or duplicate steps")
-    known[invocation_id] = invocation
+class _TrajectoryChecks:
+    """Per-document trajectory checks that retain only the facts the run-level checks need."""
+
+    def __init__(self, run_id: str, root_trajectory_id: Any) -> None:
+        self.run_id, self.root_trajectory_id = run_id, root_trajectory_id
+        self.step_ids: dict[str, set[Any]] = {}
+        self.summaries: list[Any] = []
+
+    def admit(self, document: Any) -> None:
+        _JSON.validate_python(document)
+        if not isinstance(document, dict):
+            raise ValueError("trajectory document must be an object")
+        Trajectory.model_validate(document)
+        identity = document.get("trajectory_id")
+        if not isinstance(identity, str) or not identity or identity in self.step_ids:
+            raise ValueError("trajectory documents need unique identities")
+        if document.get("session_id") != self.run_id:
+            raise ValueError("trajectory session_id differs from run_id")
+        self.step_ids[identity] = {step["step_id"] for step in document["steps"]}
+        self.summaries.append((document.get("extra") or {}).get("subtrajectories", []))
+
+    def finish(self) -> None:
+        if not self.step_ids:
+            raise ValueError("trajectory documents are empty")
+        if self.root_trajectory_id != self.run_id or self.run_id not in self.step_ids:
+            raise ValueError("trajectory root identity differs from run_id")
+        invocation_ids: dict[str, dict[str, Any]] = {}
+        for summaries in self.summaries:
+            if not isinstance(summaries, list):
+                raise ValueError("trajectory invocation summaries must be an ordered array")
+            for summary in summaries:
+                if not isinstance(summary, dict):
+                    raise ValueError("trajectory invocation summary must be a mapping")
+                if "invocation_id" in summary:
+                    self._validate_invocation(summary, invocation_ids)
+                elif "trajectory_id" in summary:
+                    # A registered fork can fail before producing a document.
+                    # Keep its recorded identity without inventing a child.
+                    for invocation in summary.get("invocations", []):
+                        self._validate_invocation(invocation, invocation_ids)
+
+    def _validate_invocation(self, invocation: dict[str, Any], known: dict[str, dict[str, Any]]) -> None:
+        invocation_id = invocation.get("invocation_id")
+        actual = self.step_ids.get(invocation.get("trajectory_id", ""))
+        if not isinstance(invocation_id, str) or not invocation_id or actual is None:
+            raise ValueError("invocation requires identity and an existing document")
+        if invocation_id in known and known[invocation_id] != invocation:
+            raise ValueError("invocation identity has conflicting summaries")
+        step_ids = invocation.get("step_ids")
+        if (not isinstance(step_ids, list) or any(type(step_id) is not int for step_id in step_ids)
+                or len(set(step_ids)) != len(step_ids) or not set(step_ids) <= actual):
+            raise ValueError("invocation step membership references absent or duplicate steps")
+        known[invocation_id] = invocation
 
 
 def run_record_schema() -> Record:
@@ -435,15 +516,25 @@ class LocalRecordStore:
         self.root = Path(root).expanduser().absolute()
         self.max_record_bytes = max_record_bytes
 
-    def commit_run(self, record: Mapping[str, Any] | str | bytes) -> CommitResult:
-        """Commit one immutable run; an identical retry is a no-op."""
-        parsed = self._parse(record, run=True)
-        return self._commit(parsed, "runs", parsed["run_id"])
+    def commit_run(
+        self, record: Mapping[str, Any] | str | bytes, documents: Iterable[Mapping[str, Any]] | None = None,
+    ) -> CommitResult:
+        """Commit one immutable run; an identical retry is a no-op.
+
+        ``documents`` streams the trajectory documents of a record whose trajectory value
+        omits them. Either way, each document is validated and written as it streams.
+        """
+        self._check_size(record)
+        try:
+            envelope, documents = _run_envelope(record, documents)
+        except _REJECTED:
+            raise StoreError("invalid_or_unknown_record_schema") from None
+        return self._commit_run(envelope, documents)
 
     def append_observation(self, record: Mapping[str, Any] | str | bytes) -> CommitResult:
         """Append history without overwriting prior decisions or source evidence."""
         parsed = self._parse(record, run=False)
-        return self._commit(parsed, "observations", parsed["observation_id"])
+        return self._commit_observation(parsed, parsed["observation_id"])
 
     def read_records(self) -> dict[str, tuple[Record, ...]]:
         """Read all validated current history without applying a temporal cutoff."""
@@ -497,10 +588,13 @@ class LocalRecordStore:
         except (ValueError, UnicodeError, RecursionError):
             raise StoreError("invalid_download_source") from None
 
-    def _parse(self, value: Any, *, run: bool) -> Record:
+    def _check_size(self, value: Any) -> None:
         size = len(value.encode() if isinstance(value, str) else value) if isinstance(value, (str, bytes)) else 0
         if size > self.max_record_bytes:
             raise StoreError("record_too_large")
+
+    def _parse(self, value: Any, *, run: bool) -> Record:
+        self._check_size(value)
         try:
             return parse_run(value) if run else parse_observation(value)
         except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
@@ -535,8 +629,8 @@ class LocalRecordStore:
         except OSError:
             raise StoreError("persistence_failed") from None
 
-    def _atomic_write(self, path: Path, data: bytes) -> None:
-        if len(data) > self.max_record_bytes:
+    def _atomic_write(self, path: Path, data: bytes | Iterable[bytes]) -> None:
+        if isinstance(data, bytes) and len(data) > self.max_record_bytes:
             raise StoreError("record_too_large")
         try:
             atomic_write_bytes(path, data, fsync=True, dir_fsync=True, mode=0o600)
@@ -558,20 +652,51 @@ class LocalRecordStore:
             raise StoreError("malformed_or_interrupted_record")
         return data
 
-    def _commit(self, record: Record, kind: str, identity: str) -> CommitResult:
+    def _commit_run(self, envelope: Record, documents: Iterable[Any] | None) -> CommitResult:
+        """Stream one validated run record into a staged shard, checking its size as it grows."""
+        identity = envelope["run_id"]
+        digest = hashlib.sha256()
+        size = 0
+
+        def record_bytes() -> Iterator[bytes]:
+            nonlocal size
+            for text in _run_text(envelope, documents):
+                chunk = text.encode("utf-8")
+                size += len(chunk)
+                if size >= self.max_record_bytes:  # the trailing newline must still fit
+                    raise StoreError("record_too_large")
+                digest.update(chunk)
+                yield chunk
+            yield b"\n"
+
+        with self._locked() as diagnostics:
+            path = self.root / "runs" / (_sha(identity.encode()) + ".jsonl")
+            try:
+                if not path.exists():
+                    self._atomic_write(path, record_bytes())
+                    return CommitResult(identity, digest.hexdigest(), True, diagnostics)
+                for _chunk in record_bytes():
+                    pass
+            except _REJECTED:
+                raise StoreError("invalid_or_unknown_record_schema") from None
+            previous = self._read_bytes(path)
+            if len(previous) == size + 1 and _sha(previous[:-1]) == digest.hexdigest():
+                return CommitResult(identity, digest.hexdigest(), False, diagnostics)
+            self._parse(previous, run=True)
+            raise StoreError("immutable_identity_conflict")
+
+    def _commit_observation(self, record: Record, identity: str) -> CommitResult:
         data = self._payload(record)
         digest = _sha(data[:-1])
-        shard = _sha(identity.encode()) + ".jsonl"
         with self._locked() as diagnostics:
-            path = self.root / kind / shard
+            path = self.root / "observations" / (_sha(identity.encode()) + ".jsonl")
             if path.exists():
                 previous = self._read_bytes(path)
-                self._parse(previous, run=kind == "runs")
+                self._parse(previous, run=False)
                 if previous == data:
                     return CommitResult(identity, digest, False, diagnostics)
                 raise StoreError("immutable_identity_conflict")
-            if kind == "observations":
-                self._validate_target(record)
+            self._validate_target(record)
             self._atomic_write(path, data)
             return CommitResult(identity, digest, True, diagnostics)
 

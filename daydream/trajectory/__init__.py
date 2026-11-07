@@ -1,8 +1,9 @@
 """Record backend events as ATIF trajectories.
 
 The recorder owns persistence; invocation buffers events; lifecycle brackets
-phases and fan-outs. Layout, frozen timing analysis, and billing each have one
-owner. Credential redaction is shared independently by daydream.redaction.
+phases and fan-outs. Layout, frozen run summaries, frozen timing analysis, and
+billing each have one owner. Credential redaction is shared independently by
+daydream.redaction.
 """
 
 from daydream.redaction import (
@@ -52,10 +53,15 @@ from daydream.trajectory.recorder import (
     flush_active_signal_recorders as flush_active_signal_recorders,
 )
 from daydream.trajectory.redactor import Redactor as Redactor
+from daydream.trajectory.summary import (
+    DocumentSummary as DocumentSummary,
+    RunSummary as RunSummary,
+    StepFacts as StepFacts,
+    summarize_run as summarize_run,
+)
 from daydream.trajectory.timing import (
     TimingSummary as TimingSummary,
     compute_timing_summary as compute_timing_summary,
-    snapshot_trajectories as snapshot_trajectories,
 )
 from daydream.trajectory.types import (
     DaydreamPhase as DaydreamPhase,
