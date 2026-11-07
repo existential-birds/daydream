@@ -1517,11 +1517,10 @@ async def test_phase_test_and_heal_records_each_host_attempt_and_heal_scope(
     )
     assert result.ignored is True and result.attempts[0].identity is not None
     assert result.attempts[0].identity.outcome == "timed-out"
-    # Repair excerpts are bounded and silent output records none; a capped turn names its cap.
-    from daydream.phases.testing import _build_repair_budget_clause, _repair_excerpt
+    # Repair excerpts are bounded and silent output records none.
+    from daydream.phases.testing import _repair_excerpt
     assert _repair_excerpt("   \n") == ()
     assert [len(excerpt) for excerpt in _repair_excerpt("x" * 5000)] == [2000]
-    assert "tool-call budget: 7 calls" in _build_repair_budget_clause(60.0, 7)
 
 
 @pytest.mark.asyncio

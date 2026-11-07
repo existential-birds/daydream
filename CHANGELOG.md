@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking (0.y.z):** Time and tool-call budgets live on one host ledger per
+  budget owner: an absolute deadline plus one charged tool-call count
+  (`daydream.review_budget.BudgetLedger`, which replaces `ReviewInvestigationBudget`).
+  `run_agent` takes `budget=` in place of `wall_budget_s`, `deadline`,
+  `tool_call_budget`, `retry_recovery_allowance_s`, `investigation_budget`,
+  `tool_call_start_floor` and `max_turns`. `HostToolBinding` charges that ledger when
+  Pi admits a tool start and accepts `budget=` (a bare `deadline=` still builds one);
+  `restrict()` now only narrows `allowed_tools`, and `charged_starts` is gone. Backends
+  that declare `supports_budget_preamble`, such as Pi, receive the ledger's absolute
+  `deadline` instead of `wall_budget_s`. Extension API 8 is
+  unchanged because `run_agent` is not exported from `daydream.extensions`; callers
+  migrate by building `BudgetLedger(owner, wall_s=..., limit=..., deadline=...)`
+  ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
+- **Breaking (0.y.z):** Committed review reads its limits from the review profile
+  only: `[pipeline] reviewer_investigation_budget_s`, `review_wall_budget_s` and
+  `reviewer_tool_call_budget`, plus a fixed 120 s finalization reserve.
+  `CommittedReviewRequest.limits` and `HostedReviewPolicy.limits` are removed. With the
+  default profile the committed review window grows from about 600 s to about 2520 s
+  ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
+- **Breaking (0.y.z):** `DAYDREAM_FANOUT_CONCURRENCY` now sets the fan-out limit for
+  every backend. Unset, each backend keeps its default: Pi 10, Claude and Codex 8,
+  Osprey 4 ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
+- Every budget stop records its owner, dimension (time or tool calls), limit, spend,
+  remaining amount at dispatch and reserved calls once, as `daydream.budget.*`
+  attributes on the agent span, and leads the coverage diagnostic with those numbers.
+  Stops refused before dispatch record them in the coverage diagnostic. A Pi read cut
+  short by the deadline now stops as `wall_budget_exceeded` instead of a retryable
+  idle stall that advised widening `DAYDREAM_STREAM_IDLE_TIMEOUT_S`
+  ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
+- The exploration repository survey and Improve's combined recon stop after 50 tool
+  calls instead of 50 model turns. Retry backoff uses fixed delays (base 10 s for Pi
+  and 2 s for other backends, at most 120 s); only `DAYDREAM_PI_RETRY_ATTEMPTS` remains
+  configurable, read by one parser
+  ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
 - Daydream loads a native backend adapter and its SDK only when a run or phase
   selects it. CLI help, configuration and Codex, Pi or Osprey runs no longer
   import the Claude Agent SDK or unused adapters, which cuts startup memory per
@@ -25,6 +59,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **Breaking (0.y.z):** Turn limits: `max_turns` on `run_agent`, the backend protocol,
+  `EffectiveRequestConfig` and every adapter, `MaxTurnsError` and its salvage path.
+  `ReasonCode.MODEL_BUDGET_EXHAUSTION` is removed without a schema version bump because
+  no current path emits it; regenerate any artifact that contains
+  `model_budget_exhaustion` ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
+- **Breaking (0.y.z):** The retry-recovery allowance: `RetryRecoveryBudget`,
+  `DEFAULT_RETRY_RECOVERY_ALLOWANCE_S`, `RetryPolicy.retry_recovery_allowance_s`, the
+  `retry_recovery_allowance_s` config-file key, the `retry_recovery_allowance_exhausted`
+  stop and `retry_recovery_spent_s` in `agent_budget_stop` events and retry summaries.
+  Retries stay bounded by the attempt count, the deadline and the outage circuit
+  ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
+- **Breaking (0.y.z):** Environment variables `DAYDREAM_PI_RETRY_BASE_DELAY_S`,
+  `DAYDREAM_PI_RETRY_MAX_DELAY_S`, `DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S`,
+  `DAYDREAM_PI_FANOUT_CONCURRENCY`, `DAYDREAM_OSPREY_FANOUT_CONCURRENCY`,
+  `DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S`, `DAYDREAM_CODEX_PROCESS_REAP_TIMEOUT_S`,
+  `DAYDREAM_CODEX_CLEANUP_TIMEOUT_S` and `DAYDREAM_REVIEW_PROFILE_CANDIDATE`; their
+  defaults are now fixed ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
+- Dead code no configuration path reached: `RepairJobPolicy.max_cost_usd`, the
+  `setup_timeout_ms` Pi host packet field, `resolve_harbor_profile` and
+  `config.DEFAULT_TOOL_CALL_BUDGET`, which was always `None`
+  ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
 - The `daydream benchmark` command, the `daydream.benchmark` package and the
   `benchmark` extra: both the public ReviewBench lane (`reviewbench harbor-export`
   and `harbor-run`, #1759) and the private Harbor benchmark workspace (`init`,
@@ -33,6 +88,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [code-review-benchmarks](https://github.com/existential-birds/code-review-benchmarks),
   and `daydream benchmark` exits with a pointer there. Repair-job ownership keeps
   its cross-process lock on the same lock file.
+
+### Fixed
+
+- A retry after a retryable provider failure refunds the failed attempt's tool calls,
+  so a stage whose stream drops late can still finish within its original allowance.
+  Before, the retry restarted from scratch on the already spent budget and usually
+  stopped with `tool_call_budget_exceeded`. Elapsed time is never refunded, and
+  compaction never renews a budget
+  ([#1767](https://github.com/existential-birds/daydream/issues/1767)).
 
 ## [0.34.0] - 2026-11-03
 

@@ -268,7 +268,7 @@ async def test_binding_charges_one_ledger_that_only_a_refund_renews() -> None:
     """Admissions charge the invocation ledger and its parent; only a refund renews calls.
 
     The one proof of ledger arithmetic: invalid terminal calls still spend; a later
-    transport (a retry) and a later deadline cannot renew; over-limit starts are
+    transport (a retry) cannot renew; over-limit starts are
     observed, never charged; a refund restores calls but never time. Native event
     observers charge after starts, so admission must charge before a corrected call.
     """
@@ -280,7 +280,7 @@ async def test_binding_charges_one_ledger_that_only_a_refund_renews() -> None:
 
     parent = BudgetLedger("committed", deadline=time.monotonic() + 10, limit=5)
     ledger = parent.carve("committed:discovery", limit=2)
-    binding = HostToolBinding(budget=ledger, deadline=time.monotonic() + 100, accept=accept)
+    binding = HostToolBinding(budget=ledger, accept=accept)
     binding.configure_schema(_SCHEMA)
     deadline = binding.deadline
     assert deadline == parent.deadline

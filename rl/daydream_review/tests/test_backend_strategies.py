@@ -22,14 +22,13 @@ async def test_claude_strategy_is_env_only() -> None:
     strategy = ClaudeStrategy(HOME)
     runtime = FakeRuntime()
 
-    env = strategy.env(ENDPOINT, SECRET, fanout_concurrency=7)
+    env = strategy.env(ENDPOINT, SECRET)
     await strategy.provision(runtime, ENDPOINT, SECRET, MODEL)
 
     # The CLI appends /v1/messages itself, so the base URL must not already carry it.
     assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:54321"
     assert env["ANTHROPIC_API_KEY"] == SECRET
     assert env["CLAUDE_CONFIG_DIR"] == "/rollout/.claude"
-    assert env["DAYDREAM_FANOUT_CONCURRENCY"] == "7"
     assert env["DISABLE_AUTOUPDATER"] == "1" and env["IS_SANDBOX"] == "1"
     assert runtime.writes == {}, "claude needs no provisioning file"
     assert runtime.commands == []
@@ -38,11 +37,11 @@ async def test_codex_strategy_writes_a_responses_provider_block() -> None:
     strategy = CodexStrategy(HOME)
     runtime = FakeRuntime()
 
-    env = strategy.env(ENDPOINT, SECRET, fanout_concurrency=4)
+    env = strategy.env(ENDPOINT, SECRET)
     await strategy.provision(runtime, ENDPOINT, SECRET, MODEL)
 
     # Set CODEX_HOME: moving HOME alone can miss the provider block and bypass interception.
-    assert env == {"CODEX_HOME": "/rollout/.codex", "CODEX_INTERCEPT_KEY": SECRET, "DAYDREAM_FANOUT_CONCURRENCY": "4"}
+    assert env == {"CODEX_HOME": "/rollout/.codex", "CODEX_INTERCEPT_KEY": SECRET}
     written = runtime.writes["/rollout/.codex/config.toml"]
     config = tomllib.loads(written.decode())
     assert config["model_provider"] == INTERCEPT_PROVIDER
@@ -56,14 +55,11 @@ async def test_pi_strategy_installs_a_chat_completions_provider_extension() -> N
     strategy = PiStrategy(HOME)
     runtime = FakeRuntime()
 
-    env = strategy.env(ENDPOINT, SECRET, fanout_concurrency=9)
+    env = strategy.env(ENDPOINT, SECRET)
     await strategy.provision(runtime, ENDPOINT, SECRET, MODEL)
 
     assert env["PI_PROVIDER"] == INTERCEPT_PROVIDER
     assert env["VF_INTERCEPT_API_KEY"] == SECRET
-    # pi has its own fan-out variable; the generic one would be ignored.
-    assert env["DAYDREAM_PI_FANOUT_CONCURRENCY"] == "9"
-    assert "DAYDREAM_FANOUT_CONCURRENCY" not in env
     # The extension reads its own key; built-in PI_API_KEY remapping does not configure it.
     assert "PI_API_KEY" not in env
 
@@ -99,7 +95,7 @@ async def test_every_strategy_honours_a_relocated_home() -> None:
         assert all(path.startswith("/tmp/elsewhere/") for path in runtime.writes), (
             f"{name} wrote outside the configured HOME: {sorted(runtime.writes)}"
         )
-        env = strategy.env(ENDPOINT, SECRET, fanout_concurrency=4)
+        env = strategy.env(ENDPOINT, SECRET)
         assert all("/rollout" not in value for value in env.values()), f"{name} env pins /rollout: {env}"
 
 def test_unknown_backend_rejected() -> None:

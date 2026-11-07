@@ -169,12 +169,8 @@ def test_exception_classification_uses_host_attributes() -> None:
     class ProviderError(RuntimeError):
         reason_code: Any = "provider-specific-error"
 
-    class MaxTurnsError(RuntimeError):
-        pass
-
     error = ProviderError("invalid api key")
     assert reason_for_exception(error) == ReasonCode.BACKEND_FAILURE
     error.reason_code = None
     error.category = "AUTH_CONFIG"  # type: ignore[attr-defined]
     assert reason_for_exception(error) == ReasonCode.AUTHENTICATION_FAILURE
-    assert reason_for_exception(MaxTurnsError()) == ReasonCode.MODEL_BUDGET_EXHAUSTION

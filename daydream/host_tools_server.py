@@ -55,7 +55,6 @@ class PiHostToolServer:
         return {
             "url": self.url, "authorization": "Bearer " + self._secret,
             "tool_name": policy.NATIVE_SUBMIT, "schema": self.binding.schema,
-            "setup_timeout_ms": int(policy._SETUP_TIMEOUT_S * 1000),
             "request_timeout_ms": max(1, int(policy._CALLBACK_TIMEOUT_S * 1000)),
             "max_frame_bytes": policy._MAX_FRAME_BYTES,
             "max_argument_bytes": policy._MAX_ARGUMENT_BYTES,

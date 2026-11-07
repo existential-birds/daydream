@@ -178,8 +178,7 @@ def _submission_schema_error(arguments: Any, schema: dict[str, Any] | None) -> s
 class HostToolBinding:
     """One review capability charging one budget ledger, with attempt-local correlation.
 
-    ``budget`` is the invocation's ledger; a bare ``deadline`` builds one. A
-    ``deadline`` given with a ledger can only narrow it.
+    ``budget`` is the invocation's ledger; a bare ``deadline`` builds one.
     """
 
     def __init__(self, *, deadline: float | None = None, budget: BudgetLedger | None = None,
@@ -188,14 +187,15 @@ class HostToolBinding:
                  reserves: Mapping[str, Any] | None = None,
                  native_requirement: NativeCapacityRequirement | None = None,
                  protected_submission: bool = False) -> None:
-        budget = budget if budget is not None else BudgetLedger("host_tools", start_floor=1)
-        if deadline is not None and type(deadline) in {int, float}:
-            budget.deadline = float(deadline) if budget.deadline is None else min(budget.deadline, deadline)
+        if budget is None:
+            budget = BudgetLedger("host_tools", start_floor=1,
+                                  deadline=deadline if type(deadline) in {int, float} else None)
+        budget.anchor()
         if budget.deadline is None or type(budget.deadline) not in {int, float} or not math.isfinite(budget.deadline):
             raise ValueError("host tools require a finite absolute monotonic deadline")
         if not callable(accept):
             raise TypeError("host tools require a synchronous acceptance callback")
-        self.budget = budget.anchor()
+        self.budget = budget
         # ``calls`` records every admitted native start identity once; ``denied_starts``
         # are the subset refused because they would consume the protected submission start.
         self.calls = self.rejections = self.denied_starts = 0

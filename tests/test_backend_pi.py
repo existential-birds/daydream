@@ -8,15 +8,17 @@ import tempfile
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
 import pytest
 
 from daydream.agent import run_agent
+from daydream.agent_retry import _resolve_retry_settings
 from daydream.atif import validate
 from daydream.backends import (
+    Backend,
     BackendExecutionInput,
     CostEvent,
     DiagnosticEvent,
@@ -739,40 +741,26 @@ async def test_pi_truncated_streams_and_exits_classify_without_misattributing_re
 
 
 def test_pi_retry_policy_is_built_from_ambient_environment(caplog: pytest.LogCaptureFixture) -> None:
-    """One actual constructor admits or diagnoses all retry settings from the same captured environment."""
-    cases: list[tuple[dict[str, str], RetryPolicy, list[str]]] = [
-        (
-            {
-                "DAYDREAM_PI_RETRY_ATTEMPTS": "-1",
-                "DAYDREAM_PI_RETRY_BASE_DELAY_S": "nan",
-                "DAYDREAM_PI_RETRY_MAX_DELAY_S": "not-a-float",
-            },
-            RetryPolicy(20, 10.0, 120.0),
-            [
-                "DAYDREAM_PI_RETRY_ATTEMPTS='-1' is negative; using default 20",
-                "DAYDREAM_PI_RETRY_BASE_DELAY_S='nan' is not finite; using default 10",
-                "DAYDREAM_PI_RETRY_MAX_DELAY_S='not-a-float' is not a valid float; using default 120",
-            ],
-        ),
-        (
-            {"DAYDREAM_PI_RETRY_ATTEMPTS": "", "DAYDREAM_PI_RETRY_BASE_DELAY_S": "-1"},
-            RetryPolicy(20, 10.0, 120.0),
-            [
-                "DAYDREAM_PI_RETRY_ATTEMPTS='' is not a valid integer; using default 20",
-                "DAYDREAM_PI_RETRY_BASE_DELAY_S='-1' is negative; using default 10",
-            ],
-        ),
-    ]
-    for environment, expected, warnings in cases:
+    """One parser reads only the attempt count; delays are fixed and deleted settings are ignored.
+
+    Pi construction and run_agent's fallback for a backend without retry settings
+    both diagnose a malformed count once and keep the default instead of failing.
+    """
+    for raw, attempts, warning in (
+        ("-1", 20, "DAYDREAM_PI_RETRY_ATTEMPTS='-1' is negative; using default 20"),
+        ("not-an-integer", 20, "DAYDREAM_PI_RETRY_ATTEMPTS='not-an-integer' is not a valid integer; using default 20"),
+        ("3", 3, None),
+    ):
         caplog.clear()
+        environment = {"DAYDREAM_PI_RETRY_ATTEMPTS": raw, "DAYDREAM_PI_RETRY_BASE_DELAY_S": "nan",
+                       "DAYDREAM_PI_RETRY_MAX_DELAY_S": "0"}
         with patch.dict(os.environ, environment, clear=True), caplog.at_level("WARNING"):
             backend = PiBackend(model="fixture-model")
+            fallback = _resolve_retry_settings(cast(Backend, SimpleNamespace()))
         assert (backend.retry_attempts, backend.retry_base_delay_s, backend.retry_max_delay_s) == (
-            expected.attempts,
-            expected.base_delay_s,
-            expected.max_delay_s,
-        )
-        assert [record.getMessage() for record in caplog.records] == warnings
+            attempts, 10.0, 120.0)
+        assert fallback == RetryPolicy(attempts, 2.0, 120.0)
+        assert [record.getMessage() for record in caplog.records] == ([warning] * 2 if warning else [])
 
 
 # --- P18 Task 1: generation lifecycle + config at the Pi argv/JSONL seam -----
@@ -834,7 +822,6 @@ async def _pi_request_event_config_matches_exact_argv_case(monkeypatch: pytest.M
     assert terminal.session_id == "pi_ses_simple" and terminal.continuation is None
     assert config.continuation_mode == "fresh"
     assert config.model_mode == "single"
-    assert config.max_turns is None  # accepted by daydream, never passed to Pi
     # System preamble is invocation-level content, never a config value.
     assert request.system_prompt is not None
     if mode != "finalization":
@@ -946,7 +933,7 @@ async def test_native_pi_tool_batch_and_resumed_turn_record_literal_observations
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A native conversation preserves heterogeneous observations and partial-turn telemetry."""
-    monkeypatch.delenv("DAYDREAM_PI_FANOUT_CONCURRENCY", raising=False)
+    monkeypatch.delenv("DAYDREAM_FANOUT_CONCURRENCY", raising=False)
     batch = [
         ("blocks", {"content": [{"type": "text", "text": "line1"}, {"type": "text", "text": "line2"}]}),
         ("content", {"content": "raw"}),

@@ -676,23 +676,3 @@ def resolve_from_runconfig(cfg: object) -> ResolvedProfile:
     return resolve_profile(
         explicit_path=explicit_str, file_config=file_config, repo_root=repo_root
     )
-
-
-def resolve_harbor_profile(
-    *,
-    file_config: object | None = None,
-    candidate_env: str = "DAYDREAM_REVIEW_PROFILE_CANDIDATE",
-    env: Mapping[str, str] | None = None,
-) -> ResolvedProfile:
-    """Accept only the control-plane candidate environment variable or packaged default.
-
-    Ignore normal-run environment, operator defaults and file_config: a benchmarked
-    repository cannot configure its evaluator. Invalid candidates fail closed.
-    None for env reads os.environ; candidate_env names the trusted override.
-    """
-    if env is None:
-        env = os.environ
-    candidate = env.get(candidate_env)
-    if candidate:
-        return _resolved_file(str(candidate), "candidate")
-    return ResolvedProfile(profile=build_default_profile(), source_kind="default")

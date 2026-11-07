@@ -70,7 +70,7 @@ async def _cli_finalization_controls_are_local_to_overlapping_calls_case(
     async def run(finalization: bool) -> list[Any]:
         return [event async for event in backend.execute(
             tmp_path, "finalize" if finalization else "discover",
-            output_schema=_SCHEMA, finalization=finalization, max_turns=1,
+            output_schema=_SCHEMA, finalization=finalization,
         )]
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", side_effect=spawn):
         final_events, normal_events = await asyncio.gather(run(True), run(False))
@@ -82,7 +82,6 @@ async def _cli_finalization_controls_are_local_to_overlapping_calls_case(
     assert backend.reasoning_effort == effort
     assert final.config.finalization is True
     assert normal.config.finalization is False
-    assert final.config.max_turns is None
     if kind == "pi":
         final_cmd = next(args for args in commands if "--no-tools" in args)
         normal_cmd = next(args for args in commands if "--no-tools" not in args)
@@ -192,6 +191,5 @@ async def test_effective_finalization_configuration_reaches_exported_telemetry()
     attrs = dict(span.attributes or {})
     assert not any(key.startswith("daydream.request.config.") for key in attrs)
     assert attrs["gen_ai.request.reasoning_effort"] == "low"
-    assert "daydream.request.config.max_turns" not in attrs
     assert "PRIVATE PROMPT" not in str(attrs)
     assert "PRIVATE CONFIG" not in str(attrs)

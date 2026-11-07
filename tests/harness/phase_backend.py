@@ -55,13 +55,13 @@ class PhaseDispatchBackend:
         return [call["prompt"] for call in self.calls]
 
     async def execute(self, cwd: Any, prompt: str, output_schema: Any=None, continuation: Any=None, agents: Any=None,
-        max_turns: Any=None, read_only: Any=False, persist_session: bool = True,
+        read_only: Any=False, persist_session: bool = True,
     ) -> AsyncGenerator[AgentEvent, None]:
         self.last_prompt = prompt
         self.call_count += 1
         self.calls.append({
                 "cwd": cwd, "prompt": prompt, "output_schema": output_schema, "agents": agents, "model": self.model,
-                "continuation": continuation, "max_turns": max_turns, "read_only": read_only,
+                "continuation": continuation, "read_only": read_only,
                 "persist_session": persist_session,
             }
         )

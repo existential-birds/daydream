@@ -285,6 +285,12 @@ class BudgetLedger:
             self.wall_s = None
         return self
 
+    def begin(self) -> BudgetLedger:
+        """Start one invocation: a reused ledger forgets the previous dispatch and stop."""
+        self.stopped = None
+        self._dispatched = None
+        return self
+
     def carve(self, owner: str, *, limit: int | None = None, deadline: float | None = None,
               reserved: int = 0, start_floor: int | None = None) -> BudgetLedger:
         """Allocate a child within this ledger's remaining calls and deadline."""

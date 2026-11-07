@@ -38,7 +38,7 @@ class BackendStrategy(Protocol):
     required_binaries: tuple[str, ...]
     """Binaries the rollout image must carry, beyond ``daydream`` itself."""
 
-    def env(self, endpoint: str, secret: str, *, fanout_concurrency: int) -> dict[str, str]:
+    def env(self, endpoint: str, secret: str) -> dict[str, str]:
         """Environment the daydream process needs to reach the endpoint."""
         ...
 
@@ -58,7 +58,7 @@ class ClaudeStrategy:
     def __init__(self, home: str = ROLLOUT_HOME) -> None:
         self.home = home
 
-    def env(self, endpoint: str, secret: str, *, fanout_concurrency: int) -> dict[str, str]:
+    def env(self, endpoint: str, secret: str) -> dict[str, str]:
         return {
             # The CLI appends /v1/messages itself, so the suffix must come off.
             "ANTHROPIC_BASE_URL": endpoint.removesuffix("/v1"),
@@ -66,7 +66,6 @@ class ClaudeStrategy:
             "CLAUDE_CONFIG_DIR": f"{self.home}/.claude",
             "DISABLE_AUTOUPDATER": "1",
             "IS_SANDBOX": "1",
-            "DAYDREAM_FANOUT_CONCURRENCY": str(fanout_concurrency),
         }
 
     async def provision(self, runtime: vf.Runtime, endpoint: str, secret: str, model: str) -> None:
@@ -107,11 +106,10 @@ class CodexStrategy:
     def config_path(self) -> str:
         return f"{self.codex_home}/config.toml"
 
-    def env(self, endpoint: str, secret: str, *, fanout_concurrency: int) -> dict[str, str]:
+    def env(self, endpoint: str, secret: str) -> dict[str, str]:
         return {
             "CODEX_HOME": self.codex_home,
             "CODEX_INTERCEPT_KEY": secret,
-            "DAYDREAM_FANOUT_CONCURRENCY": str(fanout_concurrency),
         }
 
     async def provision(self, runtime: vf.Runtime, endpoint: str, secret: str, model: str) -> None:
@@ -151,7 +149,7 @@ def pi_extension_ts(endpoint: str, model: str, *, context_window: int, max_token
 
 
 class PiStrategy:
-    """Install a Chat Completions provider extension and Pi's fan-out environment hint.
+    """Install a Chat Completions provider extension.
 
     Pi refuses subagents, so an exploration pre-scan cannot run under it."""
 
@@ -179,11 +177,10 @@ class PiStrategy:
     def extension_dir(self) -> str:
         return f"{self.home}/.pi/extensions/{INTERCEPT_PROVIDER}"
 
-    def env(self, endpoint: str, secret: str, *, fanout_concurrency: int) -> dict[str, str]:
+    def env(self, endpoint: str, secret: str) -> dict[str, str]:
         return {
             "PI_PROVIDER": INTERCEPT_PROVIDER,
             "VF_INTERCEPT_API_KEY": secret,
-            "DAYDREAM_PI_FANOUT_CONCURRENCY": str(fanout_concurrency),
         }
 
     async def provision(self, runtime: vf.Runtime, endpoint: str, secret: str, model: str) -> None:

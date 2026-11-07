@@ -99,7 +99,6 @@ class RepairJobPolicy:
     job_total_s: float = DEFAULT_REPAIR_JOB_WALL_S
     max_executions: int = DEFAULT_REPAIR_MAX_EXECUTIONS
     reserve_s: float = REPAIR_JOB_RESERVE_S
-    max_cost_usd: float | None = None
 
     def payload(self) -> dict[str, Any]:
         """JSON-serializable form of the captured policy."""
@@ -108,7 +107,6 @@ class RepairJobPolicy:
             "job_total_s": self.job_total_s,
             "max_executions": self.max_executions,
             "reserve_s": self.reserve_s,
-            "max_cost_usd": self.max_cost_usd,
         }
 
     @classmethod
@@ -121,14 +119,12 @@ class RepairJobPolicy:
         job_total_s = _finite_float(raw.get("job_total_s"))
         reserve_s = _finite_float(raw.get("reserve_s"))
         max_executions = _plain_int(raw.get("max_executions"))
-        max_cost_usd = _finite_float(raw.get("max_cost_usd"))
         return cls(
             execution_s=default.execution_s if execution_s is None else max(0.0, execution_s),
             job_total_s=default.job_total_s if job_total_s is None else max(0.0, job_total_s),
             max_executions=default.max_executions if max_executions is None
             else max(0, max_executions),
             reserve_s=default.reserve_s if reserve_s is None else max(0.0, reserve_s),
-            max_cost_usd=None if max_cost_usd is None else max(0.0, max_cost_usd),
         )
 
 
@@ -197,7 +193,7 @@ class RepairJobRecord:
     def _exhaustion_reason(self) -> str | None:
         """Name the bound that stops the job, or ``None`` while it may still run.
 
-        Time first, then count, then cost: a simultaneous breach resolves to one
+        Time first, then count: a simultaneous breach resolves to one
         deterministic reason rather than whichever check happened to run first.
         """
         if self.execution_allowance_s() <= 0.0:
@@ -207,9 +203,6 @@ class RepairJobRecord:
             )
         if self.executions >= self.policy.max_executions:
             return f"execution ceiling reached: {self.executions}/{self.policy.max_executions}"
-        cap = self.policy.max_cost_usd
-        if cap is not None and self.cumulative_cost_usd >= cap:
-            return f"job cost allowance exhausted: ${self.cumulative_cost_usd:.2f} of ${cap:.2f}"
         return None
 
     def grant_allowance(self, extra_s: float, *, reason: str) -> None:

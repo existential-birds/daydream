@@ -141,7 +141,8 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
 
         env: dict[str, str] = {
             **self.config.resolved_env,
-            **strategy.env(endpoint, secret, fanout_concurrency=self.config.fanout_concurrency),
+            **strategy.env(endpoint, secret),
+            "DAYDREAM_FANOUT_CONCURRENCY": str(self.config.fanout_concurrency),
             "HOME": self.config.home,
             "DAYDREAM_ARCHIVE_DIR": self.config.archive_root,
             # Operator-only destinations are cleared, never inherited (see

@@ -670,7 +670,7 @@ async def phase_per_stack_reviews(
                         reason = reason_for_budget(budget_reason)
                     status = "incomplete"
                     if investigation.admitted_stages == 0:
-                        if investigation.failed_invocation and reason is not ReasonCode.MODEL_BUDGET_EXHAUSTION:
+                        if investigation.failed_invocation:
                             status = "failed"
                         elif budget_reason == "pipeline_budget_exceeded":
                             status = "uncovered"

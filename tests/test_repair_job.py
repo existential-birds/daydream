@@ -126,12 +126,11 @@ async def test_phase_blocks_the_repair_when_the_checkpoint_cannot_be_persisted(
 
 
 def test_job_bounds_exhaust_and_operator_grant_is_recorded_apart_from_usage() -> None:
-    """Requirements 42/43: count, cost, and time bounds exhaust (never block); a grant is explicit.
+    """Requirements 42/43: count and time bounds exhaust (never block); a grant is explicit.
 
     Replenishment is auditable and separate from historical usage.
     """
     assert _job(executions=4, policy=_policy(max_executions=4)).next_action() == RepairAction.EXHAUSTED
-    assert _job(cumulative_cost_usd=5.01, policy=_policy(max_cost_usd=5.0)).next_action() == RepairAction.EXHAUSTED
     job = _job(consumed_s=7200.0, executions=2, policy=_policy())
     assert job.next_action() == RepairAction.EXHAUSTED
     with pytest.raises(ValueError, match="reason"):

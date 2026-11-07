@@ -99,6 +99,8 @@ async def test_launch_passes_the_selected_backend_to_the_cli(backend: str, fixtu
     assert "--review" not in argv and "--comment" not in argv
     assert env["DAYDREAM_ARCHIVE_DIR"] == "/rollout/archive"
     assert env["HOME"] == "/rollout"
+    # One fan-out variable reaches every backend.
+    assert env["DAYDREAM_FANOUT_CONCURRENCY"] == "3"
     assert trace.info["daydream_backend"] == backend
     assert trace.info["daydream_exit_code"] == 0
 

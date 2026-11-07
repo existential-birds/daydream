@@ -31,7 +31,6 @@ class HostedReviewPolicy:
     remain live for native refresh. ``environment`` is the complete child process
     environment, including its trusted executable PATH and credential variables.
     Host outputs and private diagnostics use disjoint operator-selected roots.
-    ``profile``'s pipeline policy supplies the review's time and tool-call limits.
     """
 
     agent_dir: Path

@@ -29,7 +29,7 @@ _DEFAULT_TURN: Turn = (ResultEvent(structured_output=None, continuation=None),)
 
 class ScriptedBackend:
     """Record execute arguments in calls and expose ordered prompt, continuation,
-    turn-limit, schema and read-only projections. Count cancellation separately."""
+    schema and read-only projections. Count cancellation separately."""
 
     def __init__(self, script: Sequence[Turn] | None = None, *, events: Turn | None = None,
         responses_by_schema: Sequence[tuple[dict[str, Any] | None, Turn]] | None = None,
@@ -39,7 +39,7 @@ class ScriptedBackend:
 
         Selection order: responder, first equal non-None schema, None-schema fallback,
         then script. Schemas compare by equality without hashing. A responder receives
-        all eight execute arguments and may return a turn, async iterator, None, or an
+        all seven execute arguments and may return a turn, async iterator, None, or an
         awaitable of those. Async iterators close with their consumer. With no script,
         emit a bare ResultEvent. Extra attrs advertise optional Backend capabilities."""
         if script is not None and events is not None:
@@ -78,10 +78,6 @@ class ScriptedBackend:
         return [call["continuation"] for call in self.calls]
 
     @property
-    def max_turns(self) -> list[int | None]:
-        return [call["max_turns"] for call in self.calls]
-
-    @property
     def schemas(self) -> list[dict[str, Any] | None]:
         return [call["output_schema"] for call in self.calls]
 
@@ -93,17 +89,17 @@ class ScriptedBackend:
 
     async def execute(
         self, cwd: Path, prompt: str, output_schema: dict[str, Any] | None = None, continuation: Any = None,
-        agents: Any = None, max_turns: int | None = None, read_only: bool = False, persist_session: bool = True,
+        agents: Any = None, read_only: bool = False, persist_session: bool = True,
     ) -> AsyncGenerator[AgentEvent, None]:
         self.calls.append({"cwd": cwd, "prompt": prompt, "output_schema": output_schema, "continuation": continuation,
-                "agents": agents, "max_turns": max_turns, "read_only": read_only, "persist_session": persist_session,
+                "agents": agents, "read_only": read_only, "persist_session": persist_session,
             }
         )
         index = min(len(self.calls) - 1, len(self._script) - 1)
         responded: Any = None
         if self._responder is not None:
             responded = self._responder(
-                cwd, prompt, output_schema, continuation, agents, max_turns, read_only, persist_session
+                cwd, prompt, output_schema, continuation, agents, read_only, persist_session
             )
             if inspect.isawaitable(responded):
                 responded = await responded

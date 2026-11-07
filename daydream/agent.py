@@ -214,14 +214,19 @@ _STOP_DIMENSIONS: dict[str | None, BudgetDimension] = {
 
 
 def _ledger_stop(exc: Exception, host_tools: HostToolBinding | None) -> str | None:
-    """Map a ledger limit that ended an attempt to its budget stop reason, else None."""
+    """Map a ledger limit that ended an attempt to its budget stop reason, else None.
+
+    A binding failure counts only when it caused this exception before any possible
+    acceptance; every other failure keeps its own handling.
+    """
+    if isinstance(exc, BudgetExhausted):
+        return "wall_budget_exceeded" if exc.dimension == "time" else "tool_call_budget_exceeded"
     fatal = host_tools.fatal_error if host_tools is not None else None
-    if isinstance(exc, BudgetExhausted) and exc.dimension == "time" or (
-            fatal is not None and fatal.code == "deadline_expired"):
+    if fatal is None or not fatal.preacceptance or fatal not in (exc, exc.__cause__):
+        return None
+    if fatal.code == "deadline_expired":
         return "wall_budget_exceeded"
-    if isinstance(exc, BudgetExhausted) or isinstance(fatal, HostToolCallBudgetExceeded):
-        return "tool_call_budget_exceeded"
-    return None
+    return "tool_call_budget_exceeded" if isinstance(fatal, HostToolCallBudgetExceeded) else None
 
 
 class _LogRedactingConsole(Console):
@@ -305,8 +310,7 @@ async def run_agent(
             budget = host_tools.budget
         elif budget is not host_tools.budget:
             raise ValueError("host tools must charge the invocation's budget ledger")
-    budget = (budget if budget is not None else BudgetLedger(phase.value)).anchor()
-    budget.stopped = None  # a reused ledger reports only this invocation's stop
+    budget = (budget if budget is not None else BudgetLedger(phase.value)).anchor().begin()
     investigation = budget.investigation
     if investigation and budget.deadline is None:
         raise ValueError("an investigation ledger requires an absolute deadline")
@@ -407,16 +411,10 @@ async def run_agent(
                 review_stage_scope_id=review_stage_scope_id,
                 host_tools=host_tools,
             )
-        except Exception as exc:
-            from daydream.review_result import ReasonCode, reason_for_exception
-            if (investigation or evidence is None or not evidence.valid(evidence.checkpoint)
-                    or reason_for_exception(exc) != ReasonCode.MODEL_BUDGET_EXHAUSTION):
-                if turn.stopped is not None:
-                    observed.attrs(turn.stopped.attributes())
-                raise
-            # Provider turn exhaustion retains this invocation's strictly validated
-            # checkpoint; it cannot establish completed investigation coverage.
-            result = (evidence.checkpoint, None, "error_max_turns")
+        except Exception:
+            if turn.stopped is not None:
+                observed.attrs(turn.stopped.attributes())
+            raise
         if evidence is not None and review_limits is not None and result[2] in {
             "wall_budget_exceeded", "tool_call_budget_exceeded",
         }:
@@ -526,7 +524,7 @@ async def _run_agent(
             # here — only inv.observe()/inv.observe_user_step() against the recorder.
             recorder = get_current_recorder()
             settings = _resolve_retry_settings(backend)
-            max_attempts = settings.max_attempts
+            max_attempts = settings.attempts
             base_delay = settings.base_delay_s
             max_delay = settings.max_delay_s
 
@@ -728,10 +726,8 @@ async def _run_agent(
                         with wall_scope:
                             async for event in event_stream_scope.events():
                                 # Host tools charge the ledger at admission, before Pi emits the start.
-                                over_limit = False
-                                if (isinstance(event, ToolStartEvent) and host_tools is None
-                                        and (investigation or native_output)):
-                                    over_limit = not budget.charge()
+                                over_limit = (isinstance(event, ToolStartEvent) and host_tools is None
+                                              and not budget.charge())
                                 # The sole telemetry observer runs before UI callbacks,
                                 # supervision and budgets can interrupt event handling.
                                 observed.observe(event)
@@ -797,8 +793,6 @@ async def _run_agent(
                                     if deadline_expired:
                                         budget_reason = "wall_budget_exceeded"
                                         break
-                                    if host_tools is None and not (investigation or native_output):
-                                        over_limit = not budget.charge()
                                     if over_limit:
                                         budget_reason = "tool_call_budget_exceeded"
                                         break

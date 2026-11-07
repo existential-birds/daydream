@@ -4,7 +4,6 @@ Explicit permanent conditions take precedence over transient message hints.
 Exception messages use the shared safe conversion boundary."""
 from __future__ import annotations
 
-import logging
 import math
 import re
 from collections.abc import Mapping, Sequence
@@ -14,8 +13,6 @@ from typing import Any
 
 from daydream.diagnostics import exception_text
 from daydream.json_utils import extract_json
-
-_logger = logging.getLogger(__name__)
 
 
 class FailureClass(StrEnum):

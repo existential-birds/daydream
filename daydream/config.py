@@ -31,10 +31,6 @@ REVIEWER_TOOL_CALL_BUDGET = 120
 # default, above the 7-12 calls per batch observed in #1746.
 REVIEWER_BATCHES_PER_ALLOWANCE = 4
 
-# Use wall time to bound exploratory turns; tool counts can truncate valid
-# investigation. Each call site may still supply an explicit ceiling.
-DEFAULT_TOOL_CALL_BUDGET: int | None = None
-
 # Allow target test suites more wall time than ordinary turns while bounding hangs.
 TEST_WALL_BUDGET_S = 3600.0
 

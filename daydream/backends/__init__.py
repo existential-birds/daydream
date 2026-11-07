@@ -20,7 +20,6 @@ from __future__ import annotations
 import importlib
 import logging
 import math
-import os
 import re
 import sys
 import unicodedata
@@ -108,15 +107,6 @@ def _parsed_nonnegative_float(
     return value
 
 
-def _parsed_positive_float(environment: Mapping[str, str], name: str, default: float) -> float:
-    """Parse a mandatory finite allowance; zero cannot disable lifecycle cleanup."""
-    value = _parsed_nonnegative_float(environment, name, default)
-    if value == 0:
-        logger.warning("%s must be positive; using default %g", name, default)
-        return default
-    return value
-
-
 def _parsed_positive_int(
     environment: Mapping[str, str], name: str, default: int
 ) -> int:
@@ -125,6 +115,20 @@ def _parsed_positive_int(
         logger.warning("%s must be positive; using default %d", name, default)
         return default
     return value
+
+
+def retry_policy_from_environment(environment: Mapping[str, str], *, backend: str) -> RetryPolicy:
+    """Read the operator's retry attempt count; delays are fixed per backend."""
+    return RetryPolicy(
+        attempts=_parsed_nonnegative_int(environment, "DAYDREAM_PI_RETRY_ATTEMPTS", 20),
+        base_delay_s=10.0 if backend == "pi" else 2.0,
+        max_delay_s=120.0,
+    )
+
+
+def fanout_concurrency_from_environment(environment: Mapping[str, str], default: int) -> int:
+    """Read the positive endpoint concurrency hint; warn and use *default* if malformed."""
+    return _parsed_positive_int(environment, "DAYDREAM_FANOUT_CONCURRENCY", default)
 
 
 # Codex 0.162.1 can await two sequential 45s native shutdown fallbacks after
@@ -184,13 +188,6 @@ class BackendExecutionInput:
             raise ValueError(f"unsupported backend for execution input: {backend!r}")
 
         copied = dict(environment)
-        base_delay_default = 10.0 if backend == "pi" else 2.0
-        fanout_name = (
-            "DAYDREAM_PI_FANOUT_CONCURRENCY"
-            if backend == "pi"
-            else "DAYDREAM_FANOUT_CONCURRENCY"
-        )
-        fanout_default = 10 if backend == "pi" else 8
         idle = _parsed_nonnegative_float(
             copied, "DAYDREAM_STREAM_IDLE_TIMEOUT_S",
             DEFAULT_CODEX_STREAM_IDLE_TIMEOUT_S if backend == "codex" else DEFAULT_STREAM_IDLE_TIMEOUT_S
@@ -212,27 +209,13 @@ class BackendExecutionInput:
 
         return cls(
             copied,
-            RetryPolicy(
-                attempts=_parsed_nonnegative_int(
-                    copied, "DAYDREAM_PI_RETRY_ATTEMPTS", 20
-                ),
-                base_delay_s=_parsed_nonnegative_float(
-                    copied, "DAYDREAM_PI_RETRY_BASE_DELAY_S", base_delay_default
-                ),
-                max_delay_s=_parsed_nonnegative_float(
-                    copied, "DAYDREAM_PI_RETRY_MAX_DELAY_S", 120.0
-                ),
-            ),
-            _parsed_positive_int(copied, fanout_name, fanout_default),
+            retry_policy_from_environment(copied, backend=backend),
+            fanout_concurrency_from_environment(copied, 10 if backend == "pi" else 8),
             copied.get("PI_PROVIDER") or None,
             copied.get("PI_THINKING") or None,
             pi_agent_dir,
             None if idle == 0 else idle,
             None if response_idle == 0 else response_idle,
-            _parsed_positive_float(copied, "DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S",
-                                   DEFAULT_CODEX_TERMINAL_DRAIN_TIMEOUT_S),
-            _parsed_positive_float(copied, "DAYDREAM_CODEX_PROCESS_REAP_TIMEOUT_S", 5.0),
-            _parsed_positive_float(copied, "DAYDREAM_CODEX_CLEANUP_TIMEOUT_S", 10.0),
         )
 
     def child_environment(self) -> dict[str, str]:
@@ -491,7 +474,6 @@ class EffectiveRequestConfig:
 
     finalization: bool | None = field(default=None, kw_only=True)
     temperature: float | None = None
-    max_turns: int | None = None
     read_only: bool | None = None
     persist_session: bool | None = None
     continuation_mode: Literal["fresh", "resume", "fork"] | None = None
@@ -959,7 +941,6 @@ class Backend(Protocol):
         output_schema: dict[str, Any] | None = None,
         continuation: ContinuationToken | None = None,
         agents: dict[str, AgentDefinition] | None = None,
-        max_turns: int | None = None,
         read_only: bool = False,
         persist_session: bool = True,
     ) -> AgentEventStream:
@@ -984,11 +965,6 @@ class Backend(Protocol):
         ending one invocation must close the corresponding AgentEventStream.
         """
         ...
-
-
-def resolve_fanout_concurrency(env_var: str, default: int) -> int:
-    """Read a positive endpoint concurrency hint; warn and use the default if malformed."""
-    return _parsed_positive_int(os.environ, env_var, default)
 
 
 def effective_fanout_concurrency(workflow_ceiling: int, backend: object) -> int:
@@ -1127,7 +1103,9 @@ __all__ = [
     "TurnEndEvent",
     "create_backend",
     "effective_fanout_concurrency",
+    "fanout_concurrency_from_environment",
     "is_adapter_instance",
     "load_adapters",
+    "retry_policy_from_environment",
     "unix_ms_to_ns",
 ]

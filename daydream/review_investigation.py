@@ -521,8 +521,7 @@ class ReviewInvestigation:
                             for target in output['targets']]}
                         present_result(agent.console, context.policy, agent_kwargs.get("progress_callback"), display)
                 finally:
-                    if self.reason in {'tool_call_budget_exceeded', 'wall_budget_exceeded', 'pipeline_budget_exceeded',
-                                       'model_budget_exhaustion'}:
+                    if self.reason in {'tool_call_budget_exceeded', 'wall_budget_exceeded', 'pipeline_budget_exceeded'}:
                         self.failure_class = 'quantitative_exhaustion'
                     elif self.assertion_failure_class is not None:
                         self.failure_class = self.assertion_failure_class

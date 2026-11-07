@@ -120,7 +120,7 @@ def _observed_argv(backend: str, argv: list[str]) -> tuple[list[str], dict[str, 
     }[backend].split())
     values = frozenset({"codex": "--model --sandbox --cd --output-schema resume",
         "pi": "--mode --model --provider --thinking --tools --session-id --extension",
-        "osprey": "--model --toolset --temperature --atif-output --max-turns --turn-timeout"
+        "osprey": "--model --toolset --temperature --atif-output --turn-timeout"
                   " --stream-idle-timeout-secs --streaming-timeout-secs --empty-completion-threshold"
                   " --driver-max-retries --approval --allowed-root --compress-min-bytes"
                   " --tool-result-cap --tool-result-head --tool-result-tail --tool-result-max-lines"

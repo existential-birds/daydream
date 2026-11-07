@@ -17,11 +17,8 @@ from daydream.backends import (
     TextEvent,
     ToolStartEvent,
 )
-from daydream.backends.claude import MaxTurnsError
 from daydream.deep.records import record_issues_or_empty, record_uid, stack_name_from_uid
 from tests.harness.review_result import merge_result
-
-PARTIAL_FIX_MARKER = "// PARTIAL BROKEN EDIT -- max turns exhausted mid-fix\n"
 
 
 def review_stage_state(prompt: str) -> dict[str, Any] | None:
@@ -141,17 +138,6 @@ class StubBackend:
         # Restrict retry failures to this basename; sibling files succeed at once.
         self.fix_retryable_file: str | None = None
         self._fix_retry_counts: dict[str, int] = {}
-        # Write a broken partial edit, then raise MaxTurnsError. The orchestrator
-        # must restore the file and save a recovery patch.
-        self.fix_partial_then_maxturns: str | None = None
-        # Required fix turns; a lower max_turns raises before applying the edit.
-        self.fix_turns_needed: int = 0
-        # Stray untracked path created by the failing group, outside its key file;
-        # it survives tree protection and must appear in fix_leftover_untracked.
-        self.fix_orphan_file: str | None = None
-        # Existing untracked user file damaged by the same failed turn.  The
-        # run-wide terminal guard must restore its exact pre-run bytes.
-        self.fix_damage_protected_file: str | None = None
         # Repo-relative generated path created by a successful fix turn.
         self.fix_new_generated: str | None = None
         # Repo-relative historical generated path modified by a test-healing
@@ -327,10 +313,10 @@ class StubBackend:
 
     async def execute(
         self, cwd: Path, prompt: str, output_schema: Any = None, continuation: Any = None, agents: Any = None,
-        max_turns: Any = None, read_only: bool = False, persist_session: bool = True,
+        read_only: bool = False, persist_session: bool = True,
     ) -> AsyncIterator[AgentEvent]:
         call = {"cwd": cwd, "prompt": prompt, "output_schema": output_schema, "agents": agents, "model": self.model,
-            "continuation": continuation, "max_turns": max_turns, "read_only": read_only,
+            "continuation": continuation, "read_only": read_only,
             "persist_session": persist_session,
         }
         self.calls.append(call)
@@ -647,22 +633,8 @@ class StubBackend:
                 and fixed_name == self.fail_batched_fix_file
             ):
                 raise RuntimeError(f"stub: batched fix failure for {fixed_name}")
-            if self.fix_partial_then_maxturns is not None and fixed_name == self.fix_partial_then_maxturns:
-                edit_target = Path(fixed_file) if Path(fixed_file).is_absolute() else (cwd / fixed_file)
-                edit_target.write_text(PARTIAL_FIX_MARKER)
-                if self.fix_orphan_file is not None:
-                    orphan = cwd / self.fix_orphan_file
-                    orphan.parent.mkdir(parents=True, exist_ok=True)
-                    orphan.write_text("// stray file from a dead fix agent\n")
-                if self.fix_damage_protected_file is not None:
-                    (cwd / self.fix_damage_protected_file).write_bytes(b"damaged by failed fixer")
-                raise MaxTurnsError(f"stub: max turns exhausted mid-fix for {fixed_name}")
             if self.fix_fail_file is not None and fixed_name == self.fix_fail_file:
                 raise RuntimeError(f"stub fix failure for {fixed_name}")
-            if max_turns is not None and self.fix_turns_needed > max_turns:
-                raise MaxTurnsError(
-                    f"stub: fix for {fixed_name} needs {self.fix_turns_needed} turns, capped at {max_turns}"
-                )
             if self.deferred_write_pairs is not None:
                 for index, path in enumerate(self.deferred_write_pairs, start=1):
                     edit_target = Path(path) if Path(path).is_absolute() else cwd / path

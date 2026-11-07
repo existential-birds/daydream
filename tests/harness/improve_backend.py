@@ -249,7 +249,7 @@ class ImproveStubBackend:
     def _record_call(self, cwd: Path, prompt: str, marker: str, **turn_kwargs: Any) -> None:
         """Append one per-turn call record, stamped with the model observed here."""
         self.calls.append({"cwd": cwd, "prompt": prompt, "output_schema": turn_kwargs.get("output_schema"),
-                "agents": turn_kwargs.get("agents"), "max_turns": turn_kwargs.get("max_turns"),
+                "agents": turn_kwargs.get("agents"),
                 "read_only": turn_kwargs.get("read_only", False),
                 "persist_session": turn_kwargs.get("persist_session", True), "marker": marker, "model": self.model,
                 "reasoning_effort": self.reasoning_effort,
@@ -258,10 +258,10 @@ class ImproveStubBackend:
 
     async def execute(
         self, cwd: Path, prompt: str, output_schema: Any = None, continuation: Any = None, agents: Any = None,
-        max_turns: Any = None, read_only: bool = False, persist_session: bool = True,
+        read_only: bool = False, persist_session: bool = True,
     ) -> AsyncIterator[AgentEvent]:
         turn_kwargs: dict[str, Any] = {
-            "output_schema": output_schema, "continuation": continuation, "agents": agents, "max_turns": max_turns,
+            "output_schema": output_schema, "continuation": continuation, "agents": agents,
             "read_only": read_only, "persist_session": persist_session,
         }
         prelude = await self._pre_execute(cwd, prompt, **turn_kwargs)
@@ -275,7 +275,7 @@ class ImproveStubBackend:
 
     async def _execute_body(
         self, cwd: Path, prompt: str, output_schema: Any = None, continuation: Any = None, agents: Any = None,
-        max_turns: Any = None, read_only: bool = False, persist_session: bool = True,
+        read_only: bool = False, persist_session: bool = True,
     ) -> AsyncIterator[AgentEvent]:
         marker = "other"
         category = None
@@ -291,7 +291,7 @@ class ImproveStubBackend:
         elif _is_plan_writer_prompt(prompt, output_schema):
             marker = "plan-writer"
         self._record_call(
-            cwd, prompt, marker, output_schema=output_schema, agents=agents, max_turns=max_turns, read_only=read_only,
+            cwd, prompt, marker, output_schema=output_schema, agents=agents, read_only=read_only,
             persist_session=persist_session,
         )
         if category in self.fail_categories:
@@ -638,10 +638,10 @@ class RendezvousImproveBackend(ImproveStubBackend):
 
     async def execute(
         self, cwd: Path, prompt: str, output_schema: Any = None, continuation: Any = None, agents: Any = None,
-        max_turns: Any = None, read_only: bool = False, persist_session: bool = True,
+        read_only: bool = False, persist_session: bool = True,
     ) -> AsyncIterator[AgentEvent]:
         turn_kwargs = {
-            "output_schema": output_schema, "continuation": continuation, "agents": agents, "max_turns": max_turns,
+            "output_schema": output_schema, "continuation": continuation, "agents": agents,
             "read_only": read_only, "persist_session": persist_session,
         }
         phase = ("audit" if "read-only improve audit specialist" in prompt

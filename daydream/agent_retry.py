@@ -5,7 +5,7 @@ import os
 import random
 from dataclasses import dataclass
 
-from daydream.backends import Backend
+from daydream.backends import Backend, RetryPolicy, retry_policy_from_environment
 from daydream.diagnostics import exception_text
 from daydream.retry_policy import parse_message_retry_hint
 
@@ -17,28 +17,11 @@ def _sample_retry_delay(cap: float) -> float:
     return random.uniform(0.0, cap)
 
 
-def _retry_delay_from_env(name: str, default: float) -> float:
-    """Read one non-negative finite delay knob from the environment, else *default*."""
-    try:
-        value = float(os.environ.get(name, str(default)))
-    except ValueError:
-        return default
-    return value if math.isfinite(value) and value >= 0 else default
-
-
-@dataclass(frozen=True)
-class _ResolvedRetrySettings:
-    """One invocation's fully-resolved retry ladder settings."""
-
-    max_attempts: int
-    base_delay_s: float
-    max_delay_s: float
-
-
-def _resolve_retry_settings(backend: Backend) -> _ResolvedRetrySettings:
+def _resolve_retry_settings(backend: Backend) -> RetryPolicy:
     """Resolve limits before dispatch; inverted delays raise ValueError.
 
-    A declared policy suppresses ambient reads.
+    A declared policy suppresses ambient reads; otherwise backend attributes win
+    over the one ambient retry parser.
     """
     retry_policy = getattr(backend, "retry_policy", None)
     if retry_policy is not None:
@@ -46,23 +29,14 @@ def _resolve_retry_settings(backend: Backend) -> _ResolvedRetrySettings:
         base_delay = retry_policy.base_delay_s
         max_delay = retry_policy.max_delay_s
     else:
-        try:
-            default_attempts = int(os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS", "20"))
-        except ValueError:
-            default_attempts = 20
-        if default_attempts < 0:
-            default_attempts = 20
-        max_attempts = getattr(backend, "retry_attempts", default_attempts)
-        base_delay = getattr(
-            backend,
-            "retry_base_delay_s",
-            _retry_delay_from_env("DAYDREAM_PI_RETRY_BASE_DELAY_S", 2.0),
-        )
-        max_delay = getattr(
-            backend,
-            "retry_max_delay_s",
-            _retry_delay_from_env("DAYDREAM_PI_RETRY_MAX_DELAY_S", 120.0),
-        )
+        declared = [getattr(backend, name, None) for name in ("retry_attempts", "retry_base_delay_s",
+                                                               "retry_max_delay_s")]
+        if None in declared:
+            # Only settings the backend leaves unset come from the one ambient parser.
+            ambient = retry_policy_from_environment(os.environ, backend="default")
+            defaults = (ambient.attempts, ambient.base_delay_s, ambient.max_delay_s)
+            declared = [default if value is None else value for value, default in zip(declared, defaults, strict=True)]
+        max_attempts, base_delay, max_delay = declared
     if max_attempts < 0:
         raise ValueError("retry attempts must be >= 0")
     for label, value in (("base", base_delay), ("max", max_delay)):
@@ -77,11 +51,7 @@ def _resolve_retry_settings(backend: Backend) -> _ResolvedRetrySettings:
             f"retry_base_delay_s ({base_delay}) must not exceed "
             f"retry_max_delay_s ({max_delay})"
         )
-    return _ResolvedRetrySettings(
-        max_attempts=max_attempts,
-        base_delay_s=base_delay,
-        max_delay_s=max_delay,
-    )
+    return RetryPolicy(attempts=max_attempts, base_delay_s=base_delay, max_delay_s=max_delay)
 
 
 def _plan_retry_delay(
@@ -137,16 +107,15 @@ class _RetryTelemetry:
             self.retry_attempts += 1
         self.attempt_started_at = now
 
-    def charge_attempt(self, now: float, *, cleanup_elapsed_s: float = 0.0) -> float:
-        """Close an attempt, excluding bounded cleanup time; return zero when none is in flight."""
+    def charge_attempt(self, now: float, *, cleanup_elapsed_s: float = 0.0) -> None:
+        """Close an in-flight attempt, excluding bounded cleanup time."""
         if self.attempt_started_at is None:
-            return 0.0
+            return
         delta = now - self.attempt_started_at - cleanup_elapsed_s
         self.backend_s += delta
         if self.attempt_is_retry:
             self.retry_backend_s += delta
         self.attempt_started_at = None
-        return delta
 
     def pending_s(self, now: float) -> float:
         """The in-flight attempt's elapsed time, or ``0.0`` when none is running."""

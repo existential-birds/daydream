@@ -94,7 +94,7 @@ from daydream.workspace import WorkContext, open_workspace
 class CommittedReviewRequest:
     """Select pinned committed or final working source; no edit or external posting authority.
 
-    Time and tool-call limits come from the resolved profile's pipeline policy.
+    Limits: docs/runtime.md#committed-review-requestresult.
     """
 
     source: Path
@@ -175,10 +175,9 @@ class Review:
     """
 
     def __init__(
-        self, inputs: StageInputFactory, run_id: str, *, deadline: float,
-        allowed_tools: frozenset[str] | None = None,
+        self, inputs: StageInputFactory, run_id: str, *, allowed_tools: frozenset[str] | None = None,
     ) -> None:
-        self.inputs, self.run_id, self.deadline = inputs, run_id, deadline
+        self.inputs, self.run_id = inputs, run_id
         self._allowed_tools = allowed_tools
         self.assignments = deepcopy([part.assignment for part in inputs.parts])
         self._index = {part["target_id"]: index for index, part in enumerate(self.assignments)}
@@ -459,13 +458,6 @@ class Review:
             self._claim_owner.update(dict.fromkeys(work.claims.items(), work_id))
         return identifiers
 
-    def assignment(
-        self, kind: str, *, budget: BudgetLedger | None = None, reserves: dict[str, Any] | None = None,
-    ) -> tuple[HostToolBinding, dict[str, Any]]:
-        """Plan one work item for every available responsibility of kind and open it."""
-        (work_id,) = self.plan(kind)
-        return self.open(work_id, budget=budget, reserves=reserves)
-
     # Progressive admission ------------------------------------------------------------
 
     def _receipt(self, work: _Work, final: bool, decisions: int, touched: list[dict[str, Any]]) -> dict[str, Any]:
@@ -480,12 +472,11 @@ class Review:
         }
 
     def open(
-        self, work_id: str, *, budget: BudgetLedger | None = None, reserves: dict[str, Any] | None = None,
+        self, work_id: str, *, budget: BudgetLedger, reserves: dict[str, Any] | None = None,
     ) -> tuple[HostToolBinding, dict[str, Any]]:
         """Open the single native capability for one planned work item, with charged host navigation.
 
-        The binding charges ``budget``, narrowed to the review deadline; without one it
-        charges a fresh ledger bounded only by that deadline.
+        The binding charges the dispatch's ``budget``, which the schedule carves within the review deadline.
         """
         work = self.work[work_id]
         if self._sealed or work.binding is not None or work.superseded_by:
@@ -559,8 +550,7 @@ class Review:
                     # Only identities this submission touches are rechecked; sibling updates
                     # elsewhere never invalidate it.
                     binding.ensure_open()
-                    if self._sealed or work.binding is not binding or work.superseded_by \
-                            or clock.monotonic() >= self.deadline:
+                    if self._sealed or work.binding is not binding or work.superseded_by:
                         raise HostToolFatal("Review authority has closed", code="authority_closed")
                     if kind == "challenge" and set(verdicts) & judged:
                         raise HostToolRejected("verdicts: use each assigned uid/current revision at most once")
@@ -643,7 +633,7 @@ class Review:
                 raise HostToolFatal('Captured review input is unavailable', code='input_unavailable') from exc
 
         binding = HostToolBinding(
-            deadline=self.deadline, budget=budget, accept=lambda value: admit(value, final=True),
+            budget=budget, accept=lambda value: admit(value, final=True),
             allowed_tools=self._allowed_tools, reserves=reserves, protected_submission=True,
             host_tools={LOOKUP_TOOL: HostTool(LOOKUP_SCHEMA, self.lookup),
                         ADMIT_TOOL: HostTool(schema, lambda value: admit(value, final=False), mutating=True)},
@@ -902,10 +892,12 @@ async def _run_committed_review(
     investigation_s, wall_s = pipeline.reviewer_investigation_budget_s, pipeline.review_wall_budget_s
     tool_calls = pipeline.reviewer_tool_call_budget
     if (
-        any(type(t) not in {int, float} or not math.isfinite(t) or t <= 0 for t in (investigation_s, wall_s))
+        any(type(t) not in {int, float} or not math.isfinite(t) for t in (investigation_s, wall_s))
         or type(tool_calls) is not int
     ):
-        raise ValueError("committed review requires finite positive profile time and integer tool allowances")
+        raise ValueError("committed review requires finite profile time and integer tool allowances")
+    if min(investigation_s + _FINALIZATION_S, wall_s) <= _FINALIZATION_S:
+        raise ValueError("profile investigation and wall allowances cannot preserve finalization capacity")
     if tool_calls < 2:
         raise ValueError("pipeline.reviewer_tool_call_budget must preserve both discovery and challenge "
                          "submission capacity")
@@ -1041,13 +1033,10 @@ async def _run_committed_review(
             artifact_session=session, allow_standalone=False, read_only=True,
         ))
         finish = started + min(investigation_s + _FINALIZATION_S, wall_s)
-        if finish - started <= _FINALIZATION_S:
-            raise ValueError("profile wall allowance cannot preserve finalization capacity")
-        review_deadline = finish - _FINALIZATION_S
         review = await anyio.to_thread.run_sync(lambda: Review(
-            inputs, run_id, deadline=review_deadline, allowed_tools=None if hosted is None else HOSTED_PI_TOOLS,
+            inputs, run_id, allowed_tools=None if hosted is None else HOSTED_PI_TOOLS,
         ))
-        schedule = _Schedule(review, backends, tool_calls, settings, started=started, deadline=review_deadline,
+        schedule = _Schedule(review, backends, tool_calls, settings, started=started, deadline=finish - _FINALIZATION_S,
                              adaptive=request.assignment_policy == "adaptive")
         recorder = _open_recorder(
             config=config, target_dir=captured_root, work=work,
@@ -1169,7 +1158,7 @@ class _Schedule:
                  settings: dict[str, Any], *, started: float, deadline: float, adaptive: bool) -> None:
         self.review, self.backends, self.settings = review, backends, settings
         self.ledger = BudgetLedger("committed", deadline=deadline, limit=tool_calls, investigation=True,
-                                   start_floor=1).anchor()
+                                   start_floor=1)
         window = deadline - started
         investigation_calls = tool_calls // 2
         self.batches = [tuple(part["target_id"] for part in batch) for batch in review.inputs.assignment_batches]

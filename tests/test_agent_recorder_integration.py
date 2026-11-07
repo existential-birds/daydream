@@ -22,7 +22,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
-from daydream.backends.claude import MaxTurnsError
+from daydream.backends.claude import ClaudeAgentError
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
@@ -91,27 +91,19 @@ async def test_calling_run_agent_without_phase_raises_typeerror(tmp_path: Path) 
     assert inspect.signature(run_agent).parameters["phase"].kind is inspect.Parameter.KEYWORD_ONLY
 
 
-def _max_turns_backend(pre_events: list[AgentEvent]) -> ScriptedBackend:
-    """Replay partial output then MaxTurnsError, matching a mid-turn SDK limit failure."""
-    return ScriptedBackend(
-        events=[*pre_events, MaxTurnsError("Claude agent run failed: error_max_turns", subtype="error_max_turns")],
-        model="mock-model",
-    )
-
-
-async def test_max_turns_error_is_recorded_in_trajectory(tmp_path: Path) -> None:
-    """Propagate MaxTurnsError and persist its error marker/subtype on the in-flight step."""
+async def test_mid_turn_backend_error_is_recorded_in_trajectory(tmp_path: Path) -> None:
+    """Propagate an SDK error result and persist its error marker/type on the in-flight step."""
     recorder = make_recorder(tmp_path)
     target_path = recorder.path
-    backend = _max_turns_backend([
+    backend = ScriptedBackend(events=[
         TextEvent(text="applying fix"), ToolStartEvent(id="t1", name="Edit", input={"path": "a.py"}),
         ToolResultEvent(id="t1", output="ok", is_error=False),
-    ])
-    # (a) typed exception propagates through the production entrypoint.
-    with pytest.raises(MaxTurnsError) as excinfo:
+        ClaudeAgentError("Claude agent run failed: error_during_execution"),
+    ], model="mock-model")
+    # (a) the adapter's exception propagates through the production entrypoint.
+    with pytest.raises(ClaudeAgentError):
         async with recorder:
             await run_agent(backend, tmp_path, "fix this", phase=DaydreamPhase.FIX)
-    assert excinfo.value.subtype == "error_max_turns"
     # (b) the emitted trajectory carries the error marker + subtype.
     assert target_path.exists()
     traj = json.loads(target_path.read_text())
@@ -119,7 +111,7 @@ async def test_max_turns_error_is_recorded_in_trajectory(tmp_path: Path) -> None
     errored = [s for s in traj["steps"] if s.get("extra", {}).get("error_subtype")]
     assert len(errored) == 1
     assert errored[0]["extra"]["error"] is True
-    assert errored[0]["extra"]["error_subtype"] == "error_max_turns"
+    assert errored[0]["extra"]["error_subtype"] == "ClaudeAgentError"
     # The marker lands on the in-flight Step that already held the turn's
     # output — not a synthetic empty step.
     assert errored[0]["message"] == "applying fix"

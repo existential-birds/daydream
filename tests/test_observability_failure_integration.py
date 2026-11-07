@@ -87,8 +87,6 @@ class _ActiveToolBackend:
     model = "active-tool-model"
 
     def __init__(self) -> None:
-        self.active = anyio.Event()
-        self.cancelled = False
         self.finished = False
 
     async def execute(self, _cwd: Path, prompt: str, *_args: Any, **_kwargs: Any) -> AsyncGenerator[AgentEvent]:
@@ -97,13 +95,12 @@ class _ActiveToolBackend:
             yield TextEvent("partial response before interruption")
             yield CostEvent(0.005, 5, 1)
             yield ToolStartEvent("open-tool", "Write", {"path": "protected.py"})
-            self.active.set()
             await anyio.sleep_forever()
         finally:
             self.finished = True
 
     async def cancel(self) -> None:
-        self.cancelled = True
+        """Backend-wide shutdown is not part of this scenario."""
 
 async def test_runner_cleanup_outage_preserves_captured_root_and_review_output(
     ext_dir: ExtDir, feature_branch_repo: Path,

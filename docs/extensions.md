@@ -141,16 +141,17 @@ Budgets/reserves remain host policy; feedback is system instruction, never a
 synthetic user turn. Read
 [output selection](../daydream/agent_output.py) and the relevant backend.
 Configured reviewer time and the shared pipeline deadline cover preparation,
-every stage, and retries. Explicit caller wall or absolute deadlines can tighten
-that same cumulative bound.
+every stage, and retries on one [budget ledger](runtime.md#budget-ledger). Explicit
+caller wall or absolute deadlines can tighten that same bound.
 
 For staged stack and structural reviewers, `--review-profile` accepts
 `[pipeline].reviewer_tool_call_budget`, a nonnegative integer base allowance
 independent of those time limits. Each reviewer scales its time and calls once,
 together, by the larger (never the product) of the diff-size tier and its
 first-pass batch count over `REVIEWER_BATCHES_PER_ALLOWANCE`, rounded up;
-Structure runs one integration stage and counts as one. The host counts every
-observed tool start across stages and retries, and retains incomplete coverage on
+Structure runs one integration stage and counts as one. The host charges every
+tool start across stages, refunds a provider-retried attempt's starts under the
+[renewal rule](runtime.md#budget-ledger), and retains incomplete coverage on
 exhaustion; zero stops review dispatch. Changing the base allowance changes
 profile identity and invalidates incompatible cached reviews. The default and
 batch ratio are defined in [configuration](../daydream/config.py).
@@ -175,8 +176,9 @@ and pointered issues. Legacy Markdown-only output blocks plan publication.
 
 ## Invocation-scoped Pi host tools
 
-Pi review stages bind `HostToolBinding(deadline=..., accept=...)` through
-`run_agent(host_tools=..., output_schema=..., result_schema=...)`. The synchronous
+Pi review stages bind `HostToolBinding(budget=ledger, accept=...)` through
+`run_agent(budget=ledger, host_tools=..., output_schema=..., result_schema=...)`; a bare
+`HostToolBinding(deadline=...)` builds its own ledger, which `run_agent` then uses. The synchronous
 callback prepares and atomically admits one complete canonical stage or raises
 `HostToolRejected` for a correctable preacceptance submission fault. It raises
 `HostToolFatal` for a confirmed host/input/lifecycle failure, preserving its cause;
@@ -187,8 +189,9 @@ deadline belong to the live assignment, including preacceptance retries. Each
 attempt owns its endpoint and credentials. `close_attempt()` revokes that endpoint;
 `close_authority()` permanently prevents another session. Consumers must close
 assignment authority when cancelling, finishing or superseding its work. Neither
-method discards an accepted result. Shared investigation budgets retain retry
-recovery spending across conversations as well as observed native tool starts.
+method discards an accepted result. The binding charges the invocation's
+[budget ledger](runtime.md#budget-ledger) at admission; a provider retry regains
+the failed attempt's starts under the renewal rule.
 `protected_submission=True` reserves the last start for the terminal submission
 ([limits](runtime.md#pi-host-tool-lifetime-and-limits)).
 
