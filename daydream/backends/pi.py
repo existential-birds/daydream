@@ -64,6 +64,7 @@ from daydream.backends import (
 from daydream.backends._subprocess import (
     DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S,
     DEFAULT_STREAM_IDLE_TIMEOUT_S,
+    StreamStalledError,
     stream_idle_timeout_s,
 )
 from daydream.backends._transport import (
@@ -78,6 +79,7 @@ from daydream.config import DEFAULT_PI_MODEL, DEFAULT_TOOL_CALL_BUDGET, DEFAULT_
 from daydream.host_tools import HostToolBinding
 from daydream.redaction import _PEM_HEADER, _PEM_KEY_REDACTED_MARKER, redact_structured_text
 from daydream.retry_policy import classify_failure, parse_message_retry_hint
+from daydream.review_budget import BudgetExhausted
 
 # Mirror Codex's generous stdout cap so large JSONL events (big file reads,
 # patch payloads) do not trip asyncio's "chunk is longer than limit" guard.
@@ -901,8 +903,9 @@ class PiBackend:
         Pi cannot enforce max_turns: callers must enforce an absolute deadline.
         The absolute ``deadline`` (else the host-tool ledger's) and tool_call_budget
         state the allowances the caller enforces; the preamble renders the remaining
-        seconds. Stdout silence raises retryable StreamStalledError; run_agent starts
-        a fresh subprocess for each retry.
+        seconds. A read cut short by that deadline raises BudgetExhausted. Stdout
+        silence raises retryable StreamStalledError; run_agent starts a fresh
+        subprocess for each retry.
         """
         if self._execution_input is not None:
             response_idle_timeout_s = self._execution_input.pi_response_idle_timeout_s
@@ -1124,6 +1127,8 @@ class PiBackend:
         host_failure_generation_id: str | None = None
         terminal_total_emitted = False
         host_server = None
+        # Whether the ledger deadline, not a liveness window, bounds the current read.
+        deadline_bound = False
 
         transport: CliTransport | None = None
 
@@ -1395,14 +1400,16 @@ class PiBackend:
             setup_deadline = clock.monotonic() + host_policy._SETUP_TIMEOUT_S + 2 if host_tools else None
 
             def line_timeout() -> float | None:
-                ordinary = tool_idle_timeout_s if active_tool_calls > 0 else response_idle_timeout_s
-                if host_tools is None:
-                    return ordinary
-                bound = host_tools.deadline
+                # Idle and setup windows are liveness checks; the ledger deadline is a budget stop.
+                nonlocal deadline_bound
+                now = clock.monotonic()
+                window = tool_idle_timeout_s if active_tool_calls > 0 else response_idle_timeout_s
                 if not host_ready and setup_deadline is not None:
-                    bound = min(bound, setup_deadline)
-                remaining = max(0.0, bound - clock.monotonic())
-                return min(ordinary, remaining) if ordinary is not None else remaining
+                    setup = max(0.0, setup_deadline - now)
+                    window = setup if window is None else min(window, setup)
+                remaining = None if budget_deadline is None else max(0.0, budget_deadline - now)
+                deadline_bound = remaining is not None and (window is None or remaining <= window)
+                return remaining if deadline_bound else window
 
             async for raw_line in transport.lines(line_timeout):
                 if not raw_line:
@@ -1882,7 +1889,7 @@ class PiBackend:
                     category="STREAM_TRUNCATION",
                 )
 
-        except Exception:
+        except Exception as exc:
             native_failed = True
             await cleanup()
             if pending_response is not None:
@@ -1918,6 +1925,9 @@ class PiBackend:
                               "generation_id": host_failure_generation_id or last_generation_id,
                               **cause_metadata})
                 raise PiError(str(fatal), retryable=False, category="HOST_TOOLS") from fatal
+            if deadline_bound and isinstance(exc, StreamStalledError):
+                # The ledger deadline, not stdout silence, ended this read.
+                raise BudgetExhausted("time") from exc
             raise
         except BaseException:
             native_failed = True

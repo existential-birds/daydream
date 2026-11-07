@@ -40,7 +40,7 @@ from daydream.backends.lifecycle import BackendLifecycleCollector, BackendLifecy
 from daydream.config import BUDGET_CLEANUP_GRACE_S
 from daydream.diagnostics import exception_text, sanitize_verbose_message
 from daydream.extensions import get_registry
-from daydream.host_tools import HostToolBinding
+from daydream.host_tools import HostToolBinding, HostToolCallBudgetExceeded
 from daydream.observability.spans import agent_scope, attempt_scope
 from daydream.outage_circuit import CIRCUIT_CLOSED, CIRCUIT_HALF_OPEN
 from daydream.prompt_budget import PreparedSanctionedInputs
@@ -51,6 +51,8 @@ from daydream.prompts.grounding import (
 )
 from daydream.retry_policy import FailureClass, classify_failure
 from daydream.review_budget import (
+    BudgetDimension,
+    BudgetExhausted,
     BudgetLedger,
     ReviewLimits,
     review_deadline,
@@ -140,6 +142,7 @@ class _EventStreamScope:
         self._lifecycle = lifecycle
         self._record_lifecycle = record_lifecycle
         self._host_tools = host_tools
+        self.ledger_stop: str | None = None
 
     async def __aenter__(self) -> AgentEventStream:
         self._lifecycle_token = self._lifecycle.bind()
@@ -169,12 +172,22 @@ class _EventStreamScope:
                 self._lifecycle.reset(self._lifecycle_token)
 
     async def events(self) -> AsyncIterator[AgentEvent]:
-        """Observe demand separately from adapter yields and recorder delivery."""
+        """Observe demand separately from adapter yields and recorder delivery.
+
+        A ledger limit that ends the adapter stream (a deadline-cut read or a
+        binding's deadline/allocation failure) ends iteration with ``ledger_stop``
+        set, so it takes the in-flight budget-stop path instead of a retry.
+        """
         while True:
             self._lifecycle.consumer_requested()
             try:
                 event = await anext(self.event_iter)
             except StopAsyncIteration:
+                return
+            except Exception as exc:
+                self.ledger_stop = _ledger_stop(exc, self._host_tools)
+                if self.ledger_stop is None:
+                    raise
                 return
             self._lifecycle.consumer_event()
             yield event
@@ -193,6 +206,22 @@ class _EventStreamScope:
                 self._lifecycle.expiry("cleanup")
         except Exception:  # noqa: BLE001 - cleanup must not mask the invocation outcome
             pass
+
+
+_STOP_DIMENSIONS: dict[str | None, BudgetDimension] = {
+    "wall_budget_exceeded": "time", "pipeline_budget_exceeded": "time", "tool_call_budget_exceeded": "tool_calls",
+}
+
+
+def _ledger_stop(exc: Exception, host_tools: HostToolBinding | None) -> str | None:
+    """Map a ledger limit that ended an attempt to its budget stop reason, else None."""
+    fatal = host_tools.fatal_error if host_tools is not None else None
+    if isinstance(exc, BudgetExhausted) and exc.dimension == "time" or (
+            fatal is not None and fatal.code == "deadline_expired"):
+        return "wall_budget_exceeded"
+    if isinstance(exc, BudgetExhausted) or isinstance(fatal, HostToolCallBudgetExceeded):
+        return "tool_call_budget_exceeded"
+    return None
 
 
 class _LogRedactingConsole(Console):
@@ -277,6 +306,7 @@ async def run_agent(
         elif budget is not host_tools.budget:
             raise ValueError("host tools must charge the invocation's budget ledger")
     budget = (budget if budget is not None else BudgetLedger(phase.value)).anchor()
+    budget.stopped = None  # a reused ledger reports only this invocation's stop
     investigation = budget.investigation
     if investigation and budget.deadline is None:
         raise ValueError("an investigation ledger requires an absolute deadline")
@@ -381,6 +411,8 @@ async def run_agent(
             from daydream.review_result import ReasonCode, reason_for_exception
             if (investigation or evidence is None or not evidence.valid(evidence.checkpoint)
                     or reason_for_exception(exc) != ReasonCode.MODEL_BUDGET_EXHAUSTION):
+                if turn.stopped is not None:
+                    observed.attrs(turn.stopped.attributes())
                 raise
             # Provider turn exhaustion retains this invocation's strictly validated
             # checkpoint; it cannot establish completed investigation coverage.
@@ -430,6 +462,9 @@ async def run_agent(
             result = (result[0], result[1], "pipeline_budget_exceeded")
         if output_schema is not None and not investigation and not isinstance(result[0], str):
             present_result(console, context.policy, progress_callback, result[0])
+        if (dimension := _STOP_DIMENSIONS.get(result[2])) is not None:
+            # One stop record per budget stop: the invocation ledger's limit, spend and remainder.
+            observed.attrs((turn.stopped or turn.stop(dimension)).attributes())
         observed.output(result[0])
         observed.finish(1 if result[2] else 0, reason=result[2])
         return result
@@ -770,6 +805,8 @@ async def _run_agent(
 
                                 await display.observe(event)
 
+                            if event_stream_scope.ledger_stop is not None:
+                                budget_reason = event_stream_scope.ledger_stop
                             await display.flush()
 
                         # Abort handling: a spent deadline cut the loop, the wall
@@ -877,6 +914,7 @@ async def _run_agent(
                             hint=hint,
                         )
                         if delay_stop is not None:
+                            budget.stop("time")
                             _emit_ladder_stop(delay_stop)
                             raise
                         # A provider-advertised wait is distinguished in the notice so an
@@ -933,6 +971,8 @@ async def _run_agent(
                             # elapsed_s (which already subtracts cleanup_elapsed_s).
                             telemetry.charge_attempt(clock.monotonic(), cleanup_elapsed_s=cleanup_elapsed_s)
 
+            if (dimension := _STOP_DIMENSIONS.get(aborted_reason)) is not None:
+                budget.stop(dimension)
             # Emit at most one stop record. In-flight deadline stops retain partials;
             # pre-dispatch stops discard them. Recorder failure cannot change the return value.
             if (

@@ -7,9 +7,9 @@ import math
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from daydream import clock
 from daydream.config import REVIEWER_BATCHES_PER_ALLOWANCE, REVIEWER_TOOL_CALL_BUDGET
@@ -200,6 +200,32 @@ def review_deadline(*, discovery: bool) -> float | None:
     return deadlines[0 if discovery else 1] if deadlines is not None else None
 
 
+BudgetDimension = Literal["time", "tool_calls"]
+
+
+@dataclass(frozen=True)
+class BudgetStop:
+    """Facts of one budget stop: durations and counts only, never monotonic values."""
+
+    owner: str
+    dimension: BudgetDimension
+    limit: float
+    spent: float
+    remaining_at_dispatch: float
+    reserved: int
+
+    def diagnostic(self) -> str:
+        """Numbers first, so a bounded coverage diagnostic never truncates them."""
+        unit = "s" if self.dimension == "time" else " calls"
+        return (f"Budget stop ({self.dimension}): spent {self.spent:g} of {self.limit:g}{unit}, "
+                f"{self.remaining_at_dispatch:g}{unit} remaining at dispatch, {self.reserved} calls reserved "
+                f"for later work; owner {self.owner}.")
+
+    def attributes(self) -> dict[str, Any]:
+        """The ``daydream.budget.*`` agent-span attributes."""
+        return {f"daydream.budget.{key}": value for key, value in asdict(self).items()}
+
+
 @dataclass(eq=False)
 class BudgetLedger:
     """One budget owner's absolute deadline and charged tool-call count.
@@ -229,6 +255,7 @@ class BudgetLedger:
     observed: int = 0
     refunded: int = 0
     started: float | None = None
+    stopped: BudgetStop | None = field(default=None, init=False)
     _dispatched: tuple[float, int] | None = field(default=None, init=False, repr=False)
 
     @classmethod
@@ -313,6 +340,32 @@ class BudgetLedger:
             ledger.charged -= amount
             ledger.refunded += amount
 
+    def stop(self, dimension: BudgetDimension) -> BudgetStop:
+        """Record the facts of the limit that stopped this owner; a dispatch-free stop reports now."""
+        now = clock.monotonic()
+        dispatched_at, charged_at = self._dispatched or (now, self.charged)
+        if dimension == "time":
+            started = self.started if self.started is not None else dispatched_at
+            deadline = self.deadline if self.deadline is not None else now
+            self.stopped = BudgetStop(
+                self.owner, dimension, round(max(0.0, deadline - started), 3), round(max(0.0, now - started), 3),
+                round(max(0.0, deadline - dispatched_at), 3), self.reserved)
+        else:
+            limit = self.limit if self.limit is not None else self.charged
+            self.stopped = BudgetStop(self.owner, dimension, limit, self.charged, max(0, limit - charged_at),
+                                      self.reserved)
+        return self.stopped
+
+
+class BudgetExhausted(Exception):
+    """A ledger limit, not a liveness failure, ended a backend read."""
+
+    retryable = False
+
+    def __init__(self, dimension: BudgetDimension) -> None:
+        super().__init__("Budget ledger deadline reached" if dimension == "time"
+                         else "Budget ledger tool-call allocation exhausted")
+        self.dimension = dimension
 
 
 class ReviewBudgetExceeded(RuntimeError):

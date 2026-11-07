@@ -31,7 +31,7 @@ from daydream.phases.review_prompts import build_review_stage_system_instruction
 from daydream.prompt_budget import prepare_sanctioned_inputs
 from daydream.prompts.grounding import REVIEW_STOPPING_GUIDANCE
 from daydream.retry_policy import derive_retry_summary
-from daydream.review_budget import BudgetLedger, ReviewLimits
+from daydream.review_budget import BudgetLedger, BudgetStop, ReviewLimits
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.supervision import RuleBasedToolSupervisor, apply_findings_verdicts
 from daydream.trajectory import DaydreamPhase, RunWriteSnapshot
@@ -582,6 +582,8 @@ async def test_sanctioned_input_preparation_expiry_never_dispatches_pi(
         result, _, reason = await run_agent(backend, tmp_path, "Assigned work", phase=DaydreamPhase.DEEP,
             read_only=True, sanctioned_inputs=prepared, budget=ledger)
     assert reason == "wall_budget_exceeded" and result == ""
+    # The pre-dispatch stop still records its facts: nothing remained when it would have dispatched.
+    assert ledger.stopped == BudgetStop("deep", "time", limit=5.0, spent=5.0, remaining_at_dispatch=0.0, reserved=0)
     assert len(prompts) == 1  # Only the completed earlier invocation launched Pi.
     trajectory, stop = _budget_stop(recorder)
     assert [step["message"] for step in trajectory["steps"] if step["source"] == "user"] == ["Earlier work"]

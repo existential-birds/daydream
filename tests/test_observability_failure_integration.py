@@ -144,11 +144,11 @@ async def test_runner_cleanup_outage_preserves_captured_root_and_review_output(
     assert "review completed during outage" in json.dumps(record["trajectories"]["value"])
 
 
-async def test_runner_partial_outcome_preserves_the_budget_stop_reason(
+async def test_runner_partial_outcome_preserves_the_budget_stop_record(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A tool-call stop keeps its partial output and its reason on the span chain."""
+    """A tool-call stop keeps its partial output and records one stop on the agent span."""
     reason = "tool_call_budget_exceeded"
     _flow(ext_dir, controls="budget=BudgetLedger('review:sample', limit=0),")
     backend = _ActiveToolBackend()
@@ -175,6 +175,11 @@ async def test_runner_partial_outcome_preserves_the_budget_stop_reason(
     assert finalization["status"]["code"] == "STATUS_CODE_OK"
     assert attributes(tool)["daydream.outcome"] == reason
     assert tool["status"]["message"] == reason
+    assert {key: value for key, value in attributes(agent).items() if key.startswith("daydream.budget.")} == {
+        "daydream.budget.owner": "review:sample", "daydream.budget.dimension": "tool_calls",
+        "daydream.budget.limit": 0, "daydream.budget.spent": 0, "daydream.budget.remaining_at_dispatch": 0,
+        "daydream.budget.reserved": 0,
+    }
     assert tool["events"][-1]["name"] == "exception"
     assert attributes(attempt)["gen_ai.usage.input_tokens"] == 5
     assert attributes(attempt)["gen_ai.usage.cost"] == 0.005

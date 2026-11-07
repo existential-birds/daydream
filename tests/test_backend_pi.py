@@ -40,7 +40,7 @@ from daydream.backends.pi import (
     PiBackend,
     PiError,
 )
-from daydream.review_budget import BudgetLedger, ReviewLimits
+from daydream.review_budget import BudgetExhausted, BudgetLedger, ReviewLimits
 from daydream.trajectory import DaydreamPhase
 from tests.harness.fake_cli_process import (
     install_fake_cli_process,
@@ -1121,12 +1121,17 @@ async def test_native_pi_tool_batch_and_resumed_turn_record_literal_observations
     assert validate(recorder.path, validate_images=False)
 
 
-@pytest.mark.parametrize(("active_tool", "expected_window"), [(False, 0.05), (True, 0.2)],
-                         ids=["response-window", "active-tool-window"])
+@pytest.mark.parametrize(("active_tool", "deadline_s", "expected_window"),
+                         [(False, None, 0.05), (True, None, 0.2), (True, 0.02, None)],
+                         ids=["response-window", "active-tool-window", "deadline-cut-read"])
 async def test_pi_idle_window_follows_active_tool_calls(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, active_tool: bool, expected_window: float,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, active_tool: bool, deadline_s: float | None,
+    expected_window: float | None,
 ) -> None:
-    """Silence after a finished tool uses the short response window; a running tool keeps the long one."""
+    """Silence after a finished tool uses the short response window; a running tool keeps the long one.
+
+    A ledger deadline shorter than the window ends the read as a budget stop, not an idle stall.
+    """
     tool_end = {"type": "tool_execution_end", "toolCallId": "tool-1",
                 "result": {"content": [{"type": "text", "text": "done"}]}}
     lines = [json.dumps(frame) for frame in (
@@ -1138,11 +1143,18 @@ async def test_pi_idle_window_follows_active_tool_calls(
     monkeypatch.delenv(STREAM_IDLE_TIMEOUT_ENV, raising=False)
     monkeypatch.setattr("daydream.backends.pi.DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S", 0.05)
     monkeypatch.setattr("daydream.backends.pi.DEFAULT_STREAM_IDLE_TIMEOUT_S", 0.2)
+    clock = FakeClock(monotonic_value=100.0).install(monkeypatch)
+    deadline = None if deadline_s is None else clock.monotonic_value + deadline_s
     with anyio.fail_after(1):
-        with pytest.raises(StreamStalledError) as stalled:
-            async for _ in PiBackend(model="test-model").execute(tmp_path, "do the thing"):
+        with pytest.raises(StreamStalledError if expected_window else BudgetExhausted) as stopped:
+            async for _ in PiBackend(model="test-model").execute(tmp_path, "do the thing", deadline=deadline):
                 pass
-    assert stalled.value.timeout_s == pytest.approx(expected_window) and stalled.value.retryable is True
+    if isinstance(stopped.value, StreamStalledError):
+        assert stopped.value.timeout_s == pytest.approx(expected_window) and stopped.value.retryable is True
+    else:
+        cause = stopped.value.__cause__
+        assert isinstance(stopped.value, BudgetExhausted) and stopped.value.dimension == "time"
+        assert isinstance(cause, StreamStalledError) and cause.timeout_s == pytest.approx(deadline_s)
     assert len(spawner.procs) == 1 and spawner.procs[0].reaped
     # Garbage, negative or non-finite overrides never disable or shorten the window; zero disables it.
     for raw in ("not-a-number", "-5", "nan", "inf"):

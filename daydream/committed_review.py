@@ -69,7 +69,7 @@ from daydream.hunk_index import write_hunk_index
 from daydream.immutable_review import ImmutableReviewInput
 from daydream.json_utils import canonical_json, validate_json_schema
 from daydream.prompt_budget import SanctionedInputUnavailable
-from daydream.review_budget import BudgetLedger
+from daydream.review_budget import BudgetDimension, BudgetLedger, BudgetStop
 from daydream.review_profile import ResolvedProfile, build_default_profile, resolve_from_runconfig
 from daydream.review_result import (
     AnalyzedRevision,
@@ -205,6 +205,10 @@ class Review:
         self._target_owner: dict[str, str] = {}
         self._claim_owner: dict[tuple[str, int], str] = {}
         self.execution: list[dict[str, Any]] = []
+        # Budget-stop facts that lead unfinished coverage diagnostics: one sentence per stopped
+        # dispatch (by work_id) and per coverage scope or phase whose dispatch the host refused.
+        self.stops: dict[str, str] = {}
+        self.refusals: dict[str, str] = {}
         self._coverage = ReviewCoverage(
             run_id,
             AnalyzedRevision.from_dict(inputs.revision),
@@ -649,6 +653,11 @@ class Review:
         work.binding = binding
         return binding, schema
 
+    def refuse(self, stop: BudgetStop, *, phase: str | None = None, targets: tuple[str, ...] = ()) -> None:
+        """Record a host refusal before dispatch against the phase or the scopes of targets it leaves unfinished."""
+        for key in [phase] if phase is not None else {shard_scope_id(self._shard_of[t]) for t in targets}:
+            self.refusals[key] = stop.diagnostic()
+
     def pending(self) -> list[dict[str, Any]]:
         """An immutable projection; a model cannot clear required work by declaring completion."""
         return deepcopy([c for c in self._claims.values() if c["disposition"] == "unresolved"])
@@ -698,6 +707,12 @@ class Review:
                 # Planned, abandoned or closed-without-acceptance work is unfinished, never success.
                 failures[record["work_id"]] = {ReasonCode.EVIDENCE_INCOMPLETE.value}
         current = [record for record in records if record["state"] != "superseded"]
+
+        def diagnostic(key: str, contributing: list[dict[str, Any]]) -> str | None:
+            """Stop facts of the work that contributed reasons, then any refusal; numbers lead the text."""
+            stops = [self.stops[r["work_id"]] for r in contributing if r["work_id"] in self.stops]
+            return " ".join(dict.fromkeys([*stops, *([self.refusals[key]] if key in self.refusals else [])])) or None
+
         kinds = {entry["assignment"] for entry in self.execution if entry["work_id"] is not None}
         if self.assignments and not kinds & INVESTIGATION_KINDS:
             global_reasons.add(ReasonCode.EVIDENCE_INCOMPLETE.value)
@@ -705,10 +720,9 @@ class Review:
             scopes_complete = True
             for index, shard in enumerate(self._shards):
                 identifiers = {part["target_id"] for part in shard}
-                reasons = set(global_reasons)
-                for record in current:
-                    if record["kind"] in INVESTIGATION_KINDS and identifiers & set(record["targets"]):
-                        reasons |= failures.get(record["work_id"], set())
+                contributing = [record for record in current if record["kind"] in INVESTIGATION_KINDS
+                                and identifiers & set(record["targets"])]
+                reasons = set(global_reasons).union(*(failures.get(r["work_id"], set()) for r in contributing))
                 if not all(self._decisions.get(t, {}).get("status") == "reviewed" for t in identifiers):
                     reasons.add(ReasonCode.EVIDENCE_INCOMPLETE.value)
                 scopes_complete &= not reasons
@@ -716,6 +730,7 @@ class Review:
                     shard_scope_id(index), "incomplete" if reasons else "complete", reasons=sorted(reasons),
                     partial_evidence=bool(reasons) and any(t in self._decisions for t in identifiers),
                     target_decisions=self._shard_decisions(index, self._decisions),
+                    diagnostic=diagnostic(shard_scope_id(index), contributing),
                 )
             if self.decomposed:
                 cross = [r for r in current if r["kind"] == "cross_assignment"]
@@ -724,18 +739,19 @@ class Review:
                     cross_reasons.add(ReasonCode.EVIDENCE_INCOMPLETE.value)
                 coverage.record_phase("cross_assignment", "incomplete" if cross_reasons else "complete",
                                       reasons=sorted(cross_reasons),
-                                      usable_evidence=any(r["state"] == "accepted" for r in cross))
+                                      usable_evidence=any(r["state"] == "accepted" for r in cross),
+                                      diagnostic=diagnostic("cross_assignment", cross))
             else:
                 # A single broad assignment has no assignment boundary to investigate across.
                 cross_reasons = set()
                 coverage.record_phase("cross_assignment", "complete", noop=True)
-            challenge_reasons = set(global_reasons).union(
-                *(failures.get(r["work_id"], set()) for r in current if r["kind"] == "challenge"))
+            challenges = [r for r in current if r["kind"] == "challenge"]
+            challenge_reasons = set(global_reasons).union(*(failures.get(r["work_id"], set()) for r in challenges))
             if self._claims and "challenge" not in kinds or self.pending() or not scopes_complete or cross_reasons:
                 challenge_reasons.add(ReasonCode.EVIDENCE_INCOMPLETE.value)
             coverage.record_phase(
                 "challenge", "incomplete" if challenge_reasons else "complete", reasons=sorted(challenge_reasons),
-                usable_evidence=bool(self._claims),
+                usable_evidence=bool(self._claims), diagnostic=diagnostic("challenge", challenges),
             )
         else:
             coverage.record_phase("no_diff", "complete", noop=True)
@@ -1163,11 +1179,13 @@ class _Schedule:
             investigation_calls - cross_calls >= _MIN_WORK_CALLS * len(self.batches))
         cross_deadline = started + window / 2
         local_deadline = started + window * (3 / 8 if self.decompose else 1 / 2)
+        # Each phase ledger records the calls withheld from it for later required work.
+        cross_floor = cross_calls if self.decompose else 0
         self.investigation = self.ledger.carve("committed:investigation", limit=investigation_calls,
-                                               deadline=cross_deadline)
+                                               deadline=cross_deadline, reserved=tool_calls - investigation_calls)
         self.local = self.investigation.carve(
-            "committed:local", limit=investigation_calls - (cross_calls if self.decompose else 0),
-            deadline=local_deadline)
+            "committed:local", limit=investigation_calls - cross_floor, deadline=local_deadline,
+            reserved=self.investigation.reserved + cross_floor)
         challenge = {"challenge_tool_calls": tool_calls - investigation_calls,
                      "challenge_s": round(deadline - cross_deadline, 3), "finalization_s": _FINALIZATION_S}
         self.cross_reserves = challenge
@@ -1194,8 +1212,13 @@ class _Schedule:
             await self._dispatch(work_id, self.local, self.local_reserves)
         else:
             await self._round(review.plan("discovery", self.batches), recorder)
-            while not self.local.expired() and (groups := self._follow_ups()):
-                if _remaining(self.local) < _MIN_WORK_CALLS * len(groups):
+            while groups := self._follow_ups():
+                # A refused follow-up records the local ledger's stop against the scopes it leaves unfinished.
+                dimension: BudgetDimension | None = (
+                    "time" if self.local.expired() else
+                    "tool_calls" if _remaining(self.local) < _MIN_WORK_CALLS * len(groups) else None)
+                if dimension is not None:
+                    review.refuse(self.local.stop(dimension), targets=tuple(t for group in groups for t in group))
                     break
                 await self._round(review.plan("follow_up", groups), recorder)
             # Required regardless of local results; it inherits every still-unfinished target.
@@ -1205,7 +1228,8 @@ class _Schedule:
         last: dict[str, Any] | None = None
         retried = False
         while pending := {(claim["uid"], claim["revision"]) for claim in review.pending()}:
-            if _remaining(self.ledger) < 1 or self.ledger.expired():
+            if (exhausted := _remaining(self.ledger) < 1) or self.ledger.expired():
+                review.refuse(self.ledger.stop("tool_calls" if exhausted else "time"), phase="challenge")
                 break
             fresh = not pending <= attempted
             progressed = last is not None and review.work[last["work_id"]].progress > 0
@@ -1256,8 +1280,7 @@ class _Schedule:
         """Run one work item on its own ledger carved from ``parent`` (its remaining calls by default)."""
         review, profile = self.review, self.settings
         kind = review.work[work_id].kind
-        budget = parent.carve(f"committed:{kind}", limit=allocation, reserved=sum(
-            value for key, value in reserves.items() if key.endswith("_tool_calls")))
+        budget = parent.carve(f"committed:{kind}", limit=allocation, reserved=parent.reserved)
         backend = self.backends["challenge" if kind == "challenge" else "discovery"]
         repo = review.inputs.work.repo
         work = review.work[work_id]
@@ -1326,6 +1349,8 @@ class _Schedule:
             reason = (ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION if exhausted else reason_for_exception(exc)).value
         finally:
             binding.close_authority()
+            if budget.stopped is not None:
+                review.stops[work_id] = budget.stopped.diagnostic()
             entry = {
                 "assignment": kind,
                 "work_id": work_id,

@@ -288,6 +288,11 @@ class ReviewInvestigation:
                     else 'wall_budget_exceeded')
         return None
 
+    def _refused(self, reason: str) -> str:
+        """A refusal before dispatch leads with the scope ledger's stop facts, numbers first."""
+        stop = self.budget.stop('tool_calls' if reason == 'tool_call_budget_exceeded' else 'time')
+        return f'{stop.diagnostic()} Review limit exhausted: {reason}'
+
     def _continuation_admitted(self, agent_kwargs: dict[str, Any]) -> bool:
         """A new batch cannot evade shared stopping conditions after an invocation failure."""
         reason = self._budget_stop_reason()
@@ -299,7 +304,7 @@ class ReviewInvestigation:
         self.reason = reason
         self.failed_invocation = False
         self.failure_class = 'quantitative_exhaustion' if reason != 'backend_failure' else 'outage_circuit'
-        self.failure_diagnostic = (f'Review limit exhausted: {reason}' if reason != 'backend_failure' else
+        self.failure_diagnostic = (self._refused(reason) if reason != 'backend_failure' else
                                    'Review stopped: provider outage circuit denied a later batch.')
         return False
 
@@ -361,7 +366,7 @@ class ReviewInvestigation:
         self.reason = self._budget_stop_reason()
         if self.reason is not None:
             self.failure_class = 'quantitative_exhaustion'
-            self.failure_diagnostic = f'Review limit exhausted: {self.reason}'
+            self.failure_diagnostic = self._refused(self.reason)
             return False
         candidate_ids = candidate_ids or []
         assignment_parts = assignment_parts or []
@@ -396,6 +401,7 @@ class ReviewInvestigation:
             input_failure = ''
             accepted = False
             binding: HostToolBinding | None = None
+            stage_budget: BudgetLedger | None = None
             starts_before = self.budget.observed
             candidate_count = 0
             async with phase_scope(DaydreamPhase.DEEP, stage=f'review-{stage.replace('_', '-')}') as transition:
@@ -467,6 +473,7 @@ class ReviewInvestigation:
                             advisory_tool_call_target=state['advisory_tool_call_target'], **kwargs)
                     else:
                         output = None
+                        stage_budget.stop('tool_calls')  # The native start floor refused this dispatch.
                     prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
                 except SanctionedInputUnavailable as exc:
                     self.reason = 'evidence_incomplete'
@@ -538,6 +545,9 @@ class ReviewInvestigation:
                                   'quantitative_exhaustion': 'Review limit exhausted'}
                         label = labels.get(self.failure_class or '', 'Review stopped')
                         self.failure_diagnostic = f"{label}: {self.reason}{input_failure}"
+                        if stage_budget is not None and stage_budget.stopped is not None:
+                            # The invocation ledger's stop facts lead, so bounded coverage keeps them.
+                            self.failure_diagnostic = f"{stage_budget.stopped.diagnostic()} {self.failure_diagnostic}"
                     transition.extra.update(
                         review_scope_id=self.scope_id, observed_tool_starts=self.budget.observed,
                         investigation_base_budget_s=self._base_limits.investigation_s,

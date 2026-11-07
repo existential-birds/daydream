@@ -1531,12 +1531,22 @@ async def test_denied_over_limit_discovery_start_cannot_spend_protected_challeng
 
     Previously challenge received the shared ledger's remainder, so discovery's
     rejected extra start (charged before the limit check) consumed one protected call.
+    Budget stops lead the coverage diagnostics: discovery's in-flight stop on its scope,
+    and the challenge re-dispatch the host refused for want of calls on its phase.
     """
     allocations: list[tuple[str, int]] = []
+    sealed: list[Review] = []
+    real_seal = Review.seal
+
+    def seal(self: Review, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        sealed.append(self)
+        return real_seal(self, *args, **kwargs)
 
     async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, str | None]:
         kind = "discovery" if kwargs["phase"].value == "review" else "challenge"
-        allocation = kwargs["budget"].limit
+        budget = kwargs["budget"]
+        budget.dispatch()  # run_agent's dispatch-time snapshot
+        allocation = budget.limit
         allocations.append((kind, allocation))
         binding: HostToolBinding = kwargs["host_tools"]
         binding.configure_schema(kwargs["output_schema"])
@@ -1554,13 +1564,20 @@ async def test_denied_over_limit_discovery_start_cannot_spend_protected_challeng
                         binding.admit(f"extra-{number}", "read", {})
                 assert binding.calls == allocation + 1
             else:
+                # Challenge spends its whole share and leaves the claim unresolved.
+                for number in range(allocation - 1):
+                    binding.admit(f"read-{number}", "read", {})
                 claim = _owner(binding).pending()[0]
-                value = {"verdicts": [_verdict(review_inputs, claim)], "claims": []}
+                value = {"verdicts": [_verdict(review_inputs, claim, verdict="unresolved",
+                                               grounds="Counterevidence search is unfinished.")], "claims": []}
                 binding.admit("terminal", "structured_output", value, terminal=True)
                 accepted = binding.submit("terminal", value)
             binding.native_settled = True
+        if kind == "discovery":
+            budget.stop("tool_calls")  # run_agent records the budget stop it returns
         return accepted, None, "tool_call_budget_exceeded" if kind == "discovery" else None
 
+    monkeypatch.setattr(Review, "seal", seal)
     monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=execute, console=agent.console))
     result = await run_committed_review(CommittedReviewRequest(
         review_inputs.work.source, review_inputs.revision["merge_base_sha"], config=RunConfig(
@@ -1569,6 +1586,13 @@ async def test_denied_over_limit_discovery_start_cannot_spend_protected_challeng
     assert allocations == [("discovery", 5), ("challenge", 5)] and result.output_installed
     discovery = result.to_dict()["execution"][0]
     assert (discovery["allocation"], discovery["observed_starts"], discovery["overshoot"]) == (5, 6, 1)
+    diagnostics = sealed[0]._coverage.to_dict()["diagnostics"]
+    assert diagnostics["scopes"] == {"committed:00000": (
+        "Budget stop (tool_calls): spent 5 of 5 calls, 5 calls remaining at dispatch, 5 calls reserved for later "
+        "work; owner committed:discovery.")}
+    assert diagnostics["phases"] == {"challenge": (
+        "Budget stop (tool_calls): spent 10 of 10 calls, 0 calls remaining at dispatch, 0 calls reserved for later "
+        "work; owner committed.")}
 
 
 async def test_claim_lines_inside_continuation_fragments_use_summarized_spans(tmp_path: Path) -> None:
