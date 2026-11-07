@@ -86,6 +86,17 @@ A successful callback cannot establish native settlement; suppressing a late
 result cannot prove cleanup. See
 [the lifetime contract](runtime.md#pi-host-tool-lifetime-and-limits).
 
+## Claude host-tool lifecycle evidence
+
+Claude host-tool attempts record the same lifecycle facts with `backend: claude`:
+authority closure, native settlement, cleanup (the in-process MCP session ended after
+the client disconnected) and host call/rejection counts, on every exit path. Host
+calls keep their native `mcp__daydream__<tool>` names in the trajectory, and the
+assignment instructions are recorded as supplied system instructions. A
+`claude_native_capacity` diagnostic records the context window and output limit from
+terminal model usage with `preflight: unavailable`; absent values stay absent. See
+[Claude host tools](runtime.md#claude-host-tools).
+
 ## Committed-review evidence
 
 [Committed reviews](runtime.md#committed-review-requestresult) record each

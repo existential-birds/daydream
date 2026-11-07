@@ -74,7 +74,7 @@ class BackendLifecycleSnapshot:
     """Closed, content-free attempt evidence; absent observations remain None."""
 
     attempt: int
-    backend: Literal["pi", "codex"] = "pi"
+    backend: Literal["pi", "codex", "claude"] = "pi"
     timestamp_source: Literal["host_observed"] = "host_observed"
     clock: Literal["monotonic_elapsed"] = "monotonic_elapsed"
     state: LifecycleState = "preparation"
@@ -137,7 +137,7 @@ class BackendLifecycleSnapshot:
 
     def __post_init__(self) -> None:
         allowed_strings = {
-            "backend": {"pi", "codex"}, "read_observation": {"pull_driven"},
+            "backend": {"pi", "codex", "claude"}, "read_observation": {"pull_driven"},
             "timestamp_source": {"host_observed"}, "clock": {"monotonic_elapsed"},
             "state": {"preparation", "prepared", "spawn_pending", "launched", "native_event", "generating"},
         }
@@ -204,10 +204,11 @@ class BackendLifecycleCollector:
         value: int = getattr(self._snapshot, name)
         return min(_MAX_COUNT, value + 1)
 
-    def activate(self, *, response_idle_timeout_s: float | None, tool_idle_timeout_s: float | None) -> None:
+    def activate(self, *, response_idle_timeout_s: float | None, tool_idle_timeout_s: float | None,
+                 backend: Literal["pi", "claude"] = "pi") -> None:
         """Record effective settings; zero/None means the idle detector is disabled."""
         self._active = True
-        self._update(response_idle_timeout_s=response_idle_timeout_s or 0.0,
+        self._update(backend=backend, response_idle_timeout_s=response_idle_timeout_s or 0.0,
                      tool_idle_timeout_s=tool_idle_timeout_s or 0.0,
                      idle_detection_enabled=bool(response_idle_timeout_s))
 

@@ -922,9 +922,11 @@ class Backend(Protocol):
       tool_call_budget so the backend's own system prompt can state this turn's
       real allowances rather than its module defaults. The host enforces the
       ledger either way.
-    - supports_host_tools: accepts an explicit invocation-local HostToolBinding.
-      Absence means unsupported; callers only forward the optional argument when
-      requested. Binding state never belongs to a cached backend instance.
+    - supports_host_tools: accepts an explicit invocation-local HostToolBinding
+      and, with it, review_instructions as system instructions; the accepted host
+      submission is the only result. Absence means unsupported; callers only forward
+      the optional argument when requested. Binding state never belongs to a cached
+      backend instance.
     - reasoning_effort: native level fixed at construction; None defers to the driver.
       Backend instances are cached by kind, model, effort, and audit root.
     """
