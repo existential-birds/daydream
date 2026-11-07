@@ -18,7 +18,7 @@ from daydream.run_snapshot import (
     ArchiveRecorderProvenance as ArchiveRecorderProvenance,
     ArchiveRunSnapshot,
 )
-from daydream.trajectory import DaydreamRunFlow, compute_timing_summary
+from daydream.trajectory import DaydreamRunFlow
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -269,12 +269,12 @@ def build_manifest_from_snapshot(
     """Construct a manifest from captured identity and the frozen run's document summaries."""
     recorder_provenance = run.recorder_provenance
     identity = run.identity
-    if not recorder_provenance.session_id == run.trajectories.root_trajectory_id == summary.root_trajectory_id:
+    if recorder_provenance.session_id != summary.root_trajectory_id:
         raise ValueError("archive provenance does not match frozen snapshot")
     raw_final_metrics = summary.root.metadata.get("final_metrics")
     final_metrics: dict[str, Any] = raw_final_metrics if isinstance(raw_final_metrics, dict) else {}
     raw_cost = final_metrics.get("total_cost_usd")
-    timing_summary = compute_timing_summary(summary)
+    timing_summary = summary.timing
     runs_fix = identity.phases.fix
     profile = identity.profile
 

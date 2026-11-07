@@ -151,6 +151,7 @@ def _load_trajectories(paths: Sequence[Path]) -> Iterator[Trajectory]:
         except Exception:  # noqa: BLE001 - per-file resilience
             continue
         yield trajectory
+        del trajectory  # release this file's model before the next one is read
 
 
 def _aggregate(trajectories: Iterable[Trajectory], prices: dict[str, ModelPrice]) -> _RunAgg:
@@ -160,31 +161,36 @@ def _aggregate(trajectories: Iterable[Trajectory], prices: dict[str, ModelPrice]
     """
     agg = _RunAgg()
     for traj in trajectories:
-        agent_default_model = traj.agent.model_name
-        for step in traj.steps:
-            phase_key = _phase_key_of(step)
-            if phase_key is None:
-                continue
-            phase = agg.phases.setdefault(phase_key, _PhaseAgg(phase_key))
-            # Track timestamps from ALL sources (user + agent) for latency.
-            if step.timestamp:
-                if phase.first_timestamp is None or parse_iso_timestamp(
-                    step.timestamp
-                ) < parse_iso_timestamp(phase.first_timestamp):
-                    phase.first_timestamp = step.timestamp
-                if phase.last_timestamp is None or parse_iso_timestamp(
-                    step.timestamp
-                ) > parse_iso_timestamp(phase.last_timestamp):
-                    phase.last_timestamp = step.timestamp
-            if step.source != "agent":
-                continue
-            phase.steps += 1
-            phase.tool_calls += len(step.tool_calls or [])
-            effective_model = step.model_name or agent_default_model
-            if effective_model and effective_model not in _GENERIC_MODEL_LABELS:
-                phase.models.add(effective_model)
-            _accumulate_metrics(agg, phase, step, fallback_model=agent_default_model, prices=prices)
+        _fold(agg, traj, prices)
+        del traj  # release this trajectory before the next one is produced
     return agg
+
+
+def _fold(agg: _RunAgg, traj: Trajectory, prices: dict[str, ModelPrice]) -> None:
+    agent_default_model = traj.agent.model_name
+    for step in traj.steps:
+        phase_key = _phase_key_of(step)
+        if phase_key is None:
+            continue
+        phase = agg.phases.setdefault(phase_key, _PhaseAgg(phase_key))
+        # Track timestamps from ALL sources (user + agent) for latency.
+        if step.timestamp:
+            if phase.first_timestamp is None or parse_iso_timestamp(
+                step.timestamp
+            ) < parse_iso_timestamp(phase.first_timestamp):
+                phase.first_timestamp = step.timestamp
+            if phase.last_timestamp is None or parse_iso_timestamp(
+                step.timestamp
+            ) > parse_iso_timestamp(phase.last_timestamp):
+                phase.last_timestamp = step.timestamp
+        if step.source != "agent":
+            continue
+        phase.steps += 1
+        phase.tool_calls += len(step.tool_calls or [])
+        effective_model = step.model_name or agent_default_model
+        if effective_model and effective_model not in _GENERIC_MODEL_LABELS:
+            phase.models.add(effective_model)
+        _accumulate_metrics(agg, phase, step, fallback_model=agent_default_model, prices=prices)
 
 
 def _phase_key_of(step: Step) -> str | None:

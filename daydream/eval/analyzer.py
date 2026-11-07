@@ -25,7 +25,6 @@ from daydream.trajectory import (
     DocumentSummary,
     RunSummary,
     StepFacts,
-    compute_timing_summary,
     run_document_path,
     siblings_directory,
 )
@@ -126,7 +125,7 @@ def analyze_costs(summary: RunSummary) -> dict[str, Any]:
                 name: (metrics.get(key) or default) - sum(child.get(key) or default for child in child_metrics)
                 for name, (key, default) in _BILLING_FIELDS.items()
             },
-            "steps": metrics.get("total_steps") or document.steps.require("count").count,
+            "steps": metrics.get("total_steps") or document.steps.require().count,
             "model": traj.get("agent", {}).get("model_name", "unknown"),
         })
 
@@ -154,7 +153,7 @@ def analyze_tools(summary: RunSummary) -> dict[str, Any]:
     by_agent: dict[str, dict[str, Any]] = {}
 
     for document in _root_first(summary):
-        counts = Counter(document.steps.require("tools").tool_names)
+        counts = Counter(document.steps.require().tool_names)
         by_agent[_agent_label(document.source_file)] = dict(counts)
         total_counts.update(counts)
 
@@ -585,11 +584,11 @@ def analyze_timing(summary: RunSummary) -> dict[str, Any]:
     agent_timings: list[dict[str, Any]] = []
 
     for document in _root_first(summary):
-        duration = document.steps.require("timing").duration_seconds
+        duration = document.steps.require().duration_seconds
         if duration is not None:
             agent_timings.append({"agent": _agent_label(document.source_file), "duration_seconds": round(duration, 1)})
 
-    timing = compute_timing_summary(summary)
+    timing = summary.timing
     return {
         **(timing.to_dict() if timing is not None else {"total_wall_clock_seconds": None}),
         "by_agent": sorted(agent_timings, key=lambda item: item["duration_seconds"], reverse=True),
@@ -625,7 +624,7 @@ def analyze_training_signals(summary: RunSummary) -> dict[str, Any]:
     signals: list[dict[str, Any]] = []
 
     for document in summary.forked:
-        facts = document.steps.require("content")
+        facts = document.steps.require()
         # Reasoning token fraction (approximation from char length)
         total_output_chars = facts.reasoning_chars + facts.agent_message_chars
         reasoning_fraction = (

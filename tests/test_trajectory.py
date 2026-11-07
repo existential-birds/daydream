@@ -204,6 +204,7 @@ async def test_filesystem_writer_failure_is_optional(
 
 
 UNICODE_TEXT = 'caf\u00e9 \U0001f600 \u2028\x00'
+HOST_NAME = 'caf\udce9'  # A host value from an undecodable file name keeps a lone surrogate.
 
 
 @pytest.mark.parametrize(('label', 'planned', 'identified'), [
@@ -218,6 +219,7 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
     queued = '{"type":"oauth","access":"opaque-queued-canary"}'
     snapshots: list[RunWriteSnapshot] = []
     root = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
+    root.record_profile(schema_version=1, name=HOST_NAME, source_kind='file', digest='d' * 64)
     async with root:
         async with trajectory_module.dispatch_scope(root if identified else None, phase=DaydreamPhase.DEEP,
             descriptors=[label, second_label, queued]) as dispatch:
@@ -233,7 +235,7 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
                         payload = json.loads(document.read_bytes())
                         assert payload['steps'][0]['extra']['host_event'] == 'partial_snapshot'
                         assert payload['extra']['snapshot_at'] == first.cutoff_at
-                        assert payload['final_metrics'].get('total_prompt_tokens') is None
+                        assert 'total_prompt_tokens' not in payload['final_metrics']
                     active = json.loads(first.documents[1].read_bytes())['extra']['subtrajectories'][0]
                     assert active['ended_at'] is None and active['step_ids'] == []
                     secret = '{"type":"oauth","access":"opaque-event-canary"}'
@@ -306,6 +308,7 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
                                 setattr(snapshot, 'cutoff_at', 'changed')
                             if dispatch is not None:
                                 extra = json.loads(documents[root.trajectory_id].read_bytes())['extra']
+                                assert extra['profile_name'] == HOST_NAME
                                 plan, = extra['active_dispatches']
                                 assert plan['dispatch_id'] == dispatch.dispatch_id
                                 assert plan['planned_descriptors'][:2] == [
@@ -519,7 +522,8 @@ async def test_signal_handler_flushes_siblings_despite_a_writer_failure(
     denied = True
     snapshots: list[RunWriteSnapshot] = []
     recorder = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
-    entered = {name: anyio.Event() for name in ('signal-a', 'signal-b')}
+    # The second label keeps a lone surrogate from an undecodable file name; the flush still never raises.
+    entered = {name: anyio.Event() for name in ('signal-a', 'signal-b-caf\udce9')}
     release = {name: anyio.Event() for name in entered}
     children: dict[str, TrajectoryRecorder] = {}
     writes = Path.write_bytes

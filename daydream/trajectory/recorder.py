@@ -18,8 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-from pydantic import TypeAdapter
-from pydantic_core import to_json
+from pydantic_core import PydanticSerializationError, to_json, to_jsonable_python
 
 import daydream
 from daydream import timeutil, ui
@@ -62,7 +61,17 @@ from daydream.trajectory.types import (
 from daydream.ui import create_console, print_error
 
 _console = create_console()
-_TRAJECTORY_JSON: TypeAdapter[Trajectory] = TypeAdapter(Trajectory)
+
+
+def _json_bytes(value: Any, *, indent: int | None = None) -> bytes:
+    """Encode straight to JSON bytes with ASCII escapes, omitting absent model fields.
+
+    pydantic-core refuses lone surrogates, which host values such as undecodable
+    paths can carry; those values take the standard library's escaping encoder."""
+    try:
+        return to_json(value, indent=indent, exclude_none=True, ensure_ascii=True)
+    except PydanticSerializationError:
+        return json.dumps(to_jsonable_python(value, exclude_none=True), indent=indent).encode()
 
 
 def _warn_partial_write(exc: Exception) -> None:
@@ -859,7 +868,7 @@ class TrajectoryRecorder:
             "active_dispatches": self._partial_dispatch_summaries(),
             "aborted": self._aborted,
         }
-        return hashlib.sha256(to_json(state)).hexdigest()
+        return hashlib.sha256(_json_bytes(state)).hexdigest()
 
     def _prepare_document(
         self,
@@ -917,7 +926,7 @@ class TrajectoryRecorder:
         return TrajectoryDocumentSnapshot(
             trajectory_id=self.trajectory_id,
             path=path,
-            json_bytes=_TRAJECTORY_JSON.dump_json(trajectory, indent=2, exclude_none=True, ensure_ascii=True),
+            json_bytes=_json_bytes(trajectory, indent=2),
         )
 
     def _snapshot_in_flight_steps(self) -> list[Step]:

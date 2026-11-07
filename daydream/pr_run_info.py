@@ -63,6 +63,8 @@ def render_live_run_info(source: LiveRunInfoSource) -> RunInfoResult:
     The parent comes from recorder memory; completed children are checked reads
     of the recorder registry's file references, decoded and folded one at a time,
     and a missing or changed child is omitted with a warning rather than blocking the post.
+    Prices resolve before the fold, so a pricing failure reports rendering unavailable
+    even when a retained document is also invalid.
     Diagnostics are fixed low-cardinality categories. Exception messages,
     session paths, and trajectory contents never cross this boundary.
     """
@@ -111,6 +113,7 @@ def render_live_run_info(source: LiveRunInfoSource) -> RunInfoResult:
                 raise _Unavailable("run info: trajectory identity invalid")
             seen_ids.add(sibling_id)
             yield sibling
+            del sibling  # release this child before the next one is read
 
     try:
         prices = resolve_prices(load_user_prices())

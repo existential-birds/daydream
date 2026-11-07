@@ -1,6 +1,8 @@
 """Public persistence, history, recovery and tamper checks on real local storage."""
+import fcntl
 import hashlib
 import json
+import math
 import os
 import stat
 from collections.abc import Iterator
@@ -203,6 +205,20 @@ def test_failed_commit_is_not_visible_and_abandoned_staging_recovers_privately(
     abandoned.write_bytes(b'{"partial":')
     assert store.commit_run(run_record("retry")).diagnostics == ("recovered_interrupted_write",)
     assert {run["run_id"] for run in read_records(store).runs} == {"run-1", "retry"}
+
+    def documents() -> Iterator[dict[str, Any]]:
+        """Stream while the store lock is free; another committer's recovery keeps this live stage."""
+        with open(store.root / ".lock", "rb") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        live, = (store.root / "runs").glob("*.tmp")
+        assert store.commit_run(run_record("concurrent")).diagnostics == () and live.exists()
+        yield {"schema_version": "ATIF-v1.7", "session_id": "streamed", "trajectory_id": "streamed",
+               "agent": {"name": "daydream", "version": "test"},
+               "steps": [{"step_id": 1, "source": "user", "message": "review"}]}
+    streamed = run_record("streamed", trajectories={"status": "available", "value": {
+        "root_trajectory_id": "streamed", "status": "complete", "cutoff_at": "2026-10-04T12:01:00Z"}})
+    assert store.commit_run(streamed, documents()).committed
+    assert {run["run_id"] for run in read_records(store).runs} == {"run-1", "retry", "concurrent", "streamed"}
     assert not abandoned.exists() and stat.S_IMODE(store.root.stat().st_mode) == 0o700
     assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in (store.root / "runs").iterdir())
 
@@ -265,13 +281,27 @@ def test_run_sections_require_complete_semantic_payload_and_bound_membership(tmp
     shards = [next((store.root / "runs").iterdir()) for store in (streamed, mapped)]
     assert [shard.read_text(encoding="utf-8") for shard in shards] == [expected, expected]
     assert not streamed.commit_run(raw).committed
-    with pytest.raises(StoreError, match="immutable_identity_conflict"):
-        mapped.commit_run({**raw, "outcome": "failed"})
+    with pytest.raises(StoreError, match="immutable_identity_conflict"):  # Same size, different digest.
+        mapped.commit_run({**raw, "captured_at": "2026-10-04T10:00:01Z"})
     assert shards[1].read_text(encoding="utf-8") == expected
+    size = len(expected.encode())
+    assert LocalRecordStore(tmp_path / "exact", max_record_bytes=size).commit_run(envelope, iter(documents)).committed
+    short = LocalRecordStore(tmp_path / "short", max_record_bytes=size - 1)
+    with pytest.raises(StoreError, match="record_too_large"):
+        short.commit_run(envelope, iter(documents))
+    assert list((short.root / "runs").iterdir()) == []
+    root, child = documents
+    faulted = LocalRecordStore(tmp_path / "faulted")
+    for record, streamed_documents in (
+        (envelope, [root, child | {"session_id": "other"}]), (envelope, [root, child | {"trajectory_id": "run-1"}]),
+        (envelope, [root, child | {"steps": []}]), (envelope, [root, child | {"extra": {"x": math.nan}}]),
+        (envelope, [child]), (raw, documents), (run_record(), documents),
+    ):
+        with pytest.raises(StoreError, match="invalid_or_unknown_record_schema"):
+            faulted.commit_run(record, iter(streamed_documents))
     summary["step_ids"] = [9]
     with pytest.raises(ValueError, match="invalid RunRecord"):
         parse_run(raw)
-    faulted = LocalRecordStore(tmp_path / "faulted")
     with pytest.raises(StoreError, match="invalid_or_unknown_record_schema"):
         faulted.commit_run(envelope, iter(documents))
     assert list((faulted.root / "runs").iterdir()) == []

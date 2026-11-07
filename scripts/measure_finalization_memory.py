@@ -9,6 +9,7 @@ pydantic-core buffers), bytes read (``/proc/self/io`` rchar) and seconds:
 
 - ``write``: the root's final write on recorder exit (serialization and snapshot callback);
 - ``runinfo``: ``render_live_run_info`` while the recorder is live;
+- ``summarize``: ``render_run_info_block`` over the written run directory (``daydream summarize``);
 - ``archive``: ``finalize_archive_run`` with archive and evaluation enabled;
 - ``capture``: ``capture_run_record`` (trajectory evidence only; no review sidecars).
 
@@ -35,7 +36,7 @@ from typing import Any
 
 MIB = 1024 * 1024
 SESSION = "0d1714aa-0000-4000-8000-000000000000"
-STAGES = ("write", "runinfo", "archive", "capture")
+STAGES = ("write", "runinfo", "summarize", "archive", "capture")
 
 
 def _proc_value(path: str, field: str) -> int:
@@ -84,11 +85,12 @@ def _scenario(forks: int, body_kb: int, turns: int, root_invocations: int) -> di
     import daydream.archive.provenance  # noqa: F401
     import daydream.eval.analyzer  # noqa: F401
     import daydream.retry_policy  # noqa: F401
-    from daydream.archive import finalize_archive_run
+    from daydream.archive import finalize_archive_run, get_archive_dir
     from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
     from daydream.artifact_visibility import ArtifactEvidenceProvenance, ArtifactTreeSnapshot, manifest_tree
-    from daydream.dataset import LocalRecordStore
     from daydream.dataset_capture import capture_run_record
+    from daydream.eval.analyzer import collect_trajectory_paths
+    from daydream.pr_comment_renderer import render_run_info_block
     from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
     from daydream.run_config import RunConfig
     from daydream.run_snapshot import ArchiveRunSnapshot, ManifestRunIdentity, RunPhaseCapabilities
@@ -123,7 +125,6 @@ def _scenario(forks: int, body_kb: int, turns: int, root_invocations: int) -> di
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
         frozen = tmp / "run" / "frozen"  # the dataset store must not overlap the frozen tree's parent
-        os.environ["DAYDREAM_ARCHIVE_DIR"] = str(tmp / "archive")
         tracemalloc.start()
         anyio.run(record, frozen)
         final = snapshots[-1]
@@ -131,6 +132,8 @@ def _scenario(forks: int, body_kb: int, turns: int, root_invocations: int) -> di
         result["docs"] = len(final.documents)
         result["run_mib"] = sum(path.stat().st_size for path in written) / MIB
         result["largest_mib"] = max(path.stat().st_size for path in written) / MIB
+        with Stage(result, "summarize"):
+            render_run_info_block(collect_trajectory_paths(default_trajectory_path(frozen, SESSION).parent))
         (tmp / "source").mkdir()
         identity = ManifestRunIdentity(
             skill=None, model=None, backend="claude", review_backend=None, fix_backend=None, test_backend=None,
@@ -146,11 +149,8 @@ def _scenario(forks: int, body_kb: int, turns: int, root_invocations: int) -> di
                 artifact_provenance=ArtifactEvidenceProvenance("workspace", SESSION, tmp / "source", tmp / "live"),
                 config=RunConfig(target=str(frozen), archive=True, run_eval=True), work=None,
             )
-        assert (tmp / "archive" / "runs" / SESSION / "manifest.json").is_file()
+        assert (get_archive_dir() / "runs" / SESSION / "manifest.json").is_file()
         # identity=None skips review sidecars; a captured source supplies the final head without Git.
-        store_defaults = LocalRecordStore.__init__.__kwdefaults__
-        assert store_defaults is not None
-        store_defaults["max_record_bytes"] = 1 << 34  # admit every scenario
         work = SimpleNamespace(source=tmp / "source", repo=tmp / "source", head_sha="0" * 40, head_branch="main",
                                base_branch="main", captured_source=SimpleNamespace(source_id=None))
         artifacts = ArtifactTreeSnapshot(SESSION, "workspace", frozen, manifest_tree(frozen), ())
@@ -175,8 +175,15 @@ def main() -> None:
     parser.add_argument("--scenario", nargs=2, type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.scenario:
+        from daydream.dataset import LocalRecordStore
+
+        store_defaults = LocalRecordStore.__init__.__kwdefaults__
+        assert store_defaults is not None
+        store_defaults["max_record_bytes"] = 1 << 34  # admit every scenario
         forks, body_kb = args.scenario
-        print(json.dumps(_scenario(forks, body_kb, args.turns, args.root_invocations)))
+        with tempfile.TemporaryDirectory() as archive:
+            os.environ["DAYDREAM_ARCHIVE_DIR"] = archive
+            print(json.dumps(_scenario(forks, body_kb, args.turns, args.root_invocations)))
         return
     header = ["forks", "body KB", "docs", "run MiB", "largest MiB"]
     header += [f"{stage} {kind}" for stage in STAGES for kind in ("peak MiB", "RSS MiB", "s")]

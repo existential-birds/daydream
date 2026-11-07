@@ -91,6 +91,10 @@ def test_training_signals_preserve_independent_fork_outcomes_in_archive(tmp_path
         "legacy-error-string": [step | {"observation": {"results": [completed | {"extra": {"is_error": "true"}}]}}],
         "legacy-cancel-int": [step | {"observation": {"results": [completed | {"extra": {"cancelled": 1}}]}}],
         "legacy-list": [step | {"observation": {"results": [completed | {"extra": []}]}}],
+        "content": [step | {"timestamp": "2026-01-01T00:00:01Z", "source": "agent", "message": "four",
+                            "reasoning_content": "abc", "observation": {"results": [completed | {"content": " "}]}},
+                    {"step_id": 2, "timestamp": "2026-01-01T00:00:02Z", "source": "agent", "message": "x"},
+                    {"step_id": 3, "timestamp": "2026-01-01T00:00:04Z", "source": "user", "message": "unscored"}],
     }
     target = tmp_path / "workspace"
     target.mkdir()
@@ -101,7 +105,8 @@ def test_training_signals_preserve_independent_fork_outcomes_in_archive(tmp_path
         for name, steps in population.items()
     ))
     _finalize_strict_archive(recorder, snapshot, RunConfig(run_eval=True, archive=True), target)
-    result = json.loads((archive_dir / "runs/training-outcomes/evaluation.json").read_text())["training_signals"]
+    evaluation = json.loads((archive_dir / "runs/training-outcomes/evaluation.json").read_text())
+    result = evaluation["training_signals"]
     assert {row["trajectory"]: (row["noise_flags"], row["training_quality"]) for row in result["trajectories"]} == {
         "failed": (["failed_tool_result"], "review"),
         "interrupted": (["incomplete_tool_call"], "review"),
@@ -110,9 +115,13 @@ def test_training_signals_preserve_independent_fork_outcomes_in_archive(tmp_path
         "step-local": (["incomplete_tool_call", "unmatched_tool_result"], "review"),
         "explicit-unmatched": (["unmatched_tool_result"], "review"),
         "legacy-missing": ([], "clean"), "legacy-empty": ([], "clean"), "legacy-error-string": ([], "clean"),
-        "legacy-cancel-int": ([], "clean"), "legacy-list": ([], "clean"),
+        "legacy-cancel-int": ([], "clean"), "legacy-list": ([], "clean"), "content": (["empty_tool_result"], "review"),
     }
-    assert (result["total_trajectories"], result["clean_for_training"], result["needs_review"]) == (11, 5, 6)
+    content = next(row for row in result["trajectories"] if row["trajectory"] == "content")
+    assert (content["steps"], content["has_reasoning"], content["tool_calls"], content["reasoning_fraction"]) == (
+        3, True, 1, 0.375)
+    assert evaluation["timing"]["by_agent"] == [{"agent": "content", "duration_seconds": 3.0}]
+    assert (result["total_trajectories"], result["clean_for_training"], result["needs_review"]) == (12, 5, 7)
 
 
 def test_analyze_costs_aggregates_legacy_fork_metrics() -> None:

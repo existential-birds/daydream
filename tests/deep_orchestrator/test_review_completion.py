@@ -7,7 +7,6 @@ import os
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -422,12 +421,12 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
             state['replacement_git'] = []
             _walk_entry(review.repo, review.repo / '.git', state['replacement_git'])
         return real_run(args, **kwargs)
-    def observe_stage(path: Path, content: bytes | Iterable[bytes], **kwargs: Any) -> Path:
+    def observe_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
         nonlocal staging_coverage
         staging_coverage = path.name == 'review-coverage.json'
         if path.name == 'review-coverage.json':
             state['writes'].append((state['failed'], content))
-        if isinstance(content, bytes) and b'"terminal_result"' in content:  # Streamed records stay unread.
+        if b'"terminal_result"' in content:
             state['export'] = (path, content)
         try:
             return stage(path, content, **kwargs)

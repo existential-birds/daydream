@@ -23,14 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Run finalization holds one trajectory document at a time, so its peak memory follows
   the largest document instead of the run's size times the number of consumers. One
-  summary pass now feeds timing, evaluation and the archive manifest; dataset
-  capture streams documents into the record store, refusing an oversized record early,
+  summary pass now feeds timing, evaluation and the archive manifest; dataset capture
+  stages documents outside the record store's lock, refusing an oversized record early,
   and the captured record bytes are unchanged; live and `daydream summarize` run info
   fold documents one at a time. Trajectory documents are serialized straight to bytes,
   which spells some floats differently (`0.000015` instead of `1.5e-05`) with identical
-  parsed values. For contributors: `snapshot_trajectories` is removed, and
-  `compute_timing_summary`, `analyze_session` and `build_manifest_from_snapshot` take
-  the `RunSummary` from `summarize_run`
+  parsed values. For contributors: `snapshot_trajectories` and the package export of
+  `compute_timing_summary` are removed; `analyze_session` and
+  `build_manifest_from_snapshot` take the `RunSummary` from `summarize_run`, whose
+  `timing` replaces `compute_timing_summary(write_snapshot)`
   ([#1714](https://github.com/existential-birds/daydream/issues/1714)).
 - **Breaking (0.y.z):** Time and tool-call budgets live on one host ledger per
   budget owner: an absolute deadline plus one charged tool-call count

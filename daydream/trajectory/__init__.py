@@ -59,10 +59,7 @@ from daydream.trajectory.summary import (
     StepFacts as StepFacts,
     summarize_run as summarize_run,
 )
-from daydream.trajectory.timing import (
-    TimingSummary as TimingSummary,
-    compute_timing_summary as compute_timing_summary,
-)
+from daydream.trajectory.timing import TimingSummary as TimingSummary
 from daydream.trajectory.types import (
     DaydreamPhase as DaydreamPhase,
     DaydreamRunFlow as DaydreamRunFlow,

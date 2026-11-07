@@ -724,16 +724,18 @@ frozen copy, where a mismatch is an integrity failure.
 Finalization holds one trajectory document at a time. After freeze, one summary
 pass (`summarize_run`) reads each selected document once through its
 identity-checked read and keeps only its metadata without `steps` plus compact
-step facts; timing, evaluation and the archive manifest share that
-summary, and nothing is persisted or recorded live for it. Malformed step content
-fails only the evaluation that reads it. Dataset capture streams each checked
-document through the record store's validation into a staged shard under the
-store lock: the record bytes equal the in-memory canonical record, and an
-oversized record is refused as soon as it crosses the size cap. Live run info and
+step facts; timing is reduced once from that summary, and evaluation and the
+archive manifest share it. Nothing is persisted or recorded live for it.
+Malformed step content fails only the evaluation that reads it. Dataset capture
+validates, encodes and stages each checked document outside the record store's
+lock, refusing an oversized record at the first document that crosses the size
+cap; the lock covers only interrupted-write recovery, the comparison with an
+existing shard and publication, and recovery leaves a live writer's stage alone.
+The record bytes equal the in-memory canonical record. Live run info and
 `daydream summarize` fold documents into the run-info table one at a time. The
-recorder serializes each document once, straight from the ATIF model to bytes:
-two-space indent, ASCII escapes and absent fields omitted. Float spelling may
-differ from older documents (`0.000015` rather than `1.5e-05`); decoded values are
+recorder serializes each document once, straight from the ATIF model to bytes,
+with ASCII escapes and absent fields omitted. Float spelling may differ from
+older documents (`0.000015` rather than `1.5e-05`); decoded values are
 identical. Serialization is not streamed, because every prepared document is
 retained or written whole. [The finalization measurement](../scripts/measure_finalization_memory.py)
 reports each stage's peak memory, runtime and bytes read.

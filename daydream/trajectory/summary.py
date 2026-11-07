@@ -8,12 +8,13 @@ is persisted or recorded live.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Any, Literal
 
 from daydream.timeutil import parse_iso_timestamp
 from daydream.trajectory.layout import PARTIAL_SUFFIX, RUN_DOCUMENT_NAME
+from daydream.trajectory.timing import TimingSummary, compute_timing_summary
 from daydream.trajectory.types import RunWriteSnapshot
 
 
@@ -21,12 +22,13 @@ from daydream.trajectory.types import RunWriteSnapshot
 class StepFacts:
     """Compact facts gathered from one document's ``steps``.
 
-    The ``*_result`` and ``unpaired_call`` facts correlate tool calls with observation
-    results within one step. Gathering never raises: ``unreadable`` names each part
-    (``count``, ``tools``, ``timing``, ``content``) that a reader iterating the full
-    steps would fail on.
+    Content facts, from ``tool_calls`` on, are gathered only for forked documents, the
+    only ones evaluation reads them for; the ``*_result`` and ``unpaired_call`` facts
+    correlate tool calls with observation results within one step. Gathering never
+    raises: ``readable`` is false where a reader of the full steps would have failed.
     """
 
+    readable: bool = True
     count: int = 0
     tool_names: dict[str, int] = field(default_factory=dict)
     duration_seconds: float | None = None
@@ -40,12 +42,11 @@ class StepFacts:
     unpaired_call: bool = False
     orphan_result: bool = False
     diagnostic_codes: frozenset[str] = frozenset()
-    unreadable: frozenset[str] = frozenset()
 
-    def require(self, part: str) -> StepFacts:
-        """Return these facts, or raise where reading the full steps for *part* would fail."""
-        if part in self.unreadable:
-            raise ValueError(f"trajectory steps are malformed for {part}")
+    def require(self) -> StepFacts:
+        """Return these facts, or raise where reading the full steps would fail."""
+        if not self.readable:
+            raise ValueError("trajectory steps are malformed")
         return self
 
 
@@ -76,21 +77,10 @@ class RunSummary:
     def forked(self) -> tuple[DocumentSummary, ...]:
         return tuple(document for document in self.documents if document.trajectory_id != self.root_trajectory_id)
 
-
-def _count(steps: Any) -> dict[str, Any]:
-    return {"count": len(steps)}
-
-
-def _tool_names(steps: Any) -> dict[str, Any]:
-    names = Counter(call["function_name"] for step in steps for call in step.get("tool_calls") or [])
-    if not all(isinstance(name, str) for name in names):
-        raise TypeError("tool function names must be strings")
-    return {"tool_names": dict(names)}
-
-
-def _timing(steps: Any) -> dict[str, Any]:
-    stamps = [parse_iso_timestamp(step["timestamp"]) for step in steps if step.get("timestamp")]
-    return {"duration_seconds": (stamps[-1] - stamps[0]).total_seconds() if len(stamps) >= 2 else None}
+    @cached_property
+    def timing(self) -> TimingSummary | None:
+        """Overlap-aware timing, reduced once and shared by evaluation and the manifest."""
+        return compute_timing_summary(self)
 
 
 def _content(steps: Any) -> dict[str, Any]:
@@ -175,38 +165,33 @@ def _pairing(steps: Any) -> dict[str, Any]:
             "orphan_result": orphan, "diagnostic_codes": frozenset(codes)}
 
 
-_STEP_PARTS: tuple[tuple[str, Callable[[Any], dict[str, Any]]], ...] = (
-    ("count", _count), ("tools", _tool_names), ("timing", _timing), ("content", _content),
-)
-
-
-def _step_facts(steps: Any) -> StepFacts:
-    facts: dict[str, Any] = {}
-    unreadable: set[str] = set()
-    for part, gather in _STEP_PARTS:
-        try:
-            facts.update(gather(steps))
-        except Exception:  # noqa: BLE001 - only a reader of this part fails on malformed steps
-            unreadable.add(part)
-    return StepFacts(**facts, unreadable=frozenset(unreadable))
+def _step_facts(steps: Any, *, content: bool) -> StepFacts:
+    try:
+        names = Counter(call["function_name"] for step in steps for call in step.get("tool_calls") or [])
+        if not all(isinstance(name, str) for name in names):
+            raise TypeError("tool function names must be strings")
+        stamps = [parse_iso_timestamp(step["timestamp"]) for step in steps if step.get("timestamp")]
+        return StepFacts(
+            count=len(steps), tool_names=dict(names),
+            duration_seconds=(stamps[-1] - stamps[0]).total_seconds() if len(stamps) >= 2 else None,
+            **(_content(steps) if content else {}),
+        )
+    except Exception:  # noqa: BLE001 - malformed steps fail only the evaluation that reads them
+        return StepFacts(readable=False)
 
 
 def summarize_run(write_snapshot: RunWriteSnapshot) -> RunSummary:
     """Read each selected document once through its identity-checked read and summarize it.
 
-    Undecodable, non-object or misidentified documents and a missing or duplicate
-    root raise ``ValueError``; a changed reference raises its integrity error.
+    Undecodable, non-object or misidentified documents raise ``ValueError``; a changed
+    reference raises its integrity error. The snapshot was validated with exactly one root.
     """
     root_id = write_snapshot.root_trajectory_id
     documents: list[DocumentSummary] = []
     for document in write_snapshot.documents:
         metadata = document.validated_payload(root_id)
-        source_file = (RUN_DOCUMENT_NAME if document.trajectory_id == root_id
-                       else document.path.name.removesuffix(PARTIAL_SUFFIX))
-        documents.append(
-            DocumentSummary(document.trajectory_id, source_file, metadata, _step_facts(metadata.pop("steps", [])))
-        )
-    roots = sum(summary.trajectory_id == root_id for summary in documents)
-    if roots != 1:
-        raise ValueError("duplicate frozen root trajectory" if roots else "frozen root trajectory is missing")
+        forked = document.trajectory_id != root_id
+        source_file = document.path.name.removesuffix(PARTIAL_SUFFIX) if forked else RUN_DOCUMENT_NAME
+        steps = _step_facts(metadata.pop("steps", []), content=forked)
+        documents.append(DocumentSummary(document.trajectory_id, source_file, metadata, steps))
     return RunSummary(write_snapshot.status, write_snapshot.cutoff_at, root_id, tuple(documents))
