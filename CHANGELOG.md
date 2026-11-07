@@ -32,7 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `compute_timing_summary` are removed; `analyze_session` and
   `build_manifest_from_snapshot` take the `RunSummary` from `summarize_run`, whose
   `timing` replaces `compute_timing_summary(write_snapshot)`
-  ([#1714](https://github.com/existential-birds/daydream/issues/1714)).
+  ([#1714](https://github.com/existential-birds/daydream/issues/1714),
+  [#1785](https://github.com/existential-birds/daydream/pull/1785)).
 - **Breaking (0.y.z):** Time and tool-call budgets live on one host ledger per
   budget owner: an absolute deadline plus one charged tool-call count
   (`daydream.review_budget.BudgetLedger`, which replaces `ReviewInvestigationBudget`).
