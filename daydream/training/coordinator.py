@@ -132,21 +132,10 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
     return gold, {"gold": len(gold), "silver": silver}
 
 
-def _record_views(
-    rec: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Read a projected record's ``task_identity``/``lineage`` views."""
-
-    def view(key: str) -> dict[str, Any]:
-        value = rec.get(key)
-        return value if isinstance(value, dict) else {}
-
-    return view("task_identity"), view("lineage")
-
-
 def _sft_prompt(rec: dict[str, Any]) -> str:
     """Build a deterministic prompt from frozen task identity, lineage, and stack."""
-    identity, lineage_obj = _record_views(rec)
+    identity = rec["task_identity"] if isinstance(rec.get("task_identity"), dict) else {}
+    lineage_obj = rec["lineage"] if isinstance(rec.get("lineage"), dict) else {}
     repo_slug = identity.get("repo_slug") or lineage_obj.get("repo_slug") or "unknown"
     parts = [f"repo: {repo_slug}"]
     stack = rec.get("stack") or rec.get("detected_stack")

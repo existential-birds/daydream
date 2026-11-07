@@ -1,5 +1,5 @@
 """Run the CPU pipeline on real projected files without mocks. Preserve frozen splits and projection
-digests, and reject missing Stage-1/2 fields.
+digests, and reject a gold record without its finding text.
 """
 
 from __future__ import annotations
@@ -12,11 +12,13 @@ from typing import Any, cast
 
 import pytest
 
+from daydream.dataset import LocalRecordStore
 from daydream.training.coordinator import PipelineConfig, run_pipeline
+from daydream.training.corpus_projection.projector import build_frozen_corpus
 from daydream.training.corpus_projection.splits import assign_split
 from daydream.training.reward_model import OutcomeModel, score_comment
 from daydream.training.stacks import load_v2_projection
-from tests.fixtures.training.build_projection_50 import build_projection_50
+from tests.harness.record_projection import add_projection_run, projection_config
 
 SALT = "issue-1081-coordinator-salt"
 HOLDOUT_RATE = 0.2
@@ -64,12 +66,12 @@ def _v2_record(
 
 
 def _build_projection(
-    tmp_path: Path, *, omit_finding_text: bool = False, n_sessions: int = 80,
+    tmp_path: Path, *, omit_finding_text: bool = False,
 ) -> Path:
     """Build gold outcomes plus silver/task-only records in content-derived splits; seed labels so the
     holdout contains both gold classes.
     """
-    session_ids = [f"sess-{i:04d}" for i in range(n_sessions)]
+    session_ids = [f"sess-{i:04d}" for i in range(80)]
     split_of = {sid: assign_split(_record_id(sid, "fp"), salt=SALT, holdout_rate=HOLDOUT_RATE, val_rate=VAL_RATE)
         for sid in session_ids
     }
@@ -139,12 +141,26 @@ def test_cli_projection_wiring(tmp_path: Path, cli_runner: Any) -> None:
     assert manifest["run_identity"]["corpus_digest"] == load_v2_projection(proj_dir).digest
 
 
+def _build_projection_50(tmp_path: Path) -> Path:
+    """Build 50 schema-3 records from observation-v3 evidence through the offline projector."""
+    store = LocalRecordStore(tmp_path / "projection-fixture" / "records")
+    for index in range(23):
+        add_projection_run(store, run_id=f"sess-gold-{index:02d}", dispositions=("accepted", "rejected"),
+                           repo_slug=f"owner/repo-{index % 3}")
+    for index in range(2):
+        add_projection_run(store, run_id=f"sess-amb-{index}", dispositions=("ambiguous",))
+    config = projection_config(store, tmp_path / "projection-fixture", salt="issue-1081-fixture-salt",
+                               holdout_rate=HOLDOUT_RATE, val_rate=VAL_RATE, emit_process_traces=True)
+    assert build_frozen_corpus(config)["total"] == 50
+    return config.out_dir
+
+
 def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     """Feed the real 50-record projector fixture through all pipeline stages. Require stable corpus digests
     and SFT rows without fixture post-processing; both gold classes and non-gold record types are present.
     """
 
-    proj_dir = build_projection_50(tmp_path)
+    proj_dir = _build_projection_50(tmp_path)
     projection = load_v2_projection(proj_dir)
     assert len(projection.records) == 50
     assert projection.by_split == {
