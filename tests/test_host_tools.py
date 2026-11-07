@@ -314,8 +314,7 @@ async def test_binding_charges_one_ledger_that_only_a_refund_renews() -> None:
 async def test_http_operator_grants_are_frozen_and_retries_only_narrow_them() -> None:
     """Caller mutation or a retry must not authorize an ungranted native effect.
 
-    Installed Pi excludes forbidden tools before native lookup, so it cannot prove
-    the host endpoint independently denies their starts and preserves narrowed
+    The host endpoint independently denies their starts and preserves narrowed
     authority across attempt-local readiness sessions.
     """
     installed: list[Any] = []
@@ -740,9 +739,8 @@ async def _ready(client: httpx.AsyncClient, **extra: Any) -> dict[str, Any]:
 async def test_http_host_tool_call_serves_each_admitted_start_once(fault: str) -> None:
     """A /call reply is served only for one unused admitted start of that exact tool.
 
-    Native journeys only exercise correlated calls, so they cannot catch an endpoint
-    that serves an unadmitted identity, replays a consumed one, or lets a read
-    admission authorize a different host tool.
+    The endpoint never serves an unadmitted identity, replays a consumed one, or lets
+    a read admission authorize a different host tool.
     """
     served: list[Any] = []
     def lookup(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -797,12 +795,7 @@ async def test_http_host_tool_unexpected_failure_is_indeterminate_only_when_muta
 
 @pytest.mark.parametrize("case", ["unavailable", "host-schema"])
 async def test_http_readiness_refuses_native_limits_or_host_schemas_before_provider_work(case: str) -> None:
-    """Readiness refuses undeclared native limits, or a drifted host tool, before any admission.
-
-    The installed native capacity row covers an insufficient model end to end; it
-    cannot prove undeclared limits or a host-tool schema differing from the bound
-    one fail native readiness.
-    """
+    """Readiness refuses undeclared native limits, or a drifted host tool, before any admission."""
     binding = _lookup_binding(lambda value: value,
                               native_requirement=NativeCapacityRequirement(largest_tool_result_bytes=90_000,
                                                                            submission_bytes=30_000))

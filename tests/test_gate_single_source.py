@@ -137,10 +137,6 @@ def test_ci_shard_planner_rejects_counts_without_publishing_a_partial_matrix(
 # the one-line reason. Keep this list small and reasoned; a step that is
 # neither declared here nor a gate invocation fails the guard.
 _CI_ONLY_STEPS: dict[str, str] = {
-    "Install Pi for native output contract tests": (
-        "provision the pinned native CLI on the disposable CI runner — the local gate uses contributor-installed "
-        "prerequisites without globally installing or replacing them"
-    ),
     "Plan pytest shards": "select supported shard counts for the manual benchmark and normal duration-weighted gate",
     "Run pytest shard": "partition the complete pytest collection and record checkout-bound execution and coverage",
     "Combine and enforce branch coverage": "validate every shard receipt before applying the aggregate coverage floor",

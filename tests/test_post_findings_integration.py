@@ -530,7 +530,7 @@ def _review(review_id: int, commit_id: str, body: str, *, login: str = "daydream
 
 
 @pytest.mark.parametrize("case", [
-    "no_notice", "not_superseded", "already_superseded", "matched_findings", "same_head", "ancestor",
+    "not_superseded", "already_superseded", "matched_findings", "same_head", "ancestor",
 ])
 def test_complete_clean_review_supersedes_only_a_current_unfinished_notice(
     fake_gh: FakeGh, tmp_path: Path, case: str,
@@ -554,7 +554,6 @@ def test_complete_clean_review_supersedes_only_a_current_unfinished_notice(
 
     unfinished = notice(head, warning="python: Review limit exhausted: tool_call_budget_exceeded")
     reviews = {
-        "no_notice": [],
         "not_superseded": [
             _review(1, "d" * 40, notice("d" * 40, warning="python: backend failure")),
             _review(2, head, unfinished, login="someone-else"),

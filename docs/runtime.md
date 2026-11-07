@@ -25,7 +25,7 @@ merge base, diff key, and scope inventory. Preserve admitted partial findings an
 failure reasons. Incomplete/failed results can post COMMENT notices but cannot
 approve or resolve stale threads. A later complete review with no findings posts a
 COMMENT saying so only when the latest Daydream review on its head or an ancestor,
-by the same login and carrying the current footer, is such a notice. Earlier
+by the same login and carrying the Daydream footer, is such a notice. Earlier
 reviews are never edited, dismissed or minimized. Without such a notice, a
 complete-empty review posts only an approval that the policy below allows.
 Cache/resume must validate the same identities and current typed target

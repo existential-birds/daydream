@@ -212,7 +212,7 @@ jobs:
         with:
           enable-cache: true
 
-      # After runtime provisioning, every check below is a gate step in the Makefile: the ordered
+      # After Python setup, every check below is a gate step in the Makefile: the ordered
       # check set lives there once (see `make check`). This job adds only the
       # setup steps and the coverage artifact upload, so a gate change is a
       # one-file edit.
