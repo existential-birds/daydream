@@ -643,7 +643,8 @@ assignment's system instructions become Claude's system prompt.
   validation) is admitted when its tool result arrives, so it is charged once like any start.
 - Terminal rule: the CLI runs a generation's first tool before later blocks arrive, so
   Claude cannot require a sole terminal call. Acceptance closes authority at once; later
-  starts are denied without charge or failure and observed once as overshoot.
+  starts are denied without charge or failure and observed once as overshoot, and a
+  sibling call admitted before acceptance is refused without failing the assignment.
 - Settlement: a successful result after acceptance settles; a native error keeps the
   admission and usage and is not retried. A host fatal interrupts the conversation,
   which is not an instant stop. Every exit, including cancellation, closes the attempt

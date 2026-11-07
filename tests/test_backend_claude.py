@@ -929,9 +929,12 @@ async def test_retired_host_callbacks_change_nothing_and_uncorrelated_calls_fail
         assert (await call(first, "early")).isError
         assert (ledger.charged, ledger.observed, binding.fatal_error, binding.authority_open) == (1, 1, None, True)
         assert await second.admit(start, "fresh", {}) == {}
+        assert await second.admit(start, "sibling", {}) == {}
         assert not (await call(second, "fresh")).isError and binding.accepted and not binding.authority_open
+        # A sibling admitted before acceptance is refused without failing the accepted assignment.
+        assert (await call(second, "sibling")).isError and binding.fatal_error is None
         assert _is_denied(await second.admit(start, "overshoot", {}))
-    assert (ledger.charged, ledger.observed, installed, binding.cleanup_complete) == (2, 3, [{"verdict": "clean"}],
+    assert (ledger.charged, ledger.observed, installed, binding.cleanup_complete) == (3, 4, [{"verdict": "clean"}],
                                                                                        True)
     # An MCP call without the CLI's tool identity cannot be correlated with its charged start.
     uncorrelated = HostToolBinding(deadline=clock.monotonic() + 30, accept=accept)

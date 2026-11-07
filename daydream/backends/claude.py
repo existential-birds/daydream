@@ -917,6 +917,10 @@ class _ClaudeHostEndpoint(HostToolEndpoint):
             if not self.current():
                 raise HostToolRejected("This attempt's host-tool authority is closed; the call was not served",
                                        code="authority_closed")
+            if binding.accepted:
+                # A sibling admitted before acceptance is refused without failing the accepted assignment.
+                raise HostToolRejected("structured_output was accepted and this assignment has ended; "
+                                       "the call was not served", code="authority_closed")
             if not host_policy._valid_call_id(call_id):
                 raise self.fatal("Native MCP call has no host-correlated tool identity", code="native_correlation")
             if params.name != host_policy.NATIVE_SUBMIT:
