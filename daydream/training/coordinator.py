@@ -13,7 +13,6 @@ artifacts but cannot publish a new successful manifest.
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -28,11 +27,7 @@ from daydream.training.stacks import V2Projection, load_v2_projection
 
 __all__ = ["PipelineConfig", "run_pipeline"]
 
-STAGES: tuple[str, ...] = ("stage0", "stage1", "stage2", "stage3")
-
-# Stage 2 rebuilds every task from full-length hex commit SHAs; longer
-# sha256-style content-address stamps are tolerated.
-_FULL_SHA_RE = re.compile(r"[0-9a-f]{40,}")
+STAGES: tuple[str, ...] = ("stage0", "stage1", "stage3")
 
 
 @dataclass(frozen=True)
@@ -137,21 +132,10 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
     return gold, {"gold": len(gold), "silver": silver}
 
 
-def _record_views(
-    rec: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Read a projected record's ``task_identity``/``lineage`` views."""
-
-    def view(key: str) -> dict[str, Any]:
-        value = rec.get(key)
-        return value if isinstance(value, dict) else {}
-
-    return view("task_identity"), view("lineage")
-
-
 def _sft_prompt(rec: dict[str, Any]) -> str:
     """Build a deterministic prompt from frozen task identity, lineage, and stack."""
-    identity, lineage_obj = _record_views(rec)
+    identity = rec["task_identity"] if isinstance(rec.get("task_identity"), dict) else {}
+    lineage_obj = rec["lineage"] if isinstance(rec.get("lineage"), dict) else {}
     repo_slug = identity.get("repo_slug") or lineage_obj.get("repo_slug") or "unknown"
     parts = [f"repo: {repo_slug}"]
     stack = rec.get("stack") or rec.get("detected_stack")
@@ -162,81 +146,6 @@ def _sft_prompt(rec: dict[str, Any]) -> str:
         if value:
             parts.append(f"{key}: {value}")
     return "; ".join(parts)
-
-
-def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Build RFT inputs from frozen repo/base/head/diff identity, refusing missing fields.
-
-    Both SHAs must be full-length hex. Validated projection rows
-    are format-valid; adjudicated outcomes map to the shared verdict vocabulary.
-    Absent verifier evidence stays unknown, and missing length uses finding text.
-    """
-    rows: list[dict[str, Any]] = []
-    for rec in records:
-        identity, lineage_obj = _record_views(rec)
-        rid = str(rec.get("session_id") or "")
-        repo_slug = identity.get("repo_slug") or lineage_obj.get("repo_slug")
-        base_sha = identity.get("base_sha")
-        head_sha = identity.get("head_sha")
-        diff = rec.get("diff")
-        missing = [
-            name
-            for name, value in (
-                ("repo_slug", repo_slug),
-                ("base_sha", base_sha),
-                ("head_sha", head_sha),
-                ("diff", diff),
-            )
-            if not value
-        ]
-        if missing:
-            raise RuntimeError(
-                f"stage2 refused: record {rid!r} lacks frozen task identity field(s) {missing}; "
-                "RFT rebuilds every task from repo/base/head/diff identity (M16) and never skips "
-                "a record silently"
-            )
-        for name, value in (("base_sha", base_sha), ("head_sha", head_sha)):
-            if not isinstance(value, str) or not _FULL_SHA_RE.fullmatch(value):
-                raise RuntimeError(
-                    f"stage2 refused: record {rid!r} carries an invalid {name} {value!r}; RFT inputs "
-                    "need a full 40-hex commit sha, never a truncated or non-hex identity"
-                )
-        # Projection records carry no archived verifier-verdicts file; the
-        # record's own adjudicated outcome is its capture-time judgment.
-        # Map it onto the shared verdict vocabulary (the labels
-        # score_trajectory's verdict_map consumes) so RFT inputs carry a
-        # real correctness axis instead of a 0.0 composite. format_valid is True: a frozen projection record is
-        # admission/shape/drift-validated, so the v1 bronze-parse failure
-        # floor cannot apply here.
-        disposition = rec.get("outcome_label") or rec.get("disposition")
-        verdict = {
-            "accepted": "consistent",
-            "rejected": "contradicts",
-            "ambiguous": "uncertain",
-            "unanswered": "uncertain",
-            "missing": "uncertain",
-        }.get(str(disposition))
-        verifier_verdicts: Any = (
-            [{"verdict": verdict}] if verdict is not None else rec.get("verifier_verdicts")
-        )
-        format_valid = True
-        length = rec.get("length")
-        if length is None:
-            length = len(str(rec.get("finding_text") or ""))
-        rows.append(
-            {
-                "id": rid,
-                "repo_slug": repo_slug,
-                "base_sha": base_sha,
-                "head_sha": head_sha,
-                "diff": diff,
-                "findings": rec.get("findings", []),
-                "verifier_verdicts": verifier_verdicts,
-                "format_valid": format_valid,
-                "length": length,
-            }
-        )
-    return rows
 
 
 def _frozen_split_from_projection(
@@ -319,7 +228,7 @@ def _run_stage0(
 def _run_stage_artifacts(
     config: PipelineConfig, records: list[dict[str, Any]], stage: str, stage_dir: Path
 ) -> dict[str, Any]:
-    """Write the SFT dataset, RFT inputs, or adapter checkpoint.
+    """Write the SFT dataset or the adapter checkpoint.
 
     Adapter assembly runs on the dry path too, using the validated Stage-0
     model state.
@@ -331,12 +240,6 @@ def _run_stage_artifacts(
             "\n".join(json.dumps(r, sort_keys=True) for r in rows) + ("\n" if rows else "")
         )
         return {"status": "complete", "records": len(rows), "tier_counts": tier_counts}
-    if stage == "stage2":
-        rows = _rft_rows(records)
-        (stage_dir / "rft-inputs.jsonl").write_text(
-            "\n".join(json.dumps(r, sort_keys=True) for r in rows) + "\n"
-        )
-        return {"status": "complete", "records": len(rows)}
     # stage3: adapter checkpoint handoff. The gate enforcement above guarantees
     # Stage 0 ran, so its model-state checkpoint is the merged adapter state.
     adapter_dir = stage_dir / "adapter"

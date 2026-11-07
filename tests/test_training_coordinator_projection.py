@@ -1,5 +1,5 @@
 """Run the CPU pipeline on real projected files without mocks. Preserve frozen splits and projection
-digests, and reject missing Stage-1/2 fields.
+digests, and reject a gold record without its finding text.
 """
 
 from __future__ import annotations
@@ -12,11 +12,13 @@ from typing import Any, cast
 
 import pytest
 
+from daydream.dataset import LocalRecordStore
 from daydream.training.coordinator import PipelineConfig, run_pipeline
+from daydream.training.corpus_projection.projector import build_frozen_corpus
 from daydream.training.corpus_projection.splits import assign_split
 from daydream.training.reward_model import OutcomeModel, score_comment
 from daydream.training.stacks import load_v2_projection
-from tests.fixtures.training.build_projection_50 import build_projection_50
+from tests.harness.record_projection import add_projection_run, projection_config
 
 SALT = "issue-1081-coordinator-salt"
 HOLDOUT_RATE = 0.2
@@ -34,7 +36,7 @@ def _record_id(session_id: str, fingerprint: str) -> str:
 
 def _v2_record(
     *, session_id: str, split: str, label: str | None, fingerprint: str, record_type: str = "outcome-finding",
-    tier: str = "gold", finding_text: str | None = None, base_sha: str = BASE_SHA,
+    tier: str = "gold", finding_text: str | None = None,
 ) -> dict[str, Any]:
     """A full v2 record the projector would emit for one finding."""
     record: dict[str, Any] = {
@@ -49,7 +51,7 @@ def _v2_record(
             "reply_classifier_version": "rc-1", "rubric_schema_version": "rubric-v2", "as_of": "2026-01-01T00:00:00Z",
             "valid_at": "2026-01-01T00:00:00Z", "split": split, "exclusion_reason": None, "repo_slug": "owner/repo",
         }, "task_identity": {
-            "repo_slug": "owner/repo", "source": "record", "base_sha": base_sha, "head_sha": HEAD_SHA,
+            "repo_slug": "owner/repo", "source": "record", "base_sha": BASE_SHA, "head_sha": HEAD_SHA,
             "diff_digest": hashlib.sha256(DIFF_BODY.encode("utf-8")).hexdigest(),
             "diff_ref": {"content_digest": hashlib.sha256(DIFF_BODY.encode("utf-8")).hexdigest(),
                 "relpath": f"batches/{session_id}/diff.patch",
@@ -64,12 +66,12 @@ def _v2_record(
 
 
 def _build_projection(
-    tmp_path: Path, *, omit_finding_text: bool = False, base_sha: str = BASE_SHA, n_sessions: int = 80,
+    tmp_path: Path, *, omit_finding_text: bool = False,
 ) -> Path:
     """Build gold outcomes plus silver/task-only records in content-derived splits; seed labels so the
     holdout contains both gold classes.
     """
-    session_ids = [f"sess-{i:04d}" for i in range(n_sessions)]
+    session_ids = [f"sess-{i:04d}" for i in range(80)]
     split_of = {sid: assign_split(_record_id(sid, "fp"), salt=SALT, holdout_rate=HOLDOUT_RATE, val_rate=VAL_RATE)
         for sid in session_ids
     }
@@ -92,7 +94,7 @@ def _build_projection(
         _place(_v2_record(session_id=sid, split=split_of[sid], label=label, fingerprint="fp",
                 finding_text=None if (omit_finding_text and label == "accepted") else (
                     ACCEPTED_TEXT if label == "accepted" else REJECTED_TEXT
-                ), base_sha=base_sha,
+                ),
             )
         )
     # Non-gold derived record types use their own identity split.
@@ -124,16 +126,10 @@ def _build_projection(
     return out
 
 
-def test_v2_projection_without_finding_text_or_full_sha_fails_closed(tmp_path: Path) -> None:
-    for name, overrides, match in (("missing-text", {"omit_finding_text": True}, "finding_text"),
-                                   ("short-sha", {"base_sha": "abc123"}, "base_sha"),
-                                   ("non-hex-sha", {"base_sha": "z" * 40}, "base_sha")):
-        root = tmp_path / name
-        root.mkdir()
-        proj_dir = _build_projection(root, **overrides)
-        cfg = PipelineConfig(projection=proj_dir, out_dir=root / "out")
-        with pytest.raises(RuntimeError, match=match):
-            run_pipeline(cfg, dry_run=False)
+def test_v2_projection_without_finding_text_fails_closed(tmp_path: Path) -> None:
+    proj_dir = _build_projection(tmp_path, omit_finding_text=True)
+    with pytest.raises(RuntimeError, match="finding_text"):
+        run_pipeline(PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out"), dry_run=False)
 
 
 def test_cli_projection_wiring(tmp_path: Path, cli_runner: Any) -> None:
@@ -145,13 +141,26 @@ def test_cli_projection_wiring(tmp_path: Path, cli_runner: Any) -> None:
     assert manifest["run_identity"]["corpus_digest"] == load_v2_projection(proj_dir).digest
 
 
+def _build_projection_50(tmp_path: Path) -> Path:
+    """Build 50 schema-3 records from observation-v3 evidence through the offline projector."""
+    store = LocalRecordStore(tmp_path / "projection-fixture" / "records")
+    for index in range(23):
+        add_projection_run(store, run_id=f"sess-gold-{index:02d}", dispositions=("accepted", "rejected"),
+                           repo_slug=f"owner/repo-{index % 3}")
+    for index in range(2):
+        add_projection_run(store, run_id=f"sess-amb-{index}", dispositions=("ambiguous",))
+    config = projection_config(store, tmp_path / "projection-fixture", salt="issue-1081-fixture-salt",
+                               holdout_rate=HOLDOUT_RATE, val_rate=VAL_RATE, emit_process_traces=True)
+    assert build_frozen_corpus(config)["total"] == 50
+    return config.out_dir
+
+
 def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     """Feed the real 50-record projector fixture through all pipeline stages. Require stable corpus digests
-    and full-identity RFT rows without fixture post-processing; both gold classes and non-gold record types
-    are present.
+    and SFT rows without fixture post-processing; both gold classes and non-gold record types are present.
     """
 
-    proj_dir = build_projection_50(tmp_path)
+    proj_dir = _build_projection_50(tmp_path)
     projection = load_v2_projection(proj_dir)
     assert len(projection.records) == 50
     assert projection.by_split == {
@@ -176,16 +185,7 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
         for line in (tmp_path / "out/stage1/sft-dataset.jsonl").read_text().splitlines()
         if line
     ]
-    rft_rows = [json.loads(line)
-        for line in (tmp_path / "out/stage2/rft-inputs.jsonl").read_text().splitlines()
-        if line
-    ]
-    assert sft_rows and rft_rows
-    for row in rft_rows:
-        assert len(row["base_sha"]) == 40
-        assert len(row["head_sha"]) == 40
-        assert row["repo_slug"]
-        assert row["diff"]
+    assert sft_rows
 
     first = manifest["run_identity"]["corpus_digest"]
     assert first == projection.digest
