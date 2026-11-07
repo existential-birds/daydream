@@ -33,11 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [code-review-benchmarks](https://github.com/existential-birds/code-review-benchmarks),
   and `daydream benchmark` exits with a pointer there. Repair-job ownership keeps
   its cross-process lock on the same lock file.
-- The unused RL review environment (`rl/daydream_review`) and its Prime-RL
-  recipes (`rl/train`), with `make rl-check`, the manual `run_rl` CI gate and
-  its Dependabot entry. It never ran a training job. The design rules to keep
-  if it is rebuilt are in
-  [#1775](https://github.com/existential-birds/daydream/issues/1775).
+- The unused RL review environment (`rl/daydream_review`, `rl/train`),
+  `make rl-check`, the manual `run_rl` CI gate and its Dependabot entry.
 
 ## [0.34.0] - 2026-11-03
 

@@ -3,8 +3,6 @@
 Read before changing or launching the staged pipeline. Production training has
 not completed; fixture validation establishes pipeline behavior, not model quality
 or GPU memory/cost estimates. Defaults live in [training](../daydream/training/).
-No GPU recipes or online RL environment ship; the removed environment's design
-rules are recorded in [#1775](https://github.com/existential-birds/daydream/issues/1775).
 
 ```bash
 daydream corpus build --store RECORD_STORE --snapshot-id SNAPSHOT_ID --out PROJECTION_DIR/corpus.jsonl
