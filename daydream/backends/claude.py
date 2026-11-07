@@ -3,14 +3,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import os
 import platform
 import re
 import shlex
 import shutil
-from collections.abc import AsyncGenerator, AsyncIterable
-from contextlib import suppress
+from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import asdict
 from pathlib import Path, PureWindowsPath
 from subprocess import PIPE
@@ -37,7 +39,10 @@ from claude_agent_sdk.types import (
     UserMessage,
     _hooks_to_internal_format,
 )
+from mcp import types as mcp_types
+from mcp.server.lowlevel import Server as McpServer
 
+from daydream import clock, host_tools as host_policy
 from daydream.backends import (
     AUDIT_ROOT_ISOLATION,
     READ_ONLY_BASH_ALLOWLIST,
@@ -46,6 +51,7 @@ from daydream.backends import (
     ClaudeRequestConfig,
     ContinuationToken,
     CostEvent,
+    DiagnosticEvent,
     MetricsEvent,
     ModelUsageTotals,
     RequestEvent,
@@ -57,7 +63,9 @@ from daydream.backends import (
     TurnEndEvent,
     fanout_concurrency_from_environment,
 )
+from daydream.backends.lifecycle import current_backend_lifecycle
 from daydream.config import TEST_WALL_BUDGET_S
+from daydream.host_tools import HostToolBinding, HostToolEndpoint, HostToolFatal, HostToolRejected
 
 # Non-posix shlex splits controls into characters, including redirection.
 # Leading parentheses are checked separately; mid-word parentheses produce
@@ -110,6 +118,19 @@ _AUDIT_TOOLS: tuple[str, ...] = ("Read", "Grep", "Glob", "StructuredOutput")
 _AUDIT_GREP_OUTPUT_MODES = frozenset({"content", "files_with_matches", "count"})
 _AUDIT_GREP_BOOL_FIELDS = frozenset({"-n", "-i", "multiline"})
 _AUDIT_GREP_INT_FIELDS = frozenset({"head_limit", "offset"})
+
+# Host-tool invocations serve one fresh in-process SDK MCP server under this
+# reserved name. The model sees exact ``mcp__daydream__<tool>`` names beside these
+# native inspection tools, which the read-only guard confines.
+_HOST_SERVER = "daydream"
+_HOST_TOOL_PREFIX = f"mcp__{_HOST_SERVER}__"
+_HOST_NATIVE_TOOLS: tuple[str, ...] = ("Read", "Grep", "Glob", "Bash")
+# The CLI correlates each SDK MCP call with its PreToolUse identity in request _meta.
+_TOOL_USE_ID_META = "claudecode/toolUseId"
+# Offer host tools directly, never deferred behind tool search, and keep every
+# bounded result inline: without the size hint the CLI saves large MCP results to
+# a file and shows the model only a preview.
+_HOST_TOOL_META = {"anthropic/alwaysLoad": True, "anthropic/maxResultSizeChars": host_policy._MAX_RESULT_BYTES}
 
 
 def _audit_cli_env(
@@ -322,12 +343,22 @@ class _RunLocalSubprocessCLITransport(_sdk_subprocess.SubprocessCLITransport):
                     await version_process.wait()
 
 
+def _sdk_mcp_servers(options: ClaudeAgentOptions) -> dict[str, Any]:
+    """In-process SDK MCP instances, extracted from options as the pinned SDK client does."""
+    servers = options.mcp_servers
+    if not isinstance(servers, dict):
+        return {}
+    return {name: config["instance"] for name, config in servers.items()  # type: ignore[typeddict-item]
+            if isinstance(config, dict) and config.get("type") == "sdk"}
+
+
 class _RunLocalClaudeSDKClient(ClaudeSDKClient):
     """Pinned-SDK startup using the run-owned initialization timeout.
 
     Override Query construction because the SDK otherwise reads the ambient
-    CLAUDE_CODE_STREAM_CLOSE_TIMEOUT even with a custom transport. Retain the
-    inherited error unwind, message API, disconnect, and context-manager lifecycle.
+    CLAUDE_CODE_STREAM_CLOSE_TIMEOUT even with a custom transport. Serve the same
+    in-process SDK MCP servers as the SDK client. Retain the inherited error
+    unwind, message API, disconnect, and context-manager lifecycle.
     """
 
     def __init__(
@@ -377,7 +408,7 @@ class _RunLocalClaudeSDKClient(ClaudeSDKClient):
                 if self.options.hooks
                 else None
             ),
-            sdk_mcp_servers={},
+            sdk_mcp_servers=_sdk_mcp_servers(self.options),
             initialize_timeout=self._run_initialize_timeout_s,
             agents=agents_dict,
             exclude_dynamic_sections=exclude_dynamic_sections,
@@ -760,6 +791,159 @@ async def _background_bash_guard(input_data: Any, tool_use_id: Any, context: Any
     )
 
 
+def _host_read_only_guard(host_tools: frozenset[str]) -> HookCallback:
+    """Read-only guard that also allows exactly this invocation's host MCP tools, never a wildcard."""
+
+    async def _guard(input_data: Any, tool_use_id: Any, context: Any) -> HookJSONOutput:
+        if isinstance(input_data, dict) and input_data.get("tool_name") in host_tools:
+            return {}
+        return await _read_only_guard(input_data, tool_use_id, context)
+
+    return _guard
+
+
+def _host_tool_result(value: dict[str, Any]) -> mcp_types.CallToolResult:
+    """Host metadata as JSON; frozen captured bytes stay their own unescaped text block."""
+    content = value.pop("content", None)
+    blocks = [json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+              *([content] if isinstance(content, str) else [])]
+    return mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=text) for text in blocks])
+
+
+class _ClaudeHostEndpoint(HostToolEndpoint):
+    """One attempt's fresh in-process SDK MCP server and PreToolUse admission for a binding.
+
+    Every native start is charged by ``admit`` before it runs; the MCP handler then
+    serves that exact correlated identity. Both run only after ``confirm_ready``,
+    because the query follows it. Hook and handler never raise: a raising SDK hook
+    fails open, so every failure becomes an explicit deny or tool error.
+    """
+
+    def __init__(self, binding: HostToolBinding) -> None:
+        super().__init__(binding)
+        self._listed = False
+        self._sessions = 0
+        tools = [mcp_types.Tool.model_validate({
+            "name": name, "description": self._description(name), "inputSchema": schema, "_meta": _HOST_TOOL_META,
+        }) for name, schema in self.schemas().items()]
+
+        @asynccontextmanager
+        async def serving(_server: Any) -> AsyncIterator[dict[str, Any]]:
+            self._sessions += 1
+            try:
+                yield {}
+            finally:
+                self._sessions -= 1
+
+        async def list_tools(_request: mcp_types.ListToolsRequest) -> mcp_types.ServerResult:
+            # Readiness requires that this exact instance, not a same-named server, was listed.
+            self._listed = True
+            return mcp_types.ServerResult(mcp_types.ListToolsResult(tools=tools))
+
+        async def call_tool(request: mcp_types.CallToolRequest) -> mcp_types.ServerResult:
+            return mcp_types.ServerResult(self._call(request.params))
+
+        self.server: McpServer[Any, Any] = McpServer(_HOST_SERVER, lifespan=serving)
+        self.server.request_handlers[mcp_types.ListToolsRequest] = list_tools
+        self.server.request_handlers[mcp_types.CallToolRequest] = call_tool
+
+    def _description(self, name: str) -> str:
+        tool = self.binding.host_tools.get(name)
+        if tool is None:
+            return "Submit the final result. Call this tool alone as your final action."
+        if tool.mutating:
+            return ("Charged host admission of one bounded batch without ending the assignment; "
+                    "see the system instructions.")
+        return "Charged read-only host lookup; see the system instructions for its arguments and paging."
+
+    async def confirm_ready(self, client: ClaudeSDKClient) -> None:
+        """Before any provider request, require this server's tools/list and its connected registration."""
+        state: Any = None
+        entry: dict[str, Any] = {}
+        try:
+            async with asyncio.timeout(min(host_policy._SETUP_TIMEOUT_S,
+                                           max(0.0, self.binding.deadline - clock.monotonic()))):
+                while True:
+                    status = await client.get_mcp_status()
+                    entries = [item for item in status.get("mcpServers", []) if item.get("name") == _HOST_SERVER]
+                    entry = cast(dict[str, Any], entries[0]) if len(entries) == 1 else {}
+                    state = entry.get("status")
+                    if state not in {None, "pending"} and (state != "connected" or self._listed):
+                        break
+                    await asyncio.sleep(0.02)
+        except TimeoutError:
+            if clock.monotonic() >= self.binding.deadline:
+                raise self.fatal("Host-tool absolute deadline expired during native setup",
+                                 code="deadline_expired") from None
+        names = sorted(str(tool.get("name")) for tool in entry.get("tools") or [] if isinstance(tool, dict))
+        if state != "connected" or not self._listed or names != sorted(self.schemas()):
+            raise self.fatal(f"Claude did not register the host tools before provider work (status {state!r})",
+                             code="native_readiness")
+        self.ready = True
+
+    async def admit(self, input_data: Any, tool_use_id: Any, context: Any) -> HookJSONOutput:
+        """Charge every native start before it runs, as Pi's /admit does."""
+        del context
+        binding = self.binding
+        try:
+            if not self.current():
+                return _read_only_deny("This attempt's host-tool authority is closed; no further tool runs")
+            if binding.accepted:
+                # Acceptance ended the assignment: observe overshoot without charging or failing it.
+                binding.observe_start(tool_use_id, None)
+                return _read_only_deny("structured_output was accepted and this assignment has ended; "
+                                       "make no further tool calls")
+            # Exact native host names bind to their binding names; other starts keep their own.
+            name = input_data.get("tool_name") if isinstance(input_data, dict) else None
+            if isinstance(name, str) and name.removeprefix(_HOST_TOOL_PREFIX) in self.schemas():
+                name = name.removeprefix(_HOST_TOOL_PREFIX)
+            binding.admit(tool_use_id, name, _tool_input(input_data), terminal=name == host_policy.NATIVE_SUBMIT)
+            return {}
+        except (HostToolRejected, HostToolFatal) as exc:
+            return _read_only_deny(str(exc))
+        except Exception as exc:  # noqa: BLE001 - a raising hook would fail open
+            failure = HostToolFatal("Host admission failed unexpectedly", code="callback_failed",
+                                    preacceptance=not binding.possibly_accepted)
+            failure.__cause__ = exc
+            return _read_only_deny(str(self.fail(failure)))
+
+    def _call(self, params: mcp_types.CallToolRequestParams) -> mcp_types.CallToolResult:
+        """Serve one admitted, correlated native call; failures become native tool errors."""
+        binding = self.binding
+        meta = params.meta.model_extra if params.meta is not None else None
+        call_id = (meta or {}).get(_TOOL_USE_ID_META)
+        arguments = params.arguments if params.arguments is not None else {}
+        try:
+            if not self.current():
+                raise HostToolRejected("This attempt's host-tool authority is closed; the call was not served",
+                                       code="authority_closed")
+            if binding.accepted:
+                # A sibling admitted before acceptance is refused without failing the accepted assignment.
+                raise HostToolRejected("structured_output was accepted and this assignment has ended; "
+                                       "the call was not served", code="authority_closed")
+            if not host_policy._valid_call_id(call_id):
+                raise self.fatal("Native MCP call has no host-correlated tool identity", code="native_correlation")
+            if params.name != host_policy.NATIVE_SUBMIT:
+                return _host_tool_result(binding.call(call_id, params.name, arguments))
+            result = binding.submit(call_id, arguments)
+            # Acceptance closes authority at once: later or sibling starts become observed overshoot.
+            binding.close_authority()
+            return _host_tool_result(dict(result))
+        except (HostToolRejected, HostToolFatal) as exc:
+            error = str(exc)
+        except Exception as exc:  # noqa: BLE001 - the native result must stay a typed tool error
+            failure = HostToolFatal("Host tool callback failed unexpectedly", code="callback_failed",
+                                    preacceptance=not binding.possibly_accepted)
+            failure.__cause__ = exc
+            error = str(self.fail(failure))
+        return mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=error)], isError=True)
+
+    async def close(self) -> None:
+        await super().close()
+        # The SDK closes its bridge when the client disconnects; a live session is unfinished cleanup.
+        self.closed = self._sessions == 0
+
+
 _CLAUDE_EFFORT_LEVELS: frozenset[str] = frozenset(("low", "medium", "high", "xhigh", "max"))
 
 
@@ -777,6 +961,21 @@ def _claude_effort(value: str | None) -> EffortLevel | None:
             f"expected one of {sorted(_CLAUDE_EFFORT_LEVELS)}"
         )
     return cast(EffortLevel, value)
+
+
+def _native_capacity(raw: dict[str, Any] | None) -> DiagnosticEvent:
+    """Model limits Claude reports only in terminal usage; it offers no preflight output limit."""
+    models = [usage for usage in (raw or {}).values() if isinstance(usage, dict)]
+
+    def limit(key: str) -> int | None:
+        values = {usage.get(key) for usage in models}
+        value = values.pop() if len(values) == 1 else None
+        return value if type(value) is int and value > 0 else None
+
+    return DiagnosticEvent(code="claude_native_capacity", message="Native model limits", metadata={
+        "context_window": limit("contextWindow"), "max_tokens": limit("maxOutputTokens"),
+        "source": "terminal_model_usage", "preflight": "unavailable",
+    })
 
 
 def _model_usage_totals(raw: dict[str, Any] | None) -> dict[str, ModelUsageTotals] | None:
@@ -805,6 +1004,7 @@ class ClaudeBackend:
     """Translate Claude SDK messages into the unified AgentEvent stream."""
 
     supports_finalization = True
+    supports_host_tools = True
 
     def __init__(
         self,
@@ -849,6 +1049,16 @@ class ClaudeBackend:
             self.fanout_concurrency = fanout_concurrency_from_environment(os.environ, 8)
         self._active_clients: set[ClaudeSDKClient] = set()
 
+    def bind_review_context(self, original_source: Path) -> dict[str, object]:
+        """Opaque identity of this adapter's native selection, without credentials or environment.
+
+        Claude's native authentication and user settings stay live; only the
+        selected model, effort and pinned SDK are identified.
+        """
+        del original_source
+        selection = json.dumps([self.model, self.reasoning_effort, _sdk_version]).encode()
+        return {"configuration_identity": hashlib.sha256(selection).hexdigest()}
+
     async def execute(
         self,
         cwd: Path,
@@ -859,6 +1069,8 @@ class ClaudeBackend:
         read_only: bool = False,
         persist_session: bool = True,
         finalization: bool = False,
+        review_instructions: str | None = None,
+        host_tools: HostToolBinding | None = None,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Yield normalized SDK events; error results raise ClaudeAgentError.
 
@@ -869,7 +1081,19 @@ class ClaudeBackend:
         tools under bypassPermissions. finalization removes investigative tools and
         uses low effort for this invocation, retaining guards and StructuredOutput.
         persist_session=False suppresses the terminal continuation token.
+
+        host_tools serves the binding's tools and terminal ``structured_output``
+        from a fresh invocation-local SDK MCP server; ``review_instructions`` become
+        its system prompt. Its result is the host-accepted submission, never prose.
         """
+        if host_tools is not None:
+            if (self.audit_root is not None or finalization or continuation is not None or agents
+                    or not read_only or persist_session or output_schema is None):
+                raise ValueError("Claude host tools require a fresh, nonpersistent read-only invocation with a "
+                                 "terminal schema, without audit isolation, finalization, continuation or agents")
+            host_tools.configure_schema(output_schema)
+        elif review_instructions is not None:
+            raise ValueError("Claude review instructions are served only with host tools")
         audit_root = self.audit_root
         audit_guard = self._audit_root_guard
         if audit_root is not None:
@@ -890,9 +1114,10 @@ class ClaudeBackend:
             persist_session = False
 
         effort = _claude_effort("low") if finalization else self.reasoning_effort
+        # The host tool is the only submission authority; native StructuredOutput stays for other contracts.
         output_format = (
             {"type": "json_schema", "schema": output_schema}
-            if output_schema
+            if output_schema and host_tools is None
             else None
         )
 
@@ -935,7 +1160,17 @@ class ClaudeBackend:
                 **_CLI_ENV,
             }
             pre_tool_use_hooks = [_dangerous_command_guard, _background_bash_guard]
-            if read_only:
+            if host_tools is not None:
+                # Exact host names beside the native inspection tools; strict MCP config
+                # excludes user servers, so no other MCP tool is offered.
+                host_names = [_HOST_TOOL_PREFIX + name for name in (*sorted(host_tools.host_tools),
+                                                                    host_policy.NATIVE_SUBMIT)]
+                options.tools = list(_HOST_NATIVE_TOOLS)
+                options.allowed_tools = [*_HOST_NATIVE_TOOLS, *host_names]
+                options.strict_mcp_config = True
+                options.system_prompt = review_instructions
+                pre_tool_use_hooks.append(_host_read_only_guard(frozenset(host_names)))
+            elif read_only:
                 pre_tool_use_hooks.append(_read_only_guard)
         options.hooks = {
             "PreToolUse": [HookMatcher(matcher=_READ_ONLY_HOOK_MATCHER, hooks=pre_tool_use_hooks)]
@@ -991,10 +1226,15 @@ class ClaudeBackend:
         # ResultMessage.structured_output); track their IDs so the matching
         # ToolResultBlocks aren't logged as unmatched_tool_results.
         skipped_tool_ids: set[str] = set()
+        tool_names: dict[str, str] = {}
         terminal_result: ResultEvent | None = None
 
+        lifecycle = current_backend_lifecycle() if host_tools is not None else None
+        if lifecycle is not None:
+            lifecycle.activate(response_idle_timeout_s=None, tool_idle_timeout_s=None, backend="claude")
         yield RequestEvent(
             prompt=prompt,
+            system_prompt=review_instructions,
             model_name=self.model,
             session_id=options.resume,
             reasoning_effort=effort,
@@ -1020,25 +1260,47 @@ class ClaudeBackend:
             session_source="host_generated" if resume_applied else None,
         )
 
-        if self._execution_input is not None:
-            client: ClaudeSDKClient
-            client = _RunLocalClaudeSDKClient(
-                options=options,
-                transport=_RunLocalSubprocessCLITransport(
-                    options, environment=dict(options.env)
-                ),
-                initialize_timeout_s=_run_local_initialize_timeout_s(
-                    dict(options.env)
-                ),
-            )
-        else:
-            client = ClaudeSDKClient(options=options)
+        async with AsyncExitStack() as attempt:
+            endpoint: _ClaudeHostEndpoint | None = None
+            if host_tools is not None:
+                binding, collector = host_tools, lifecycle
+                if collector is not None:
+                    # Recorded after the attempt's endpoint closes, on every exit path.
+                    attempt.callback(lambda: collector.host_tools_closed(
+                        native_settled=binding.native_settled, cleanup_complete=binding.cleanup_complete,
+                        calls=binding.calls, rejections=binding.rejections))
+                endpoint = await attempt.enter_async_context(host_tools.attempt(_ClaudeHostEndpoint))
+                # A fresh server and admission hook belong to this attempt alone.
+                options.mcp_servers = {_HOST_SERVER: {"type": "sdk", "name": _HOST_SERVER,
+                                                      "instance": endpoint.server}}
+                assert options.hooks is not None
+                options.hooks["PreToolUse"].append(
+                    HookMatcher(matcher=_READ_ONLY_HOOK_MATCHER, hooks=[endpoint.admit]))
+            if self._execution_input is not None:
+                client: ClaudeSDKClient
+                client = _RunLocalClaudeSDKClient(
+                    options=options,
+                    transport=_RunLocalSubprocessCLITransport(
+                        options, environment=dict(options.env)
+                    ),
+                    initialize_timeout_s=_run_local_initialize_timeout_s(
+                        dict(options.env)
+                    ),
+                )
+            else:
+                client = ClaudeSDKClient(options=options)
 
-        async with client:
+            await attempt.enter_async_context(client)
+            if host_tools is not None:
+                # Unwinding revokes this attempt before the client disconnects: closure first.
+                attempt.callback(host_tools.close_attempt)
             self._active_clients.add(client)
             response = client.receive_response()
             response_terminated = False
+            interrupted = False
             try:
+                if endpoint is not None:
+                    await endpoint.confirm_ready(client)
                 await client.query(prompt)
                 async for msg in response:
                     if isinstance(msg, AssistantMessage):
@@ -1053,6 +1315,7 @@ class ClaudeBackend:
                             elif isinstance(block, ThinkingBlock) and block.thinking:
                                 yield ThinkingEvent(text=block.thinking)
                             elif isinstance(block, ToolUseBlock):
+                                tool_names[block.id] = block.name
                                 if block.name == "StructuredOutput":
                                     # Drift guard: StructuredOutput must stay in the read-only
                                     # allow-set, else this passthrough becomes a mutation hole.
@@ -1094,6 +1357,11 @@ class ClaudeBackend:
                     elif isinstance(msg, UserMessage):
                         for user_block in msg.content:
                             if isinstance(user_block, ToolResultBlock):
+                                if endpoint is not None and endpoint.current():
+                                    # A start the CLI refused before PreToolUse still counts once.
+                                    with suppress(HostToolFatal):  # retained; the conversation stops below
+                                        endpoint.binding.observe_start(
+                                            user_block.tool_use_id, tool_names.get(user_block.tool_use_id))
                                 if user_block.tool_use_id in skipped_tool_ids:
                                     skipped_tool_ids.discard(user_block.tool_use_id)
                                     continue
@@ -1110,13 +1378,19 @@ class ClaudeBackend:
                     elif isinstance(msg, ResultMessage):
                         response_terminated = True
                         session_id = getattr(msg, "session_id", None) or session_id
-                        model_usage = _model_usage_totals(getattr(msg, "model_usage", None))
+                        raw_usage = getattr(msg, "model_usage", None)
+                        model_usage = _model_usage_totals(raw_usage)
                         if last_assistant_model is None and model_usage and len(model_usage) == 1:
                             last_assistant_model = next(iter(model_usage.values())).model_name
                         providers = {entry.provider_name for entry in (model_usage or {}).values()
                                      if entry.provider_name is not None}
                         provider = next(iter(providers)) if len(providers) == 1 else None
-                        if msg.structured_output is not None:
+                        if host_tools is not None:
+                            # Host acceptance is the result; native completion settles it separately.
+                            structured_result = host_tools.accepted_result
+                            host_tools.native_settled = host_tools.accepted and not msg.is_error
+                            yield _native_capacity(raw_usage)
+                        elif msg.structured_output is not None:
                             structured_result = msg.structured_output
                         # Emit cost when either cost or usage exists. Anthropic input excludes
                         # cache reads/writes; fold both in while retaining the cached subset.
@@ -1150,8 +1424,15 @@ class ClaudeBackend:
                         )
                         if msg.is_error:
                             yield terminal_result
+                            if host_tools is not None and host_tools.fatal_error is not None:
+                                raise host_tools.fatal_error
                             detail = msg.result or msg.subtype or "unknown error"
                             raise ClaudeAgentError(f"Claude agent run failed: {detail}")
+                    if (host_tools is not None and host_tools.fatal_error is not None
+                            and not interrupted and not response_terminated):
+                        # A terminal host failure stops this conversation, though not instantly.
+                        interrupted = True
+                        await client.interrupt()
 
                 yield terminal_result or ResultEvent(
                     structured_output=structured_result,
@@ -1167,7 +1448,11 @@ class ClaudeBackend:
                         else None
                     ),
                 )
+                if host_tools is not None and host_tools.fatal_error is not None:
+                    raise host_tools.fatal_error
             except GeneratorExit:
+                if host_tools is not None:
+                    host_tools.close_attempt()
                 if not response_terminated:
                     await client.interrupt()
                     async for _ in response:

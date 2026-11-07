@@ -185,6 +185,9 @@ and the relevant contracts below.
   usage twice. Postterminal expiry prohibits replay of a possibly completed mutation.
 - Preserve Claude's dangerous-command/background-Bash guards for ordinary turns
   and its deny-by-default snapshot-root guard for Improve, which permits no Bash.
+  Host tools add only exact `mcp__daydream__*` names to the read-only guard, never a
+  wildcard. SDK hooks fail open, so every hook returns a decision and never raises
+  ([Claude host tools](docs/runtime.md#claude-host-tools)).
   Background Bash cannot report after the host stops consuming the completed turn.
   Keep the SDK pin at least `0.2.111` for cancellation-safe subprocess teardown.
 - No turn limits; bound invocations with the host ledger's absolute deadline and tool

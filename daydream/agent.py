@@ -653,7 +653,9 @@ async def _run_agent(
                         execute_kwargs["finalization"] = True
                     if tools_disabled and getattr(backend, "supports_tools_disabled", False):
                         execute_kwargs["tools_disabled"] = True
-                    supports_review_instructions = bool(getattr(backend, "supports_review_instructions", False))
+                    # Host-tool adapters serve committed-review instructions as the system prompt.
+                    supports_review_instructions = (host_tools is not None
+                                                    or bool(getattr(backend, "supports_review_instructions", False)))
                     if review_instructions and supports_review_instructions:
                         execute_kwargs["review_instructions"] = review_instructions
                     if not validate_structured_output and getattr(
@@ -755,9 +757,11 @@ async def _run_agent(
                                 if review_evidence is not None:
                                     review_evidence.observe(event)
                                 if isinstance(event, RequestEvent):
-                                    native_output = (isinstance(event.config, PiRequestConfig)
-                                                     and event.output_schema is not None
-                                                     and event.config.schema_emulated is False)
+                                    # A host-tool submission is the only output; prose never becomes it.
+                                    native_output = host_tools is not None or (
+                                        isinstance(event.config, PiRequestConfig)
+                                        and event.output_schema is not None
+                                        and event.config.schema_emulated is False)
                                 elif isinstance(event, TextEvent) and not native_output:
                                     if not investigation:
                                         output_parts.append(event.text)

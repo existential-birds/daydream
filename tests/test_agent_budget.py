@@ -14,10 +14,11 @@ import anyio
 import httpx
 import pytest
 
-from daydream.agent import run_agent
+from daydream.agent import StructuredOutputFailure, run_agent
 from daydream.backends import (
     AgentEvent,
     ContinuationToken,
+    RequestEvent,
     ResultEvent,
     RetryPolicy,
     TextEvent,
@@ -252,17 +253,19 @@ async def test_host_admitted_starts_stay_charged_unless_a_retry_refunds_them(
 
     A retry after a retryable failure regains that attempt's calls; a failure that is not
     retried keeps them charged against the scope, so later work cannot spend them again.
+    Without a host submission, schema-valid assistant prose never becomes the result.
     """
     scope = BudgetLedger("stage:scope", deadline=anyio.current_time() + 60, limit=2, investigation=True,
                          start_floor=1)
+    schema = {"type": "object"}
     bindings: list[HostToolBinding] = []
     residual: list[int | None] = []
 
     async def stream(
         *_args: Any, host_tools: HostToolBinding, **_kwargs: Any,
     ) -> AsyncGenerator[AgentEvent, None]:
-        schema = {"type": "object"}
         host_tools.configure_schema(schema)
+        yield RequestEvent(prompt="review", output_schema=schema)
         async with host_tools.session() as server:
             residual.append(host_tools.remaining_tool_calls)
             async with httpx.AsyncClient(base_url=server.url, headers={
@@ -277,7 +280,7 @@ async def test_host_admitted_starts_stay_charged_unless_a_retry_refunds_them(
             if host_tools is bindings[0]:
                 raise _RetryableBackendError("native stream ended before the admitted start")
             yield ToolStartEvent(id="read-1", name="read", input={"path": "assigned.py"})
-            yield TextEvent(text="done")
+            yield TextEvent(text='{"findings": []}')
             yield ResultEvent(structured_output=None, continuation=None)
 
     backend = ScriptedBackend(model="mock-model", supports_host_tools=True,
@@ -292,11 +295,11 @@ async def test_host_admitted_starts_stay_charged_unless_a_retry_refunds_them(
                 with pytest.raises(_RetryableBackendError) if index == 0 else contextlib.nullcontext():
                     output, _, reason = await run_agent(
                         backend, tmp_path, "review", phase=DaydreamPhase.REVIEW, budget=ledger,
-                        host_tools=bindings[-1],
+                        output_schema=schema, host_tools=bindings[-1],
                     )
                     assert reason == ("tool_call_budget_exceeded" if index == 2 else None)
                     if index == 1:
-                        assert output == "done"
+                        assert isinstance(output, StructuredOutputFailure) and output.reason == "missing_output"
     assert residual == [2, 2, 1]  # the retry regained the failed attempt's call
     assert [binding.calls for binding in bindings] == [2, 1, 0]
     assert backend.cancel_calls == 0

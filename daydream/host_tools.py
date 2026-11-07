@@ -1,8 +1,9 @@
-"""Synchronous admission for one live native Pi review assignment.
+"""Synchronous admission for one live native review assignment.
 
-Pi owns ordinary reads and tool execution. This binding owns one domain callback
-and charges the invocation's budget ledger (its absolute deadline and tool-call
-count) across short-lived transports. Acceptance runs on the event-loop thread
+The native agent (Pi, or Claude through the Agent SDK) owns ordinary reads and
+tool execution. This binding owns one domain callback and charges the
+invocation's budget ledger (its absolute deadline and tool-call count) across
+short-lived per-attempt endpoints. Acceptance runs on the event-loop thread
 without an await, so authority closure and state installation have an
 unambiguous order.
 """
@@ -13,7 +14,7 @@ import asyncio
 import json
 import math
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, Set
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -370,6 +371,22 @@ class HostToolBinding:
                 raise self._reject(schema_error)
             self._pending[call_id] = key
 
+    def observe_start(self, call_id: Any, name: Any) -> None:
+        """Count once a native start that admits no domain work, such as one refused natively.
+
+        With authority open it is admitted like any start (charged, or only observed for a
+        protected or ungranted start) and an exhausted allowance fails closed. After closure
+        or acceptance it is observed overshoot, never charged.
+        """
+        if call_id in self._admitted:
+            return
+        if not self.authority_open or self.fatal_error is not None:
+            self._admitted.add(call_id)
+            self.budget.deny()
+            return
+        with suppress(HostToolRejected):
+            self.admit(call_id, name, None)
+
     def submit(self, call_id: Any, arguments: Any) -> dict[str, Any]:
         """Synchronously accept once, immediately after the final authority/deadline check."""
         if self._accepted_identity is None:
@@ -500,11 +517,15 @@ class HostToolBinding:
                     "with larger native limits or adjust native compaction settings.", code="native_capacity")
         return evidence
 
-    @asynccontextmanager
-    async def session(self) -> AsyncIterator[PiHostToolServer]:
-        """Open one attempt's endpoint; unaccepted retries keep the ledger and its deadline."""
+    def session(self) -> AbstractAsyncContextManager[PiHostToolServer]:
+        """Open one attempt's Pi loopback endpoint."""
         from daydream.host_tools_server import PiHostToolServer
 
+        return self.attempt(PiHostToolServer)
+
+    @asynccontextmanager
+    async def attempt[E: HostToolEndpoint](self, endpoint: Callable[[HostToolBinding], E]) -> AsyncIterator[E]:
+        """Open one attempt's endpoint; unaccepted retries keep the ledger and its deadline."""
         if self.fatal_error is not None:
             raise self.fatal_error
         if self.closed:
@@ -518,7 +539,7 @@ class HostToolBinding:
         self._admitted.clear()
         self._pending.clear()
         self._host_pending.clear()
-        server = PiHostToolServer(self)
+        server = endpoint(self)
         try:
             try:
                 async with asyncio.timeout(min(_SETUP_TIMEOUT_S, max(0, self.deadline - clock.monotonic()))):
@@ -596,3 +617,49 @@ class HostToolBinding:
         self.authority_open = False
         self._pending.clear()
         self._host_pending.clear()
+
+
+class HostToolEndpoint:
+    """One attempt's native callback transport for a binding, served by an adapter.
+
+    Each transport offers exactly ``schemas()`` and becomes ``ready`` only after the
+    native agent confirms its tools before provider work. A retired endpoint cannot
+    act on, or revoke, a newer attempt of the same binding.
+    """
+
+    def __init__(self, binding: HostToolBinding) -> None:
+        self.binding = binding
+        self.ready = False
+        self.closed = False
+        self._closing = False
+
+    def host_schemas(self) -> dict[str, Any]:
+        return {name: tool.schema for name, tool in sorted(self.binding.host_tools.items())}
+
+    def schemas(self) -> dict[str, Any]:
+        """Exact model-visible schemas: nonterminal host tools, then the terminal submission."""
+        return {**self.host_schemas(), NATIVE_SUBMIT: self.binding.schema}
+
+    def current(self) -> bool:
+        """Whether a callback may reach the binding; revoked, unfailed and unaccepted authority changes nothing."""
+        binding = self.binding
+        return not self._closing and (binding.authority_open or binding.accepted or binding.fatal_error is not None)
+
+    def fail(self, error: HostToolFatal) -> HostToolFatal:
+        # A retired endpoint cannot revoke a newer attempt on the same binding.
+        if self._closing or not self.binding.authority_open:
+            return self.binding.fatal_error or error
+        return self.binding.fail(error)
+
+    def fatal(self, message: str, *, code: HostToolFailureCode) -> HostToolFatal:
+        return self.fail(HostToolFatal(message, code=code, preacceptance=not self.binding.possibly_accepted))
+
+    async def start(self) -> None:
+        """Acquire transport resources before authority opens."""
+
+    async def close(self) -> None:
+        """Revoke this attempt before its transport resources are released."""
+        if not self._closing:
+            self.binding.close_attempt()
+        self._closing = True
+        self.closed = True
