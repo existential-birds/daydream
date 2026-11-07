@@ -78,8 +78,8 @@ those candidates as decisions and do not remove them.
    `module.name` access and string monkeypatch targets, and run the type checker after
    each change. Follow the [apply contract](scripts/sweep/prompts/apply.md), and finish
    one connected simplification at a time.
-7. Run affected tests, including unchanged consumers, then `make check`. Run
-   `make rl-check` if `rl/daydream_review` changed. Record real exit codes and skips.
+7. Run affected tests, including unchanged consumers, then `make check`. Record
+   real exit codes and skips.
 8. Inspect the complete diff. Commit or open a PR only if asked.
 
 ## Report

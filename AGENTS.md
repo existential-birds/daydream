@@ -42,8 +42,7 @@ make check      # lockcheck + install + static + test + coverage-report (the gat
 
 The pre-push hook checks signatures and runs this gate. Follow
 [CONTRIBUTING.md's setup and focused checks](CONTRIBUTING.md#everyday-commands-and-the-required-gate).
-Run `make rl-check` separately when changing `rl/daydream_review`; it is outside
-`make check`. Follow [the coverage ratchet](docs/coverage.md) without lowering it.
+Follow [the coverage ratchet](docs/coverage.md) without lowering it.
 
 ## Local PR reviews
 
@@ -213,5 +212,5 @@ rules in these owners rather than expanding this file with defaults and inventor
 | Tracing, timing, billing | [Observability](docs/observability.md); tracing is operator-controlled and owns a per-run provider, never a global provider or `Traceloop.init()` |
 | Improve audit/plans | [Improve implementation](daydream/improve/), [Improve flow](docs/extensions.md#improve); `services.py` owns shared service discovery |
 | Capture, harvest, adjudication, dataset publication, corpus projection | [Research](README.md#research), [record dataset workflow](docs/runbooks/record-dataset.md), [calibration](docs/calibration.md); preserve immutable evidence, repository provenance, and C5 benchmark isolation |
-| Training launches or RL | [Training launch](docs/training-launch.md), [RL package](rl/daydream_review/README.md) |
+| Training launches | [Training launch](docs/training-launch.md) |
 | Bot/workflow publication or CI policy | [Packaged workflows](daydream/templates/workflows/README.md), [self-hosted bot](docs/self-hosted-bot-setup.md), [CI spend policy](.github/workflows/README.md#ci-spend-policy) |

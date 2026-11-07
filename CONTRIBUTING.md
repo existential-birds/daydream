@@ -46,8 +46,8 @@ purpose so the full gate suite runs with every dependency it exercises. Note tha
 `make hooks` symlinks two git hooks:
 
 - `scripts/hooks/pre-commit` — a fast commit-time gate that runs ruff on the
-  staged Python files (scoped to `daydream/`, `tests/`, and
-  `rl/daydream_review/`, linted from the index, not the working tree).
+  staged Python files (scoped to `daydream/` and `tests/`, linted from the
+  index, not the working tree).
 - `scripts/hooks/pre-push` — verifies every pushed commit carries a valid
   signature (SSH or GPG), then delegates to `make check`, the full local CI gate.
 
@@ -84,13 +84,12 @@ The focused targets, all run from the repo root:
 | `make lint` | Ruff over `daydream tests scripts/ci_*.py` (120 cols, `E F I W`, py314; `daydream/atif/**` is lint-exempt as vendored code) |
 | `make typecheck` | mypy over `daydream tests scripts/ci_*.py` |
 | `make test` | `pytest -n logical` (one worker per logical CPU) with coverage; the branch-coverage floor (`fail_under` in `pyproject.toml`) is enforced here, not in global addopts — a bare or targeted `pytest` run stays plain |
-| `make deadcode` | vulture dead-code scan over the root project and the RL package |
+| `make deadcode` | vulture dead-code scan over the package and its tests |
 | `make coverage-report` | checks that `coverage.xml` exists after `make test`; the measurement + ratchet procedure is in [docs/coverage.md](docs/coverage.md) |
 | `make actionlint` | actionlint over `.github/workflows/*.yml` plus the packaged workflow templates |
 | `make lockcheck` | `uv lock --check` — fails if `uv.lock` is out of sync with `pyproject.toml` |
 | `make package-check` | Build the wheel and check it ships its packaged resources |
 | `make check-naming` | naming-convention check over the repo (`scripts/check-naming.sh`) |
-| `make rl-check` | the RL project's own lockcheck + ruff + mypy + pytest suite, run with a scoped git identity as process env. **This is explicitly not part of `make check`** — it mirrors `ci.yml`, where RL is a manually dispatched job while RL work is paused (its e2e test drives the `claude` CLI that CI's `check` job never installs). Run it by hand whenever you change `rl/daydream_review`. |
 
 The required gate:
 
@@ -107,13 +106,9 @@ lockcheck install static test coverage-report
 `static` runs `lint deadcode typecheck package-check actionlint check-naming test-scripts` in
 parallel (the Makefile's `STATIC_CHECKS`), so the gate pays for the slowest of them.
 
-This is the same set of steps a full `check` job in `.github/workflows/ci.yml` runs —
-`rl-check` is the only CI job the gate deliberately omits. One scope difference:
-`make deadcode` also runs vulture over `rl/daydream_review/`, which CI's `check`
-job does not include — that scan happens in the manual `rl-check` job — so the
-local gate is the stricter one. The pre-push hook runs `make check` after
-verifying signatures, so a green local `make check` is what keeps your push from
-being rejected. CI defaults to eight duration-weighted standard `ubuntu-24.04`
+This is the same set of steps a full `check` job in `.github/workflows/ci.yml` runs.
+The pre-push hook runs `make check` after verifying signatures, so a green local
+`make check` is what keeps your push from being rejected. CI defaults to eight duration-weighted standard `ubuntu-24.04`
 pytest jobs with four workers each. A final `check` joins static checks and validated aggregate branch
 coverage; missing or failed shards cannot pass. The script unit tests run in the
 static job. See [coverage aggregation](docs/coverage.md) in [the CI shard tooling](scripts/ci_shard.py).
@@ -221,8 +216,6 @@ By task:
 
 - Tracing / observability → [docs/observability.md](docs/observability.md)
 - Corpus / training launches → [docs/training-launch.md](docs/training-launch.md)
-- RL package work → [rl/daydream_review/README.md](rl/daydream_review/README.md)
-  (and run `make rl-check` — see the commands table above)
 
 ## Shared agent skill workflow
 

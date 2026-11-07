@@ -18,7 +18,7 @@ or if their identity or bypass evidence cannot be verified, every PR runs the
 complete root gate. GitHub omits bypass actors when the caller lacks write access
 to the ruleset; that omitted evidence also keeps the complete gate. This workflow
 does not increase token permissions to obtain it.
-Documentation and RL-only changes follow the same rule; no path allowlist skips
+Documentation-only changes follow the same rule; no path allowlist skips
 the queue gate.
 
 `merge_group: checks_requested` runs the complete root suite with branch
@@ -61,20 +61,6 @@ workflow reaches the default branch. The required check name remains `check`.
 Queue rules must have no bypass actors; administrators use the same verified
 merge path. This workflow never writes repository settings.
 
-Automatic `rl-check` is paused by maintainer choice because no RL work is active.
-Its complete lockcheck, lint, typecheck, dead-code, and Docker test gate remains
-available through **Run workflow → run_rl**, or:
-
-```bash
-gh workflow run ci.yml --ref main -f run_rl=true
-```
-
-Use `--ref YOUR_BRANCH` to check another revision. The root gate also runs in
-full on a manual dispatch. `make rl-check` remains the local RL gate. Both
-projects and all workflow tool installations use Python 3.14. The standalone
-project uses verifiers 0.4.0; Prime-RL training integration is paused because
-its Python 3.12 workspace cannot install the migrated package.
-
 These three workflows are this repository's own **repository-only Codex dogfood configuration**
 — maintained for this repository and intentionally differing from the packaged workflow templates.
 
@@ -108,14 +94,14 @@ reviewer-friendly PRs across three managed ecosystems:
 | Ecosystem | Directory | Notes |
 |---|---|---|
 | `uv` | `/` | Root workspace dependencies (`pyproject.toml` / `uv.lock`) |
-| `uv` | `/rl/daydream_review` | The standalone RL package's own dependencies |
+| `github-actions` | `/` | Third-party action pins (see below) |
 | `npm` | `/.github/workflows` | Deliberately points at this folder's `package.json`, which tracks the single `@openai/codex` dependency used by CI — do not "fix" the directory to `/` |
 
 **Volume bounds.** All three ecosystems run weekly on Mondays (06:00,
 `Australia/Brisbane`) with `open-pull-requests-limit: 5` per ecosystem. The
-two multi-dependency `uv` blocks each use one minor+patch group, so at most
-one grouped PR per uv project; the npm block is ungrouped since it tracks a
-single dependency. Commit messages carry the `chore(deps)` prefix.
+`uv` and `github-actions` blocks each use one minor+patch group, so at most
+one grouped PR each; the npm block is ungrouped since it tracks a single
+dependency. Commit messages carry the `chore(deps)` prefix.
 
 **Action bumps are automated.** Every third-party action stays pinned to a full
 commit SHA — enforced by
