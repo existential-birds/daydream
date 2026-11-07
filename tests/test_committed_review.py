@@ -1,4 +1,4 @@
-"""Review admission, revision and failure contracts; native journeys own transport proof."""
+"""Review admission, revision and failure contracts."""
 
 from __future__ import annotations
 
@@ -338,7 +338,6 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
 
     Rows cover a native failure after host acceptance combined with a failed sealed-bundle
     staging, cancellation usage and capture cleanup, and a pre-dispatch export refusal.
-    Native journeys separately own transport/history/accounting.
     """
     failed_after_acceptance = challenge == "accepted-then-failed-bundle-stage"
     injected = staging_output = False

@@ -6,9 +6,10 @@ import daydream
 DAYDREAM_REPO_URL = "https://github.com/existential-birds/daydream"
 
 
-DAYDREAM_FOOTER = (
-    f"<sub>🧙 Posted by [daydream v{daydream.__version__}]({DAYDREAM_REPO_URL})</sub>"
-)
+# Version-stable prefix: matching it (not the version-pinned footer) recognises
+# comments from any daydream release.
+DAYDREAM_FOOTER_PREFIX = "<sub>🧙 Posted by [daydream v"
+DAYDREAM_FOOTER = f"{DAYDREAM_FOOTER_PREFIX}{daydream.__version__}]({DAYDREAM_REPO_URL})</sub>"
 
 
 # Hidden HTML-comment marker embedded in posted comment bodies so later runs

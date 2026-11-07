@@ -99,6 +99,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stopped with `tool_call_budget_exceeded`. Elapsed time is never refunded, and
   compaction never renews a budget
   ([#1767](https://github.com/existential-birds/daydream/issues/1767)).
+- When Daydream cannot run `pi --version` or `node --version` to check the hosted
+  Pi baseline, the error now says the check timed out or failed instead of telling
+  you to install Pi 1.4.0 and Node 24.18.1. A real version mismatch reports the
+  version it found. `make check` and CI's test jobs no longer need Node.js or the Pi
+  CLI: the tests that ran the installed Pi were removed
+  ([#1772](https://github.com/existential-birds/daydream/pull/1772)).
+- A complete review with no findings now posts a short COMMENT review saying so
+  when the latest Daydream review on the same PR, for the same commit or one it
+  supersedes, is an unfinished notice ("Review incomplete", "Review failed" or
+  "Review completeness unavailable"). Before, the clean rerun posted nothing, so
+  the unfinished notice stayed the newest Daydream review. The earlier notice is
+  never edited, dismissed or minimized, and nothing is approved unless
+  `approve_on_clean` already allowed it. Without an earlier notice, a complete
+  clean review posts nothing beyond that approval. Both `--comment` and
+  `post-findings` follow this
+  ([#1766](https://github.com/existential-birds/daydream/issues/1766)).
 
 ## [0.34.0] - 2026-11-03
 

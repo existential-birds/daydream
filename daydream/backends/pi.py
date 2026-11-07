@@ -803,24 +803,26 @@ class PiBackend:
                     if len(lines) > 1:
                         break
                 code = await reap(probe, timeout_s=allowance)
-        except (TimeoutError, OSError, ValueError):
+        except (TimeoutError, OSError, ValueError) as exc:
             probe_failed = True
+            # Name the actual failure: a probe that never answered says nothing about the installed version.
+            cause = "timed out" if isinstance(exc, TimeoutError) else f"failed ({type(exc).__name__})"
+            message = f"`{command} --version` {cause} before the native baseline could be checked"
             if self._hosted_read_only:
-                raise _unsupported_hosted_policy(
-                    f"Could not verify hosted read-only native baseline: {command} {expected}; "
-                    "install official Pi 1.4.0 and Node 24.18.1") from None
-            raise PiError("Could not verify required Pi 1.4.0 host-tool capabilities", category="HOST_TOOLS") from None
+                raise _unsupported_hosted_policy(message) from None
+            raise PiError(message, category="HOST_TOOLS") from None
         except BaseException:
             probe_failed = True
             raise
         else:
             if code != 0 or lines != [expected]:
                 probe_failed = True
+                observed = f"exit {code}" if code != 0 else repr(" ".join(lines)[:64] or "no output")
+                message = f"`{command} --version` reported {observed}; expected {expected}"
                 if self._hosted_read_only:
                     raise _unsupported_hosted_policy(
-                        f"Hosted read-only policy requires verified official Pi 1.4.0 / Node 24.18.1; "
-                        f"{command} did not report {expected}")
-                raise PiError("Native host tools require verified Pi 1.4.0", category="HOST_TOOLS")
+                        f"Hosted read-only policy requires official Pi 1.4.0 / Node 24.18.1; {message}")
+                raise PiError(f"Native host tools require Pi 1.4.0; {message}", category="HOST_TOOLS")
         finally:
             try:
                 await teardown(probe, self._transports, cleanup_timeout_s=host_policy._CLEANUP_TIMEOUT_S)

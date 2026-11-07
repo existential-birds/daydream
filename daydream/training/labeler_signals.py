@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, cast
 
 from daydream.hunk_index import parse_hunks
-from daydream.pr_review import parse_finding_markers
+from daydream.pr_review import DAYDREAM_FOOTER_PREFIX, parse_finding_markers
 from daydream.training._immutable_json import thaw_json
 from daydream.training.labeler_versions import reply_evidence_digest
 from daydream.training.reply_classifier import (
@@ -24,16 +24,12 @@ from daydream.training.reply_classifier import (
     qualification_reason,
 )
 
-# Version-stable footer prefix: matching only this prefix (not the full
-# version-pinned DAYDREAM_FOOTER) recognises comments from any daydream release.
-_DAYDREAM_FOOTER_PREFIX = "<sub>🧙 Posted by [daydream v"
-
 
 def _is_daydream_comment(comment: dict[str, Any]) -> bool:
     """Recognize any Daydream release by its version-stable footer prefix.
 
     Reviews use ordinary user accounts, so a bot-shaped login is insufficient."""
-    return _DAYDREAM_FOOTER_PREFIX in (comment.get("body") or "")
+    return DAYDREAM_FOOTER_PREFIX in (comment.get("body") or "")
 
 
 # Result dataclasses

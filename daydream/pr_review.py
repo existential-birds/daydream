@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from daydream import git_ops
+from daydream.bot_identity import bot_login_matches
 from daydream.extensions import (
     get_registry,
 )
@@ -29,6 +30,7 @@ from daydream.reviews.diagrams import (
 )
 from daydream.reviews.identity import (
     DAYDREAM_FOOTER as DAYDREAM_FOOTER,
+    DAYDREAM_FOOTER_PREFIX as DAYDREAM_FOOTER_PREFIX,
     FINDING_MARKER_RE as FINDING_MARKER_RE,
     diagram_marker as diagram_marker,
     finding_marker as finding_marker,
@@ -107,8 +109,15 @@ async def post_review_to_pr_from_report(
         return PostStatus.NOTHING_TO_POST
     issues = parsed_issues_from_items(items)
     if not issues and not approve_on_clean and not review_warnings and not (diagram_blocks and diagram_blocks.strip()):
-        print_info(console, "No parseable issues in review output; skipping PR post.")
-        return PostStatus.NOTHING_TO_POST
+        # A complete pinned review answers its own earlier unfinished notice; _post still validates the target.
+        notice = superseding_completion_notice(
+            target_dir if publication_dir is None else publication_dir, captured_pr,
+            author=run_context.github_identity.login, console=console, auth=auth,
+        ) if review_complete and captured_pr is not None else None
+        if notice is None:
+            print_info(console, "No parseable issues in review output; skipping PR post.")
+            return PostStatus.NOTHING_TO_POST
+        review_summary = notice
     return await _post(
         target_dir,
         issues,
@@ -886,6 +895,55 @@ def post_classified_review(
     )
 
 
+_UNFINISHED_REVIEW_HEADING = re.compile(
+    r"^⚠️ \*\*Review (?:incomplete|failed|completeness unavailable)\.\*\*", re.MULTILINE)
+
+
+def superseding_completion_notice(
+    target_dir: Path, pr: PRInfo, *, author: str, console: Console, auth: GitHubAuth,
+) -> str | None:
+    """Return a notice that a complete, findings-free review supersedes an unfinished Daydream notice.
+
+    Only reviews on this PR by *author* that carry the Daydream footer count, and the newest one
+    on the head or an ancestor must be the unfinished notice. Lookup failures warn and supersede
+    nothing; earlier reviews are never changed."""
+    if author == "unknown":
+        print_warning(console, "Posting identity is unknown; earlier unfinished review notices were not checked.")
+        return None
+    try:
+        reviews = git_ops.gh_api(
+            target_dir, f"repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/reviews?per_page=100",
+            paginate=True, jq=".[]", idempotent=True, auth=auth,
+        )
+    except GitError as exc:
+        print_warning(console, f"Could not check earlier review notices; an unfinished notice may remain ({exc}).")
+        return None
+    for review in sorted(reviews, key=lambda item: item.get("id") or 0, reverse=True):
+        body, commit = review.get("body") or "", review.get("commit_id")
+        if (not isinstance(commit, str) or DAYDREAM_FOOTER_PREFIX not in body
+                or not bot_login_matches((review.get("user") or {}).get("login"), author)):
+            continue
+        if commit == pr.head_sha or _github_ancestor(target_dir, pr, commit, auth=auth):
+            if not _UNFINISHED_REVIEW_HEADING.search(body):
+                return None
+            return (f"✅ **Review complete.** No findings in the complete review of `{pr.head_sha[:7]}`; "
+                    f"this supersedes the earlier unfinished review notice for `{commit[:7]}`.")
+    return None
+
+
+def _github_ancestor(target_dir: Path, pr: PRInfo, commit: str, *, auth: GitHubAuth) -> bool:
+    """Ask GitHub whether *commit* precedes the PR head; posting runs may have no checkout.
+
+    An unknown or unreachable commit is not an ancestor."""
+    try:
+        comparison = git_ops.gh_api(
+            target_dir, f"repos/{pr.owner}/{pr.repo}/compare/{commit}...{pr.head_sha}", idempotent=True, auth=auth,
+        )
+    except GitError:
+        return False
+    return isinstance(comparison, dict) and comparison.get("status") == "ahead"
+
+
 def _resolve_pr(
     target_dir: Path,
     console: Console,
@@ -969,17 +1027,6 @@ async def _post(
             raise
         classified = classify(target_dir, pr, issues, auth=auth, renderers=renderers,
                               snapshot_diff=snapshot_diff, frozen_only=True)
-    if (
-        classified.is_empty()
-        and not approve_on_clean
-        and not review_warnings
-        and not (diagram_blocks and diagram_blocks.strip())
-    ):
-        print_info(
-            console, "No postable issues after classification; skipping PR post."
-        )
-        return PostStatus.NOTHING_TO_POST
-
     inline_files = sorted({c.path for c in classified.inline})
     summary = (
         f"{len(classified.inline)} inline on "
@@ -1197,16 +1244,19 @@ def post_findings_from_artifact(
         for finding in artifact.findings
     )
 
-    if classified.is_empty() and not can_approve and diagram_blocks is None and not review_warnings:
-        print_info(
-            console,
-            f"No new findings to post ({len(plan.matched)} already on PR #{pr_number}).",
-        )
-        return 0
-
     from daydream.review_reporting import render_github_review_context, render_review_run_id
 
     review_summary = render_github_review_context(artifact.terminal_result, review_warnings=artifact.review_warnings)
+    if classified.is_empty() and not can_approve and diagram_blocks is None and not review_warnings:
+        notice = (superseding_completion_notice(target_dir, pr, author=effective_login, console=console, auth=auth)
+                  if effective_login is not None and artifact.analysis_complete and not artifact.findings else None)
+        if notice is None:
+            print_info(
+                console,
+                f"No new findings to post ({len(plan.matched)} already on PR #{pr_number}).",
+            )
+            return 0
+        review_summary = notice
     run_info = artifact.run_info if artifact.run_info is not None else render_run_info(())
     run_id = render_review_run_id(artifact.terminal_result)
     if run_id:

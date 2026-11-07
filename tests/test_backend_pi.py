@@ -641,8 +641,7 @@ async def test_pi_diagnostic_redaction_fault_preserves_native_failure_and_termin
 async def _pi_response_diagnostics_admit_only_bounded_redacted_fields_case(status: Any) -> None:
     """Optional helper data cannot leak headers or replace a native terminal failure.
 
-    Installed-native journeys exercise ordinary HTTP headers; they cannot emit
-    malformed helper frames or put a secret before a truncated header boundary.
+    Covers malformed helper frames and a secret before a truncated header boundary.
     """
     native = {
         "type": "daydream_provider_response",

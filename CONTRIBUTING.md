@@ -17,19 +17,12 @@ Verify these prerequisites before running the local gate:
 - **Python ≥ 3.14**
 - **[`uv`](https://docs.astral.sh/uv/)** — installs and manages the virtualenv and runs every gate tool
 - **Claude Code CLI** ([claude.ai/code](https://claude.ai/code)) — the default review backend for running Daydream; the gate does not need it
-- **Node.js 24.18.1 and official Pi CLI 1.4.0** — required by the installed-native contract tests in every full gate; these match [CI provisioning](.github/workflows/ci.yml)
 
-Pi's native tests use an isolated offline provider; `make install` only provisions
-Python dependencies. Other backend CLIs (`gh`, Codex, Osprey) are feature-specific.
+`make install` only provisions Python dependencies. Backend CLIs (`gh`, Pi, Codex,
+Osprey) are feature-specific; the gate needs none of them. The Pi CLI is needed only
+to run the Daydream review in the [review loop](#shared-agent-skill-workflow).
 
 ## Setup
-
-Install the pinned Node/Pi tools (matching CI), then set up the repository:
-
-```bash
-nvm install 24.18.1 && nvm use 24.18.1
-npm install --global @earendil-works/pi-coding-agent@1.4.0
-```
 
 From the repo root:
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -16,6 +17,10 @@ from rich.console import Console
 
 from daydream.findings import write_findings_artifact
 from daydream.pr_review import (
+    ClassifiedIssues,
+    PRInfo,
+    ReviewEvent,
+    build_payload_for_event,
     parse_finding_markers,
     post_findings_from_artifact,
     validate_diagram_payload,
@@ -26,6 +31,7 @@ from tests.harness.git_helpers import commit, git
 from tests.harness.review_result import findings_artifact
 from tests.harness.scripts import cli_main
 from tests.test_findings import immutable_findings_artifact
+from tests.test_pr_review import BUILTIN_RENDERERS
 
 
 def _post_argv(
@@ -517,3 +523,63 @@ def test_post_findings_final_failure_reports_writes_and_safe_recovery_path(
         assert secret not in message
     finally:
         payload_path.unlink(missing_ok=True)
+
+
+def _review(review_id: int, commit_id: str, body: str, *, login: str = "daydream-bot[bot]") -> dict[str, Any]:
+    return {"id": review_id, "user": {"login": login}, "commit_id": commit_id, "body": body}
+
+
+@pytest.mark.parametrize("case", [
+    "not_superseded", "already_superseded", "matched_findings", "same_head", "ancestor",
+])
+def test_complete_clean_review_supersedes_only_a_current_unfinished_notice(
+    fake_gh: FakeGh, tmp_path: Path, case: str,
+) -> None:
+    """A complete review with no findings answers the latest unfinished Daydream notice on its head or an ancestor.
+
+    The shipped poster has no checkout, so ancestry comes from GitHub's comparison, never local history.
+
+    Notices on other heads or PRs, by other logins, or without the current renderer's footer are not superseded,
+    nor is any notice when findings already on the PR remain current. The earlier review is never edited,
+    dismissed or minimized, and nothing is approved."""
+    target = tmp_path / "no-checkout"
+    target.mkdir()
+    parent, head = "1" * 40, "2" * 40
+    pr = PRInfo(number=7, head_sha=head, base_sha="", base_ref="", head_ref="", owner="o", repo="r", url="")
+
+    def notice(commit_id: str, **warning: str) -> str:
+        return build_payload_for_event(replace(pr, head_sha=commit_id), ClassifiedIssues(), event=ReviewEvent.COMMENT,
+                                       run_info="run", renderers=BUILTIN_RENDERERS,
+                                       review_warnings=tuple(warning.values())).body
+
+    unfinished = notice(head, warning="python: Review limit exhausted: tool_call_budget_exceeded")
+    reviews = {
+        "not_superseded": [
+            _review(1, "d" * 40, notice("d" * 40, warning="python: backend failure")),
+            _review(2, head, unfinished, login="someone-else"),
+            _review(3, head, "⚠️ **Review incomplete.** typed by hand"),
+        ],
+        "already_superseded": [_review(1, head, unfinished), _review(2, head, notice(head))],
+        "matched_findings": [_review(1, head, unfinished)],
+        "same_head": [_review(1, head, notice(head)), _review(2, head, unfinished)],
+        "ancestor": [_review(1, parent, notice(parent, warning="python: backend failure"))],
+    }[case]
+    fake_gh.set_response("GET", "repos/o/r/pulls/7/reviews", reviews)
+    fake_gh.set_response("GET", "repos/o/r/pulls/8/reviews", [_review(1, head, unfinished)])
+    fake_gh.set_response("GET", f"repos/o/r/compare/{parent}...{head}", {"status": "ahead"})
+    fake_gh.set_response("GET", f"repos/o/r/compare/{'d' * 40}...{head}", {"status": "diverged"})
+    findings = [_inline_finding("Already posted")] if case == "matched_findings" else []
+    fake_gh.serve_prior_threads(fingerprints=[finding["fingerprint"] for finding in findings], viewer_did_author=True)
+    artifact = _write_artifact(tmp_path / "findings.json", findings, head_sha=head)
+
+    assert cli_main([*_post_argv(artifact, head_sha=head, target=target), "--bot-login", "daydream-bot"]) == 0
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert not fake_gh.calls("PATCH") + fake_gh.calls("PUT") + fake_gh.calls("DELETE"), "never edited or dismissed"
+    assert not any("minimizeComment" in call.payload.get("query", "") for call in fake_gh.calls("POST", "graphql"))
+    if case not in {"same_head", "ancestor"}:
+        assert posts == []
+        return
+    superseded = head if case == "same_head" else parent
+    assert len(posts) == 1 and posts[0].payload["event"] == "COMMENT" and posts[0].payload["commit_id"] == head
+    assert (f"✅ **Review complete.** No findings in the complete review of `{head[:7]}`; this supersedes the "
+            f"earlier unfinished review notice for `{superseded[:7]}`.") in posts[0].payload["body"]
