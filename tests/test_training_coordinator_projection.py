@@ -126,7 +126,8 @@ def _build_projection(
 
 def test_v2_projection_without_finding_text_or_full_sha_fails_closed(tmp_path: Path) -> None:
     for name, overrides, match in (("missing-text", {"omit_finding_text": True}, "finding_text"),
-                                   ("short-sha", {"base_sha": "abc123"}, "base_sha")):
+                                   ("short-sha", {"base_sha": "abc123"}, "base_sha"),
+                                   ("non-hex-sha", {"base_sha": "z" * 40}, "base_sha")):
         root = tmp_path / name
         root.mkdir()
         proj_dir = _build_projection(root, **overrides)

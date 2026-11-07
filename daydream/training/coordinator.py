@@ -165,9 +165,9 @@ def _sft_prompt(rec: dict[str, Any]) -> str:
 
 
 def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Build replay inputs from frozen repo/base/head/diff identity, refusing missing fields.
+    """Build RFT inputs from frozen repo/base/head/diff identity, refusing missing fields.
 
-    Both SHAs use the replay's shared full-hex validator. Validated projection rows
+    Both SHAs must be full-length hex. Validated projection rows
     are format-valid; adjudicated outcomes map to the shared verdict vocabulary.
     Absent verifier evidence stays unknown, and missing length uses finding text.
     """
@@ -198,15 +198,14 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for name, value in (("base_sha", base_sha), ("head_sha", head_sha)):
             if not isinstance(value, str) or not _FULL_SHA_RE.fullmatch(value):
                 raise RuntimeError(
-                    f"record {rid!r} carries an invalid {name} {value!r}: stage2 rebuilds every task "
-                    "from a full 40-hex commit sha and never uses a truncated or non-hex identity"
+                    f"stage2 refused: record {rid!r} carries an invalid {name} {value!r}; RFT inputs "
+                    "need a full 40-hex commit sha, never a truncated or non-hex identity"
                 )
         # Projection records carry no archived verifier-verdicts file; the
         # record's own adjudicated outcome is its capture-time judgment.
         # Map it onto the shared verdict vocabulary (the labels
-        # score_trajectory's verdict_map consumes) so the replay reads a
-        # real correctness axis instead of flooring every candidate at a
-        # 0.0 composite. format_valid is True: a frozen projection record is
+        # score_trajectory's verdict_map consumes) so RFT inputs carry a
+        # real correctness axis instead of a 0.0 composite. format_valid is True: a frozen projection record is
         # admission/shape/drift-validated, so the v1 bronze-parse failure
         # floor cannot apply here.
         disposition = rec.get("outcome_label") or rec.get("disposition")
