@@ -144,12 +144,12 @@
         "base_sha": {
           "type": "string",
           "pattern": "^[0-9a-f]{40,}$",
-          "description": "Full-length hex sha (40+ chars; sha256-style 64-hex content-address stamps tolerated, matching rft.validate_full_sha)."
+          "description": "Full-length hex sha (40+ chars; sha256-style 64-hex content-address stamps tolerated, matching the training coordinator's stage-2 check)."
         },
         "head_sha": {
           "type": "string",
           "pattern": "^[0-9a-f]{40,}$",
-          "description": "Full-length hex sha (40+ chars; sha256-style 64-hex content-address stamps tolerated, matching rft.validate_full_sha)."
+          "description": "Full-length hex sha (40+ chars; sha256-style 64-hex content-address stamps tolerated, matching the training coordinator's stage-2 check)."
         },
         "diff_digest": {
           "type": "string",

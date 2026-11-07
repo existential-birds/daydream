@@ -37,9 +37,9 @@ TASK_IDENTITY = {"repo_slug": "owner/repo", "source": "record", "base_sha": "1" 
 
 def test_task_identity_sha_shape_matches_runtime_validator() -> None:
     """Short SHAs are rejected. The runtime validator tolerates sha256-style 64-hex content-address
-    stamps (``rft.validate_full_sha`` accepts 40+ hex, and v1 corpus shas are
-    64-hex), so the pinned schema must admit the same values — a record that
-    passes ``load_v2_projection``/``run_rft`` must never fail this schema."""
+    stamps (the coordinator's stage-2 check accepts 40+ hex, and v1 corpus shas
+    are 64-hex), so the pinned schema must admit the same values — a record that
+    passes ``load_v2_projection`` and stage 2 must never fail this schema."""
     bad_identity = dict(TASK_IDENTITY, base_sha="short")
     record = _base_record(record_type="task-only", tier="task-only", task_identity=bad_identity)
     with pytest.raises(jsonschema.ValidationError):
