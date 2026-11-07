@@ -82,7 +82,6 @@ async def phase_fix_parallel(
     intent_path: Path | None = None,
     group_max_wall_s: float = phase_config.DEFAULT_GROUP_MAX_WALL_S,
     group_max_serial_items: int = phase_config.DEFAULT_GROUP_MAX_SERIAL_ITEMS,
-    retry_recovery_allowance_s: float | None = None,
     exploration_dir: Path | None = None,
     test_map_path: Path | None = None,
     run_context: RunContext | None = None,
@@ -91,8 +90,8 @@ async def phase_fix_parallel(
 
     Each group tries one batch turn, then individual findings on batch failure.
     Prompts receive group edit scope and run context. Backend concurrency, group
-    wall time, serial-call count, and retry recovery allowance bound dispatch;
-    intent, exploration, and parsed test-map hints are forwarded to each turn.
+    wall time, and serial-call count bound dispatch; intent, exploration, and
+    parsed test-map hints are forwarded to each turn.
 
     Return file-to-reason failures. Exceptions and interrupted turns restore the
     group snapshot; budget stops before dispatch preserve completed edits. All
@@ -197,7 +196,6 @@ async def phase_fix_parallel(
                 test_map=test_map,
                 run_context=run_context,
                 deadline=budget.deadline,
-                retry_recovery_allowance_s=retry_recovery_allowance_s,
             )
             if turn_reason == "wall_budget_exceeded":
                 _restore_group_or_raise("after its turn wall budget cut", edit_scope, group_work, group_snapshot)
@@ -276,7 +274,6 @@ async def phase_fix_parallel(
                                             test_map=test_map,
                                             run_context=run_context,
                                             deadline=budget.deadline,
-                                            retry_recovery_allowance_s=retry_recovery_allowance_s,
                                         )
                                         budget.record_item()
                                         successful_groups.add(fkey)

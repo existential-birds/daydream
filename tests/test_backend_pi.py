@@ -40,7 +40,7 @@ from daydream.backends.pi import (
     PiBackend,
     PiError,
 )
-from daydream.review_budget import ReviewLimits
+from daydream.review_budget import BudgetLedger, ReviewLimits
 from daydream.trajectory import DaydreamPhase
 from tests.harness.fake_cli_process import (
     install_fake_cli_process,
@@ -110,7 +110,8 @@ async def _interrupted_pi_updates_retain_only_admitted_progress_case(
     async with recorder:
         async with asyncio.TaskGroup() as tasks:
             turn = tasks.create_task(run_agent(
-                PiBackend(model="test-model"), tmp_path, "review", phase=DaydreamPhase.REVIEW, wall_budget_s=0.05,
+                PiBackend(model="test-model"), tmp_path, "review", phase=DaydreamPhase.REVIEW,
+                budget=BudgetLedger("review", wall_s=0.05),
             ))
             with anyio.fail_after(5):
                 await spawner.wait_for_read()

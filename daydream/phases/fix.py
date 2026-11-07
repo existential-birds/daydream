@@ -27,6 +27,7 @@ from daydream.prompts.authorial_intent import (
 from daydream.repository_paths import (
     path_is_confined,
 )
+from daydream.review_budget import BudgetLedger
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.trajectory import (
     DaydreamPhase,
@@ -430,7 +431,6 @@ class FixOptions(TypedDict, total=False):
     test_map: dict[str, str] | None
     run_context: RunContext | None
     deadline: float | None
-    retry_recovery_allowance_s: float | None
 
 
 def _finding_prompt(repo: Path, item: dict[str, Any], *, number: int | None = None) -> str:
@@ -464,7 +464,6 @@ async def _fix_findings(
     test_map: dict[str, str] | None = None,
     run_context: RunContext | None = None,
     deadline: float | None = None,
-    retry_recovery_allowance_s: float | None = None,
 ) -> str | None:
     run_context = resolve_run_context(run_context)
     if edit_scope is None or read_scope is None:
@@ -499,16 +498,11 @@ async def _fix_findings(
     if count == 1:
         prompt = append_extended_facts(prompt, _recipe_for_work(work))
 
-    # Scale per-finding allowances; the shared group deadline still bounds the
-    # whole call, and retry recovery retains the caller's cumulative allowance.
-    tool_budget = phase_config.DEFAULT_TOOL_CALL_BUDGET
+    # Scale the per-finding wall allowance; the shared group deadline still bounds the whole call.
     _, _, budget_reason = await agent.run_agent(
         backend, work.repo, prompt,
         phase=DaydreamPhase.FIX,
-        tool_call_budget=None if tool_budget is None else tool_budget * count,
-        wall_budget_s=phase_config.DEFAULT_WALL_BUDGET_S * count,
-        deadline=deadline,
-        retry_recovery_allowance_s=retry_recovery_allowance_s,
+        budget=BudgetLedger("fix", wall_s=phase_config.DEFAULT_WALL_BUDGET_S * count, deadline=deadline),
         progress_callback=_console_progress_callback(console_lock),
         sanctioned_inputs=sanctioned_inputs,
         run_context=run_context,

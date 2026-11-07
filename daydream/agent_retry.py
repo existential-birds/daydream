@@ -4,15 +4,10 @@ import math
 import os
 import random
 from dataclasses import dataclass
-from typing import Any
 
 from daydream.backends import Backend
-from daydream.config import DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
 from daydream.diagnostics import exception_text
-from daydream.retry_policy import (
-    coerce_declared_retry_allowance,
-    parse_message_retry_hint,
-)
+from daydream.retry_policy import parse_message_retry_hint
 
 
 def _sample_retry_delay(cap: float) -> float:
@@ -38,35 +33,12 @@ class _ResolvedRetrySettings:
     max_attempts: int
     base_delay_s: float
     max_delay_s: float
-    allowance_s: float
 
 
-def _allowance_source(backend: Backend, policy: Any, explicit: float | None) -> tuple[str, Any] | None:
-    """Return the first declared allowance without reading lower-priority sources."""
-    key = "retry_recovery_allowance_s"
-    for owner, prefix in ((policy, "RetryPolicy."), (backend, "")):
-        value = getattr(owner, key, None)
-        if value is not None:
-            return prefix + key, value
-    if explicit is not None:
-        return key, explicit
-    if policy is None:
-        key = "DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S"
-        value = os.environ.get(key)
-        if value is not None:
-            return key, value
-    return None
+def _resolve_retry_settings(backend: Backend) -> _ResolvedRetrySettings:
+    """Resolve limits before dispatch; inverted delays raise ValueError.
 
-
-def _resolve_retry_settings(
-    backend: Backend, retry_recovery_allowance_s: float | None
-) -> _ResolvedRetrySettings:
-    """Resolve limits before dispatch, rejecting contradictory declarations.
-
-    Allowance precedence: policy, backend attribute, explicit argument, ambient
-    Pi environment, default. A declared policy suppresses ambient reads. An invalid
-    single allowance warns and uses the default; inverted delays or an explicit
-    nonzero allowance with disabled retries raise ValueError.
+    A declared policy suppresses ambient reads.
     """
     retry_policy = getattr(backend, "retry_policy", None)
     if retry_policy is not None:
@@ -99,39 +71,16 @@ def _resolve_retry_settings(
         if value < 0:
             raise ValueError(f"retry {label} delay must be >= 0")
 
-    allowance_source = _allowance_source(backend, retry_policy, retry_recovery_allowance_s)
-    resolved_allowance = DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
-    declared_allowance = False
-    if allowance_source is not None:
-        parsed_allowance = coerce_declared_retry_allowance(
-            allowance_source[1], allowance_source[0]
-        )
-        if parsed_allowance is not None:
-            resolved_allowance = parsed_allowance
-            declared_allowance = True
-
-    # Two declared values can each be valid and still contradict one another.
-    # Refuse the combination here, before any dispatch, with a message naming both
-    # keys -- never coerce it into a plausible bound. The allowance check fires
-    # only for a *declared* non-zero value: the default 300s must not turn
-    # ``retry_attempts = 0`` (a legitimate "no retries" declaration) into an error.
+    # Two valid delays can still contradict one another; refuse before dispatch.
     if base_delay > max_delay:
         raise ValueError(
             f"retry_base_delay_s ({base_delay}) must not exceed "
             f"retry_max_delay_s ({max_delay})"
         )
-    if declared_allowance and resolved_allowance > 0 and max_attempts == 0:
-        raise ValueError(
-            "retry_recovery_allowance_s "
-            f"({resolved_allowance}) cannot be non-zero while retries are "
-            "disabled (max_attempts == 0); set retry_recovery_allowance_s = 0 "
-            "to disable retry recovery explicitly"
-        )
     return _ResolvedRetrySettings(
         max_attempts=max_attempts,
         base_delay_s=base_delay,
         max_delay_s=max_delay,
-        allowance_s=resolved_allowance,
     )
 
 
@@ -140,36 +89,25 @@ def _plan_retry_delay(
     attempt: int,
     base_delay_s: float,
     max_delay_s: float,
-    allowance_remaining_s: float | None,
     deadline_remaining_s: float | None,
     hint: float | None,
 ) -> tuple[float, str | None]:
     """Return a bounded hint/jitter delay, or retry_hint_exceeds_budget.
 
-    A server hint is evaluated against the remaining recovery allowance and
-    deadline only; an admitted hint is waited in full and never shortened by the
-    exponential cap or configured maximum jitter delay. A hint longer than
-    either budget stops the ladder with ``retry_hint_exceeds_budget``. The
-    exponential cap and maximum delay bound the fallback jitter path only.
+    A server hint is evaluated against the remaining deadline only; an admitted
+    hint is waited in full and never shortened by the exponential cap or
+    configured maximum jitter delay. A hint longer than the remaining deadline
+    stops the ladder with ``retry_hint_exceeds_budget``. The exponential cap and
+    maximum delay bound the fallback jitter path only.
     """
-    bounds = [
-        bound
-        for bound in (
-            allowance_remaining_s,
-            # ``max(..., 0.0)`` twice: a spent deadline is a spent bound, never a
-            # negative one that would invert the comparison below.
-            deadline_remaining_s,
-        )
-        if bound is not None
-    ]
     if hint is not None:
-        if bounds and hint > min(bounds):
+        if deadline_remaining_s is not None and hint > deadline_remaining_s:
             return 0.0, "retry_hint_exceeds_budget"
         # A spent-but-not-none bound cannot turn an admitted hint negative.
         return max(hint, 0.0), None
     cap = min(base_delay_s * (2 ** attempt), max_delay_s)
-    if bounds:
-        cap = min(cap, min(bounds))
+    if deadline_remaining_s is not None:
+        cap = min(cap, deadline_remaining_s)
     cap = max(cap, 0.0)
     return min(_sample_retry_delay(cap), cap), None
 
@@ -178,8 +116,8 @@ def _plan_retry_delay(
 class _RetryTelemetry:
     """Account for dispatched attempts separately from retry overhead.
 
-    The opening useful-work attempt contributes to backend_s only. Recovery
-    charges retry_backend_s and backoff_s; cleanup is excluded from backend time.
+    The opening useful-work attempt contributes to backend_s only. Retries
+    charge retry_backend_s and backoff_s; cleanup is excluded from backend time.
     This keeps backend_s + backoff_s within elapsed invocation time.
     """
 

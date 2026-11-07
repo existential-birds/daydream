@@ -4,7 +4,7 @@ from __future__ import annotations
 from daydream.retry_policy import (
     FailureClass,
     classify_failure,
-    decode_retry_recovery_allowance,
+    decode_retry_seconds,
     derive_retry_summary,
     parse_message_retry_hint,
 )
@@ -35,7 +35,7 @@ def test_retry_hints_allowances_and_summaries_refuse_invalid_evidence() -> None:
     assert derive_retry_summary(events) is None
     # One decode rule: numeric strings accepted, everything invalid refused.
     for raw in (True, "nonsense", None):
-        assert decode_retry_recovery_allowance(raw) is None
+        assert decode_retry_seconds(raw) is None
     for message in ('429: {"metadata":{"headers":{"Other":"5","Retry-After":-1}}}',
                     '429: {"metadata":{"headers":"nope"}}',
                     '429: {"metadata":{"headers":{"Retry-After":"10"}'):

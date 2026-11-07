@@ -240,6 +240,11 @@ def test_pagination_preserves_tenant_archive_and_cursor_filters():
     os.environ["PI_PROVIDER"] = "openrouter"
     backend = MeasuredPi(args.model, cwd=repo, reasoning_effort=args.thinking)
     kwargs = {}
+    if "budget" in inspect.signature(run_agent).parameters:
+        from daydream.review_budget import BudgetLedger
+        kwargs["budget"] = BudgetLedger("runtime-comparison", wall_s=args.investigation_s + args.finalization_s)
+    else:  # baseline revisions before the single budget ledger
+        kwargs["wall_budget_s"] = args.investigation_s + args.finalization_s
     if "review_limits" in inspect.signature(run_agent).parameters:
         from daydream.review_budget import ReviewLimits
         kwargs["review_limits"] = ReviewLimits(args.investigation_s, args.finalization_s, args.tool_calls)
@@ -261,7 +266,6 @@ def test_pagination_preserves_tenant_archive_and_cursor_filters():
         async with recorder:
             result, _, reason = await run_agent(
                 backend, repo, prompt, phase=DaydreamPhase.DEEP, output_schema=PER_STACK_RECORD_SCHEMA,
-                wall_budget_s=args.investigation_s + args.finalization_s,
                 run_context=RunContext(InteractionPolicy(quiet=True, interactive=False)), **kwargs,
             )
     except Exception as exc:

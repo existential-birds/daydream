@@ -41,7 +41,7 @@ from daydream.backends.codex import (
 from daydream.extensions import Registry, ToolDecision, set_registry
 from daydream.phases.schemas import review_stage_schema, review_stage_submission_schema
 from daydream.retry_policy import FailureClass, classify_failure
-from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
+from daydream.review_budget import BudgetLedger, ReviewLimits
 from daydream.trajectory import DaydreamPhase
 from tests.harness.codex_replay import (
     make_mock_process,
@@ -219,7 +219,7 @@ async def test_empty_final_codex_message_cannot_reuse_planning_json(tmp_path: Pa
         result, token, reason = await run_agent(
             CodexBackend(model="fixture-model"), tmp_path, "review", phase=DaydreamPhase.REVIEW,
             output_schema=schema, require_full_schema=True,
-            investigation_budget=ReviewInvestigationBudget.from_limits(ReviewLimits()) if staged else None,
+            budget=BudgetLedger.from_limits("stage", ReviewLimits()) if staged else None,
         )
     assert isinstance(result, StructuredOutputFailure) and result.reason == "missing_output"
     assert token is not None and token.data == {"thread_id": "empty-final"}

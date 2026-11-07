@@ -43,7 +43,6 @@ from typing import (
 )
 
 from daydream.redaction import redact_structured_text
-from daydream.retry_policy import coerce_declared_retry_allowance
 from daydream.timeutil import now_iso
 
 logger = logging.getLogger(__name__)
@@ -70,10 +69,6 @@ class RetryPolicy:
     attempts: int
     base_delay_s: float
     max_delay_s: float
-    #: Invocation retry overhead in seconds; zero disables recovery, None defers.
-    #: A declared RetryPolicy suppresses ambient PI retry settings. Embedded runs
-    #: materialize environment overrides into this policy during construction.
-    retry_recovery_allowance_s: float | None = None
 
 
 def _parsed_nonnegative_int(
@@ -226,15 +221,6 @@ class BackendExecutionInput:
                 ),
                 max_delay_s=_parsed_nonnegative_float(
                     copied, "DAYDREAM_PI_RETRY_MAX_DELAY_S", 120.0
-                ),
-                # Parsed here, not in run_agent: this is the construction path
-                # every embedded caller uses, and ``run_agent`` resolves the
-                # documented top precedence tier (RetryPolicy) before the env, so
-                # the operator knob must be materialised into the policy or it
-                # would be silently dropped on this path only.
-                retry_recovery_allowance_s=coerce_declared_retry_allowance(
-                    copied.get("DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S"),
-                    "DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S",
                 ),
             ),
             _parsed_positive_int(copied, fanout_name, fanout_default),
@@ -953,9 +939,10 @@ class Backend(Protocol):
       reasoning and native tool controls. Codex still requires a host zero-tool guard.
     - supports_tools_disabled: removes tools without lowering reasoning or changing
       the task. Distinct from finalization, read-only mode, and tool-call budgets.
-    - supports_budget_preamble: accepts wall_budget_s/tool_call_budget so the
-      backend's own system prompt can state this turn's real allowances rather
-      than its module defaults. The host enforces the bound either way.
+    - supports_budget_preamble: accepts the ledger's absolute deadline and
+      tool_call_budget so the backend's own system prompt can state this turn's
+      real allowances rather than its module defaults. The host enforces the
+      ledger either way.
     - supports_host_tools: accepts an explicit invocation-local HostToolBinding.
       Absence means unsupported; callers only forward the optional argument when
       requested. Binding state never belongs to a cached backend instance.

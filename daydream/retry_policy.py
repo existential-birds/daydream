@@ -1,5 +1,4 @@
-"""Backend-failure classification, cumulative retry-recovery accounting, and the
-one shared retry-recovery allowance rule.
+"""Backend-failure classification, retry hints and retry-ladder summaries.
 
 Explicit permanent conditions take precedence over transient message hints.
 Exception messages use the shared safe conversion boundary."""
@@ -9,7 +8,7 @@ import logging
 import math
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -105,7 +104,7 @@ def _structured_retry_hint(message: str) -> float | None:
     for key, value in headers.items():
         if not isinstance(key, str) or key.strip().lower() not in _STRUCTURED_RETRY_HINT_KEY:
             continue
-        hint = decode_retry_recovery_allowance(value)
+        hint = decode_retry_seconds(value)
         if hint is not None:
             return hint
     return None
@@ -122,7 +121,7 @@ def parse_message_retry_hint(message: str) -> float | None:
     if structured is not None:
         return structured
     match = _RETRY_HINT_RE.search(message)
-    return decode_retry_recovery_allowance(match.group(1)) if match else None
+    return decode_retry_seconds(match.group(1)) if match else None
 
 
 @dataclass(frozen=True)
@@ -133,12 +132,11 @@ class RetryDecision:
     retries_allowed: bool
 
 
-def decode_retry_recovery_allowance(raw: Any) -> float | None:
-    """Decode a shared backend/config/environment allowance, or None if undeclared.
+def decode_retry_seconds(raw: Any) -> float | None:
+    """Decode a provider retry wait in seconds, or None when unusable.
 
     Numeric strings are accepted; bools, nonnumbers, negatives, and nonfinite values
-    are refused. Zero disables recovery. This is the silent rule; use
-    :func:`coerce_declared_retry_allowance` for a *declared* value that must warn."""
+    are refused."""
     if isinstance(raw, bool):
         return None
     if isinstance(raw, (int, float)):
@@ -153,69 +151,6 @@ def decode_retry_recovery_allowance(raw: Any) -> float | None:
     if not math.isfinite(value) or value < 0:
         return None
     return value
-
-
-def coerce_declared_retry_allowance(raw: Any, source: str) -> float | None:
-    """Decode one *declared* allowance from any source, or ``None`` if not usable.
-
-    The single owner of the declared-value rule for backend attributes, explicit
-    arguments, config files and the environment: an undeclared (``raw is None``)
-    value stays silent because an absent key is not a declaration, while a declared
-    value the decoder refuses warns once and yields ``None`` so the caller's own
-    default remains authoritative. The shared message keeps every source's warning
-    shape identical instead of re-expressed per module.
-    """
-    if raw is None:
-        return None
-    value = decode_retry_recovery_allowance(raw)
-    if value is None:
-        _logger.warning(
-            "%s=%r is not a finite non-negative number; the retry-recovery allowance stays undeclared",
-            source,
-            raw,
-        )
-    return value
-
-
-@dataclass
-class RetryRecoveryBudget:
-    """Accumulate invocation retry overhead independently of useful-work time.
-
-    The first retryable failure clamps the allowance once to the remaining deadline.
-    Later failures cannot reset it. Callers supply clocks; remaining time is nonnegative."""
-
-    allowance_s: float
-    _activated_at: float | None = field(default=None, init=False)
-    _spent_s: float = field(default=0.0, init=False)
-
-    def activate(self, now: float, effective_deadline: float | None = None) -> None:
-        """Activate once and clamp the allowance to the remaining effective deadline."""
-        if self._activated_at is not None:
-            return
-        self._activated_at = now
-        if effective_deadline is not None:
-            remaining_deadline_s = effective_deadline - now
-            if remaining_deadline_s < self.allowance_s:
-                self.allowance_s = max(remaining_deadline_s, 0.0)
-
-    @property
-    def active(self) -> bool:
-        """Whether a retryable failure has activated the budget."""
-        return self._activated_at is not None
-
-    @property
-    def spent_s(self) -> float:
-        """Cumulative retry overhead charged so far."""
-        return self._spent_s
-
-    def charge(self, seconds: float) -> None:
-        """Charge time to the cumulative retry allowance."""
-        if seconds > 0:
-            self._spent_s += seconds
-
-    def remaining(self) -> float:
-        """Seconds of recovery allowance left, clamped at zero."""
-        return max(0.0, self.allowance_s - self._spent_s)
 
 
 def _numeric(value: Any) -> float:
@@ -240,7 +175,6 @@ def derive_retry_summary(phase_events: Any) -> dict[str, Any] | None:
     attempts = 0
     backoff_s = 0.0
     backend_s = 0.0
-    retry_recovery_spent_s = 0.0
     for event in phase_events:
         if not isinstance(event, Mapping) or event.get("event") != "agent_budget_stop":
             continue
@@ -260,7 +194,6 @@ def derive_retry_summary(phase_events: Any) -> dict[str, Any] | None:
         attempts += int(_numeric(metadata.get("attempts")))
         backoff_s += _numeric(metadata.get("backoff_s"))
         backend_s += _numeric(metadata.get("backend_s"))
-        retry_recovery_spent_s += _numeric(metadata.get("retry_recovery_spent_s"))
 
     if not stops:
         return None
@@ -269,7 +202,6 @@ def derive_retry_summary(phase_events: Any) -> dict[str, Any] | None:
         "attempts": attempts,
         "backoff_s": round(backoff_s, 6),
         "backend_s": round(backend_s, 6),
-        "retry_recovery_spent_s": round(retry_recovery_spent_s, 6),
         "circuit_states": circuit_states,
     }
 

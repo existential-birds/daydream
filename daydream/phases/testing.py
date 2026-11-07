@@ -68,6 +68,7 @@ from daydream.phases.test_evidence import (
     test_command_fact,
 )
 from daydream.redaction import redact_text
+from daydream.review_budget import BudgetLedger
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.test_execution import (
     TestRecipe,
@@ -649,8 +650,7 @@ async def phase_test_and_heal(
         try:
             partial_output, continuation_token, abort_reason = await agent.run_agent(
                 repair_instance, work.repo, fix_prompt, phase=DaydreamPhase.FIX,
-                tool_call_budget=tool_call_budget,
-                wall_budget_s=wall_budget_s,
+                budget=BudgetLedger("test-repair", wall_s=wall_budget_s, limit=tool_call_budget),
                 run_context=run_context,
             )
         except Exception as exc:

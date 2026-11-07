@@ -14,6 +14,7 @@ from daydream.agent import run_agent
 from daydream.backends import Backend, ResultEvent, TextEvent
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.pi import PiBackend, PiError
+from daydream.review_budget import BudgetLedger
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
@@ -87,7 +88,7 @@ async def test_bounded_full_jitter_never_exceeds_the_cap(
     )
     with pytest.raises(_HostileHint):
         await run_agent(
-            backend, tmp_path, "go", phase=DaydreamPhase.FIX, wall_budget_s=10_000.0, retry_recovery_allowance_s=300.0,
+            backend, tmp_path, "go", phase=DaydreamPhase.FIX, budget=BudgetLedger("fix", wall_s=10_000.0),
         )
     assert slept == [pytest.approx(expected)]
     assert backend.call_count == 2
@@ -108,7 +109,7 @@ async def test_zero_server_retry_hint_is_honoured(
     )
     with pytest.raises(_HintError):
         await run_agent(
-            backend, tmp_path, "go", phase=DaydreamPhase.FIX, wall_budget_s=10_000.0, retry_recovery_allowance_s=300.0,
+            backend, tmp_path, "go", phase=DaydreamPhase.FIX, budget=BudgetLedger("fix", wall_s=10_000.0),
         )
     assert slept == [0.0]
     assert backend.call_count == 2
@@ -132,7 +133,7 @@ async def test_a_malformed_retry_after_attribute_degrades_to_jitter(
     )
     with pytest.raises(_HintError):
         await run_agent(
-            backend, tmp_path, "go", phase=DaydreamPhase.FIX, wall_budget_s=10_000.0, retry_recovery_allowance_s=300.0,
+            backend, tmp_path, "go", phase=DaydreamPhase.FIX, budget=BudgetLedger("fix", wall_s=10_000.0),
         )
     assert slept == [pytest.approx(30.0)]  # jitter pinned to the cap, not the malformed value
 
@@ -144,35 +145,8 @@ async def test_contradictory_retry_budgets_refuse_before_any_dispatch(tmp_path: 
         await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.FIX)
     assert backend.call_count == 0  # refused before dispatch
 
-async def test_a_non_zero_allowance_with_retries_disabled_is_contradictory(tmp_path: Path) -> None:
-    backend = ScriptedBackend(events=[_HintError("503")], retry_attempts=0)
-    with pytest.raises(ValueError, match="retry_recovery_allowance_s"):
-        await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.FIX, retry_recovery_allowance_s=60.0)
-    assert backend.call_count == 0
-
-async def test_retry_recovery_allowance_argument_outranks_environment(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The file-config argument beats the ambient env override; the env is the last resort."""
-    monkeypatch.setenv("DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S", "0")
-    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
-    patch_retry_sleep(monkeypatch, fake)
-    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
-    argument_backend = ScriptedBackend(
-        events=[_HintError("503")], retry_attempts=1, retry_base_delay_s=0.0, retry_max_delay_s=0.0,
-    )
-    with pytest.raises(_HintError):
-        await run_agent(argument_backend, tmp_path, "go", phase=DaydreamPhase.FIX, retry_recovery_allowance_s=300.0)
-    assert argument_backend.call_count == 2  # the argument's 300s outranked the env's 0s
-    # Nothing declared but the env: the env's zero stops after one dispatch.
-    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
-    env_backend = ScriptedBackend(events=[_HintError("503")], retry_attempts=5)
-    with pytest.raises(_HintError):
-        await run_agent(env_backend, tmp_path, "go", phase=DaydreamPhase.FIX)
-    assert env_backend.call_count == 1
-
 @pytest.mark.parametrize(
-    ("second_lines", "allowance_s", "retries", "expected_sleep"),
+    ("second_lines", "wall_s", "retries", "expected_sleep"),
     [
         # The next attempt begins no earlier than the advertised delay, even when the configured
         # jitter maximum (4s) is smaller than the hint (10.5s).
@@ -181,7 +155,7 @@ async def test_retry_recovery_allowance_argument_outranks_environment(
     ],
 )
 async def test_run_agent_honours_or_stops_on_a_server_hint(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, second_lines: list[str], allowance_s: float,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, second_lines: list[str], wall_s: float,
     retries: bool, expected_sleep: list[Any],
 ) -> None:
     notices: list[str] = []
@@ -202,7 +176,7 @@ async def test_run_agent_honours_or_stops_on_a_server_hint(
     if retries:
         out, _, _ = await run_agent(
             cast(Backend, backend), tmp_path, "p", phase=DaydreamPhase.FIX,
-            wall_budget_s=10_000.0, retry_recovery_allowance_s=allowance_s,
+            budget=BudgetLedger("fix", wall_s=wall_s),
             progress_callback=lambda text: notices.append(text.plain.strip()),
         )
         assert out == "done"
@@ -211,7 +185,7 @@ async def test_run_agent_honours_or_stops_on_a_server_hint(
         with pytest.raises(PiError) as failure:
             await run_agent(
                 cast(Backend, backend), tmp_path, "p", phase=DaydreamPhase.FIX,
-                wall_budget_s=10_000.0, retry_recovery_allowance_s=allowance_s,  # hint 10.5 > 5
+                budget=BudgetLedger("fix", wall_s=wall_s),  # hint 10.5 > the 5s deadline
                 progress_callback=lambda text: notices.append(text.plain.strip()),
             )
         assert len(spawned) == 1  # no further attempt dispatched after the stop

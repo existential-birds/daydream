@@ -885,7 +885,7 @@ class PiBackend:
         review_instructions: str | None = None,
         tools_disabled: bool = False,
         validate_structured_output: bool = True,
-        wall_budget_s: float | None = DEFAULT_WALL_BUDGET_S,
+        deadline: float | None = None,
         tool_call_budget: int | None = None,
         host_tools: HostToolBinding | None = None,
     ) -> AsyncGenerator[AgentEvent, None]:
@@ -899,10 +899,10 @@ class PiBackend:
         serialization instructions, and caps thinking at low while preserving lower
         settings. tools_disabled keeps normal instructions/thinking and uses stdin.
         Pi cannot enforce max_turns: callers must enforce an absolute deadline.
-        wall_budget_s/tool_call_budget state the allowances the caller is actually
-        enforcing, so the preamble describes this turn rather than the defaults.
-        Stdout silence raises retryable StreamStalledError; run_agent starts a fresh
-        subprocess for each retry.
+        The absolute ``deadline`` (else the host-tool ledger's) and tool_call_budget
+        state the allowances the caller enforces; the preamble renders the remaining
+        seconds. Stdout silence raises retryable StreamStalledError; run_agent starts
+        a fresh subprocess for each retry.
         """
         if self._execution_input is not None:
             response_idle_timeout_s = self._execution_input.pi_response_idle_timeout_s
@@ -918,6 +918,7 @@ class PiBackend:
                 "Pi backend does not support exploration subagents; use --backend claude for exploration."
             )
 
+        budget_deadline = deadline if deadline is not None else host_tools.deadline if host_tools is not None else None
         if self._hosted_read_only:
             from daydream.hosted_review import HOSTED_PI_TOOLS
 
@@ -926,7 +927,7 @@ class PiBackend:
                     or self._review_context is None):
                 raise _unsupported_hosted_policy(
                     "Hosted Pi requires a fresh, nonpersistent read-only invocation with bound native host submission")
-            host_tools.restrict(deadline=None, tool_call_budget=None, allowed_tools=HOSTED_PI_TOOLS)
+            host_tools.restrict(allowed_tools=HOSTED_PI_TOOLS)
             if host_tools.allowed_tools != HOSTED_PI_TOOLS:
                 raise _unsupported_hosted_policy("Hosted Pi requires the exact operator read/search/submission grant")
 
@@ -941,11 +942,6 @@ class PiBackend:
                               category="HOST_TOOLS", retryable=False)
             assert output_schema is not None
             host_tools.configure_schema(output_schema)
-            # run_agent passes the residual allocation on retries; the binding
-            # stores an original cumulative limit, so account for earlier starts.
-            host_tools.restrict(deadline=(clock.monotonic() + wall_budget_s) if wall_budget_s is not None else None,
-                                tool_call_budget=(host_tools.calls + tool_call_budget)
-                                if tool_call_budget is not None else None)
 
         review_context = self._review_context
         self._check_review_context()
@@ -1012,8 +1008,9 @@ class PiBackend:
         system_prompt = (
             _PI_FINALIZATION_PREAMBLE
             if finalization
-            else pi_system_preamble(wall_budget_s, tool_call_budget, staged=bool(review_instructions
-                                                and "Staged review contract:" in review_instructions))
+            else pi_system_preamble(
+                None if budget_deadline is None else max(0.0, budget_deadline - clock.monotonic()),
+                tool_call_budget, staged=bool(review_instructions and "Staged review contract:" in review_instructions))
         )
         if review_instructions and not finalization:
             system_prompt += (

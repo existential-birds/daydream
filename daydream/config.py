@@ -48,11 +48,6 @@ BUDGET_CLEANUP_GRACE_S = 10.0
 RETRY_CIRCUIT_FAILURE_THRESHOLD = 3
 RETRY_CIRCUIT_PROBE_INTERVAL_S = 30.0
 
-# Charge every backoff and retry attempt to a separate recovery allowance,
-# activated by the first retryable failure. Exhaustion re-raises without dispatch.
-# File/environment overrides are supported; zero disables recovery.
-DEFAULT_RETRY_RECOVERY_ALLOWANCE_S = 300.0
-
 # Bound cumulative fix cost/time per file group across all turns and retries.
 # Thread the group deadline into each call for mid-call enforcement; configurable
 # through [tool.daydream].

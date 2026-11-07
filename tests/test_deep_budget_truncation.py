@@ -20,7 +20,6 @@ async def test_single_stack_alternatives_timeout_still_emits_findings(
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, tiny_diff_target)
     stub.runaway_alternatives = True
-    monkeypatch.setattr("daydream.config.DEFAULT_TOOL_CALL_BUDGET", 3)
     _pin_findings_pr(monkeypatch, tiny_diff_target)
     out = tiny_diff_target / "findings.json"
     assert await run(make_config(

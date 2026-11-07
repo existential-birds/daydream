@@ -13,7 +13,6 @@ from pathlib import Path
 from types import MappingProxyType
 
 from daydream.backends import BackendExecutionInput
-from daydream.review_budget import ReviewLimits
 from daydream.review_profile import ResolvedProfile
 
 HOSTED_PI_TOOLS = frozenset({"read", "find", "ls", "grep", "review_source", "review_admit", "structured_output"})
@@ -32,6 +31,7 @@ class HostedReviewPolicy:
     remain live for native refresh. ``environment`` is the complete child process
     environment, including its trusted executable PATH and credential variables.
     Host outputs and private diagnostics use disjoint operator-selected roots.
+    ``profile``'s pipeline policy supplies the review's time and tool-call limits.
     """
 
     agent_dir: Path
@@ -39,7 +39,6 @@ class HostedReviewPolicy:
     output_dir: Path
     private_base: Path
     profile: ResolvedProfile
-    limits: ReviewLimits = field(default_factory=ReviewLimits)
     trusted_prepared_source: bool = False
     backend: str = "pi"
     provider: str = "nous"

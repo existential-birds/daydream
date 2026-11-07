@@ -77,8 +77,6 @@ class StagedBackend(EmptyReviewBackend):
             yield ResultEvent(structured_output=output, continuation=None)
             return
         kwargs.pop('review_instructions', None)
-        kwargs.pop('wall_budget_s', None)
-        kwargs.pop('tool_call_budget', None)
         async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
@@ -433,9 +431,6 @@ async def test_unadmitted_backend_failure_remains_failed_after_a_shared_stop(
     Only the exact Codex lifecycle error projects its closed diagnostic; other failures stay generic."""
     review = many_file_review(tmp_path, monkeypatch, count=9, docs_count=0)
     review.backend.fanout_concurrency = 1
-    monkeypatch.setenv('DAYDREAM_PI_RETRY_ATTEMPTS', '1')
-    monkeypatch.setenv('DAYDREAM_PI_RETRY_BASE_DELAY_S', '0')
-    monkeypatch.setenv('DAYDREAM_PI_RETRY_MAX_DELAY_S', '0')
     timer = FakeClock(monotonic_value=clock.monotonic()).install(monkeypatch)
     patch_retry_sleep(monkeypatch, timer)
     attempts = 0
@@ -584,7 +579,6 @@ async def test_stage_preparation_cannot_renew_the_original_invocation_wall_clamp
     real_run = ReviewInvestigation.run
 
     async def explicitly_bounded(self: ReviewInvestigation, *args: Any, **kwargs: Any) -> Any:
-        kwargs.pop('wall_budget_s', None)
         kwargs['wall_budget_s'] = 3600
         return await real_run(self, *args, **kwargs)
 
@@ -804,7 +798,8 @@ def test_assessment_rejects_domain_faults_and_irreparable_native_capacity(
         context.outage_circuit.record_failure(clock.monotonic())
     assert batches._continuation_admitted({'run_context': context}) is False
     assert (batches.reason, batches.failure_class) == ('backend_failure', 'outage_circuit')
-    batches.budget.observed_tool_starts = batches.budget.limits.tool_calls
+    while batches.budget.charge():
+        pass
     assert batches._continuation_admitted({}) is False
     assert (batches.reason, batches.failure_class, batches.failure_diagnostic) == (
         'tool_call_budget_exceeded', 'quantitative_exhaustion', 'Review limit exhausted: tool_call_budget_exceeded')
@@ -814,9 +809,9 @@ def test_assessment_rejects_domain_faults_and_irreparable_native_capacity(
     scoped = fresh(many)
     for _ in many:
         assert scoped._budget_stop_reason() is None
-        scoped.budget.observed_tool_starts += 9
+        scoped.budget.charged += 9
     assert fresh(many, limits=ReviewLimits(tool_calls=0))._budget_stop_reason() == 'tool_call_budget_exceeded'
-    assert fresh(many, scope_id=STRUCTURE_STACK_NAME).budget.limits == ReviewLimits()
+    assert fresh(many, scope_id=STRUCTURE_STACK_NAME)._scaled_limits == ReviewLimits()
     monkeypatch.setattr(review_result, 'RUN_TARGET_DECISIONS_MAX_BYTES', 1)
     with pytest.raises(HostToolFatal, match='required target IDs') as targets:
         fresh()._assessment(valid, 'first_pass', ['api.py'], [], files=['api.py'], native_sources=True)

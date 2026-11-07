@@ -458,13 +458,12 @@ class TrajectoryRecorder:
         cleanup_elapsed_s: float | None = None,
         retry_stop_reason: str | None = None,
         circuit_state: str | None = None,
-        retry_recovery_spent_s: float | None = None,
         partial_edit_handling: str | None = None,
     ) -> None:
         """Record an invocation stop once, using durations instead of monotonic deadlines.
 
-        Retry stops carry retry-only attempts, backend time, backoff, reason, circuit
-        state, and recovery spend. Initial useful work is excluded. Partial edits are
+        Retry stops carry retry-only attempts, backend time, backoff, reason and circuit
+        state. Initial useful work is excluded. Partial edits are
         kept for an interrupted attempt and discarded when stopping before dispatch."""
         self._emit_phase_event(
             phase,
@@ -477,7 +476,6 @@ class TrajectoryRecorder:
             cleanup_elapsed_s=cleanup_elapsed_s,
             retry_stop_reason=retry_stop_reason,
             circuit_state=circuit_state,
-            retry_recovery_spent_s=retry_recovery_spent_s,
             partial_edit_handling=partial_edit_handling,
         )
 

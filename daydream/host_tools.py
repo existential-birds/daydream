@@ -1,9 +1,10 @@
 """Synchronous admission for one live native Pi review assignment.
 
-Pi owns ordinary reads and tool execution. This binding owns one domain callback,
-its original deadline and cumulative allowance across short-lived transports.
-Acceptance runs on the event-loop thread without an await, so authority closure
-and state installation have an unambiguous order.
+Pi owns ordinary reads and tool execution. This binding owns one domain callback
+and charges the invocation's budget ledger (its absolute deadline and tool-call
+count) across short-lived transports. Acceptance runs on the event-loop thread
+without an await, so authority closure and state installation have an
+unambiguous order.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from jsonschema import Draft202012Validator
 
 from daydream import clock
 from daydream.redaction import redact_structured_text
+from daydream.review_budget import BudgetLedger
 
 if TYPE_CHECKING:
     from daydream.host_tools_server import PiHostToolServer
@@ -96,7 +98,7 @@ class HostToolFatal(Exception):
 
 
 class HostToolCallBudgetExceeded(HostToolFatal):
-    """The binding's original native call allowance cannot authorize further work."""
+    """The ledger's tool-call allocation cannot authorize further work."""
 
     def __init__(self, message: str, *, preacceptance: bool = True) -> None:
         super().__init__(message, code="capacity_exhausted", preacceptance=preacceptance)
@@ -174,18 +176,26 @@ def _submission_schema_error(arguments: Any, schema: dict[str, Any] | None) -> s
 
 
 class HostToolBinding:
-    """One review capability with cumulative limits and attempt-local correlation."""
+    """One review capability charging one budget ledger, with attempt-local correlation.
 
-    def __init__(self, *, deadline: float, accept: Callable[[Any], dict[str, Any]],
+    ``budget`` is the invocation's ledger; a bare ``deadline`` builds one. A
+    ``deadline`` given with a ledger can only narrow it.
+    """
+
+    def __init__(self, *, deadline: float | None = None, budget: BudgetLedger | None = None,
+                 accept: Callable[[Any], dict[str, Any]],
                  allowed_tools: Set[str] | None = None, host_tools: Mapping[str, HostTool] | None = None,
                  reserves: Mapping[str, Any] | None = None,
                  native_requirement: NativeCapacityRequirement | None = None,
                  protected_submission: bool = False) -> None:
-        if type(deadline) not in {int, float} or not math.isfinite(deadline):
+        budget = budget if budget is not None else BudgetLedger("host_tools", start_floor=1)
+        if deadline is not None and type(deadline) in {int, float}:
+            budget.deadline = float(deadline) if budget.deadline is None else min(budget.deadline, deadline)
+        if budget.deadline is None or type(budget.deadline) not in {int, float} or not math.isfinite(budget.deadline):
             raise ValueError("host tools require a finite absolute monotonic deadline")
         if not callable(accept):
             raise TypeError("host tools require a synchronous acceptance callback")
-        self.deadline = float(deadline)
+        self.budget = budget.anchor()
         # ``calls`` records every admitted native start identity once; ``denied_starts``
         # are the subset refused because they would consume the protected submission start.
         self.calls = self.rejections = self.denied_starts = 0
@@ -195,7 +205,6 @@ class HostToolBinding:
         self.fatal_error: HostToolFatal | None = None
         self._accept = accept
         self._allowed_tools = frozenset(allowed_tools) if allowed_tools is not None else None
-        self._call_limit: int | None = None
         self._schema: dict[str, Any] | None = None
         self._session_active = self._cleanup_failed = self._acceptance_started = False
         self._accepted_result: dict[str, Any] | None = None
@@ -211,6 +220,11 @@ class HostToolBinding:
         self.prompt_bytes = 0
         self.native_limits: dict[str, Any] | None = None
         self._host_pending: dict[str, str] = {}
+
+    @property
+    def deadline(self) -> float:
+        assert self.budget.deadline is not None
+        return self.budget.deadline
 
     @property
     def accepted(self) -> bool:
@@ -234,13 +248,8 @@ class HostToolBinding:
         return self._allowed_tools
 
     @property
-    def charged_starts(self) -> int:
-        """Admitted starts that consumed allowance; protected-slot denials are recorded, not charged."""
-        return self.calls - self.denied_starts
-
-    @property
     def remaining_tool_calls(self) -> int | None:
-        return None if self._call_limit is None else max(0, self._call_limit - self.charged_starts)
+        return self.budget.remaining_tool_calls
 
     def configure_schema(self, schema: dict[str, Any]) -> None:
         """Bind readiness and native argument validation to the model-facing schema."""
@@ -248,17 +257,10 @@ class HostToolBinding:
             raise ValueError("cannot change an active host submission schema")
         self._schema = json.loads(json.dumps(schema, ensure_ascii=False, allow_nan=False))
 
-    def restrict(self, *, deadline: float | None, tool_call_budget: int | None,
-                 allowed_tools: Set[str] | None = None) -> None:
-        """Intersect original cumulative policy; retries cannot replenish it."""
-        if deadline is not None:
-            self.deadline = min(self.deadline, deadline)
-        if tool_call_budget is not None:
-            self._call_limit = (tool_call_budget if self._call_limit is None
-                                else min(self._call_limit, tool_call_budget))
-        if allowed_tools is not None:
-            self._allowed_tools = (frozenset(allowed_tools) if self._allowed_tools is None
-                                   else self._allowed_tools & allowed_tools)
+    def restrict(self, *, allowed_tools: Set[str]) -> None:
+        """Narrow the granted tools; a grant is never widened."""
+        self._allowed_tools = (frozenset(allowed_tools) if self._allowed_tools is None
+                               else self._allowed_tools & allowed_tools)
 
     def _check_open(self, *, preacceptance: bool | None = None) -> None:
         if self.fatal_error is not None:
@@ -292,9 +294,9 @@ class HostToolBinding:
             return self.fail(HostToolFatal("Host callback could not confirm a new submission after terminal acceptance",
                                           code="native_correlation", preacceptance=False))
         rejection = HostToolRejected(message, code=code)
-        if self._call_limit is not None and self.charged_starts >= self._call_limit:
+        if self.budget.remaining_tool_calls == 0:
             fatal = HostToolCallBudgetExceeded(
-                "Original cumulative tool allowance exhausted; no calls remain for correction. "
+                "Tool-call allocation exhausted; no calls remain for correction. "
                 f"Rejected submission: {rejection}", preacceptance=not self.possibly_accepted)
             fatal.__cause__ = rejection
             return self.fail(fatal)
@@ -315,10 +317,11 @@ class HostToolBinding:
 
     def admit(self, call_id: Any, name: Any, arguments: Any, *, terminal: bool = False,
               malformed: bool | str = False) -> None:
-        """Charge real starts before native validation; only sole final calls can submit.
+        """Charge real starts to the ledger before native validation; only sole final calls can submit.
 
-        A protected binding keeps its last start for the terminal submission: any other
-        start that would take it is recorded and correctably denied, never charged.
+        Pi awaits this admission before it emits the start. A protected binding keeps
+        its last start for the terminal submission: any other start that would take it
+        is observed and correctably denied, never charged.
         """
         self._check_open()
         if not _valid_call_id(call_id) or not isinstance(name, str) or not name or len(name) > 256:
@@ -329,11 +332,12 @@ class HostToolBinding:
                               code="native_correlation")
         self.calls += 1
         self._admitted.add(call_id)
-        limit = self._call_limit
-        if (limit is not None and self.protected_submission and self.charged_starts > limit - 1
+        remaining = self.budget.remaining_tool_calls
+        if (remaining is not None and self.protected_submission and remaining <= 1
                 and not self.possibly_accepted and not (name == NATIVE_SUBMIT and terminal is True)):
             # The last start belongs to structured_output: refuse this one without
             # charging it or closing authority, so the model can still submit.
+            self.budget.deny()
             self.denied_starts += 1
             self.rejections += 1
             if self.denied_starts > PROTECTED_DENIAL_LIMIT:
@@ -345,10 +349,10 @@ class HostToolBinding:
                 "Tool start denied: the remaining tool start is reserved for structured_output. Submit your final "
                 "batch now with structured_output alone, truthfully marking unfinished targets.",
                 code="capacity_protected")
-        if limit is not None and self.charged_starts > limit:
+        if not self.budget.charge():
             self.rejections += 1
             raise self.fail(HostToolCallBudgetExceeded(
-                "Original cumulative tool allowance exhausted; no further native calls are authorized",
+                "Tool-call allocation exhausted; no further native calls are authorized",
                 preacceptance=not self.possibly_accepted))
         if self._allowed_tools is not None and name not in self._allowed_tools:
             raise self._reject("This tool is not granted by the operator's read-only policy; use only granted tools",
@@ -498,7 +502,7 @@ class HostToolBinding:
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[PiHostToolServer]:
-        """Open one attempt's endpoint; unaccepted retries retain counters and deadline."""
+        """Open one attempt's endpoint; unaccepted retries keep the ledger and its deadline."""
         from daydream.host_tools_server import PiHostToolServer
 
         if self.fatal_error is not None:
@@ -588,7 +592,7 @@ class HostToolBinding:
         self.close_attempt()
 
     def close_attempt(self) -> None:
-        """Revoke this transport; a permitted live retry keeps cumulative policy."""
+        """Revoke this transport; a permitted live retry keeps the ledger."""
         self.authority_open = False
         self._pending.clear()
         self._host_pending.clear()

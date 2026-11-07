@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 from daydream import git_ops, trajectory
 from daydream.agent import console, run_agent
 from daydream.config import (
-    DEFAULT_TOOL_CALL_BUDGET,
     DEFAULT_WALL_BUDGET_S,
     EffortTier,
 )
@@ -18,7 +17,7 @@ from daydream.config_file import DaydreamFileConfig
 from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.deep.diff import _diff_changed_files
 from daydream.exploration import EXPLORATION_SECTION_PREFIX, ExplorationContext
-from daydream.exploration_runner import EXPLORATION_MAX_TURNS, _sample_paths, repo_scan
+from daydream.exploration_runner import EXPLORATION_TOOL_CALL_LIMIT, _sample_paths, repo_scan
 from daydream.extensions.api import Stop
 from daydream.improve import artifacts
 from daydream.improve.command_contract import (
@@ -42,6 +41,7 @@ from daydream.prompts.grounding import (
 )
 from daydream.redaction import redact_value
 from daydream.repository_paths import canonicalize_working_directory
+from daydream.review_budget import BudgetLedger
 from daydream.review_profile import build_default_profile
 from daydream.services import (
     Service,
@@ -364,9 +364,8 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
             read_only=True,
             persist_session=False,
             validate_structured_output=False,
-            max_turns=EXPLORATION_MAX_TURNS if combined else None,
-            wall_budget_s=DEFAULT_WALL_BUDGET_S if combined else None,
-            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+            budget=BudgetLedger("recon", wall_s=DEFAULT_WALL_BUDGET_S, limit=EXPLORATION_TOOL_CALL_LIMIT)
+            if combined else None,
             run_context=ctx.run_context,
         )
 

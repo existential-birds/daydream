@@ -66,6 +66,7 @@ from daydream.prompt_budget import (
 )
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.review_budget import (
+    BudgetLedger,
     ReviewBudgetExceeded,
     ReviewLimits,
 )
@@ -194,8 +195,7 @@ async def phase_understand_intent(
                                   ("author correction", intent_correction),
                                   ("diff", inline_diff or "")),
             ),
-            tool_call_budget=phase_config.DEFAULT_TOOL_CALL_BUDGET,
-            wall_budget_s=phase_config.REVIEW_WALL_BUDGET_S,
+            budget=BudgetLedger("intent", wall_s=phase_config.REVIEW_WALL_BUDGET_S),
             read_only=True,
             sanctioned_inputs=sanctioned_inputs,
             run_context=run_context,
@@ -330,8 +330,7 @@ async def phase_alternative_review(
             "An empty issues array is valid.",
             supplied_context=(("confirmed intent", intent_summary), ("diff", inline_diff or "")),
         ),
-        tool_call_budget=phase_config.DEFAULT_TOOL_CALL_BUDGET,
-        wall_budget_s=phase_config.REVIEW_WALL_BUDGET_S,
+        budget=BudgetLedger("alternatives", wall_s=phase_config.REVIEW_WALL_BUDGET_S),
         sanctioned_inputs=sanctioned_inputs,
         read_only=read_only,
         run_context=run_context,

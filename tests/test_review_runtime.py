@@ -11,6 +11,7 @@ from daydream.agent import run_agent
 from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent, TurnEndEvent
 from daydream.prompt_budget import SanctionedInputUnavailable, inline_context_file, prepare_sanctioned_inputs
 from daydream.review_budget import (
+    BudgetLedger,
     ReviewLimits,
     review_deadline_scope,
     review_limits_for_scope,
@@ -117,7 +118,8 @@ async def test_retry_discards_failed_attempt_checkpoint_and_evidence(
         retry_attempts=1, retry_base_delay_s=0, retry_max_delay_s=0,
     )
     result = await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.DEEP, output_schema=SCHEMA,
-        deadline=clock.monotonic() + 5, review_limits=ReviewLimits(10, 2, 1), progress_callback=lambda _: None,
+        budget=BudgetLedger("deep", deadline=clock.monotonic() + 5), review_limits=ReviewLimits(10, 2, 1),
+        progress_callback=lambda _: None,
     )
     assert result[0] == FINDINGS
     assert "at most 3 seconds and 1 tool calls" in backend.prompts[0]
