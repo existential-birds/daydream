@@ -50,9 +50,6 @@ class PipelineConfig:
     seed: int = 0
     gate_config: GateConfig = field(default_factory=GateConfig)
     profile_policy: str = "decisive-only"
-    stack_pins: dict[str, str] = field(
-        default_factory=lambda: {"verifiers": "0.2.1", "prime-rl": "0.7.0"}
-    )
 
     def __post_init__(self) -> None:
         unknown = [s for s in self.stages if s not in STAGES]
@@ -293,7 +290,6 @@ def _make_identity(config: PipelineConfig, corpus_digest: str, split_digest: str
         profile_policy=config.profile_policy,
         reward_version=REWARD_VERSION,
         reward_weights=_reward_weights_snapshot(),
-        stack_pins=dict(config.stack_pins),
     )
 
 

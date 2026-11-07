@@ -33,7 +33,6 @@ class RunIdentity:
     profile_policy: str
     reward_version: str
     reward_weights: dict[str, float]
-    stack_pins: dict[str, str]
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -52,9 +51,9 @@ LOCKED_FIELDS: tuple[str, ...] = tuple(f.name for f in fields(RunIdentity))
 
 Covers exactly the AC5 list — base model, tokenizer/renderer, max sequence
 length, LoRA rank + target modules, optimizer + learning rate, corpus digest,
-split digest, profile policy, reward version + weights, and exact stack pins
-(verifiers + prime-rl versions). The AC5 list is the floor, not the ceiling:
-adding a field to :class:`RunIdentity` automatically locks it. That floor is
+split digest, profile policy, and reward version + weights. The AC5 list is
+the floor, not the ceiling: adding a field to :class:`RunIdentity`
+automatically locks it. That floor is
 asserted in ``tests/test_training_lineage_guard.py``, so it is enforced once,
 in CI, instead of as a second executable copy of the list here.
 """

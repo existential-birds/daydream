@@ -29,9 +29,8 @@ def _base_record(**overrides: Any) -> dict[str, Any]:
     return record
 
 
-TASK_IDENTITY = {"repo_slug": "owner/repo", "source": "record", "base_sha": "1" * 40, "head_sha": "2" * 40,
+TASK_IDENTITY = {"repo_slug": "owner/repo", "base_sha": "1" * 40, "head_sha": "2" * 40,
     "diff_digest": "3" * 64, "diff_ref": {"record_digest": "4" * 64, "run_id": "s1", "section": "original_task.diff"},
-    "replay_verification": {"status": "passed"},
 }
 
 
