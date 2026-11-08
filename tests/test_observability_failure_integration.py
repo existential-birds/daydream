@@ -77,7 +77,8 @@ def _config(
 ) -> RunConfig:
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", endpoint + "/v1/traces")
     return make_config(
-        repo, flow_name="trace-failures", observability=ObservabilityConfig(destinations=("otlp", "local"))
+        repo, flow_name="trace-failures", observability=ObservabilityConfig(destinations=("otlp", "local")),
+        pr_repo="octo/sample", pr_number=7,
     )
 
 
@@ -320,6 +321,9 @@ async def test_runner_exact_allocation_bills_children_and_chain_matches_wire(
     dispatch = {key.rsplit(".", 1)[-1]: value for key, value in billed.items()
                 if key.startswith("daydream.host_dispatch.") or key == "daydream.attempt"}
     assert trajectory["extra"]["subtrajectories"][0]["host_dispatch"] == dispatch
+    root, = _kind(spans, "run")
+    assert {key: attributes(root)[f"daydream.{key}"] for key in ("pr_repo", "pr_number")} == {
+        key: trajectory["extra"][key] for key in ("pr_repo", "pr_number")} == {"pr_repo": "octo/sample", "pr_number": 7}
 
 
 class _LateMissingMetricsBackend(_NoCancelBackend):

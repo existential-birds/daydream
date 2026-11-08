@@ -129,6 +129,12 @@ async def test_run_agent_stops_on_a_server_hint_longer_than_the_deadline(
     agent_span = next(span for span in exporter.get_finished_spans()
                       if (span.attributes or {}).get("daydream.span.kind") == "agent")
     assert (agent_span.attributes or {})["daydream.budget.dimension"] == "time"
+    assert [dict(event.attributes or {}) for event in agent_span.events if event.name == "daydream.retry.stop"] == [{
+        "daydream.retry.limit_expired": "retry_ladder", "daydream.retry.elapsed_s": 0.0,
+        "daydream.retry.backend_s": 0.0, "daydream.retry.backoff_s": 0.0, "daydream.retry.attempts": 0,
+        "daydream.retry.retry_stop_reason": "retry_hint_exceeds_budget", "daydream.retry.circuit_state": "closed",
+        "daydream.retry.partial_edit_handling": "discarded",
+    }]
     assert ledger.stopped == BudgetStop("fix", "time", limit=5.0, spent=0.0, remaining_at_dispatch=5.0, reserved=0)
     assert len(spawned) == 1  # no further attempt dispatched after the stop
     assert failure.value.retry_after == 10.5

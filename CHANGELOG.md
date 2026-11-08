@@ -29,6 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Trace agent spans record each retry-ladder stop as a `daydream.retry.stop` event carrying
+  the trajectory's `agent_budget_stop` fields as `daydream.retry.*`, with or without a
+  trajectory recorder. The run span carries the run's pull request as `daydream.pr_repo`
+  and `daydream.pr_number`, and spans inside a dispatched fork carry that fork's trajectory
+  id (`<session>:dispatch:<n>:fork:<m>`) as `daydream.trajectory.id` instead of
+  `<session>:<descriptor>`, matching its trajectory document
+  ([#1718](https://github.com/existential-birds/daydream/issues/1718)).
 - Trace attempt spans record each backend diagnostic as a `daydream.backend_diagnostic`
   event in observed order, with its code and, under full content only, its message and
   metadata. The events replace the `daydream.backend_diagnostic.codes` and `.counts`

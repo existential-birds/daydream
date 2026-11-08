@@ -48,7 +48,9 @@ Use interval unions for overlapping wall time. Host-rendered request sizes measu
 exact attempt inputs, not provider tokenization or provider-hidden context. Each attempt
 span records them as attributes before backend startup, so a startup failure keeps them,
 and records each backend diagnostic as an event in observed order: the code always, the
-message and metadata only with full content.
+message and metadata only with full content. The run span carries the run's pull request
+as `daydream.pr_repo` and `daydream.pr_number`, and spans inside a forked recorder carry
+that fork's ATIF trajectory id as `daydream.trajectory.id`.
 
 [Span construction](../daydream/observability/spans.py),
 [trajectory metrics](../daydream/trajectory/), and
@@ -134,7 +136,8 @@ hint longer than the remaining deadline). Every other stop is a `daydream.budget
 event with the same attributes on the active span: a review-finalization turn's stop on
 its agent span, and a dispatch the host refuses before any agent runs on the enclosing
 step or run span. Values are counts or durations in seconds, never monotonic timestamps.
-The ATIF `agent_budget_stop` event keeps only its retry-ladder fields.
+A retry-ladder stop is a `daydream.retry.stop` event on its agent span carrying the ATIF
+`agent_budget_stop` fields as `daydream.retry.*`, with or without a recorder.
 
 ## Codex lifecycle evidence
 

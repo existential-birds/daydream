@@ -41,7 +41,7 @@ from daydream.config import BUDGET_CLEANUP_GRACE_S
 from daydream.diagnostics import exception_text, sanitize_verbose_message
 from daydream.extensions import get_registry
 from daydream.host_tools import HostToolBinding, HostToolCallBudgetExceeded
-from daydream.observability.spans import agent_scope, attempt_scope, record_budget_stop
+from daydream.observability.spans import agent_scope, attempt_scope, record_budget_stop, record_retry_stop
 from daydream.outage_circuit import CIRCUIT_CLOSED, CIRCUIT_HALF_OPEN
 from daydream.prompt_budget import PreparedSanctionedInputs
 from daydream.prompts.grounding import (
@@ -585,23 +585,21 @@ async def _run_agent(
                 Counts include dispatched/in-flight retries and backoff, excluding initial useful
                 work. Persist only durations and codes, never monotonic timestamps or deadlines.
                 """
-                if recorder is None:
-                    return
                 now = clock.monotonic()
-                pending = telemetry.pending_retry_s(now)
                 try:
-                    recorder.emit_agent_budget_stop(
-                        phase,
-                        limit_expired=limit_expired,
-                        elapsed_s=now - invocation_start,
-                        backend_s=telemetry.retry_backend_s + pending,
-                        backoff_s=telemetry.backoff_s,
-                        attempts=telemetry.retry_attempts,
-                        cleanup_elapsed_s=None,
-                        retry_stop_reason=stop_reason,
-                        circuit_state=run_context.outage_circuit.state(),
-                        partial_edit_handling="discarded",
-                    )
+                    stop: dict[str, Any] = {
+                        "limit_expired": limit_expired,
+                        "elapsed_s": now - invocation_start,
+                        "backend_s": telemetry.retry_backend_s + telemetry.pending_retry_s(now),
+                        "backoff_s": telemetry.backoff_s,
+                        "attempts": telemetry.retry_attempts,
+                        "retry_stop_reason": stop_reason,
+                        "circuit_state": run_context.outage_circuit.state(),
+                        "partial_edit_handling": "discarded",
+                    }
+                    record_retry_stop(stop)
+                    if recorder is not None:
+                        recorder.emit_agent_budget_stop(phase, **stop)
                 except Exception:  # noqa: BLE001 - telemetry must never break the run
                     _logger.exception("failed to record agent retry-ladder stop")
 

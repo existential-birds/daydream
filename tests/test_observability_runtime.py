@@ -39,7 +39,7 @@ from daydream.observability.config import (
 from daydream.observability.privacy import PrivacyPolicy, diagnostic_scope
 from daydream.observability.runtime import current_run_trace_id, current_session, record_local_trace, trace_run
 from daydream.observability.spans import agent_scope, attempt_scope, stack_scope, step_scope
-from daydream.trajectory import DaydreamPhase
+from daydream.trajectory import DaydreamPhase, dispatch_scope
 from tests.harness.backend import ScriptedBackend
 from tests.harness.trajectory import make_recorder
 
@@ -404,13 +404,17 @@ async def test_stack_binding_preserves_precedence_and_restores_context_on_every_
     # Spans opened inside a forked recorder carry that child's trajectory identity.
     exporter, registry = _memory_tracing()
     root = make_recorder(tmp_path)
-    async with root, root.fork("stack-python") as child:
+    async with (
+        root,
+        dispatch_scope(root, phase=DaydreamPhase.DEEP, descriptors=("stack-python",)) as dispatch,
+        root.fork("stack-python", dispatch=dispatch) as child,
+    ):
         async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
             with step_scope("review", stack=None, iteration=0):
                 pass
     step, = [span for span in exporter.get_finished_spans() if span.name == "daydream.step.review"]
     assert (step.attributes or {})["daydream.trajectory.descriptor"] == "stack-python"
-    assert (step.attributes or {})["daydream.trajectory.id"] == f"{child.session_id}:stack-python"
+    assert (step.attributes or {})["daydream.trajectory.id"] == child.trajectory_id == "test:dispatch:1:fork:1"
 
 
 async def test_codex_lifecycle_export_retains_exit_without_creating_usage() -> None:

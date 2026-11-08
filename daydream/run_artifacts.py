@@ -192,7 +192,7 @@ def _open_recorder(
         test_backend_name=names.test,
         on_write=None if run_artifacts is None else run_artifacts.capture.retain,
     )
-    associate_run_trajectory(recorder.session_id)
+    associate_run_trajectory(recorder.session_id, pr_repo=recorder.pr_repo, pr_number=recorder.pr_number)
     return recorder
 
 
