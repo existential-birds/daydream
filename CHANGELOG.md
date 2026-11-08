@@ -35,7 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its pull request number as `daydream.pr_repo` and `daydream.pr_number`, and spans inside
   a dispatched fork carry that fork's trajectory id (`<session>:dispatch:<n>:fork:<m>`) as
   `daydream.trajectory.id` instead of `<session>:<descriptor>`, matching its trajectory
-  document ([#1718](https://github.com/existential-birds/daydream/issues/1718)).
+  document ([#1718](https://github.com/existential-birds/daydream/issues/1718),
+  [#1793](https://github.com/existential-birds/daydream/pull/1793)).
 - Trace attempt spans record each backend diagnostic as a `daydream.backend_diagnostic`
   event in observed order, with its code and, under full content only, its message and
   metadata. The events replace the `daydream.backend_diagnostic.codes` and `.counts`
