@@ -774,10 +774,8 @@ async def _run_agent(
                                 # The sole telemetry observer runs before UI callbacks,
                                 # supervision and budgets can interrupt event handling.
                                 observed.observe(event)
-                                # Parser/transport evidence and the
-                                # invocation ledger must be forwarded before any
-                                # branch-specific break; _dispatch is UI-free and
-                                # ignores RequestEvent (the one armless member).
+                                # Parser/transport evidence and the invocation ledger must be forwarded
+                                # before any branch-specific break; _dispatch is UI-free.
                                 if inv is not None:
                                     inv.observe(event)
                                 # After expiry, supervise/charge received native starts;

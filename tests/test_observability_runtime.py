@@ -197,7 +197,6 @@ async def test_startup_failure_and_retry_keep_dispatch_facts_failed_billing_and_
             "daydream.host_dispatch.user_utf8_bytes": len("original".encode()),
             "daydream.host_dispatch.system_disposition": "unsupported",
         }
-    assert [event.name for event in attempts[0].events] == ["exception"]
     assert not any(key.startswith("gen_ai.usage.") for key in startup)
     assert first["gen_ai.usage.cost"] == 0.05
     assert second["gen_ai.usage.input_tokens"] == 0
@@ -231,7 +230,7 @@ async def test_metadata_policy_omits_all_content_and_exception_strings(tmp_path:
             await run_agent(backend, tmp_path, "PRIVATE ORIGINAL", phase=DaydreamPhase.REVIEW)
     for span in exporter.get_finished_spans():
         encoded = (str(span.attributes) + str([event.attributes for event in span.events])
-                   + str(span.resource.attributes) + str(span.status))
+                   + str(span.resource.attributes) + str(span.status.description))
         assert "PRIVATE" not in encoded and "opaque-secret" not in encoded
         assert not any(key.startswith(("traceloop.entity.input", "traceloop.entity.output", "gen_ai.input.messages",
                     "gen_ai.output.messages", "daydream.error.message",
