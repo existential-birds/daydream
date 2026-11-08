@@ -387,8 +387,8 @@ _USAGE_ATTRIBUTES = {
     "cost_usd": "gen_ai.usage.cost",
 }
 
-# Lifecycle evidence has a closed export surface independent of recorder-only
-# diagnostics and future snapshot additions. No native payloads belong here.
+# Lifecycle evidence has a closed export surface independent of diagnostics
+# and future snapshot additions. No native payloads belong here.
 _BACKEND_LIFECYCLE_FIELDS = frozenset({
     "attempt", "backend", "timestamp_source", "clock", "state",
     "response_idle_timeout_s", "tool_idle_timeout_s", "idle_detection_enabled",
@@ -442,7 +442,6 @@ class AttemptObserver:
         self.models: list[str] = []
         self.providers: list[str] = []
         self.reason: str | None = None
-        self.diagnostic_counts: dict[str, int] = {}
         # Pending spans await the trajectory ledger's final billing owner.
         self.generations: dict[str, dict[str, Any]] = {}
         self._saw_authoritative_total = False
@@ -498,14 +497,24 @@ class AttemptObserver:
             if key in _BACKEND_LIFECYCLE_FIELDS
         })
 
+    def record_host_dispatch(self, dispatch: dict[str, int | str]) -> None:
+        """Attach the host's dispatch measurement; ``daydream.attempt`` already numbers the attempt."""
+        self.scope.attrs({
+            f"daydream.host_dispatch.{key}": value for key, value in dispatch.items() if key != "attempt"
+        })
+
     @singledispatchmethod
     def _observe(self, event: AgentEvent, policy: PrivacyPolicy) -> None:
         """Ignore events without an observability projection."""
 
     @_observe.register
     def _observe_diagnostic(self, event: DiagnosticEvent, policy: PrivacyPolicy) -> None:
-        code = policy.text(event.code)
-        self.diagnostic_counts[code] = self.diagnostic_counts.get(code, 0) + 1
+        attributes = {"daydream.backend_diagnostic.code": policy.text(event.code)}
+        if self.capture:
+            attributes["daydream.backend_diagnostic.message"] = policy.text(event.message)
+            attributes["daydream.backend_diagnostic.metadata"] = policy.json(event.metadata)
+        if self.scope.span is not None:
+            self.scope.span.add_event("daydream.backend_diagnostic", attributes)
 
     @_observe.register
     def _observe_request(self, event: RequestEvent, policy: PrivacyPolicy) -> None:
@@ -855,22 +864,16 @@ class AttemptObserver:
                 self.providers, max_chars=_MAX_PROVIDER_NAME_CHARS, context="providers"
             )
             for diagnostic in (model_diagnostic, provider_diagnostic):
-                if diagnostic is not None:
-                    code = diagnostic.split(":", 1)[0]
-                    self.diagnostic_counts[code] = self.diagnostic_counts.get(code, 0) + 1
+                if diagnostic is not None and self.scope.span is not None:
+                    self.scope.span.add_event(
+                        "daydream.backend_diagnostic", {"daydream.backend_diagnostic.code": diagnostic.split(":", 1)[0]}
+                    )
             self.scope.attrs(
                 {
                     "daydream.models": list(admitted_models) if admitted_models else None,
                     "daydream.providers": list(admitted_providers) if admitted_providers else None,
                 }
             )
-            if self.diagnostic_counts:
-                self.scope.attrs(
-                    {
-                        "daydream.backend_diagnostic.codes": list(self.diagnostic_counts),
-                        "daydream.backend_diagnostic.counts": list(self.diagnostic_counts.values()),
-                    }
-                )
             if self.capture:
                 if self.request is not None:
                     self.scope.content("traceloop.entity.input", self.request)

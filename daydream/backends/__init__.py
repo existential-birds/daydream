@@ -671,7 +671,7 @@ class ToolResultEvent:
 
 @dataclass
 class DiagnosticEvent:
-    """Recorder-only parser/transport evidence, normalized and redacted before persistence."""
+    """Parser/transport evidence, normalized and redacted before persistence or trace export."""
 
     code: str
     message: str

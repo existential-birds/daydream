@@ -78,7 +78,7 @@ async def test_unencodable_dispatch_measurement_does_not_change_agent_result(
     assert "host_dispatch" not in trajectory["extra"]["subtrajectories"][0]
     assert _single_agent_step(trajectory)["message"] == "done"
     output = capsys.readouterr().out
-    assert "Trajectory dispatch measurement failed: UnicodeError" in output
+    assert "Host dispatch measurement failed: UnicodeError" in output
     assert "PRIVATE_MEASUREMENT_FAILURE" not in output
     assert "private-unencodable-credential" not in output + json.dumps(trajectory)
 
