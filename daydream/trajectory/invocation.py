@@ -237,6 +237,7 @@ class Invocation:
     _backend_lifecycle_collector: BackendLifecycleCollector | None = field(default=None, repr=False)
     _host_dispatch: dict[str, int | str] | None = None
     _requests: list[dict[str, Any]] = field(default_factory=list)
+    _metered_message_ids: set[str] = field(default_factory=set)
 
     def summary(self, *, partial: bool = False) -> dict[str, Any]:
         """Project invocation identity/timing; generation billing appears only after completion."""
@@ -443,6 +444,13 @@ class Invocation:
 
     @_dispatch.register
     def _observe_metrics(self, event: MetricsEvent) -> None:
+        # Claude repeats one provider message's usage on each of its content-block messages.
+        if event.message_id:
+            if event.message_id in self._metered_message_ids:
+                if event.model_name and self._open_step_dict is not None:
+                    self._open_step_dict["_model_name"] = event.model_name
+                return
+            self._metered_message_ids.add(event.message_id)
         target = self._open_step_dict
         if target is None and not self.steps:
             target = self._ensure_open_step()

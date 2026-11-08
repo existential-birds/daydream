@@ -178,7 +178,7 @@ async def test_startup_failure_and_retry_keep_dispatch_facts_failed_billing_and_
             [TextEvent("failed content"), CostEvent(0.05, 4, 2), ResultEvent(None, None), RetryableError("retry")],
             [RequestEvent("effective prompt", system_prompt="effective system"), TextEvent('{"ok":true}'),
                 ResultEvent({"wrong": True}, None), MetricsEvent("", 30, 6, 4, 0.2, usage_scope="invocation"),
-                CostEvent(None, 0, None),
+                CostEvent(0.3, 0, None),
             ],
         ], model="requested", retry_attempts=2, retry_base_delay_s=0, retry_max_delay_s=0,
     )
@@ -199,8 +199,10 @@ async def test_startup_failure_and_retry_keep_dispatch_facts_failed_billing_and_
         }
     assert not any(key.startswith("gen_ai.usage.") for key in startup)
     assert first["gen_ai.usage.cost"] == 0.05
-    assert second["gen_ai.usage.input_tokens"] == 0
-    assert second["gen_ai.usage.output_tokens"] == 6
+    assert {key: value for key, value in second.items() if key.startswith("gen_ai.usage.")} == {
+        "gen_ai.usage.input_tokens": 30, "gen_ai.usage.output_tokens": 6, "gen_ai.usage.cache_read.input_tokens": 4,
+        "gen_ai.usage.cost": 0.3, "gen_ai.usage.total_tokens": 36,
+    }
     assert "effective system" in str(second["gen_ai.input.messages"])
     assert "failed content" not in str(second)
     agent = next(

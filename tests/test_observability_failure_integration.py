@@ -241,13 +241,14 @@ async def _run_lifecycle_flow(
 
 
 class _ExactAllocationBackend(_NoCancelBackend):
-    """Two complete generations, late per-generation usage, terminal total."""
+    """Two complete generations, late per-generation usage restated once, terminal total."""
 
     async def execute(self, _cwd: Path, prompt: str, *_args: Any, **_kwargs: Any) -> AsyncGenerator[AgentEvent]:
         yield RequestEvent(prompt)
         yield DiagnosticEvent("parser_gap", "unparsed native line", {"line": 3})
         yield _gen_start("gen-a")
         yield _gen_end("gen-a", "first sealed choice", response_id="resp-alpha")
+        yield MetricsEvent("gen-a", 100, 20, None, 0.002, reasoning_tokens=5, generation_id="gen-a")
         yield MetricsEvent("gen-a", 100, 20, None, 0.002, reasoning_tokens=5, generation_id="gen-a")
         yield ToolStartEvent("gen-a-call", "Read", {"path": "src/x.py"})
         yield ToolResultEvent("gen-a-call", "tool output", False)
@@ -308,9 +309,6 @@ async def test_runner_exact_allocation_bills_children_and_chain_matches_wire(
         assert int(gens[generation_id]["endTimeUnixNano"]) == 1_778_000_000_500_000_000
     billed = attributes(attempt)
     assert billed["daydream.billing.owner"] == "generation_children"
-    assert billed["gen_ai.usage.input_tokens"] == 150
-    assert billed["gen_ai.usage.output_tokens"] == 30
-    assert billed["gen_ai.usage.cost"] == pytest.approx(0.003)
     assert gens["gen-a"]["parentSpanId"] == attempt["spanId"]
     (path,) = (feature_branch_repo / ".daydream/runs").glob("*/trajectory.json")
     trajectory = json.loads(path.read_text())
@@ -321,6 +319,10 @@ async def test_runner_exact_allocation_bills_children_and_chain_matches_wire(
     dispatch = {key.rsplit(".", 1)[-1]: value for key, value in billed.items()
                 if key.startswith("daydream.host_dispatch.") or key == "daydream.attempt"}
     assert trajectory["extra"]["subtrajectories"][0]["host_dispatch"] == dispatch
+    final = trajectory["final_metrics"]
+    assert (final["total_prompt_tokens"], final["total_completion_tokens"], final["total_cost_usd"]) == (
+        billed["gen_ai.usage.input_tokens"], billed["gen_ai.usage.output_tokens"], billed["gen_ai.usage.cost"],
+    ) == (150, 30, 0.003)
     root, = _kind(spans, "run")
     assert {key: attributes(root)[f"daydream.{key}"] for key in ("pr_repo", "pr_number")} == {
         key: trajectory["extra"][key] for key in ("pr_repo", "pr_number")} == {"pr_repo": "octo/sample", "pr_number": 7}
