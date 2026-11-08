@@ -5,20 +5,21 @@ from __future__ import annotations
 import inspect
 import logging
 import os
+import threading
 import uuid
 from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
 from importlib.metadata import version
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO
 
 import anyio
 from opentelemetry.metrics import NoOpMeterProvider
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan, SpanLimits, TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter, SpanExportResult
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor, SpanExporter, SpanExportResult
 
-from daydream.observability.config import ObservabilityConfig, ObservabilityError
+from daydream.observability.config import LOCAL_TRACE_DESTINATION, ObservabilityConfig, ObservabilityError
 from daydream.observability.privacy import (
     RESOURCE_DIAGNOSTIC,
     PrivacyPolicy,
@@ -28,6 +29,8 @@ from daydream.observability.privacy import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from daydream.extensions.registry import Registry
     from daydream.observability.spans import SpanScope
 
@@ -80,6 +83,15 @@ def associate_run_trajectory(session_id: str) -> None:
         associate_trajectory_identity(session_id)
 
 
+def record_local_trace(path: Path) -> None:
+    """Start the selected ``local`` destination once the run's private directory exists."""
+    session = current_session()
+    if session is not None and session._local_trace_pending:
+        session._local_trace_pending = False
+        exporter = _LocalTraceExporter(path, session.policy)
+        session.provider.add_span_processor(SimpleSpanProcessor(exporter, meter_provider=NoOpMeterProvider()))
+
+
 class _SafeExporter(SpanExporter):
     """Contain extension and SDK failures and sanitize their worker diagnostics."""
 
@@ -118,6 +130,47 @@ class _SafeExporter(SpanExporter):
                 _logger.warning("Trace exporter shutdown failed")
 
 
+class _LocalTraceExporter(SpanExporter):
+    """Append each export as one OTLP/JSON line to a new private file; the first failure stops recording."""
+
+    def __init__(self, path: Path, policy: PrivacyPolicy) -> None:
+        self.path = path
+        self.policy = policy
+        self._lock = threading.RLock()
+        self._file: BinaryIO | None = None
+        self._stopped = False
+
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        with self._lock, diagnostic_scope(self.policy):
+            if self._stopped:
+                return SpanExportResult.FAILURE
+            try:
+                from daydream.observability.otlp_compat import encode_json_line
+
+                line = encode_json_line(spans)
+                if self._file is None:
+                    fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                    self._file = os.fdopen(fd, "wb")
+                self._file.write(line)
+                self._file.flush()
+                return SpanExportResult.SUCCESS
+            except Exception as exc:
+                _logger.warning(
+                    "Local trace evidence write failed (%s); the review continues and the local trace is incomplete",
+                    type(exc).__name__,
+                )
+                self.shutdown()
+                return SpanExportResult.FAILURE
+
+    def shutdown(self) -> None:
+        with self._lock:
+            self._stopped = True
+            file, self._file = self._file, None
+            if file is not None:
+                with suppress(OSError):
+                    file.close()
+
+
 class TraceSession:
     """One owned OTel provider; never installs globals or automatic instrumentors."""
 
@@ -126,6 +179,7 @@ class TraceSession:
         self.run_id = str(uuid.uuid4())
         self.root_scope: SpanScope | None = None
         self.cleanup_timeout_s = cleanup_timeout_s
+        self._local_trace_pending = LOCAL_TRACE_DESTINATION in config.destinations
         self._closed = False
         self._unowned: list[_SafeExporter] = []
         self.provider = TracerProvider(
@@ -177,13 +231,18 @@ class TraceSession:
         """Resolve all names before opening any exporter; retain cleanup ownership."""
         factories = []
         for name in config.destinations:
+            if name == LOCAL_TRACE_DESTINATION:
+                continue
             try:
                 factories.append((name, registry.trace_exporter(name)))
             except Exception:
                 raise ObservabilityError(f"Unknown trace exporter '{name}'") from None
         with diagnostic_scope(self.policy):
             try:
-                from traceloop.sdk import Traceloop  # noqa: F401  (dependency presence probe)
+                if factories:
+                    from traceloop.sdk import Traceloop  # noqa: F401  (dependency presence probe)
+                if self._local_trace_pending:
+                    from daydream.observability import otlp_compat  # noqa: F401  (local encoder probe)
             except ImportError:
                 raise ObservabilityError(
                     "Tracing dependencies are missing or incompatible. From the Daydream clone, run "

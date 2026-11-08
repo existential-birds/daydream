@@ -54,7 +54,7 @@ def test_missing_tracing_dependency() -> None:
                         assert destination == "off"
                     assert current_session() is None
 
-                for destination in ("off", "otlp"):
+                for destination in ("off", "otlp", "local"):
                     anyio.run(run, destination)
                 """),
         ], env={key: value for key, value in os.environ.items() if not key.startswith(("OTEL_", "_OTEL_"))},

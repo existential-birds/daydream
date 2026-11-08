@@ -17,7 +17,12 @@ from daydream.extensions.api import (
     ToolSupervisor,
     UnresolvedExtensionError,
 )
-from daydream.observability.config import ObservabilityError, TraceExporterFactory, validate_destination_name
+from daydream.observability.config import (
+    LOCAL_TRACE_DESTINATION,
+    ObservabilityError,
+    TraceExporterFactory,
+    validate_destination_name,
+)
 
 FlowEntry = str | LoopGroup
 
@@ -156,6 +161,8 @@ class Registry:
             validate_destination_name(name)
         except ObservabilityError as exc:
             raise ExtensionError(str(exc)) from None
+        if name == LOCAL_TRACE_DESTINATION:
+            raise ExtensionError(f"trace exporter '{name}' is reserved for the built-in local trace file")
         if not callable(factory):
             raise ExtensionError(f"trace exporter '{name}' factory must be callable")
         if inspect.iscoroutinefunction(factory) or inspect.iscoroutinefunction(getattr(factory, "__call__", None)):

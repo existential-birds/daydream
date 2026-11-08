@@ -34,6 +34,7 @@ from daydream.deep.artifacts import (
 from daydream.extensions.loader import build_registry
 from daydream.flows.engine import BackendFactory, FlowContext
 from daydream.github_app import GitHubExecutionInput
+from daydream.observability.config import ObservabilityConfig
 from daydream.pr_review import PRInfo
 from daydream.run_artifacts import (
     _RunSnapshotCaptureError,
@@ -53,6 +54,7 @@ from daydream.workspace import AuditWorkspace, WorkContext, _resolve_base
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.dataset import read_records
 from tests.harness.git_helpers import bare_remote, commit as _commit, git as _git, init_repo as _init_repo
+from tests.harness.otlp import attributes, kind_of
 from tests.harness.trajectory import make_recorder
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
@@ -277,8 +279,9 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     """Finalization publishes frozen evidence after the model; lost or redirected sources are never touched.
 
     ``none`` is the only runner proof that the public run, archive, external trajectory, and
-    dump are byte-equal to the frozen trajectory; the other rows prove a replacement checkout
-    or foreign Git metadata at the original path is left byte-identical.
+    dump are byte-equal to the frozen trajectory, and that the selected local trace stays only
+    in the private run directory; the other rows prove a replacement checkout or foreign Git
+    metadata at the original path is left byte-identical.
     """
     from daydream.eval.analyzer import analyze_session
     from tests.test_artifact_visibility import _Entry, _manifest, _walk_entry
@@ -315,6 +318,7 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
         dataset_capture=source_loss or git_redirect,
         dataset_store_path=store_path,
         force_worktree=force_worktree,
+        observability=ObservabilityConfig(destinations=("local",)),
     )
     result: list[int] = []
     frozen_trajectory: bytes | None = None
@@ -467,6 +471,17 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     assert result == [0] and "Data Collection" not in captured.out
     assert (repo / ".review-output.md").read_text() == "Completed review\n"
     public_run, archived_run = _assert_one_published_run(repo, archive_dir)
+    local_trace, = (tmp_path / "private" / "runtime").glob(f"*/runs/{public_run.name}/otel-trace.jsonl")
+    assert list(tmp_path.rglob("otel-trace.jsonl")) == [local_trace]
+    assert local_trace.stat().st_mode & 0o777 == 0o600
+    spans = [span for line in local_trace.read_text().splitlines() for resource in json.loads(line)["resourceSpans"]
+             for scope in resource["scopeSpans"] for span in scope["spans"]]
+    assert len({span["traceId"] for span in spans}) == 1
+    assert kind_of(spans, "run") == [spans[-1]] and "parentSpanId" not in spans[-1]
+    assert spans[-1]["status"] == {"code": 1}
+    (agent,), (attempt,) = kind_of(spans, "agent"), kind_of(spans, "attempt")
+    assert "PROBE" in attributes(agent)["traceloop.entity.input"]
+    assert json.loads(attributes(attempt)["traceloop.entity.output"]) == "controlled output"
     archived_bytes = (archived_run / "trajectory.json").read_bytes()
     assert archived_bytes == frozen_trajectory
     evaluation = json.loads((archived_run / "evaluation.json").read_text())

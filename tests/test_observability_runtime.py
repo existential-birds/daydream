@@ -37,7 +37,7 @@ from daydream.observability.config import (
     resolve_observability_config,
 )
 from daydream.observability.privacy import PrivacyPolicy, diagnostic_scope
-from daydream.observability.runtime import current_run_trace_id, current_session, trace_run
+from daydream.observability.runtime import current_run_trace_id, current_session, record_local_trace, trace_run
 from daydream.observability.spans import agent_scope, attempt_scope, stack_scope, step_scope
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
@@ -323,9 +323,9 @@ async def test_otel_service_name_overrides_service_name_resource(monkeypatch: py
 
 @pytest.mark.anyio
 async def test_run_trace_identity_and_delivery_failures_never_block_the_run(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path,
 ) -> None:
-    """Capture identifies only the owned root; failed export and flush only warn."""
+    """Capture identifies only the owned root; failed export, flush and local writes only warn."""
 
     class BrokenContext(NonRecordingSpan):
         def get_span_context(self) -> SpanContext:
@@ -338,8 +338,15 @@ async def test_run_trace_identity_and_delivery_failures_never_block_the_run(
     registry = Registry()
     registry.register_trace_exporter("rejecting", lambda _: RejectingExporter())
     ambient = NonRecordingSpan(SpanContext(123, 456, False, TraceFlags(TraceFlags.SAMPLED)))
+    blocked = tmp_path / "regular-file" / "otel-trace.jsonl"
+    blocked.parent.write_text("")
     with trace.use_span(ambient):
-        async with trace_run(ObservabilityConfig(destinations=("rejecting",)), registry, flow="review") as run:
+        async with trace_run(ObservabilityConfig(destinations=("rejecting", "local")), registry, flow="review") as run:
+            record_local_trace(blocked)
+            with step_scope("review"):
+                pass
+            blocked.parent.unlink()
+            blocked.parent.mkdir()  # A retry could now create a file that falsely ends with the root span.
             owned = current_run_trace_id()
             assert owned is not None and int(owned, 16) not in (0, 123)
             session = current_session()
@@ -355,6 +362,8 @@ async def test_run_trace_identity_and_delivery_failures_never_block_the_run(
     assert current_run_trace_id() is None
     assert "Trace export failed; review execution continues" in caplog.text
     assert "Trace processor flush failed" in caplog.text
+    assert caplog.text.count("Local trace evidence write failed (NotADirectoryError); the review continues") == 1
+    assert str(tmp_path) not in caplog.text and not blocked.exists()
 
 
 # --- P18 Task 3: no global providers, ambient metrics/logs, or instrumentation -

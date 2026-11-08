@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from opentelemetry.sdk.trace.export import SpanExporter
 
 _DESTINATION_NAME = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z")
+LOCAL_TRACE_DESTINATION = "local"
 
 
 class ObservabilityError(ValueError):

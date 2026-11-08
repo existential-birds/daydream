@@ -5,6 +5,9 @@ Tracing is operator-controlled and off by default. Repository config cannot
 activate it or choose credentials/endpoints. CLI `--trace-to` replaces
 `DAYDREAM_TRACE_TO`; `--no-tracing` overrides both. Full content is the default;
 `--trace-content metadata` omits conversation/tool payloads and exception text.
+Selecting the built-in `local` destination records a [private file](#ownership-and-evidence)
+with no network or credentials, alone or with remote destinations
+(`--trace-to local --trace-to otlp` or `DAYDREAM_TRACE_TO=local,otlp`).
 
 ```bash
 export LANGSMITH_PROJECT=daydream
@@ -28,6 +31,14 @@ outcomes. Flush success and HTTP acknowledgement do not establish vendor ingesti
 verify native trees using [readback tooling](../scripts/verify_observability_readback.py).
 The [replay manifest](../tests/fixtures/observability_contract/replay-manifest.json)
 pins sanitized replay inputs; replay is distinct from real-provider acceptance.
+
+`local` writes `otel-trace.jsonl` (mode 0600) in the run's private directory,
+`~/.daydream/runtime/<workspace>/runs/<session_id>/`, once the artifact session opens.
+Each line is one OTLP/JSON `ExportTraceServiceRequest` written as its span ends; the run
+span ends last, so a complete file ends with the root span. The first open, encoding or
+write failure logs one warning naming only the exception type and stops local recording,
+leaving the file without its root span while the review and remote export continue. The
+file is never frozen, published, archived or captured.
 
 Only the resolved billing owner emits usage/cost; parent aggregation must not
 charge it again. Cache tokens are within input; reasoning tokens within output.

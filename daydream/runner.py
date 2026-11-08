@@ -70,7 +70,7 @@ from daydream.observability.config import (
     ObservabilityError,
     resolve_observability_config,
 )
-from daydream.observability.runtime import trace_run
+from daydream.observability.runtime import record_local_trace, trace_run
 from daydream.observability.spans import step_scope
 from daydream.phases.inputs import (
     _detect_default_branch,
@@ -553,6 +553,7 @@ async def _run_workspace(
                                  pr_repo=f"{work.review_pr.owner}/{work.review_pr.repo}")
             session_id = str(uuid.uuid4())
             async with open_artifact_session(work, session_id=session_id, owner=private_owner) as artifacts:
+                record_local_trace(artifacts.layout.otel_trace)
                 def _route(path: str | Path | None, label: OutputLabel) -> RoutedDestination | None:
                     absolute = _absolute_output_path(path)
                     return None if absolute is None else artifacts.register_destination(absolute, label=label)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import textwrap
 from collections.abc import AsyncGenerator, Callable
@@ -75,7 +76,9 @@ def _config(
     make_config: Callable[..., RunConfig], repo: Path, endpoint: str, monkeypatch: pytest.MonkeyPatch
 ) -> RunConfig:
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", endpoint + "/v1/traces")
-    return make_config(repo, flow_name="trace-failures", observability=ObservabilityConfig(destinations=("otlp",)))
+    return make_config(
+        repo, flow_name="trace-failures", observability=ObservabilityConfig(destinations=("otlp", "local"))
+    )
 
 
 class _NoCancelBackend:
@@ -106,7 +109,7 @@ class _ActiveToolBackend:
 async def test_runner_cleanup_outage_preserves_captured_root_and_review_output(
     ext_dir: ExtDir, feature_branch_repo: Path,
     make_config: Callable[..., RunConfig], install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, artifact_runtime_root: Path,
 ) -> None:
     _flow(ext_dir)
     install_backend(ScriptedBackend(events=[TextEvent("review completed during outage"), ResultEvent(None, None)]))
@@ -125,6 +128,7 @@ async def test_runner_cleanup_outage_preserves_captured_root_and_review_output(
         observability=ObservabilityConfig(destinations=("memory",)))
     with anyio.fail_after(15):
         assert await runner.run(config) == 0
+    assert [run.joinpath("otel-trace.jsonl").exists() for run in artifact_runtime_root.glob("*/runs/*")] == [False]
     assert "Trace exporter shutdown failed" in caplog.text
     assert json.loads((feature_branch_repo / _RESULT_FILE).read_text()) == {
         "output": "review completed during outage", "aborted": None,
@@ -256,12 +260,26 @@ class _ExactAllocationBackend(_NoCancelBackend):
 
 async def test_runner_exact_allocation_bills_children_and_chain_matches_wire(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch, artifact_runtime_root: Path,
 ) -> None:
     backend = _ExactAllocationBackend()
     collector = await _run_lifecycle_flow(
         ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, backend
     )
+    local_trace, = artifact_runtime_root.glob("*/runs/*/otel-trace.jsonl")
+    local = [span for line in local_trace.read_text().splitlines() for resource in json.loads(line)["resourceSpans"]
+             for scope in resource["scopeSpans"] for span in scope["spans"]]
+
+    def hexed(span: dict[str, Any], key: str) -> str:
+        return base64.b64decode(span.get(key, "")).hex()
+
+    assert len(local) == len(collector.spans) and {
+        span["spanId"]: (span["traceId"], span.get("parentSpanId", ""), span["name"], attributes(span))
+        for span in local
+    } == {
+        hexed(span, "spanId"): (hexed(span, "traceId"), hexed(span, "parentSpanId"), span["name"], attributes(span))
+        for span in collector.spans
+    }
     lifecycle = _read_subtrajectory(feature_branch_repo)
     assert lifecycle["billing_owner"] == "generation_children"
     assert lifecycle["diagnostics"] == []
