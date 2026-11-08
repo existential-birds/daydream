@@ -179,9 +179,7 @@ class SpanScope:
             if recorder is not None:
                 common["daydream.session.id"] = recorder.session_id
                 common["traceloop.association.properties.session_id"] = recorder.session_id
-                common["daydream.trajectory.id"] = (
-                    f"{recorder.session_id}:{recorder.descriptor}" if recorder.descriptor else recorder.session_id
-                )
+                common["daydream.trajectory.id"] = recorder.trajectory_id
                 if recorder.descriptor:
                     common["daydream.trajectory.descriptor"] = recorder.descriptor
             self._token = _scope_attributes.set(
@@ -343,6 +341,18 @@ def stack_scope(stack: str) -> Iterator[None]:
         _scope_attributes.reset(token)
 
 
+def _record_active_event(name: str, attributes: dict[str, Any]) -> None:
+    session = current_session()
+    if session is None:
+        return
+    try:
+        trace.get_current_span().add_event(
+            name, {key: session.policy.value(value) for key, value in attributes.items()},
+        )
+    except Exception:
+        _logger.warning("Trace event %s could not be recorded", name)
+
+
 def record_budget_stop(stop: BudgetStop) -> None:
     """Add a budget stop that no agent span carries as an event on the active span.
 
@@ -350,16 +360,12 @@ def record_budget_stop(stop: BudgetStop) -> None:
     attributes on its agent span; a finalization turn's stop and a dispatch the host
     refuses before any agent runs are ``daydream.budget.stop`` events with those keys.
     """
-    session = current_session()
-    if session is None:
-        return
-    try:
-        trace.get_current_span().add_event(
-            "daydream.budget.stop",
-            {key: session.policy.value(value) for key, value in stop.attributes().items()},
-        )
-    except Exception:
-        _logger.warning("Trace budget stop could not be recorded")
+    _record_active_event("daydream.budget.stop", stop.attributes())
+
+
+def record_retry_stop(stop: dict[str, Any]) -> None:
+    """Add the retry-ladder stop that ends an invocation as an event on its agent span."""
+    _record_active_event("daydream.retry.stop", {f"daydream.retry.{key}": value for key, value in stop.items()})
 
 
 def agent_scope(phase: str, *, backend: str, model: str | None = None) -> SpanScope:

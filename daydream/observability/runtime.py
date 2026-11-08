@@ -68,7 +68,7 @@ def current_run_trace_id() -> str | None:
     return None
 
 
-def associate_run_trajectory(session_id: str) -> None:
+def associate_run_trajectory(session_id: str, *, pr_repo: str | None = None, pr_number: int | None = None) -> None:
     """Link the early run span once its root trajectory identity is available."""
     session = current_session()
     if session is not None and session.root_scope is not None:
@@ -76,6 +76,8 @@ def associate_run_trajectory(session_id: str) -> None:
             "daydream.session.id": session_id,
             "daydream.trajectory.id": session_id,
             "traceloop.association.properties.session_id": session_id,
+            "daydream.pr_repo": pr_repo,
+            "daydream.pr_number": pr_number,
         })
         # Seed descendants even without a recorder; root exit resets this context.
         from daydream.observability.spans import associate_trajectory_identity
