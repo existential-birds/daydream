@@ -251,12 +251,16 @@ def test_interruption_after_remote_commit_recovers_from_content_identity(tmp_pat
     assert restarted.status().queued == 1 and restarted.status().published == 0
     assert restarted.upload().published == 1 and len(hub.commits) == 1
     published = store.root / "runs" / record_name("run-1")
-    published.write_bytes(published.read_bytes()[:-1])
-    store.commit_run(run_record("after"))
-    after = restarted.upload()
-    assert (after.published, after.error, len(hub.commits)) == (1, None, 2)
-    assert after.skipped == (
-        api.SkippedRecord("runs", hashlib.sha256(b"run-1").hexdigest(), "malformed_or_interrupted_record"),)
+    original = published.read_bytes()
+    for index, (damaged, code) in enumerate((
+        (original[:-1], "malformed_or_interrupted_record"),
+        (original.replace(b"daydream.run.v1", b"daydream.run.v9"), "invalid_or_unknown_record_schema"),
+    )):
+        published.write_bytes(damaged)
+        store.commit_run(run_record(f"after-{index}"))
+        after = restarted.upload()
+        assert (after.published, after.error, len(hub.commits)) == (index + 1, None, index + 2)
+        assert after.skipped == (api.SkippedRecord("runs", hashlib.sha256(b"run-1").hexdigest(), code),)
 
 
 def test_failed_queue_write_keeps_original_and_retries_privately(

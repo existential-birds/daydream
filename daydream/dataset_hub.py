@@ -362,11 +362,17 @@ class DatasetUploader:
                         for kind in _SCHEMAS:
                             known = _members(remote, kind)
                             for name, digest in index[kind].items():
-                                if name in known and digest is not None:
-                                    if known[name] != digest:
-                                        raise StoreError("immutable_identity_conflict")
-                                elif (kind, name) not in skipped:
+                                if (kind, name) in skipped:
+                                    continue
+                                if name not in known:
                                     pending.append((kind, name))
+                                elif known[name] != digest:
+                                    try:
+                                        self.store.read_record(kind, name)
+                                    except StoreError as refusal:
+                                        skipped[kind, name] = refusal.code
+                                    else:
+                                        raise StoreError("immutable_identity_conflict")
                         shards, files, more = self._seal(pending, targets, skipped)
                         merged = json.loads(canonical_json(remote))
                         for kind in _SCHEMAS:

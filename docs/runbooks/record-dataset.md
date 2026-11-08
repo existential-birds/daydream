@@ -87,11 +87,13 @@ each run to one commit.
 
 A pending record that fails validation or the publication scanner is left out of the
 commit, and so is an observation whose target run is neither published nor being
-published; the other records still publish. The output lists each skipped record
-under `skipped` with its kind, identity SHA-256 and error code, and the command exits
-1; `dataset status` then reports `records_skipped` and exits 1 until a publish skips
-nothing. A skipped record stays unchanged in the local store, counts as queued, and
-is checked again by every publish. Records are immutable, so resolve one by removing
-its file, `RECORD_STORE/<kind>/<identity SHA-256>.jsonl`, together with any
-observation skipped because it targets that run, after handling the cause, such as an
-exposed credential.
+published, and a local copy of a published record that fails validation; the other
+records still publish. A valid local copy whose content differs from the published
+record is an identity conflict and stops the publish. The output lists each skipped
+record under `skipped` with its kind, identity SHA-256 and error code, and the
+command exits 1; `dataset status` then reports `records_skipped` and exits 1 until a
+publish skips nothing. A skipped record stays unchanged in the local store, counts as
+queued, and is checked again by every publish. Records are immutable, so resolve one
+by removing its file, `RECORD_STORE/<kind>/<identity SHA-256>.jsonl`, together with
+any observation skipped because it targets that run, after handling the cause, such
+as an exposed credential.
