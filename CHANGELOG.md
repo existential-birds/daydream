@@ -24,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--trace-content`; the file is never published, archived or captured, and a write failure
   warns once and leaves it without its root span. Extensions can no longer register a trace
   exporter named `local`; see [trace exporters](docs/extensions.md#trace-exporters)
-  (part of [#1719](https://github.com/existential-birds/daydream/issues/1719)).
+  (part of [#1719](https://github.com/existential-birds/daydream/issues/1719),
+  [#1791](https://github.com/existential-birds/daydream/pull/1791)).
 
 ### Changed
 
