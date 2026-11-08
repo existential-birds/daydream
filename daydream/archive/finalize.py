@@ -31,7 +31,7 @@ from daydream.trajectory import (
     DaydreamRunFlow,
     TrajectoryDocumentIntegrityError,
     run_directory,
-    snapshot_trajectories,
+    summarize_run,
 )
 
 if TYPE_CHECKING:
@@ -200,7 +200,7 @@ def finalize_archive_run(
             if work is not None:
                 git_ctx = replace(git_ctx, base_branch=work.base_branch,
                                   base_sha=work.base_sha if git_ctx.base_sha is None else git_ctx.base_sha)
-        frozen = snapshot_trajectories(write_snapshot)
+        summary = summarize_run(write_snapshot)
         evaluation: dict[str, Any] | None = None
         if config.run_eval and recorder_provenance.run_flow is not DaydreamRunFlow.DIAGRAM:
             if progress is not None:
@@ -216,7 +216,7 @@ def finalize_archive_run(
                 ) as observed:
                     evaluation = analyze_session(
                         target_dir / ".daydream",
-                        write_snapshot=write_snapshot,
+                        summary=summary,
                         artifact_provenance=artifact_provenance,
                         code_workspace=code_workspace or (
                             work.repo if work is not None else artifact_provenance.public_source
@@ -234,10 +234,10 @@ def finalize_archive_run(
                 raise ArchiveFinalizationError("evaluation finalization failed") from exc
             (assembly_dir / "evaluation.json").write_text(json.dumps(evaluation, indent=2), encoding="utf-8")
             _validate_frozen_artifacts(artifacts)
-        frozen_root = frozen.get("main")
-        frozen_extra = frozen_root.get("extra") if isinstance(frozen_root, dict) else None
+        frozen_extra = summary.root.metadata.get("extra")
         manifest = build_manifest_from_snapshot(
             run=run,
+            summary=summary,
             git_ctx=git_ctx,
             archive_path=run_dir,
             evaluation=evaluation,

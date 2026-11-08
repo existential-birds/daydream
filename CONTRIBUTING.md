@@ -74,8 +74,8 @@ The focused targets, all run from the repo root:
 
 | Command | What it does |
 |---|---|
-| `make lint` | Ruff over `daydream tests scripts/ci_*.py` (120 cols, `E F I W`, py314; `daydream/atif/**` is lint-exempt as vendored code) |
-| `make typecheck` | mypy over `daydream tests scripts/ci_*.py` |
+| `make lint` | Ruff over `daydream tests scripts/ci_*.py scripts/measure_finalization_memory.py` (120 cols, `E F I W`, py314; `daydream/atif/**` is lint-exempt as vendored code) |
+| `make typecheck` | mypy over `daydream tests scripts/ci_*.py scripts/measure_finalization_memory.py` |
 | `make test` | `pytest -n logical` (one worker per logical CPU) with coverage; the branch-coverage floor (`fail_under` in `pyproject.toml`) is enforced here, not in global addopts — a bare or targeted `pytest` run stays plain |
 | `make deadcode` | vulture dead-code scan over the package and its tests |
 | `make coverage-report` | checks that `coverage.xml` exists after `make test`; the measurement + ratchet procedure is in [docs/coverage.md](docs/coverage.md) |
@@ -128,7 +128,7 @@ select the operator's dataset or credentials. Production defaults are unchanged.
   `daydream/atif/**` is lint-exempt as vendored Harbor code (see
   [daydream/atif/NOTICE](daydream/atif/NOTICE)); make only mechanical edits
   there.
-- **mypy** — configured in `pyproject.toml`, run over `daydream tests scripts/ci_*.py`.
+- **mypy** — configured in `pyproject.toml`, run over the `make typecheck` paths.
 - **Dependencies** — declared in `pyproject.toml`; keep `uv.lock` in sync (`uv
   lock`) or `make check` fails at its first step (`lockcheck`).
 - **Commit messages** — Conventional Commits, e.g. `feat(backends): ...`.

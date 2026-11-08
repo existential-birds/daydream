@@ -19,15 +19,14 @@ from daydream.eval.quality import _QUALITY_CALIBRATION, analyze_quality as analy
 from daydream.hunk_index import load_hunk_index, parse_hunks, range_distance
 from daydream.observability.runtime import current_session
 from daydream.observability.spans import SpanScope
-from daydream.timeutil import parse_iso_timestamp
 from daydream.trajectory import (
     RUN_DOCUMENT_NAME,
     RUNS_DIRNAME,
-    RunWriteSnapshot,
-    compute_timing_summary,
+    DocumentSummary,
+    RunSummary,
+    StepFacts,
     run_document_path,
     siblings_directory,
-    snapshot_trajectories,
 )
 
 # Trajectory loading
@@ -86,12 +85,8 @@ _WRITE_TOOL_ALIASES = frozenset(
 
 # Analysis functions
 
-def _all_trajectories(trajectories: dict[str, Any]) -> list[dict[str, Any]]:
-    all_trajs: list[dict[str, Any]] = []
-    if trajectories["main"]:
-        all_trajs.append(trajectories["main"])
-    all_trajs.extend(trajectories["forked"])
-    return all_trajs
+def _root_first(summary: RunSummary) -> tuple[DocumentSummary, ...]:
+    return summary.root, *summary.forked
 
 
 _BILLING_FIELDS = {
@@ -102,15 +97,16 @@ _BILLING_FIELDS = {
 }
 
 
-def analyze_costs(trajectories: dict[str, Any]) -> dict[str, Any]:
+def analyze_costs(summary: RunSummary) -> dict[str, Any]:
     """Report invocation-local agent rows and authoritative whole-run totals.
 
     Marked roots include fork billing already; legacy documents aggregate rows.
     Cache tokens are a subset of prompt tokens and are never added again.
     """
     agents: list[dict[str, Any]] = []
-    forks_by_source = {fork["_source_file"]: fork for fork in trajectories.get("forked") or []}
-    for traj in _all_trajectories(trajectories):
+    forks_by_source = {fork.source_file: fork.metadata for fork in summary.forked}
+    for document in _root_first(summary):
+        traj = document.metadata
         metrics = traj.get("final_metrics") or {}
         child_sources = {
             Path(ref).name
@@ -124,20 +120,19 @@ def analyze_costs(trajectories: dict[str, Any]) -> dict[str, Any]:
             for source in child_sources if source in forks_by_source
         ]
         agents.append({
-            "agent": _agent_label(traj["_source_file"]),
+            "agent": _agent_label(document.source_file),
             **{
                 name: (metrics.get(key) or default) - sum(child.get(key) or default for child in child_metrics)
                 for name, (key, default) in _BILLING_FIELDS.items()
             },
-            "steps": metrics.get("total_steps") or len(traj.get("steps", [])),
+            "steps": metrics.get("total_steps") or document.steps.require().count,
             "model": traj.get("agent", {}).get("model_name", "unknown"),
         })
 
-    root = trajectories.get("main")
-    root_metrics = (root or {}).get("final_metrics") or {}
+    root_metrics = summary.root.metadata.get("final_metrics") or {}
     root_includes_forks = (root_metrics.get("extra") or {}).get("daydream_metric_scope") == "whole_run_including_forks"
     totals = {
-        name: root_metrics.get(key) or default if root and root_includes_forks else sum(row[name] for row in agents)
+        name: root_metrics.get(key) or default if root_includes_forks else sum(row[name] for row in agents)
         for name, (key, default) in _BILLING_FIELDS.items()
     }
     total_input = totals["prompt_tokens"]
@@ -152,19 +147,14 @@ def analyze_costs(trajectories: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def analyze_tools(trajectories: dict[str, Any]) -> dict[str, Any]:
+def analyze_tools(summary: RunSummary) -> dict[str, Any]:
     """Tool call counts and per-agent breakdown."""
     total_counts: Counter[str] = Counter()
     by_agent: dict[str, dict[str, Any]] = {}
 
-    for traj in _all_trajectories(trajectories):
-        label = _agent_label(traj["_source_file"])
-        counts = Counter(
-            call["function_name"]
-            for step in traj.get("steps", [])
-            for call in step.get("tool_calls") or []
-        )
-        by_agent[label] = dict(counts)
+    for document in _root_first(summary):
+        counts = Counter(document.steps.require().tool_names)
+        by_agent[_agent_label(document.source_file)] = dict(counts)
         total_counts.update(counts)
 
     total = sum(total_counts.values())
@@ -589,24 +579,18 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
     }
 
 
-def analyze_timing(trajectories: dict[str, Any], write_snapshot: RunWriteSnapshot) -> dict[str, Any]:
+def analyze_timing(summary: RunSummary) -> dict[str, Any]:
     """Project the shared lifecycle-first timing reducer into evaluation JSON."""
     agent_timings: list[dict[str, Any]] = []
 
-    for traj in _all_trajectories(trajectories):
-        label = _agent_label(traj["_source_file"])
-        ts_list = [
-            parse_iso_timestamp(s["timestamp"])
-            for s in traj.get("steps", [])
-            if s.get("timestamp")
-        ]
-        if len(ts_list) >= 2:
-            duration = (ts_list[-1] - ts_list[0]).total_seconds()
-            agent_timings.append({"agent": label, "duration_seconds": round(duration, 1)})
+    for document in _root_first(summary):
+        duration = document.steps.require().duration_seconds
+        if duration is not None:
+            agent_timings.append({"agent": _agent_label(document.source_file), "duration_seconds": round(duration, 1)})
 
-    summary = compute_timing_summary(write_snapshot)
+    timing = summary.timing
     return {
-        **(summary.to_dict() if summary is not None else {"total_wall_clock_seconds": None}),
+        **(timing.to_dict() if timing is not None else {"total_wall_clock_seconds": None}),
         "by_agent": sorted(agent_timings, key=lambda item: item["duration_seconds"], reverse=True),
     }
 
@@ -624,123 +608,39 @@ _DIAGNOSTIC_TRAINING_FLAGS = {
 }
 
 
-def _tool_outcome_flags(steps: list[dict[str, Any]]) -> list[str]:
-    """Classify tool outcomes and diagnostics with step-local correlation."""
-    found: set[str] = set()
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
-        call_counts: Counter[str] = Counter()
-        malformed_calls = 0
-        raw_calls = step.get("tool_calls")
-        if isinstance(raw_calls, list):
-            for call in raw_calls:
-                call_id = call.get("tool_call_id") if isinstance(call, dict) else None
-                if isinstance(call_id, str) and call_id:
-                    call_counts[call_id] += 1
-                else:
-                    malformed_calls += 1
-
-        paired_counts: Counter[str] = Counter()
-        observation = step.get("observation")
-        raw_results = observation.get("results") if isinstance(observation, dict) else None
-        if isinstance(raw_results, list):
-            for result in raw_results:
-                if not isinstance(result, dict):
-                    continue
-                source_call_id = result.get("source_call_id")
-                raw_extra = result.get("extra")
-                extra = raw_extra if isinstance(raw_extra, dict) else {}
-                interrupted = (
-                    extra.get("status") == "interrupted"
-                    or extra.get("cancelled") is True
-                )
-                if isinstance(source_call_id, str) and source_call_id:
-                    if source_call_id not in call_counts:
-                        found.add("unmatched_tool_result")
-                        continue
-                    paired_counts[source_call_id] += 1
-                    if interrupted:
-                        found.add("incomplete_tool_call")
-                    elif extra.get("is_error") is True:
-                        found.add("failed_tool_result")
-                elif interrupted and (call_counts or malformed_calls):
-                    # Recorder-generated interruption markers deliberately
-                    # carry a null source id. The unpaired call is the primary
-                    # evidence; this branch preserves the marker semantics
-                    # without misclassifying it as an orphan result.
-                    found.add("incomplete_tool_call")
-
-        if malformed_calls or any(
-            paired_counts[call_id] < count for call_id, count in call_counts.items()
-        ):
-            found.add("incomplete_tool_call")
-
-        step_extra = step.get("extra")
-        if not isinstance(step_extra, dict):
-            continue
-        unmatched = step_extra.get("unmatched_tool_results")
-        if isinstance(unmatched, list) and unmatched:
-            found.add("unmatched_tool_result")
-        diagnostics = step_extra.get("backend_diagnostics")
-        if isinstance(diagnostics, list):
-            for diagnostic in diagnostics:
-                code = diagnostic.get("code") if isinstance(diagnostic, dict) else None
-                flag = _DIAGNOSTIC_TRAINING_FLAGS.get(code) if isinstance(code, str) else None
-                if flag is not None:
-                    found.add(flag)
-
+def _tool_outcome_flags(facts: StepFacts) -> list[str]:
+    """Classify step-local tool pairing and backend diagnostics as training outcome flags."""
+    found = {flag for flag, present in (
+        ("failed_tool_result", facts.error_result),
+        ("incomplete_tool_call", facts.interrupted_result or facts.unpaired_call),
+        ("unmatched_tool_result", facts.orphan_result),
+    ) if present}
+    found.update(flag for code, flag in _DIAGNOSTIC_TRAINING_FLAGS.items() if code in facts.diagnostic_codes)
     return [flag for flag in _TOOL_OUTCOME_FLAG_ORDER if flag in found]
 
 
-def analyze_training_signals(
-    trajectories: dict[str, Any],
-) -> dict[str, Any]:
+def analyze_training_signals(summary: RunSummary) -> dict[str, Any]:
     """Assess forked training trajectories for content and evidence quality."""
     signals: list[dict[str, Any]] = []
 
-    for traj in trajectories["forked"]:
-        label = _agent_label(traj["_source_file"])
-        steps = traj.get("steps", [])
-
-        has_reasoning = any(s.get("reasoning_content") for s in steps)
-        total_tool_calls = sum(len(s.get("tool_calls") or []) for s in steps)
-
+    for document in summary.forked:
+        facts = document.steps.require()
         # Reasoning token fraction (approximation from char length)
-        reasoning_chars = sum(len(s.get("reasoning_content") or "") for s in steps)
-        message_chars = sum(
-            len(s["message"]) for s in steps
-            if s.get("source") == "agent" and isinstance(s.get("message"), str)
-        )
-        total_output_chars = reasoning_chars + message_chars
+        total_output_chars = facts.reasoning_chars + facts.agent_message_chars
         reasoning_fraction = (
-            round(reasoning_chars / total_output_chars, 4)
+            round(facts.reasoning_chars / total_output_chars, 4)
             if total_output_chars > 0
             else 0
         )
-
-        noise_flags: list[str] = []
-        for s in steps:
-            obs = s.get("observation")
-            if obs:
-                for r in obs.get("results", []):
-                    content = r.get("content", "")
-                    if isinstance(content, str) and content.strip() == "":
-                        noise_flags.append("empty_tool_result")
-                        break
-
-        noise_flags.extend(_tool_outcome_flags(steps))
-
-        # Keep the documented category order while ensuring repeated evidence
-        # never repeats a training-review flag.
-        noise_flags = list(dict.fromkeys(noise_flags))
+        noise_flags = ["empty_tool_result"] if facts.blank_result else []
+        noise_flags.extend(_tool_outcome_flags(facts))
 
         signals.append({
-            "trajectory": label,
-            "source_file": traj["_source_file"],
-            "steps": len(steps),
-            "has_reasoning": has_reasoning,
-            "tool_calls": total_tool_calls,
+            "trajectory": _agent_label(document.source_file),
+            "source_file": document.source_file,
+            "steps": facts.count,
+            "has_reasoning": facts.has_reasoning,
+            "tool_calls": facts.tool_calls,
             "reasoning_fraction": reasoning_fraction,
             "noise_flags": noise_flags,
             "training_quality": "clean" if not noise_flags else "review",
@@ -777,13 +677,13 @@ def analyze_routing(daydream_dir: str | Path) -> dict[str, Any]:
 def analyze_session(
     daydream_dir: str | Path,
     *,
-    write_snapshot: RunWriteSnapshot,
+    summary: RunSummary,
     artifact_provenance: ArtifactEvidenceProvenance | None = None,
     code_workspace: Path | CodeWorkspace | None = None,
 ) -> dict[str, Any]:
     """Combine trajectory, findings, timing, routing, training, and quality analysis.
 
-    The frozen write snapshot supplies checked trajectory documents and lifecycle timing. Artifact
+    The frozen run summary supplies checked trajectory metadata, step facts and lifecycle timing. Artifact
     provenance supplies the public display path; only quality reads the live code_workspace. Unavailable code
     or unsafe tree-sitter versions preserve the remaining frozen-only evaluation.
     """
@@ -791,12 +691,7 @@ def analyze_session(
     display_daydream_dir = (
         daydream_dir if artifact_provenance is None else artifact_provenance.public_daydream_dir
     )
-    trajectories = snapshot_trajectories(write_snapshot)
-
-    if not trajectories["main"] and not trajectories["forked"]:
-        return {"error": f"No trajectory files found in {daydream_dir}"}
-
-    main = trajectories["main"] or trajectories["forked"][0]
+    main = summary.root.metadata
     session_id = main.get("session_id", "unknown")
     agent_info = main.get("agent", {})
 
@@ -805,14 +700,14 @@ def analyze_session(
     pr_number = traj_extra.get("pr_number")
     pr_repo = traj_extra.get("pr_repo")
 
-    costs = analyze_costs(trajectories)
-    tools = analyze_tools(trajectories)
+    costs = analyze_costs(summary)
+    tools = analyze_tools(summary)
     findings_data = analyze_findings(daydream_dir)
     location = analyze_location(daydream_dir)
     routing = analyze_routing(daydream_dir)
     shipped_duplication = analyze_shipped_duplication(daydream_dir)
-    timing = analyze_timing(trajectories, write_snapshot)
-    training = analyze_training_signals(trajectories)
+    timing = analyze_timing(summary)
+    training = analyze_training_signals(summary)
     try:
         # Omit optional labels to retain the enclosing host scope's explicit attribution.
         with SpanScope(
@@ -845,7 +740,7 @@ def analyze_session(
         "session_id": session_id,
         "agent": agent_info,
         "daydream_dir": str(display_daydream_dir),
-        "trajectory_count": len(_all_trajectories(trajectories)),
+        "trajectory_count": len(summary.documents),
         "cost": costs,
         "timing": timing,
         "tools": tools,

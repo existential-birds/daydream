@@ -30,6 +30,7 @@ from daydream.trajectory import (
     DaydreamPhase,
     RunWriteSnapshot,
     TrajectoryDocumentSnapshot,
+    summarize_run,
 )
 from tests.harness.git_helpers import git
 from tests.harness.trajectory import make_recorder
@@ -62,7 +63,7 @@ def test_evaluation_uses_frozen_bytes_status_and_cutoff(tmp_path: Path) -> None:
     root["extra"]["run_ended_at"] = "2026-01-01T00:01:00Z"
     live_path.write_text(json.dumps(root))
 
-    result = analyze_session(tmp_path / ".daydream", write_snapshot=snapshot)
+    result = analyze_session(tmp_path / ".daydream", summary=summarize_run(snapshot))
 
     assert result["cost"]["total_cost_usd"] == 0.5
     assert result["timing"]["total_wall_clock_seconds"] is None
@@ -90,6 +91,10 @@ def test_training_signals_preserve_independent_fork_outcomes_in_archive(tmp_path
         "legacy-error-string": [step | {"observation": {"results": [completed | {"extra": {"is_error": "true"}}]}}],
         "legacy-cancel-int": [step | {"observation": {"results": [completed | {"extra": {"cancelled": 1}}]}}],
         "legacy-list": [step | {"observation": {"results": [completed | {"extra": []}]}}],
+        "content": [step | {"timestamp": "2026-01-01T00:00:01Z", "source": "agent", "message": "four",
+                            "reasoning_content": "abc", "observation": {"results": [completed | {"content": " "}]}},
+                    {"step_id": 2, "timestamp": "2026-01-01T00:00:02Z", "source": "agent", "message": "x"},
+                    {"step_id": 3, "timestamp": "2026-01-01T00:00:04Z", "source": "user", "message": "unscored"}],
     }
     target = tmp_path / "workspace"
     target.mkdir()
@@ -100,7 +105,8 @@ def test_training_signals_preserve_independent_fork_outcomes_in_archive(tmp_path
         for name, steps in population.items()
     ))
     _finalize_strict_archive(recorder, snapshot, RunConfig(run_eval=True, archive=True), target)
-    result = json.loads((archive_dir / "runs/training-outcomes/evaluation.json").read_text())["training_signals"]
+    evaluation = json.loads((archive_dir / "runs/training-outcomes/evaluation.json").read_text())
+    result = evaluation["training_signals"]
     assert {row["trajectory"]: (row["noise_flags"], row["training_quality"]) for row in result["trajectories"]} == {
         "failed": (["failed_tool_result"], "review"),
         "interrupted": (["incomplete_tool_call"], "review"),
@@ -109,21 +115,24 @@ def test_training_signals_preserve_independent_fork_outcomes_in_archive(tmp_path
         "step-local": (["incomplete_tool_call", "unmatched_tool_result"], "review"),
         "explicit-unmatched": (["unmatched_tool_result"], "review"),
         "legacy-missing": ([], "clean"), "legacy-empty": ([], "clean"), "legacy-error-string": ([], "clean"),
-        "legacy-cancel-int": ([], "clean"), "legacy-list": ([], "clean"),
+        "legacy-cancel-int": ([], "clean"), "legacy-list": ([], "clean"), "content": (["empty_tool_result"], "review"),
     }
-    assert (result["total_trajectories"], result["clean_for_training"], result["needs_review"]) == (11, 5, 6)
+    content = next(row for row in result["trajectories"] if row["trajectory"] == "content")
+    assert (content["steps"], content["has_reasoning"], content["tool_calls"], content["reasoning_fraction"]) == (
+        3, True, 1, 0.375)
+    assert evaluation["timing"]["by_agent"] == [{"agent": "content", "duration_seconds": 3.0}]
+    assert (result["total_trajectories"], result["clean_for_training"], result["needs_review"]) == (12, 5, 7)
 
 
 def test_analyze_costs_aggregates_legacy_fork_metrics() -> None:
-    trajectories = {"main": None,
-        "forked": [{"_source_file": "legacy-main.json", "final_metrics": {"total_cost_usd": 1.0}},
-            {"_source_file": "fork.json", "final_metrics": {"total_cost_usd": 0.5}}],
-    }
+    """A root without the whole-run metric scope bills its rows by summing every document's own totals."""
+    root = _root_trajectory("legacy") | {"final_metrics": {"total_cost_usd": 1.0}}
+    fork = root | {"_source_file": "fork.json", "trajectory_id": "fork", "final_metrics": {"total_cost_usd": 0.5}}
 
-    result = analyze_costs(trajectories)
+    result = analyze_costs(summarize_run(_snapshot(root, fork)))
 
     assert result["total_cost_usd"] == 1.5
-    assert [(row["agent"], row["cost_usd"]) for row in result["by_agent"]] == [("legacy-main", 1.0), ("fork", 0.5)]
+    assert [(row["agent"], row["cost_usd"]) for row in result["by_agent"]] == [("main", 1.0), ("fork", 0.5)]
     # The legacy filename shapes are retained deliberately.
     assert _agent_label("deadbeef.deep-python.json") == "deep-python"
 
@@ -560,7 +569,9 @@ def test_analyze_session_reads_quality_from_explicit_code_workspace(tmp_path: Pa
         public_source=public_source, private_base=tmp_path / "private", workspace_key="workspace",
         session_id="quality-split",
     )
-    result = analyze_session(frozen, write_snapshot=snapshot, artifact_provenance=provenance, code_workspace=workspace)
+    result = analyze_session(
+        frozen, summary=summarize_run(snapshot), artifact_provenance=provenance, code_workspace=workspace,
+    )
     quality = result["quality"]
     assert quality["scoped_files"] == 5
     assert quality["per_file"] == {
@@ -579,11 +590,11 @@ def test_analyze_session_reads_quality_from_explicit_code_workspace(tmp_path: Pa
     assert result["daydream_dir"] == str(public_source / ".daydream")
 
     (workspace / "pkg/dispatch.py").write_text(_big_function(13))
-    eroded = analyze_session(frozen, write_snapshot=snapshot, code_workspace=workspace)["quality"]
+    eroded = analyze_session(frozen, summary=summarize_run(snapshot), code_workspace=workspace)["quality"]
     assert eroded["erosion"] > quality["erosion"]
     for path in workspace.rglob("*.py"):
         path.write_text("def value():\n    return 1\n")
-    cleaned = analyze_session(frozen, write_snapshot=snapshot, code_workspace=workspace)["quality"]
+    cleaned = analyze_session(frozen, summary=summarize_run(snapshot), code_workspace=workspace)["quality"]
     assert cleaned["erosion"] == cleaned["verbosity"] == 0.0
     assert cleaned["scoped_files"] == 5
 
@@ -700,7 +711,7 @@ def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
     seed_stack_records(deep, "structure", n=2)
     seed_stack_records(deep, "uncovered", n=1)
     (deep / "alternatives.json").write_text(json.dumps([{"id": i} for i in range(6)]))
-    res = analyze_session(dd, write_snapshot=snapshot)
+    res = analyze_session(dd, summary=summarize_run(snapshot))
     assert res["findings"]["total"] == 8
     assert res["findings"]["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
     assert res["findings"]["per_lens"] == {"wonder": 6, "per-stack": 3, "structure": 2}
@@ -711,16 +722,16 @@ def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
     # Shipped rendering wins over raw reviewer populations when canonical JSON is unavailable.
     (deep / "merged-items.json").unlink()
     (deep / "review-output.md").write_text("\n".join(f"{i}. [HIGH] finding {i}" for i in range(1, 9)) + "\n")
-    rendered = analyze_session(dd, write_snapshot=snapshot)
+    rendered = analyze_session(dd, summary=summarize_run(snapshot))
     assert rendered["findings"]["total"] == 8 and rendered["findings"]["by_confidence"] == {}
     assert rendered["derived"]["cost_per_finding_usd"] == pytest.approx(18.2056 / 8, rel=1e-4)
     (deep / "review-output.md").unlink()
-    premerge = analyze_session(dd, write_snapshot=snapshot)
+    premerge = analyze_session(dd, summary=summarize_run(snapshot))
     assert premerge["findings"]["total"] == 5 and premerge["findings"]["by_confidence"] == {"HIGH": 5}
     assert premerge["derived"]["cost_per_finding_usd"] == pytest.approx(18.2056 / 5, rel=1e-4)
     (deep / "stack-python-records.json").unlink()
     (deep / "stack-structure-records.json").unlink()
-    wonder_only = analyze_session(dd, write_snapshot=snapshot)
+    wonder_only = analyze_session(dd, summary=summarize_run(snapshot))
     assert wonder_only["findings"]["per_lens"] == {"wonder": 6, "per-stack": 0, "structure": 0}
     assert wonder_only["findings"]["total"] == 0
     (deep / "alternatives.json").write_text("{not json")
@@ -818,7 +829,7 @@ def _assert_frozen_analysis_survives(monkeypatch: pytest.MonkeyPatch, tmp_path: 
             monkeypatch.setattr(quality_mod, "search_files", enumerate_then_remove_git)
 
         result = analyze_session(
-            daydream_dir, write_snapshot=snapshot, code_workspace=code_workspace,
+            daydream_dir, summary=summarize_run(snapshot), code_workspace=code_workspace,
         )
 
         quality = result["quality"]
@@ -941,7 +952,7 @@ def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path
         "record_duplicate_pairs": [{"similarity": 0.9}],
     }))
     result = analyze_session(
-        dd, write_snapshot=_snapshot(_root_trajectory("loc-session") | {"schema_version": "ATIF-v1.7"})
+        dd, summary=summarize_run(_snapshot(_root_trajectory("loc-session") | {"schema_version": "ATIF-v1.7"}))
     )
     location = result["location"]
     assert location["hunk_source"] == "hunk-index.json"

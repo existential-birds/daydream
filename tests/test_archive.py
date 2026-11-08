@@ -69,6 +69,7 @@ from daydream.trajectory import (
     TrajectoryDocumentReference,
     TrajectoryDocumentSnapshot,
     sibling_document_path,
+    summarize_run,
 )
 from tests.harness.review_result import review_coverage
 from tests.harness.trajectory import make_manifest
@@ -214,7 +215,8 @@ def _build(tmp_path: Path, *, git_ctx: GitContext | None = None, write_snapshot:
     """Build a manifest from immutable public archive inputs."""
     snapshot = write_snapshot or _manifest_write_snapshot()
     return build_manifest_from_snapshot(run=_archive_snapshot(snapshot, run_flow=run_flow, identity=identity,),
-        git_ctx=git_ctx if git_ctx is not None else GitContext(), status="complete", archive_path=tmp_path, **kw,
+        summary=summarize_run(snapshot), git_ctx=git_ctx if git_ctx is not None else GitContext(), status="complete",
+        archive_path=tmp_path, **kw,
     )
 
 
@@ -792,7 +794,7 @@ def test_snapshot_manifest_provenance_rejects_malformed_identity(tmp_path: Path)
     assert not (get_archive_dir() / "runs" / "frozen-session").exists()
 
 
-def _finalizer_arguments(tmp_path: Path, session_id: str, *, config: RunConfig,
+def _finalizer_arguments(tmp_path: Path, session_id: str, *, config: RunConfig, child_steps: tuple[Any, ...] = (),
 ) -> dict[str, Any]:
     """Freeze a prepared root and a completed-child file reference, binding the finalizer's roots."""
     frozen = tmp_path / "frozen"
@@ -801,7 +803,7 @@ def _finalizer_arguments(tmp_path: Path, session_id: str, *, config: RunConfig,
     snapshot = _manifest_write_snapshot(session_id=session_id, final_metrics={}, path=path)
     path.write_bytes(snapshot.documents[0].read_bytes())
     # Completed children reach consumers as references into the frozen copy, named by their logical path.
-    child = json.dumps({"session_id": session_id, "trajectory_id": "fork-1", "steps": []}).encode()
+    child = json.dumps({"session_id": session_id, "trajectory_id": "fork-1", "steps": list(child_steps)}).encode()
     private_child = sibling_document_path(path.parent, "frozen-child.json")
     private_child.parent.mkdir()
     private_child.write_bytes(child)
@@ -857,15 +859,30 @@ def test_strict_archive_evaluation_failure_is_typed_and_never_reports_success(
                 evaluation["quality"] = None
             return evaluation
 
-        monkeypatch.setattr("daydream.eval.analyzer.analyze_session", fail_evaluation)
-        try:
-            with pytest.raises(ArchiveFinalizationError, match="evaluation"):
-                finalize_archive_run(**arguments)
-        except BaseException as error:
-            error.add_note(f"evaluation failure case: {failure!r}")
-            raise
+        with monkeypatch.context() as patch:
+            patch.setattr("daydream.eval.analyzer.analyze_session", fail_evaluation)
+            try:
+                with pytest.raises(ArchiveFinalizationError, match="evaluation"):
+                    finalize_archive_run(**arguments)
+            except BaseException as error:
+                error.add_note(f"evaluation failure case: {failure!r}")
+                raise
         assert not (get_archive_dir() / "runs" / session_id).exists(), failure
         assert not (get_archive_dir() / "index.db").exists(), failure
+    # Real malformed child steps fail only the evaluation that reads them; an archive-only run installs.
+    archived = get_archive_dir() / "runs" / session_id
+    for run_eval in (True, False):
+        root = tmp_path / f"malformed-steps-{run_eval}"
+        arguments = _finalizer_arguments(root, session_id, config=RunConfig(target=str(root), run_eval=run_eval),
+                                         child_steps=({"tool_calls": [{"tool_call_id": "unnamed"}]},))
+        if run_eval:
+            with pytest.raises(ArchiveFinalizationError, match="evaluation"):
+                finalize_archive_run(**arguments)
+            assert not archived.exists()
+        else:
+            finalize_archive_run(**arguments)
+            assert json.loads((archived / "manifest.json").read_text())["session_id"] == session_id
+            assert not (archived / "evaluation.json").exists()
 
 
 def test_strict_archive_reattests_live_workspace_before_quality(
@@ -938,7 +955,7 @@ def test_strict_archive_rejects_frozen_receipt_changed_by_evaluator(
 
 @pytest.mark.parametrize(("mutated", "message"), [
     (0, "frozen artifact tree changed"),
-    # A completed child changed after its checked bundle copy fails its next read as integrity, not optional.
+    # A completed child changed after its checked bundle copy fails the summary pass as integrity, not optional.
     (1, "frozen trajectory document changed"),
 ])
 def test_strict_archive_refuses_frozen_tree_mutated_before_publication(
@@ -950,13 +967,13 @@ def test_strict_archive_refuses_frozen_tree_mutated_before_publication(
     )
     document = arguments["run"].trajectories.documents[mutated]
     private_path = getattr(document, "private_path", document.path)
-    from daydream.archive.provenance import capture_executable_provenance
+    from daydream.archive.git_context import capture_git_context
 
-    def mutate_then_capture() -> Any:
+    def mutate_then_capture(*args: Any) -> Any:
         private_path.write_bytes(document.read_bytes() + b"\n")
-        return capture_executable_provenance()
+        return capture_git_context(*args)
 
-    monkeypatch.setattr("daydream.archive.provenance.capture_executable_provenance", mutate_then_capture)
+    monkeypatch.setattr("daydream.archive.finalize.capture_git_context", mutate_then_capture)
     with pytest.raises(ArchiveIntegrityError, match=message):
         finalize_archive_run(**arguments)
     assert not (get_archive_dir() / "runs" / session_id).exists()

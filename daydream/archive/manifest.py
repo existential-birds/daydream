@@ -18,13 +18,13 @@ from daydream.run_snapshot import (
     ArchiveRecorderProvenance as ArchiveRecorderProvenance,
     ArchiveRunSnapshot,
 )
-from daydream.trajectory import DaydreamRunFlow, compute_timing_summary, snapshot_trajectories
+from daydream.trajectory import DaydreamRunFlow
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from daydream.archive.provenance import ExecutableProvenance
-    from daydream.trajectory import RunWriteSnapshot
+    from daydream.trajectory import RunSummary, RunWriteSnapshot
 
 MANIFEST_SCHEMA_VERSION = "2.0"
 
@@ -251,6 +251,7 @@ class Manifest:
 def build_manifest_from_snapshot(
     *,
     run: ArchiveRunSnapshot,
+    summary: RunSummary,
     git_ctx: GitContext,
     status: str,
     archive_path: Path,
@@ -265,18 +266,15 @@ def build_manifest_from_snapshot(
     retry_summary: Mapping[str, Any] | None = None,
     provenance: ExecutableProvenance | None = None,
 ) -> Manifest:
-    """Construct a manifest from captured identity and frozen trajectory bytes."""
+    """Construct a manifest from captured identity and the frozen run's document summaries."""
     recorder_provenance = run.recorder_provenance
-    write_snapshot = run.trajectories
     identity = run.identity
-    if recorder_provenance.session_id != write_snapshot.root_trajectory_id:
+    if recorder_provenance.session_id != summary.root_trajectory_id:
         raise ValueError("archive provenance does not match frozen snapshot")
-    frozen = snapshot_trajectories(write_snapshot)
-    frozen_root = frozen.get("main")
-    raw_final_metrics = frozen_root.get("final_metrics") if isinstance(frozen_root, dict) else None
+    raw_final_metrics = summary.root.metadata.get("final_metrics")
     final_metrics: dict[str, Any] = raw_final_metrics if isinstance(raw_final_metrics, dict) else {}
     raw_cost = final_metrics.get("total_cost_usd")
-    timing_summary = compute_timing_summary(write_snapshot)
+    timing_summary = summary.timing
     runs_fix = identity.phases.fix
     profile = identity.profile
 
