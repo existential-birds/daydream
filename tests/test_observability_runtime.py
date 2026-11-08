@@ -199,8 +199,10 @@ async def test_startup_failure_and_retry_keep_dispatch_facts_failed_billing_and_
         }
     assert not any(key.startswith("gen_ai.usage.") for key in startup)
     assert first["gen_ai.usage.cost"] == 0.05
-    assert second["gen_ai.usage.input_tokens"] == 0
-    assert second["gen_ai.usage.output_tokens"] == 6
+    assert {key: value for key, value in second.items() if key.startswith("gen_ai.usage.")} == {
+        "gen_ai.usage.input_tokens": 30, "gen_ai.usage.output_tokens": 6, "gen_ai.usage.cache_read.input_tokens": 4,
+        "gen_ai.usage.cost": 0.2, "gen_ai.usage.total_tokens": 36,
+    }
     assert "effective system" in str(second["gen_ai.input.messages"])
     assert "failed content" not in str(second)
     agent = next(

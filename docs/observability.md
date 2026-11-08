@@ -42,7 +42,9 @@ file is never frozen, published, archived or captured.
 
 Only the resolved billing owner emits usage/cost; parent aggregation must not
 charge it again. Cache tokens are within input; reasoning tokens within output.
-Missing values stay absent; observed zero stays zero. Pi generation intervals need
+Missing values stay absent; observed zero stays zero. Usage repeated under one message
+id counts once, and an invocation total can raise but never lower summed turn usage, so
+trajectories and attempt spans report the same totals. Pi generation intervals need
 native boundaries; unfinished generations create no invented completion or billing.
 Use interval unions for overlapping wall time. Host-rendered request sizes measure
 exact attempt inputs, not provider tokenization or provider-hidden context. Each attempt

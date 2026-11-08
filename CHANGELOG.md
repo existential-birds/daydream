@@ -182,6 +182,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clean review posts nothing beyond that approval. Both `--comment` and
   `post-findings` follow this
   ([#1766](https://github.com/existential-birds/daydream/issues/1766)).
+- Claude trajectories, archives and embedded review usage no longer count a provider
+  message's prompt and cache tokens once per content block, so recorded Claude prompt
+  and cached totals now match the provider's figures. Claude records written before
+  this change over-count them and are not rewritten. Trace attempt spans no longer let
+  a lower invocation total replace observed turn usage
+  ([#1718](https://github.com/existential-birds/daydream/issues/1718)).
 
 ## [0.34.0] - 2026-11-03
 
