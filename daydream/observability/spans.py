@@ -860,7 +860,7 @@ class AttemptObserver:
                     usage[name] = usage.get(name, 0) + value
             usage.update(self.invocation_usage)
             for name, value in self.final_usage.items():
-                usage[name] = max(usage.get(name, value), value)
+                usage[name] = max(value, usage.get(name, value))
             self.scope.attrs(_usage_attributes(usage))
             if self.usage_metadata:
                 self.scope.attrs({"daydream.message_usage": list(self.usage_metadata.values())})

@@ -447,6 +447,8 @@ class Invocation:
         # Claude repeats one provider message's usage on each of its content-block messages.
         if event.message_id:
             if event.message_id in self._metered_message_ids:
+                if event.model_name and self._open_step_dict is not None:
+                    self._open_step_dict["_model_name"] = event.model_name
                 return
             self._metered_message_ids.add(event.message_id)
         target = self._open_step_dict
