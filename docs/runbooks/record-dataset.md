@@ -81,14 +81,17 @@ records one at a time, verifies remote shards one at a time and commits at most
 within one commit, one remote shard and one record, plus small per-record name and
 digest indexes, however large the stored history or backlog; its time still grows
 with remote history, because every commit verifies and scans the whole remote.
+Because each commit re-verifies the whole remote, a large first backlog published in
+n commits reads about n²/2 commits' worth of shards; running publish regularly keeps
+each run to one commit.
 
 A pending record that fails validation or the publication scanner is left out of the
 commit, and so is an observation whose target run is neither published nor being
 published; the other records still publish. The output lists each skipped record
-under `skipped` with its kind, identity SHA-256 and error code, and the command
-exits 1; `dataset status` then reports `records_skipped` and exits 1 until a publish
-skips nothing. A skipped record stays unchanged in the local store, counts as queued,
-and is checked again by every publish. Records are immutable, so resolve one by removing
+under `skipped` with its kind, identity SHA-256 and error code, and the command exits
+1; `dataset status` then reports `records_skipped` and exits 1 until a publish skips
+nothing. A skipped record stays unchanged in the local store, counts as queued, and
+is checked again by every publish. Records are immutable, so resolve one by removing
 its file, `RECORD_STORE/<kind>/<identity SHA-256>.jsonl`, together with any
-observation skipped because it targets that run, after handling the cause, such as
-an exposed credential.
+observation skipped because it targets that run, after handling the cause, such as an
+exposed credential.
