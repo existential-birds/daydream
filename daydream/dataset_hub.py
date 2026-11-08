@@ -386,7 +386,7 @@ class DatasetUploader:
                                 raise StoreError("publication_not_confirmed")
                             verified = (head, merged, _remote_records(backend, self.repo_id, head, merged))
                         self._write(self.queue / "receipt.json", _json_bytes(
-                            {"manifest": merged, "revision": head, "error": None}))
+                            {"manifest": merged, "revision": head, "error": "records_skipped" if skipped else None}))
                         # Evidence remains immutable; only acknowledged sealed staging is removed.
                         for path in self.queue.glob("*.jsonl"):
                             if not path.is_symlink() and path.is_file():

@@ -131,10 +131,10 @@ def test_cli_rival_manifest_commit_preserves_both_record_sets(
     records = LocalRecordStore(destination).read_records()
     assert {record["run_id"] for record in records["runs"]} == {"first", "rival"}
     assert {record["observation_id"] for record in records["observations"]} == {"first-judgment", "rival-judgment"}
-    for store, queued in ((first, 2), (rival, 0)):
-        assert cli_main(["corpus", "dataset", "status", "--store", str(store.root)]) == 0
+    for store, queued, error in ((first, 2, "records_skipped"), (rival, 0, None)):
+        assert cli_main(["corpus", "dataset", "status", "--store", str(store.root)]) == (1 if error else 0)
         status = json.loads(capsys.readouterr().out)
-        assert (status["published"], status["queued"]) == (2, queued)
+        assert (status["published"], status["queued"], status["error"]) == (2, queued, error)
     assert cli_main(["corpus", "dataset", "publish", "--store", str(first.root)]) == 1
     later = json.loads(capsys.readouterr().out)
     assert (later["published"], later["skipped"], len(hub.commits)) == (3, published["skipped"], 3)
