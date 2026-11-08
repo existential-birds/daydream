@@ -576,16 +576,13 @@ class LocalRecordStore:
         """Map each kind's record files, in name order, to their record digests without parsing.
 
         Only the listing holds the store lock: a listed name is fully published and never
-        changes. Each digest is the SHA-256 of the file without its newline, streamed outside
-        the lock; a file that is not one newline-terminated line has none.
+        changes. Each digest is the SHA-256 of the file without its newline, read one file at
+        a time outside the lock; a file that fails the store's read check has none.
         """
         with self._locked():
             names = {kind: self._published(kind) for kind in ("runs", "observations")}
-        try:
-            return {kind: {name: self._record_digest(self.root / kind / name) for name in listed}
-                    for kind, listed in names.items()}
-        except OSError:
-            raise StoreError("persistence_failed") from None
+        return {kind: {name: self._record_digest(self.root / kind / name) for name in listed}
+                for kind, listed in names.items()}
 
     def read_record(self, kind: str, name: str) -> tuple[bytes, Record]:
         """Read one listed record file's exact bytes and fully validated record outside the lock."""
@@ -710,18 +707,13 @@ class LocalRecordStore:
     def _shard(self, kind: str, identity: str) -> Path:
         return self.root / kind / record_name(identity)
 
-    @staticmethod
-    def _record_digest(path: Path) -> str | None:
-        digest, newlines, last = hashlib.sha256(), 0, b""
-        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as handle:
-            while chunk := handle.read(1 << 20):
-                digest.update(last)
-                newlines += chunk.count(b"\n")
-                last = chunk
-        if newlines != 1 or not last.endswith(b"\n"):
+    def _record_digest(self, path: Path) -> str | None:
+        try:
+            return _sha(self._read_bytes(path)[:-1])
+        except StoreError:
             return None
-        digest.update(last[:-1])
-        return digest.hexdigest()
+        except OSError:
+            raise StoreError("persistence_failed") from None
 
     def _commit_run(self, envelope: Record, documents: Iterable[Any] | None) -> CommitResult:
         """Stage one run record outside the store lock, then compare or publish it under the lock.

@@ -4,11 +4,9 @@ import fcntl
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from daydream import dataset
 from daydream.dataset import LocalRecordStore, record_name
 from tests.harness.dataset import observation, run_record
 from tests.harness.scripts import cli_main
@@ -100,9 +98,9 @@ def test_cli_rival_manifest_commit_preserves_both_record_sets(
     first.commit_run(run_record("refused", provenance={
         "key": "-----BEGIN PRIVATE KEY-----\nprivate-sensitive-body\n-----END PRIVATE KEY-----"}))
     blocked: list[bool] = []
-    parse_run = dataset.parse_run
+    read_bytes = LocalRecordStore._read_bytes
 
-    def commit_while_publish_reads(raw: Any) -> Any:
+    def commit_while_publish_reads(store: LocalRecordStore, path: Path) -> bytes:
         with open(first.root / ".lock", "rb") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -110,13 +108,13 @@ def test_cli_rival_manifest_commit_preserves_both_record_sets(
                 blocked.append(True)
         if not blocked and not (first.root / "runs" / record_name("later")).exists():
             first.commit_run(run_record("later"))
-        return parse_run(raw)
+        return read_bytes(store, path)
 
     def publish_rival() -> None:
         assert cli_main(["corpus", "dataset", "publish", "--store", str(rival.root)]) == 0
         assert json.loads(capsys.readouterr().out)["published"] == 2
 
-    monkeypatch.setattr(dataset, "parse_run", commit_while_publish_reads)
+    monkeypatch.setattr(LocalRecordStore, "_read_bytes", commit_while_publish_reads)
     hub.before_commit = publish_rival
     assert cli_main(["corpus", "dataset", "publish", "--store", str(first.root)]) == 1
     published = json.loads(capsys.readouterr().out)
