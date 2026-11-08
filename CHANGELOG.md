@@ -37,7 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep Hub work out of review processes, capture without a destination and schedule
   `publish`; see
   [separate publication](docs/runbooks/record-dataset.md#separate-publication)
-  ([#1715](https://github.com/existential-birds/daydream/issues/1715)).
+  ([#1715](https://github.com/existential-birds/daydream/issues/1715),
+  [#1786](https://github.com/existential-birds/daydream/pull/1786)).
 - Run finalization holds one trajectory document at a time, so its peak memory follows
   the largest document instead of the run's size times the number of consumers. One
   summary pass now feeds timing, evaluation and the archive manifest; dataset capture
