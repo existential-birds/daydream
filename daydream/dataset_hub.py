@@ -16,7 +16,16 @@ from typing import Any
 from daydream.archive.scan import SEVERITY_BLOCKING, _scan_file, _scan_text
 from daydream.artifacts.filesystem import _create_private_directory, _projection_path
 from daydream.artifacts.models import ArtifactVisibilityError
-from daydream.dataset import LocalRecordStore, Record, StoreError, parse_observation, parse_run, validate_record_targets
+from daydream.dataset import (
+    LocalRecordStore,
+    Record,
+    StoreError,
+    finding_targets,
+    parse_observation,
+    parse_run,
+    record_name,
+    validate_observation_target,
+)
 from daydream.hub import DatasetHub, HfDatasetHub, HubConflict, HubError
 from daydream.json_utils import atomic_write_bytes, canonical_json
 
@@ -97,7 +106,8 @@ def _manifest(raw: bytes) -> Record:
 
 
 def _members(manifest: Record, kind: str) -> dict[str, str]:
-    return {record["identity"]: record["sha256"] for shard in manifest["shards"][kind]
+    """Map each published record's local file name to its record digest."""
+    return {record_name(record["identity"]): record["sha256"] for shard in manifest["shards"][kind]
             for record in shard["records"]}
 
 
@@ -118,14 +128,16 @@ def _identity(record: Record, kind: str) -> str:
     return str(record[_IDENTITY_FIELDS[kind]])
 
 
-def _validate_shard(data: bytes, shard: Record, kind: str, schemas: Sequence[str]) -> tuple[Record, ...]:
+def _validate_shard(data: bytes, shard: Record, kind: str, schemas: Sequence[str]) -> Iterator[Record]:
+    """Yield each verified record, copying and parsing one line at a time."""
     if len(data) != shard["bytes"] or _sha(data) != shard["sha256"]:
         raise StoreError("shard_digest_mismatch")
-    lines = data.splitlines(keepends=True)
-    if len(lines) != shard["count"] or any(not line.endswith(b"\n") for line in lines):
+    if data.count(b"\n") != shard["count"] or not data.endswith(b"\n"):
         raise StoreError("malformed_or_interrupted_shard")
-    records = []
-    for line, member in zip(lines, shard["records"], strict=True):
+    end = 0
+    for member in shard["records"]:
+        start, end = end, data.index(b"\n", end) + 1
+        line = data[start:end]
         try:
             record = _PARSERS[kind](line)
             if record["schema_version"] not in schemas:
@@ -136,24 +148,37 @@ def _validate_shard(data: bytes, shard: Record, kind: str, schemas: Sequence[str
                 or _json_bytes(record) != line):
             raise StoreError("shard_record_identity_mismatch")
         _scan(record)
-        records.append(record)
-    return tuple(records)
+        yield record
 
 
 def _remote_records(
     backend: DatasetHub, repo_id: str, revision: str, manifest: Record,
-) -> dict[str, tuple[Record, ...]]:
-    records: dict[str, tuple[Record, ...]] = {}
+    keep: dict[str, list[Record]] | None = None,
+) -> dict[str, frozenset[str]]:
+    """Verify every shard one shard and one record at a time; return each run's finding targets."""
+    targets: dict[str, frozenset[str]] = {}
     for kind in _SCHEMAS:
-        loaded: list[Record] = []
         for shard in manifest["shards"][kind]:
             data = backend.read_file(repo_id, shard["path"], revision)
             if data is None:
                 raise StoreError("missing_shard")
-            loaded.extend(_validate_shard(data, shard, kind, manifest["record_schemas"][kind]))
-        records[kind] = tuple(loaded)
-    validate_record_targets(records["runs"], records["observations"])
-    return records
+            for record in _validate_shard(data, shard, kind, manifest["record_schemas"][kind]):
+                if kind == "runs":
+                    targets[record["run_id"]] = finding_targets(record)
+                else:
+                    validate_observation_target(record, targets)
+                if keep is not None:
+                    keep[kind].append(record)
+            del data
+    return targets
+
+
+@dataclass(frozen=True)
+class SkippedRecord:
+    """A pending record left out of publication: its kind, identity SHA-256 and error code."""
+    kind: str
+    identity_sha256: str
+    error: str
 
 
 @dataclass(frozen=True)
@@ -163,18 +188,24 @@ class UploadStatus:
     failed: int = 0
     error: str | None = None
     revision: str | None = None
+    skipped: tuple[SkippedRecord, ...] = ()
 
 
 class DatasetUploader:
-    """Local records are the queue; receipts acknowledge only verified atomic HF commits."""
+    """Local records are the queue; receipts acknowledge only verified atomic HF commits.
+
+    Each commit carries at most ``max_commit_bytes`` of shards. A pending record that fails
+    validation or the scanner is left out and reported; the rest still publish.
+    """
     def __init__(
         self, store: LocalRecordStore, repo_id: str | None = None, *, backend: DatasetHub | None = None,
-        max_shard_records: int = 100, max_shard_bytes: int = 16 * 1024 * 1024,
+        max_shard_records: int = 100, max_shard_bytes: int = 16 * 1024 * 1024, max_commit_bytes: int = _MAX_BYTES,
     ) -> None:
-        if max_shard_records <= 0 or not 0 < max_shard_bytes <= _MAX_BYTES:
+        if max_shard_records <= 0 or not 0 < max_shard_bytes <= min(_MAX_BYTES, max_commit_bytes):
             raise ValueError("invalid shard limits")
         self.store, self.repo_id, self.backend = store, repo_id, backend
         self.max_shard_records, self.max_shard_bytes = max_shard_records, max_shard_bytes
+        self.max_commit_bytes = max_commit_bytes
         key = _sha((repo_id or "disabled").encode())
         self.queue = store.root / "uploads" / key
 
@@ -198,7 +229,7 @@ class DatasetUploader:
         if not stat.S_ISREG(path.lstat().st_mode):
             raise StoreError("unsafe_storage_path")
         with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as handle:
-            data = handle.read(_MAX_BYTES + 1)
+            data = handle.read(min(os.fstat(handle.fileno()).st_size, _MAX_BYTES) + 1)
         if len(data) > _MAX_BYTES:
             raise StoreError("queue_content_too_large")
         return data
@@ -222,30 +253,40 @@ class DatasetUploader:
         except (ValueError, TypeError, KeyError, RecursionError):
             raise StoreError("invalid_upload_receipt") from None
 
-    def _status(self, records: Mapping[str, Sequence[Record]], manifest: Record,
-                revision: str | None, error: str | None = None) -> UploadStatus:
+    def _status(self, index: Mapping[str, Mapping[str, str | None]], manifest: Record, revision: str | None,
+                error: str | None = None, skipped: Mapping[tuple[str, str], str] | None = None) -> UploadStatus:
         published = queued = 0
         for kind in _SCHEMAS:
             known = _members(manifest, kind)
-            for record in records[kind]:
-                if known.get(_identity(record, kind)) == _sha(_json_bytes(record)[:-1]):
+            for name, digest in index[kind].items():
+                if digest is not None and known.get(name) == digest:
                     published += 1
                 else:
                     queued += 1
-        return UploadStatus(queued, published, queued if error else 0, error, revision)
+        refused = tuple(SkippedRecord(kind, name.removesuffix(".jsonl"), code)
+                        for (kind, name), code in sorted((skipped or {}).items()))
+        return UploadStatus(queued, published, queued if error else len(refused), error, revision, refused)
 
     def status(self) -> UploadStatus:
         """Offline receipt status; credentials do not activate an uploader."""
         with self._locked():
             manifest, revision, error = self._receipt()
-            return self._status(self.store.read_records(), manifest, revision, error)
+            return self._status(self.store.record_index(), manifest, revision, error)
 
-    def _seal(self, records: Sequence[Record], kind: str) -> tuple[list[Record], dict[str, bytes]]:
-        shards: list[Record] = []
+    def _seal(
+        self, pending: Sequence[tuple[str, str]], targets: dict[str, frozenset[str]],
+        skipped: dict[tuple[str, str], str],
+    ) -> tuple[dict[str, list[Record]], dict[str, bytes], bool]:
+        """Seal the next commit's pending records, read one at a time, and say whether more remain.
+
+        A refused record is left out and recorded in ``skipped``. Observations must resolve
+        against ``targets``, which gains each sealed run.
+        """
+        shards: dict[str, list[Record]] = {kind: [] for kind in _SCHEMAS}
         files: dict[str, bytes] = {}
         batch: list[bytes] = []
         members: list[Record] = []
-        size = 0
+        kind, size, total = "runs", 0, 0
 
         def seal() -> None:
             if not batch:
@@ -259,83 +300,102 @@ class DatasetUploader:
                 raise StoreError("queued_shard_digest_mismatch")
             if previous is None:
                 self._write(local, data)
-            shards.append({"path": path, "sha256": digest, "bytes": len(data),
-                           "count": len(batch), "records": list(members)})
+            shards[kind].append({"path": path, "sha256": digest, "bytes": len(data),
+                                 "count": len(batch), "records": list(members)})
             files[path] = data
             batch.clear()
             members.clear()
 
-        for record in sorted(records, key=lambda item: _identity(item, kind)):
-            _scan(record)
-            data = _json_bytes(record)
-            if len(data) > self.max_shard_bytes:
-                raise StoreError("record_exceeds_shard_limit")
-            if batch and (len(batch) >= self.max_shard_records or size + len(data) > self.max_shard_bytes):
+        for record_kind, name in pending:
+            try:
+                data, record = self.store.read_record(record_kind, name)
+                _scan(record)
+                if len(data) > self.max_shard_bytes:
+                    raise StoreError("record_exceeds_shard_limit")
+                if record_kind == "observations":
+                    validate_observation_target(record, targets)
+            except StoreError as refusal:
+                skipped[record_kind, name] = refusal.code
+                continue
+            if total + len(data) > self.max_commit_bytes:
+                seal()
+                return shards, files, True
+            if batch and (record_kind != kind or len(batch) >= self.max_shard_records
+                          or size + len(data) > self.max_shard_bytes):
                 seal()
                 size = 0
+            kind = record_kind
             batch.append(data)
             members.append({"identity": _identity(record, kind), "sha256": _sha(data[:-1])})
             size += len(data)
+            total += len(data)
+            if kind == "runs":
+                targets[record["run_id"]] = finding_targets(record)
         seal()
-        return shards, files
+        return shards, files, False
 
     def upload(self) -> UploadStatus:
         """Retry from current remote membership; retain local evidence after any failure."""
-        records: dict[str, tuple[Record, ...]] = {kind: () for kind in _SCHEMAS}
+        index: dict[str, dict[str, str | None]] = {kind: {} for kind in _SCHEMAS}
+        skipped: dict[tuple[str, str], str] = {}
         receipt, revision, error = _empty_manifest(), None, None
         try:
             with self._locked():
                 receipt, revision, error = self._receipt()
-                records = self.store.read_records()
+                index = self.store.record_index()
                 if self.repo_id is None:
-                    return self._status(records, receipt, revision)
+                    return self._status(index, receipt, revision)
                 _validate_repo(self.repo_id)
-                # Seal privately before any network operation; incomplete staging never acknowledges records.
-                for kind in _SCHEMAS:
-                    self._seal(records[kind], kind)
                 backend = self.backend or HfDatasetHub()
-                for _attempt in range(5):
-                    head = _validate_revision(backend.private_revision(self.repo_id))
-                    raw = backend.read_file(self.repo_id, MANIFEST_PATH, head)
-                    remote = _empty_manifest() if raw is None else _manifest(raw)
-                    _remote_records(backend, self.repo_id, head, remote)
-                    files: dict[str, bytes] = {}
-                    merged = json.loads(canonical_json(remote))
-                    for kind in _SCHEMAS:
-                        known = _members(remote, kind)
+                more, verified = True, None
+                while more:
+                    for _attempt in range(5):
+                        head = _validate_revision(backend.private_revision(self.repo_id))
+                        if verified is not None and verified[0] == head:
+                            remote, targets = verified[1], verified[2]
+                        else:
+                            raw = backend.read_file(self.repo_id, MANIFEST_PATH, head)
+                            remote = _empty_manifest() if raw is None else _manifest(raw)
+                            targets = _remote_records(backend, self.repo_id, head, remote)
+                        verified = None
                         pending = []
-                        for record in records[kind]:
-                            identity = _identity(record, kind)
-                            digest = _sha(_json_bytes(record)[:-1])
-                            if identity in known:
-                                if known[identity] != digest:
-                                    raise StoreError("immutable_identity_conflict")
-                            else:
-                                pending.append(record)
-                        shards, additions = self._seal(pending, kind)
-                        merged["shards"][kind].extend(shards)
-                        files.update(additions)
-                    if files:
-                        merged["schema_version"] = _VERSION
-                        merged["record_schemas"] = _SCHEMAS
-                        files[MANIFEST_PATH] = _json_bytes(merged)
-                        _manifest(files[MANIFEST_PATH])
-                        try:
-                            head = _validate_revision(backend.commit(self.repo_id, files, head))
-                        except HubConflict:
-                            continue
-                        raw = backend.read_file(self.repo_id, MANIFEST_PATH, head)
-                        if raw is None or _manifest(raw) != merged:
-                            raise StoreError("publication_not_confirmed")
-                        _remote_records(backend, self.repo_id, head, merged)
-                    self._write(self.queue / "receipt.json", _json_bytes(
-                        {"manifest": merged, "revision": head, "error": None}))
-                    # Evidence remains immutable; only acknowledged sealed staging is removed.
-                    for path in self.queue.glob("*.jsonl"):
-                        if not path.is_symlink() and path.is_file():
-                            path.unlink()
-                    return self._status(records, merged, head)
-                raise StoreError("concurrent_update_retry_exhausted")
+                        for kind in _SCHEMAS:
+                            known = _members(remote, kind)
+                            for name, digest in index[kind].items():
+                                if name in known:
+                                    if known[name] != digest:
+                                        raise StoreError("immutable_identity_conflict")
+                                elif (kind, name) not in skipped:
+                                    pending.append((kind, name))
+                        shards, files, more = self._seal(pending, targets, skipped)
+                        merged = json.loads(canonical_json(remote))
+                        for kind in _SCHEMAS:
+                            merged["shards"][kind].extend(shards[kind])
+                        if files:
+                            merged["schema_version"] = _VERSION
+                            merged["record_schemas"] = _SCHEMAS
+                            files[MANIFEST_PATH] = _json_bytes(merged)
+                            _manifest(files[MANIFEST_PATH])
+                            try:
+                                head = _validate_revision(backend.commit(self.repo_id, files, head))
+                            except HubConflict:
+                                continue
+                            del files
+                            raw = backend.read_file(self.repo_id, MANIFEST_PATH, head)
+                            if raw is None or _manifest(raw) != merged:
+                                raise StoreError("publication_not_confirmed")
+                            verified = (head, merged, _remote_records(backend, self.repo_id, head, merged))
+                        self._write(self.queue / "receipt.json", _json_bytes(
+                            {"manifest": merged, "revision": head, "error": None}))
+                        # Evidence remains immutable; only acknowledged sealed staging is removed.
+                        for path in self.queue.glob("*.jsonl"):
+                            if not path.is_symlink() and path.is_file():
+                                path.unlink()
+                        receipt, revision = merged, head
+                        break
+                    else:
+                        raise StoreError("concurrent_update_retry_exhausted")
+                return self._status(index, receipt, revision, skipped=skipped)
         except (StoreError, HubError) as failure:
             error = failure.code
         except Exception:
@@ -349,7 +409,7 @@ class DatasetUploader:
                     {"manifest": receipt, "revision": revision, "error": error}))
         except (StoreError, OSError):
             pass
-        return self._status(records, receipt, revision, error)
+        return self._status(index, receipt, revision, error, skipped)
 
 
 def download_snapshot(
@@ -365,7 +425,8 @@ def download_snapshot(
         if raw is None:
             raise StoreError("missing_manifest")
         manifest = _manifest(raw)
-        records = _remote_records(client, repo_id, revision, manifest)
+        records: dict[str, list[Record]] = {kind: [] for kind in _SCHEMAS}
+        _remote_records(client, repo_id, revision, manifest, records)
         store = LocalRecordStore(destination)
         # Do not contaminate a pinned download with unrelated local evidence on reuse.
         if store.root.exists():

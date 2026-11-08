@@ -61,3 +61,33 @@ exposed, record affected run/observation IDs and publication commits without
 secret values. Operators decide revocation, rotation, access restrictions, and
 remote history remediation. Never edit immutable evidence in place. Private
 harvest clones use `DAYDREAM_GIT_TOKEN` through child Git configuration, not URLs.
+
+## Separate publication
+
+To keep Hub work out of review processes, run reviews with `--capture-data` and no
+destination: each review commits its one record to the local store and never loads
+stored history. Publish the store separately, by hand or from a timer such as cron
+or a systemd timer, with `daydream corpus dataset publish --store RECORD_STORE
+--trajectory-hub-repo OWNER/REPO`. A review uploads synchronously whenever
+`--trajectory-hub-repo` or `DAYDREAM_TRAJECTORY_HUB_REPO` reaches it, so give the
+destination only to the publish command.
+
+Publishers of one store and destination take turns. A publish holds the store lock
+only while listing record files, so reviews keep committing while it runs; records
+committed after the listing wait for the next publish. Publishers on other stores or
+hosts coordinate through the guarded parent commit and retry. A publish reads local
+records one at a time, verifies remote shards one at a time and commits at most
+64 MiB of shards per commit, each acknowledged by its own receipt. Its memory stays
+within one commit, one remote shard and one record, plus small per-record name and
+digest indexes, however large the stored history or backlog; its time still grows
+with remote history, because every commit verifies and scans the whole remote.
+
+A pending record that fails validation or the publication scanner is left out of the
+commit, and so is an observation whose target run is neither published nor being
+published; the other records still publish. The output lists each skipped record
+under `skipped` with its kind, identity SHA-256 and error code, and the command
+exits 1. A skipped record stays unchanged in the local store, counts as queued, and
+is checked again by every publish. Records are immutable, so resolve one by removing
+its file, `RECORD_STORE/<kind>/<identity SHA-256>.jsonl`, together with any
+observation skipped because it targets that run, after handling the cause, such as
+an exposed credential.

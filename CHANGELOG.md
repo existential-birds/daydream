@@ -21,6 +21,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Dataset publication (`daydream corpus dataset publish` and a review's synchronous
+  upload) no longer loads the store's history into memory. It holds the store lock only
+  while listing record files, so reviews can commit during a publish; it reads local
+  records one at a time, verifies remote shards one at a time and commits at most
+  64 MiB of shards per commit, each with its own receipt, so its memory no longer grows
+  with stored history or the pending backlog. `dataset status` no longer parses records.
+  A pending record that fails validation or the publication scanner, or an observation
+  whose target run is not published, is now left out while the other records publish,
+  where one such record used to stop all publication. The status JSON lists it under
+  `skipped` with its kind, identity SHA-256 and error code and counts it as `failed`, so
+  `publish` exits 1 and a synchronous review reports the upload as failed. Shards now
+  group pending records in store-file order. To keep Hub work out of review processes,
+  capture without a destination and schedule `publish`; see
+  [separate publication](docs/runbooks/record-dataset.md#separate-publication)
+  ([#1715](https://github.com/existential-birds/daydream/issues/1715)).
 - Run finalization holds one trajectory document at a time, so its peak memory follows
   the largest document instead of the run's size times the number of consumers. One
   summary pass now feeds timing, evaluation and the archive manifest; dataset capture

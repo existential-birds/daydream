@@ -1,11 +1,15 @@
 """The public dataset commands read persisted records without archive reconstruction."""
 
+import fcntl
+import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from daydream.dataset import LocalRecordStore
+from daydream import dataset
+from daydream.dataset import LocalRecordStore, record_name
 from tests.harness.dataset import observation, run_record
 from tests.harness.scripts import cli_main
 
@@ -93,15 +97,33 @@ def test_cli_rival_manifest_commit_preserves_both_record_sets(
     rival.commit_run(run_record("rival"))
     first.append_observation(observation("first-judgment", run_id="first"))
     rival.append_observation(observation("rival-judgment", run_id="rival"))
+    first.commit_run(run_record("refused", provenance={
+        "key": "-----BEGIN PRIVATE KEY-----\nprivate-sensitive-body\n-----END PRIVATE KEY-----"}))
+    blocked: list[bool] = []
+    parse_run = dataset.parse_run
+
+    def commit_while_publish_reads(raw: Any) -> Any:
+        with open(first.root / ".lock", "rb") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                blocked.append(True)
+        if not blocked and not (first.root / "runs" / record_name("later")).exists():
+            first.commit_run(run_record("later"))
+        return parse_run(raw)
 
     def publish_rival() -> None:
         assert cli_main(["corpus", "dataset", "publish", "--store", str(rival.root)]) == 0
         assert json.loads(capsys.readouterr().out)["published"] == 2
 
+    monkeypatch.setattr(dataset, "parse_run", commit_while_publish_reads)
     hub.before_commit = publish_rival
-    assert cli_main(["corpus", "dataset", "publish", "--store", str(first.root)]) == 0
-    assert json.loads(capsys.readouterr().out)["published"] == 2
-    assert len(hub.commits) == 2
+    assert cli_main(["corpus", "dataset", "publish", "--store", str(first.root)]) == 1
+    published = json.loads(capsys.readouterr().out)
+    assert not blocked, "the publisher held the store lock while reading a record"
+    assert (published["published"], published["queued"], len(hub.commits)) == (2, 1, 2)
+    assert published["skipped"] == [{"error": "blocking_secret_findings", "identity_sha256":
+                                     hashlib.sha256(b"refused").hexdigest(), "kind": "runs"}]
     destination = tmp_path / "download"
     assert cli_main(["corpus", "dataset", "download", "--revision", hub.revision,
                      "--output", str(destination)]) == 0
@@ -109,9 +131,13 @@ def test_cli_rival_manifest_commit_preserves_both_record_sets(
     records = LocalRecordStore(destination).read_records()
     assert {record["run_id"] for record in records["runs"]} == {"first", "rival"}
     assert {record["observation_id"] for record in records["observations"]} == {"first-judgment", "rival-judgment"}
-    for store in (first, rival):
+    for store, queued in ((first, 2), (rival, 0)):
         assert cli_main(["corpus", "dataset", "status", "--store", str(store.root)]) == 0
-        assert json.loads(capsys.readouterr().out)["published"] == 2
+        status = json.loads(capsys.readouterr().out)
+        assert (status["published"], status["queued"]) == (2, queued)
+    assert cli_main(["corpus", "dataset", "publish", "--store", str(first.root)]) == 1
+    later = json.loads(capsys.readouterr().out)
+    assert (later["published"], later["skipped"], len(hub.commits)) == (3, published["skipped"], 3)
 
 
 def test_cli_rejects_corrupt_pinned_snapshot_before_exposing_records(

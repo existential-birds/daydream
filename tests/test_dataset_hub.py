@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import itertools
 import json
 import stat
+import tracemalloc
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from daydream.dataset import LocalRecordStore, StoreError
+from daydream.dataset import LocalRecordStore, StoreError, record_name
 from tests.harness.dataset import observation, read_records, run_record
 
 TEST_REPO = "test-user/private-trajectories"
@@ -78,43 +80,86 @@ def test_credentials_alone_do_not_construct_a_hub(tmp_path: Path, api: Any, monk
     assert (result.queued, result.published, result.failed) == (1, 0, 0)
 
 
-def test_rejected_records_are_queued_with_safe_errors(tmp_path: Path, api: Any) -> None:
+def test_rejected_records_are_skipped_with_safe_errors(tmp_path: Path, api: Any) -> None:
+    """A refused record and the observation that targets it stay local; other records still publish."""
     from tests.harness.dataset_hub import FakeDatasetHub
     secret = "-----BEGIN PRIVATE KEY-----\nprivate-sensitive-body\n-----END PRIVATE KEY-----"
     for fault, expected in (("oversized", "record_exceeds_shard_limit"), ("secret", "blocking_secret_findings"),
-                            ("schema", "invalid_or_unknown_record_schema"), ("path", "unsafe_storage_path")):
+                            ("schema", "invalid_or_unknown_record_schema"),
+                            ("partial", "malformed_or_interrupted_record"), ("path", "unsafe_storage_path")):
         root = tmp_path / fault
         hub = FakeDatasetHub()
         store = LocalRecordStore(root / "records")
-        store.commit_run(run_record(provenance={"nested": secret} if fault == "secret" else {}))
-        shard = next((store.root / "runs").iterdir())
+        store.commit_run(run_record("kept"))
+        store.commit_run(run_record(provenance={"nested": secret} if fault == "secret" else
+                                    {"pad": "x" * 4096} if fault == "oversized" else {}))
+        store.append_observation(observation())
+        shard = store.root / "runs" / record_name("run-1")
         if fault == "schema":
             shard.write_bytes(shard.read_bytes().replace(b'daydream.run.v1', b'daydream.run.v9'))
+        if fault == "partial":
+            shard.write_bytes(shard.read_bytes()[:-1])
         if fault == "path":
             target = root / "outside"
             target.write_bytes(shard.read_bytes())
             shard.unlink()
             shard.symlink_to(target)
-        result = api.DatasetUploader(store, TEST_REPO, backend=hub,
-                                     max_shard_bytes=20 if fault == "oversized" else 1024 * 1024).upload()
-        assert result.error == expected and result.published == 0
-        assert not hub.commits and "private-sensitive-body" not in str(result)
-        assert shard.exists()
+        publisher = api.DatasetUploader(store, TEST_REPO, backend=hub, max_shard_bytes=2048)
+        result = publisher.upload()
+        assert shard.exists() and "private-sensitive-body" not in str(result)
+        if fault == "path":
+            assert result.error == expected and result.published == 0 and not hub.commits
+            continue
+        assert (result.queued, result.published, result.failed, result.error) == (2, 1, 2, None)
+        assert result.skipped == (
+            api.SkippedRecord("observations", hashlib.sha256(b"judgment-1").hexdigest(), "unknown_run_reference"),
+            api.SkippedRecord("runs", hashlib.sha256(b"run-1").hexdigest(), expected),
+        )
+        manifest = json.loads(hub.trees[hub.revision][api.MANIFEST_PATH])
+        assert [record["identity"] for kind in ("runs", "observations") for shard_entry in manifest["shards"][kind]
+                for record in shard_entry["records"]] == ["kept"]
+        assert publisher.upload().skipped == result.skipped and len(hub.commits) == 1
 
 
-def test_bounded_shards_keep_whole_records_and_identity_conflicts_fail(tmp_path: Path, api: Any) -> None:
+def test_bounded_publication_keeps_whole_records_and_identity_conflicts_fail(tmp_path: Path, api: Any) -> None:
+    """Shards and commits stay within their limits, memory stays flat as stored history grows,
+    and an identity conflict fails before any commit."""
     from tests.harness.dataset_hub import FakeDatasetHub
     hub = FakeDatasetHub()
     store = LocalRecordStore(tmp_path / "records")
     for i in range(5):
         store.commit_run(run_record(f"run-{i}"))
-    result = api.DatasetUploader(store, TEST_REPO, backend=hub, max_shard_records=2).upload()
+    bound = 2 * max(path.stat().st_size for path in (store.root / "runs").iterdir())
+    empty = hub.revision
+    result = api.DatasetUploader(store, TEST_REPO, backend=hub, max_shard_records=2, max_shard_bytes=bound,
+                                 max_commit_bytes=bound).upload()
     manifest = json.loads(hub.trees[result.revision][api.MANIFEST_PATH])
     assert sorted(shard["count"] for shard in manifest["shards"]["runs"]) == [1, 2, 2]
+    assert result.published == 5 and len(hub.commits) == 3
+    for parent, child in itertools.pairwise([empty, *hub.commits]):
+        added = set(hub.trees[child]) - set(hub.trees[parent]) - {api.MANIFEST_PATH}
+        assert 0 < sum(len(hub.trees[child][path]) for path in added) <= bound
     rival = LocalRecordStore(tmp_path / "rival")
     rival.commit_run(run_record("run-0", outcome="failed"))
     failure = api.DatasetUploader(rival, TEST_REPO, backend=hub).upload()
-    assert failure.error == "immutable_identity_conflict" and len(hub.commits) == 1
+    assert failure.error == "immutable_identity_conflict" and len(hub.commits) == 3
+
+    def publication_peak(history: int) -> int:
+        stored = LocalRecordStore(tmp_path / f"history-{history}")
+        remote = FakeDatasetHub()
+        for i in range(history):
+            stored.commit_run(run_record(f"stored-{i}", provenance={"pad": "x" * 32768}))
+        api.DatasetUploader(stored, TEST_REPO, backend=remote, max_shard_records=1).upload()
+        stored.commit_run(run_record("new", provenance={"pad": "x" * 32768}))
+        tracemalloc.start()
+        try:
+            assert api.DatasetUploader(stored, TEST_REPO, backend=remote).upload().published == history + 1
+            return tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+    few = publication_peak(2)  # first, so one-time warm-up cannot inflate the larger history
+    assert publication_peak(8) - few < 32768
 
 
 def test_corrupt_pinned_snapshots_never_expose_records(tmp_path: Path, api: Any) -> None:

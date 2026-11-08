@@ -8,7 +8,7 @@ import os
 import re
 import stat
 import tempfile
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
@@ -304,17 +304,25 @@ def parse_snapshot(raw: Mapping[str, Any] | str | bytes) -> Record:
     return _parse_typed(raw, versions=("daydream.snapshot.v1", "daydream.snapshot.v2"), name="Snapshot")
 
 
+def finding_targets(run: Record) -> frozenset[str]:
+    """The finding item identities that an observation of ``run`` may target."""
+    return frozenset(item["item_uid"] for item in (run["findings"]["value"] or {}).get("items", []))
+
+
+def validate_observation_target(record: Record, targets: Mapping[str, Collection[str]]) -> None:
+    """Resolve an observation against a compact ``run_id -> finding_targets`` index."""
+    items = targets.get(record["run_id"])
+    if items is None:
+        raise StoreError("unknown_run_reference")
+    if record.get("item_uid") is not None and record["item_uid"] not in items:
+        raise StoreError("orphan_finding_reference")
+
+
 def validate_record_targets(runs: Sequence[Record], observations: Sequence[Record]) -> None:
     """Validate observation references against a complete collection of typed runs."""
-    known = {run["run_id"]: run for run in runs}
+    targets = {run["run_id"]: finding_targets(run) for run in runs}
     for record in observations:
-        run = known.get(record["run_id"])
-        if run is None:
-            raise StoreError("unknown_run_reference")
-        if record.get("item_uid") is not None:
-            items = (run["findings"]["value"] or {}).get("items", [])
-            if not any(item["item_uid"] == record["item_uid"] for item in items):
-                raise StoreError("orphan_finding_reference")
+        validate_observation_target(record, targets)
 
 
 def semantic_evidence_digest(value: Any) -> str:
@@ -472,6 +480,7 @@ def run_record_schema() -> Record:
 
 _DEFAULT_MAX_RECORD_BYTES = 64 * 1024 * 1024
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_RECORD_NAME = re.compile(r"[0-9a-f]{64}\.jsonl")
 _DIRECTORIES = ("runs", "observations", "snapshots")
 
 
@@ -504,6 +513,11 @@ class SnapshotRecords:
 
 def _sha(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def record_name(identity: str) -> str:
+    """The file name that holds the record with ``identity`` in its kind's store directory."""
+    return _sha(identity.encode()) + ".jsonl"
 
 
 def _abandoned(staged: Path) -> bool:
@@ -557,6 +571,30 @@ class LocalRecordStore:
             for record in observations:
                 self._validate_target(record)
             return {"runs": runs, "observations": observations}
+
+    def record_index(self) -> dict[str, dict[str, str | None]]:
+        """Map each kind's record files, in name order, to their record digests without parsing.
+
+        Only the listing holds the store lock: a listed name is fully published and never
+        changes. Each digest is the SHA-256 of the file without its newline, streamed outside
+        the lock; a file that is not one newline-terminated line has none.
+        """
+        with self._locked():
+            names = {kind: self._published(kind) for kind in ("runs", "observations")}
+        try:
+            return {kind: {name: self._record_digest(self.root / kind / name) for name in listed}
+                    for kind, listed in names.items()}
+        except OSError:
+            raise StoreError("persistence_failed") from None
+
+    def read_record(self, kind: str, name: str) -> tuple[bytes, Record]:
+        """Read one listed record file's exact bytes and fully validated record outside the lock."""
+        if kind not in ("runs", "observations") or not _RECORD_NAME.fullmatch(name):
+            raise StoreError("unknown_shard")
+        try:
+            return self._checked(kind, self.root / kind / name)
+        except OSError:
+            raise StoreError("persistence_failed") from None
 
     def record_download_source(
         self, source: Mapping[str, Any], *, runs: Sequence[Record], observations: Sequence[Record],
@@ -662,7 +700,7 @@ class LocalRecordStore:
         if metadata.st_size > self.max_record_bytes:
             raise StoreError("record_too_large")
         with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as handle:
-            data = handle.read(self.max_record_bytes + 1)
+            data = handle.read(min(os.fstat(handle.fileno()).st_size, self.max_record_bytes) + 1)
         if len(data) > self.max_record_bytes:
             raise StoreError("record_too_large")
         if not data.endswith(b"\n") or data.count(b"\n") != 1:
@@ -670,7 +708,20 @@ class LocalRecordStore:
         return data
 
     def _shard(self, kind: str, identity: str) -> Path:
-        return self.root / kind / (_sha(identity.encode()) + ".jsonl")
+        return self.root / kind / record_name(identity)
+
+    @staticmethod
+    def _record_digest(path: Path) -> str | None:
+        digest, newlines, last = hashlib.sha256(), 0, b""
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as handle:
+            while chunk := handle.read(1 << 20):
+                digest.update(last)
+                newlines += chunk.count(b"\n")
+                last = chunk
+        if newlines != 1 or not last.endswith(b"\n"):
+            return None
+        digest.update(last[:-1])
+        return digest.hexdigest()
 
     def _commit_run(self, envelope: Record, documents: Iterable[Any] | None) -> CommitResult:
         """Stage one run record outside the store lock, then compare or publish it under the lock.
@@ -759,10 +810,8 @@ class LocalRecordStore:
     def _validate_finding_target(record: Record, run: Record) -> None:
         validate_record_targets((run,), (record,))
 
-    def _load(
-        self, kind: str, path: Path, expected: Record | None = None,
-    ) -> tuple[Record, Record]:
-        if not re.fullmatch(r"[0-9a-f]{64}\.jsonl", path.name):
+    def _checked(self, kind: str, path: Path, expected: Record | None = None) -> tuple[bytes, Record]:
+        if not _RECORD_NAME.fullmatch(path.name):
             raise StoreError("unknown_shard")
         data = self._read_bytes(path)
         if expected is not None and (
@@ -771,18 +820,35 @@ class LocalRecordStore:
             raise StoreError("snapshot_record_digest_mismatch")
         record = self._parse(data, run=kind == "runs")
         identity = record["run_id" if kind == "runs" else "observation_id"]
-        if (path.name != _sha(identity.encode()) + ".jsonl"
-                or (expected is not None and identity != expected["identity"])):
+        if path.name != record_name(identity) or (expected is not None and identity != expected["identity"]):
             raise StoreError("conflicting_record_identity")
         if self._payload(record) != data:
             raise StoreError("noncanonical_record")
-        member = {"identity": identity, "record_digest": _sha(data[:-1]),
-                  "shard": path.name, "shard_digest": _sha(data)}
+        return data, record
+
+    def _load(
+        self, kind: str, path: Path, expected: Record | None = None,
+    ) -> tuple[Record, Record]:
+        data, record = self._checked(kind, path, expected)
+        member = {"identity": record["run_id" if kind == "runs" else "observation_id"],
+                  "record_digest": _sha(data[:-1]), "shard": path.name, "shard_digest": _sha(data)}
         return member, record
 
-    def _members(self, kind: str) -> list[tuple[Record, Record]]:
+    def _published(self, kind: str) -> list[str]:
         # Called under the lock after recovery, so a remaining stage belongs to a live writer.
-        return [self._load(kind, path) for path in sorted((self.root / kind).iterdir()) if path.suffix != ".tmp"]
+        names = []
+        for path in sorted((self.root / kind).iterdir()):
+            if path.suffix == ".tmp":
+                continue
+            if not _RECORD_NAME.fullmatch(path.name):
+                raise StoreError("unknown_shard")
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise StoreError("unsafe_storage_path")
+            names.append(path.name)
+        return names
+
+    def _members(self, kind: str) -> list[tuple[Record, Record]]:
+        return [self._load(kind, self.root / kind / name) for name in self._published(kind)]
 
     def select_snapshot(
         self, *, observed_before: str, valid_before: str | None = None,
