@@ -472,7 +472,8 @@ def _capture_dataset(
                     store = LocalRecordStore(config.dataset_store_path or Path.home() / ".daydream" / "dataset")
                     status = DatasetUploader(store, config.trajectory_hub_repo).upload()
                     if status.failed or status.error:
-                        print_error(console, "Data Collection", "Run evidence remains queued after an upload failure.")
+                        print_error(console, "Data Collection",
+                                    "Upload left some queued records unpublished; they remain in the local queue.")
                     else:
                         outcomes.upload = "uploaded"
                 except Exception as exc:
