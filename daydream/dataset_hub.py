@@ -362,7 +362,7 @@ class DatasetUploader:
                         for kind in _SCHEMAS:
                             known = _members(remote, kind)
                             for name, digest in index[kind].items():
-                                if name in known:
+                                if name in known and digest is not None:
                                     if known[name] != digest:
                                         raise StoreError("immutable_identity_conflict")
                                 elif (kind, name) not in skipped:
