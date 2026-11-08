@@ -86,7 +86,8 @@ def test_rejected_records_are_skipped_with_safe_errors(tmp_path: Path, api: Any)
     secret = "-----BEGIN PRIVATE KEY-----\nprivate-sensitive-body\n-----END PRIVATE KEY-----"
     for fault, expected in (("oversized", "record_exceeds_shard_limit"), ("secret", "blocking_secret_findings"),
                             ("schema", "invalid_or_unknown_record_schema"),
-                            ("partial", "malformed_or_interrupted_record"), ("path", "unsafe_storage_path")):
+                            ("partial", "malformed_or_interrupted_record"), ("path", "unsafe_storage_path"),
+                            ("unknown", "unknown_shard")):
         root = tmp_path / fault
         hub = FakeDatasetHub()
         store = LocalRecordStore(root / "records")
@@ -104,10 +105,12 @@ def test_rejected_records_are_skipped_with_safe_errors(tmp_path: Path, api: Any)
             target.write_bytes(shard.read_bytes())
             shard.unlink()
             shard.symlink_to(target)
+        if fault == "unknown":
+            (store.root / "runs" / "notes.txt").write_text("not a record\n")
         publisher = api.DatasetUploader(store, TEST_REPO, backend=hub, max_shard_bytes=2048)
         result = publisher.upload()
         assert shard.exists() and "private-sensitive-body" not in str(result)
-        if fault == "path":
+        if fault in ("path", "unknown"):
             assert result.error == expected and result.published == 0 and not hub.commits
             continue
         assert (result.queued, result.published, result.failed, result.error) == (2, 1, 2, None)
@@ -125,24 +128,34 @@ def test_bounded_publication_keeps_whole_records_and_identity_conflicts_fail(tmp
     """Shards and commits stay within their limits, memory stays flat as stored history grows,
     and an identity conflict fails before any commit."""
     from tests.harness.dataset_hub import FakeDatasetHub
-    hub = FakeDatasetHub()
+    between = [LocalRecordStore(tmp_path / "between")]
+    between[0].commit_run(run_record("between"))
+
+    class RivalBetweenCommits(FakeDatasetHub):
+        def private_revision(self, repo_id: str) -> str:
+            if len(self.commits) == 1 and between:
+                api.DatasetUploader(between.pop(), TEST_REPO, backend=self).upload()
+            return super().private_revision(repo_id)
+
+    hub = RivalBetweenCommits()
     store = LocalRecordStore(tmp_path / "records")
     for i in range(5):
         store.commit_run(run_record(f"run-{i}"))
+    store.append_observation(observation())
     bound = 2 * max(path.stat().st_size for path in (store.root / "runs").iterdir())
     empty = hub.revision
     result = api.DatasetUploader(store, TEST_REPO, backend=hub, max_shard_records=2, max_shard_bytes=bound,
                                  max_commit_bytes=bound).upload()
     manifest = json.loads(hub.trees[result.revision][api.MANIFEST_PATH])
-    assert sorted(shard["count"] for shard in manifest["shards"]["runs"]) == [1, 2, 2]
-    assert result.published == 5 and len(hub.commits) == 3
+    assert sorted(shard["count"] for shard in manifest["shards"]["runs"]) == [1, 1, 2, 2]
+    assert result.published == 6 and len(hub.commits) == 4
     for parent, child in itertools.pairwise([empty, *hub.commits]):
         added = set(hub.trees[child]) - set(hub.trees[parent]) - {api.MANIFEST_PATH}
         assert 0 < sum(len(hub.trees[child][path]) for path in added) <= bound
     rival = LocalRecordStore(tmp_path / "rival")
     rival.commit_run(run_record("run-0", outcome="failed"))
     failure = api.DatasetUploader(rival, TEST_REPO, backend=hub).upload()
-    assert failure.error == "immutable_identity_conflict" and len(hub.commits) == 3
+    assert failure.error == "immutable_identity_conflict" and len(hub.commits) == 4
 
     def publication_peak(history: int) -> int:
         stored = LocalRecordStore(tmp_path / f"history-{history}")
@@ -164,11 +177,13 @@ def test_bounded_publication_keeps_whole_records_and_identity_conflicts_fail(tmp
 
 def test_corrupt_pinned_snapshots_never_expose_records(tmp_path: Path, api: Any) -> None:
     from tests.harness.dataset_hub import FakeDatasetHub
-    for fault in ("digest", "count", "schema", "duplicate", "missing", "partial", "record"):
+    for fault in ("digest", "count", "schema", "duplicate", "missing", "partial", "record", "orphan"):
         root = tmp_path / fault
         hub = FakeDatasetHub()
         store = LocalRecordStore(root / "records")
         store.commit_run(run_record())
+        if fault == "orphan":
+            store.append_observation(observation())
         result = api.DatasetUploader(store, TEST_REPO, backend=hub).upload()
         tree = dict(hub.trees[result.revision])
         manifest = json.loads(tree[api.MANIFEST_PATH])
@@ -190,6 +205,8 @@ def test_corrupt_pinned_snapshots_never_expose_records(tmp_path: Path, api: Any)
             shard["bytes"] = len(data)
             shard["path"] = "runs/" + shard["sha256"] + ".jsonl"
             tree[shard["path"]] = data
+        elif fault == "orphan":
+            manifest["shards"]["runs"] = []
         tree[api.MANIFEST_PATH] = json.dumps(manifest).encode()
         revision = hub.commit(TEST_REPO, tree, hub.revision)
         if fault == "missing":
