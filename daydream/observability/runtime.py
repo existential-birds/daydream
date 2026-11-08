@@ -87,7 +87,6 @@ def record_local_trace(path: Path) -> None:
     """Start the selected ``local`` destination once the run's private directory exists."""
     session = current_session()
     if session is not None and session._local_trace_pending:
-        session._local_trace_pending = False
         exporter = _LocalTraceExporter(path, session.policy)
         session.provider.add_span_processor(SimpleSpanProcessor(exporter, meter_provider=NoOpMeterProvider()))
 
@@ -144,6 +143,7 @@ class _LocalTraceExporter(SpanExporter):
         with self._lock, diagnostic_scope(self.policy):
             if self._stopped:
                 return SpanExportResult.FAILURE
+            self._stopped = True
             try:
                 from daydream.observability.otlp_compat import encode_json_line
 
@@ -153,6 +153,7 @@ class _LocalTraceExporter(SpanExporter):
                     self._file = os.fdopen(fd, "wb")
                 self._file.write(line)
                 self._file.flush()
+                self._stopped = False
                 return SpanExportResult.SUCCESS
             except Exception as exc:
                 _logger.warning(

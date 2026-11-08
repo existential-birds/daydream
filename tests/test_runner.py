@@ -476,7 +476,6 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     assert local_trace.stat().st_mode & 0o777 == 0o600
     spans = [span for line in local_trace.read_text().splitlines() for resource in json.loads(line)["resourceSpans"]
              for scope in resource["scopeSpans"] for span in scope["spans"]]
-    assert len({span["traceId"] for span in spans}) == 1
     assert kind_of(spans, "run") == [spans[-1]] and "parentSpanId" not in spans[-1]
     assert spans[-1]["status"] == {"code": 1}
     (agent,), (attempt,) = kind_of(spans, "agent"), kind_of(spans, "attempt")

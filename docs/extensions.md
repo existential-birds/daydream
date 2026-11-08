@@ -266,7 +266,9 @@ Factories are synchronous `(ObservabilityConfig) -> SpanExporter` and return fre
 exporters with finite timeouts/shutdown. Registration/validation never contacts
 providers or requires credentials. Operator environment owns credentials; runtime
 owns flush/shutdown, spans, redaction, and content policy. Vendor compatibility
-mutates copies only. See [observability](observability.md).
+mutates copies only. See [observability](observability.md). `local` is reserved for
+the built-in [local trace](observability.md#ownership-and-evidence); registering it
+raises `ExtensionError` (extension API 8 is retained).
 
 ## Renderers
 

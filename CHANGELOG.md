@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alone or beside remote destinations. Like all tracing it is off by default and follows
   `--trace-content`; the file is never published, archived or captured, and a write failure
   warns once and leaves it without its root span. Extensions can no longer register a trace
-  exporter named `local`; see [observability](docs/observability.md#ownership-and-evidence)
+  exporter named `local`; see [trace exporters](docs/extensions.md#trace-exporters)
   (part of [#1719](https://github.com/existential-birds/daydream/issues/1719)).
 
 ### Changed

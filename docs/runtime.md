@@ -678,8 +678,7 @@ Use the run's single artifact owner/session. Live artifacts are private; finaliz
 `.daydream/` and `.review-output.md` belong to the source checkout even when work
 runs in an operational worktree. The private run directory may also hold the
 [`local` trace](observability.md#ownership-and-evidence), written until the run span
-ends after finalization and never frozen, published, archived or captured.
-Join writers before freezing evidence. Tracked
+ends after finalization. Join writers before freezing evidence. Tracked
 artifact paths cause refusal; competing bytes survive conflicts. When the source
 identity remains valid, output-publication failure restores prior checkout artifacts.
 Optional archive, evaluation, index,
