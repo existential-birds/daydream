@@ -347,7 +347,7 @@ def _record_active_event(name: str, attributes: dict[str, Any]) -> None:
         return
     try:
         trace.get_current_span().add_event(
-            name, {key: session.policy.value(value) for key, value in attributes.items() if value is not None},
+            name, {key: session.policy.value(value) for key, value in attributes.items()},
         )
     except Exception:
         _logger.warning("Trace event %s could not be recorded", name)

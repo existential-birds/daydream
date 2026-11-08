@@ -48,9 +48,10 @@ Use interval unions for overlapping wall time. Host-rendered request sizes measu
 exact attempt inputs, not provider tokenization or provider-hidden context. Each attempt
 span records them as attributes before backend startup, so a startup failure keeps them,
 and records each backend diagnostic as an event in observed order: the code always, the
-message and metadata only with full content. The run span carries the run's pull request
-as `daydream.pr_repo` and `daydream.pr_number`, and spans inside a forked recorder carry
-that fork's ATIF trajectory id as `daydream.trajectory.id`.
+message and metadata only with full content. The run span carries the run's GitHub
+repository and, when known, its pull request number as `daydream.pr_repo` and
+`daydream.pr_number`, and spans inside a forked recorder carry that fork's ATIF trajectory
+id as `daydream.trajectory.id`.
 
 [Span construction](../daydream/observability/spans.py),
 [trajectory metrics](../daydream/trajectory/), and
