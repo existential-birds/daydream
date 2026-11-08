@@ -187,7 +187,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and cached totals now match the provider's figures. Claude records written before
   this change over-count them and are not rewritten. Trace attempt spans no longer let
   a lower invocation total replace observed turn usage
-  ([#1718](https://github.com/existential-birds/daydream/issues/1718)).
+  ([#1718](https://github.com/existential-birds/daydream/issues/1718),
+  [#1797](https://github.com/existential-birds/daydream/pull/1797)).
 
 ## [0.34.0] - 2026-11-03
 
