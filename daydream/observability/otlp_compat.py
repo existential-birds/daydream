@@ -6,6 +6,7 @@ SDK globals remain untouched; transports do not delegate nested retry loops.
 
 from __future__ import annotations
 
+import base64
 import calendar
 import gzip
 import json
@@ -19,6 +20,7 @@ from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 import anyio
+from google.protobuf.json_format import MessageToDict
 from google.protobuf.message import DecodeError
 from google.rpc import error_details_pb2  # type: ignore[import-untyped]  # proto-only, no stubs
 from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans as sdk_encode_spans
@@ -155,6 +157,19 @@ def encode_batch(spans: Sequence[ReadableSpan]) -> ExportTraceServiceRequest:
                 raise ObservabilityError("OTLP encoder changed link identity; refusing to repair a mismatched batch")
             _repair_link(wire_link, source_link)
     return request
+
+
+def encode_json_line(spans: Sequence[ReadableSpan]) -> bytes:
+    """Encode one OTLP/JSON request line: hex trace/span ids and integer enums, as the OTLP spec requires."""
+    request = MessageToDict(encode_batch(spans), use_integers_for_enums=True)
+    for resource in request.get("resourceSpans", ()):
+        for scope in resource.get("scopeSpans", ()):
+            for span in scope.get("spans", ()):
+                for item in (span, *span.get("links", ())):
+                    for key in ("traceId", "spanId", "parentSpanId"):
+                        if key in item:
+                            item[key] = base64.b64decode(item[key]).hex()
+    return json.dumps(request, separators=(",", ":")).encode() + b"\n"
 
 
 def _repair_flags(wire_span: Any, trace_flags: Any, parent: Any) -> None:

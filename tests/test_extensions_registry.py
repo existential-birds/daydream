@@ -38,6 +38,8 @@ def test_trace_exporter_registry_is_lazy_and_replace_is_explicit() -> None:
     with pytest.raises(ExtensionError, match="already registered"):
         reg.register_trace_exporter("custom", factory)
     reg.register_trace_exporter("custom", cast(TraceExporterFactory, factory), replace=True)
+    with pytest.raises(ExtensionError, match="reserved for the built-in local trace file"):
+        reg.register_trace_exporter("local", factory, replace=True)
     with pytest.raises(UnresolvedExtensionError, match="trace exporter 'absent'"):
         reg.trace_exporter("absent")
 

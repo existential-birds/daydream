@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [Claude host tools](docs/runtime.md#claude-host-tools). Hosted and immutable inputs stay
   Pi-only. `mcp` is now a direct dependency
   ([#1647](https://github.com/existential-birds/daydream/issues/1647)).
+- `--trace-to local` (or `DAYDREAM_TRACE_TO=local`) records a run's spans as OTLP/JSON
+  lines in `otel-trace.jsonl` in its private run directory, with no network or credentials,
+  alone or beside remote destinations. Like all tracing it is off by default and follows
+  `--trace-content`; the file is never published, archived or captured, and a write failure
+  warns once and leaves it without its root span. Extensions can no longer register a trace
+  exporter named `local`; see [trace exporters](docs/extensions.md#trace-exporters)
+  (part of [#1719](https://github.com/existential-birds/daydream/issues/1719),
+  [#1791](https://github.com/existential-birds/daydream/pull/1791)).
 
 ### Changed
 

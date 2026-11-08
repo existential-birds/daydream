@@ -146,6 +146,10 @@ class ArtifactLayout:
         return run_directory(self.state_root, self.session_id) / "live"
 
     @property
+    def otel_trace(self) -> Path:
+        return self.live_root.parent / "otel-trace.jsonl"
+
+    @property
     def daydream_dir(self) -> Path:
         return self.live_root / _DAYDREAM
 

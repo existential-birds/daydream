@@ -26,8 +26,8 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
     tracing = parser.add_mutually_exclusive_group()
     tracing.add_argument(
         "--trace-to", action="append", default=None, metavar="NAME",
-        help="Export OpenLLMetry traces to a destination (langsmith, honeyhive, otlp, or an extension); repeatable"
-        if full_help else argparse.SUPPRESS,
+        help="Export OpenLLMetry traces to a destination (local, langsmith, honeyhive, otlp, or an extension); "
+        "repeatable" if full_help else argparse.SUPPRESS,
     )
     tracing.add_argument(
         "--no-tracing", action="store_true",
