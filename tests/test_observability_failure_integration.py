@@ -16,6 +16,7 @@ from daydream import runner
 from daydream.backends import (
     AgentEvent,
     CostEvent,
+    DiagnosticEvent,
     GenerationEndEvent,
     GenerationStartEvent,
     MetricsEvent,
@@ -239,6 +240,7 @@ class _ExactAllocationBackend(_NoCancelBackend):
 
     async def execute(self, _cwd: Path, prompt: str, *_args: Any, **_kwargs: Any) -> AsyncGenerator[AgentEvent]:
         yield RequestEvent(prompt)
+        yield DiagnosticEvent("parser_gap", "unparsed native line", {"line": 3})
         yield _gen_start("gen-a")
         yield _gen_end("gen-a", "first sealed choice", response_id="resp-alpha")
         yield MetricsEvent("gen-a", 100, 20, None, 0.002, reasoning_tokens=5, generation_id="gen-a")
@@ -291,6 +293,15 @@ async def test_runner_exact_allocation_bills_children_and_chain_matches_wire(
     assert billed["gen_ai.usage.output_tokens"] == 30
     assert billed["gen_ai.usage.cost"] == pytest.approx(0.003)
     assert gens["gen-a"]["parentSpanId"] == attempt["spanId"]
+    (path,) = (feature_branch_repo / ".daydream/runs").glob("*/trajectory.json")
+    trajectory = json.loads(path.read_text())
+    (diagnostic,) = [event for event in attempt["events"] if event["name"] == "daydream.backend_diagnostic"]
+    wire = {key.rsplit(".", 1)[-1]: value for key, value in attributes(diagnostic).items()}
+    records = [item for step in trajectory["steps"] for item in step.get("extra", {}).get("backend_diagnostics", [])]
+    assert records == [{**wire, "metadata": json.loads(wire["metadata"])}]
+    dispatch = {key.rsplit(".", 1)[-1]: value for key, value in billed.items()
+                if key.startswith("daydream.host_dispatch.") or key == "daydream.attempt"}
+    assert trajectory["extra"]["subtrajectories"][0]["host_dispatch"] == dispatch
 
 
 class _LateMissingMetricsBackend(_NoCancelBackend):

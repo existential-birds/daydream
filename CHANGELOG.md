@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Trace attempt spans record each backend diagnostic as a `daydream.backend_diagnostic`
+  event in observed order, with its code and, under full content only, its message and
+  metadata. The events replace the `daydream.backend_diagnostic.codes` and `.counts`
+  attributes. Attempt spans also carry the host's dispatch sizes as
+  `daydream.host_dispatch.*` attributes, set before the backend starts, so an attempt
+  that fails at startup keeps them, with or without a trajectory recorder
+  ([#1718](https://github.com/existential-birds/daydream/issues/1718),
+  [#1787](https://github.com/existential-birds/daydream/pull/1787)).
 - Dataset publication (`daydream corpus dataset publish` and a review's synchronous
   upload) no longer loads the store's history into memory. It holds the store lock only
   while listing record files, so reviews can commit during a publish; it reads local

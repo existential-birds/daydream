@@ -34,7 +34,10 @@ charge it again. Cache tokens are within input; reasoning tokens within output.
 Missing values stay absent; observed zero stays zero. Pi generation intervals need
 native boundaries; unfinished generations create no invented completion or billing.
 Use interval unions for overlapping wall time. Host-rendered request sizes measure
-exact attempt inputs, not provider tokenization or provider-hidden context.
+exact attempt inputs, not provider tokenization or provider-hidden context. Each attempt
+span records them as attributes before backend startup, so a startup failure keeps them,
+and records each backend diagnostic as an event in observed order: the code always, the
+message and metadata only with full content.
 
 [Span construction](../daydream/observability/spans.py),
 [trajectory metrics](../daydream/trajectory/), and

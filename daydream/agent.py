@@ -67,7 +67,7 @@ from daydream.run_context import (
     resolve_run_context,
 )
 from daydream.trajectory import DaydreamPhase, get_current_recorder, redact_text
-from daydream.ui import NEON_THEME, print_error
+from daydream.ui import NEON_THEME, print_error, print_warning
 from daydream.ui.agent_stream import AgentDisplay, present_result
 
 _logger = logging.getLogger(__name__)
@@ -470,6 +470,34 @@ async def run_agent(
         return result
 
 
+def _measure_host_dispatch(
+    *, prompt: str, system_instructions: str | None, system_instructions_supported: bool,
+    attempt: int, stage_scope_id: str | None,
+) -> dict[str, int | str] | None:
+    """Measure exact UTF-8 sizes of the final host execute arguments, or warn and return None.
+
+    Backend-internal prompts, schemas, history and transport envelopes are
+    outside this boundary. An unsent system argument has no byte count.
+    """
+    try:
+        measured: dict[str, int | str] = {
+            "attempt": attempt,
+            "user_utf8_bytes": len(prompt.encode("utf-8")),
+            "system_disposition": (
+                "supplied" if system_instructions is not None else
+                "absent" if system_instructions_supported else "unsupported"
+            ),
+        }
+        if system_instructions is not None:
+            measured["system_utf8_bytes"] = len(system_instructions.encode("utf-8"))
+        if stage_scope_id is not None:
+            measured["stage_scope_id"] = stage_scope_id
+        return measured
+    except Exception as exc:  # noqa: BLE001 - measurement must never interrupt agent work
+        print_warning(console, f"Host dispatch measurement failed: {type(exc).__name__}")
+        return None
+
+
 async def _run_agent(
     backend: Backend,
     cwd: Path,
@@ -712,13 +740,17 @@ async def _run_agent(
                     ):
                         if inv is not None:
                             inv.observe_backend_lifecycle(lifecycle)
-                            inv.record_host_dispatch(
-                                prompt=attempt_prompt,
-                                system_instructions=execute_kwargs.get("review_instructions"),
-                                system_instructions_supported=supports_review_instructions,
-                                attempt=attempt + 1, stage_scope_id=review_stage_scope_id,
-                            )
                             inv.observe_user_step(prompt=attempt_prompt)
+                        dispatch = _measure_host_dispatch(
+                            prompt=attempt_prompt,
+                            system_instructions=execute_kwargs.get("review_instructions"),
+                            system_instructions_supported=supports_review_instructions,
+                            attempt=attempt + 1, stage_scope_id=review_stage_scope_id,
+                        )
+                        if dispatch is not None:
+                            observed.record_host_dispatch(dispatch)
+                            if inv is not None:
+                                inv.record_host_dispatch(dispatch)
 
                         # Per-invocation abort controls live here so both backends
                         # are covered without a backend-signature change: the tool-call
@@ -742,10 +774,8 @@ async def _run_agent(
                                 # The sole telemetry observer runs before UI callbacks,
                                 # supervision and budgets can interrupt event handling.
                                 observed.observe(event)
-                                # Recorder-only parser/transport evidence and the
-                                # invocation ledger must be forwarded before any
-                                # branch-specific break; _dispatch is UI-free and
-                                # ignores RequestEvent (the one armless member).
+                                # Parser/transport evidence and the invocation ledger must be forwarded
+                                # before any branch-specific break; _dispatch is UI-free.
                                 if inv is not None:
                                     inv.observe(event)
                                 # After expiry, supervise/charge received native starts;

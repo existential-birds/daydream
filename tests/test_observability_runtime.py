@@ -65,7 +65,7 @@ def _observe_generation(attempt: Any, *, text: bool = False, metrics: bool = Fal
         attempt.observe(MetricsEvent("", 10, 2, None, 0.001, generation_id="gen-1"))
 
 @pytest.mark.anyio
-async def test_attempt_records_only_scrubbed_diagnostic_codes_and_counts(monkeypatch: pytest.MonkeyPatch,) -> None:
+async def test_attempt_records_scrubbed_diagnostic_events_in_observed_order(monkeypatch: pytest.MonkeyPatch,) -> None:
     secret = "opaque-diagnostic-secret"
     monkeypatch.setenv("DAYDREAM_TEST_TOKEN", secret)
     exporter, registry = _memory_tracing()
@@ -79,7 +79,7 @@ async def test_attempt_records_only_scrubbed_diagnostic_codes_and_counts(monkeyp
                     )
                 )
                 attempt.observe(DiagnosticEvent(
-                        code=f"parser_{secret}", message="another message", metadata={"raw": "not observable"},
+                        code=f"parser_{secret}", message="another message", metadata={"raw": "observable"},
                     )
                 )
                 attempt.observe(DiagnosticEvent(
@@ -90,16 +90,19 @@ async def test_attempt_records_only_scrubbed_diagnostic_codes_and_counts(monkeyp
     spans = exporter.get_finished_spans()
     assert sorted(str((span.attributes or {})["daydream.span.kind"]) for span in spans) == ["agent", "attempt", "run"]
     attempt_span = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "attempt")
-    attrs = dict(attempt_span.attributes or {})
-    assert attrs["daydream.backend_diagnostic.codes"] == ("parser_[REDACTED_CREDENTIAL]", "codex_transport_coverage",)
-    assert attrs["daydream.backend_diagnostic.counts"] == (2, 1)
-    encoded = str(spans)
-    assert secret not in encoded
-    assert "do not export" not in encoded
-    assert "not observable" not in encoded
+    assert [(event.name, dict(event.attributes or {})) for event in attempt_span.events] == [
+        ("daydream.backend_diagnostic", {"daydream.backend_diagnostic.code": code,
+            "daydream.backend_diagnostic.message": message, "daydream.backend_diagnostic.metadata": metadata})
+        for code, message, metadata in [
+            ("parser_[REDACTED_CREDENTIAL]", "do not export [REDACTED_CREDENTIAL]",
+                '{"api_key":"[REDACTED_CREDENTIAL]","count":99}'),
+            ("parser_[REDACTED_CREDENTIAL]", "another message", '{"raw":"observable"}'),
+            ("codex_transport_coverage", "transport detail", '{"occurrences":4}'),
+        ]
+    ]
     for span in spans:
-        if span is not attempt_span:
-            assert not any(key.startswith("daydream.backend_diagnostic") for key in (span.attributes or {}))
+        assert not any(key.startswith("daydream.backend_diagnostic") for key in (span.attributes or {}))
+        assert span is attempt_span or not span.events
 
 
 def test_diagnostics_scrub_formatted_arguments_and_exception(caplog: pytest.LogCaptureFixture) -> None:
@@ -165,18 +168,19 @@ async def test_shutdown_deadline_is_total_and_shutdown_once( caplog: pytest.LogC
 
 
 @pytest.mark.anyio
-async def test_retry_keeps_failed_billing_and_agent_records_salvaged_result(tmp_path: Path) -> None:
+async def test_startup_failure_and_retry_keep_dispatch_facts_failed_billing_and_salvaged_result(tmp_path: Path) -> None:
     class RetryableError(RuntimeError):
         retryable = True
 
     exporter, registry = _memory_tracing()
     backend = ScriptedBackend(script=[
+            [RetryableError("startup")],
             [TextEvent("failed content"), CostEvent(0.05, 4, 2), ResultEvent(None, None), RetryableError("retry")],
             [RequestEvent("effective prompt", system_prompt="effective system"), TextEvent('{"ok":true}'),
                 ResultEvent({"wrong": True}, None), MetricsEvent("", 30, 6, 4, 0.2, usage_scope="invocation"),
                 CostEvent(None, 0, None),
             ],
-        ], model="requested", retry_attempts=1, retry_base_delay_s=0, retry_max_delay_s=0,
+        ], model="requested", retry_attempts=2, retry_base_delay_s=0, retry_max_delay_s=0,
     )
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
         result = await run_agent(backend, tmp_path, "original", phase=DaydreamPhase.REVIEW,
@@ -186,8 +190,14 @@ async def test_retry_keeps_failed_billing_and_agent_records_salvaged_result(tmp_
     attempts = [
         span for span in exporter.get_finished_spans() if (span.attributes or {}).get("daydream.span.kind") == "attempt"
     ]
-    assert [span.status.status_code for span in attempts] == [StatusCode.ERROR, StatusCode.OK]
-    first, second = [dict(span.attributes or {}) for span in attempts]
+    assert [span.status.status_code for span in attempts] == [StatusCode.ERROR, StatusCode.ERROR, StatusCode.OK]
+    startup, first, second = [dict(span.attributes or {}) for span in attempts]
+    for attrs in (startup, first, second):
+        assert {key: value for key, value in attrs.items() if key.startswith("daydream.host_dispatch.")} == {
+            "daydream.host_dispatch.user_utf8_bytes": len("original".encode()),
+            "daydream.host_dispatch.system_disposition": "unsupported",
+        }
+    assert not any(key.startswith("gen_ai.usage.") for key in startup)
     assert first["gen_ai.usage.cost"] == 0.05
     assert second["gen_ai.usage.input_tokens"] == 0
     assert second["gen_ai.usage.output_tokens"] == 6
@@ -205,6 +215,7 @@ async def test_metadata_policy_omits_all_content_and_exception_strings(tmp_path:
     exporter, registry = _memory_tracing()
     backend = ScriptedBackend(script=[[
                 RequestEvent("PRIVATE PROMPT", system_prompt="PRIVATE SYSTEM"), TextEvent("PRIVATE TEXT"),
+                DiagnosticEvent("parser_gap", "PRIVATE DIAGNOSTIC", {"raw": "PRIVATE METADATA"}),
                 ThinkingEvent("PRIVATE REASON"), ToolStartEvent("tool", "Read", {"arg": "PRIVATE INPUT"}),
                 ToolResultEvent("tool", "PRIVATE OUTPUT", True), CostEvent(0.1, 2, 3),
                 ResultEvent({"verdict": "PRIVATE STRUCTURED"}, None), RuntimeError("PRIVATE ERROR opaque-secret"),
@@ -218,7 +229,8 @@ async def test_metadata_policy_omits_all_content_and_exception_strings(tmp_path:
         ):
             await run_agent(backend, tmp_path, "PRIVATE ORIGINAL", phase=DaydreamPhase.REVIEW)
     for span in exporter.get_finished_spans():
-        encoded = str(span.attributes) + str(span.events) + str(span.resource.attributes) + str(span.status)
+        encoded = (str(span.attributes) + str([event.attributes for event in span.events])
+                   + str(span.resource.attributes) + str(span.status.description))
         assert "PRIVATE" not in encoded and "opaque-secret" not in encoded
         assert not any(key.startswith(("traceloop.entity.input", "traceloop.entity.output", "gen_ai.input.messages",
                     "gen_ai.output.messages", "daydream.error.message",
@@ -230,6 +242,8 @@ async def test_metadata_policy_omits_all_content_and_exception_strings(tmp_path:
         span for span in exporter.get_finished_spans() if (span.attributes or {}).get("daydream.span.kind") == "attempt"
     )
     assert (attempt.attributes or {})["gen_ai.usage.output_tokens"] == 3
+    events = [dict(event.attributes or {}) for event in attempt.events if event.name == "daydream.backend_diagnostic"]
+    assert events == [{"daydream.backend_diagnostic.code": "parser_gap"}]
     assert attempt.status.description == "error"
     assert attempt.events[-1].name == "exception"
     assert (attempt.events[-1].attributes or {})["exception.type"] == "RuntimeError"
