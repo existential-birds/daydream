@@ -55,7 +55,13 @@ and records each backend diagnostic as an event in observed order: the code alwa
 message and metadata only with full content. The run span carries the run's GitHub
 repository and, when known, its pull request number as `daydream.pr_repo` and
 `daydream.pr_number`, and spans inside a forked recorder carry that fork's ATIF trajectory
-id as `daydream.trajectory.id`.
+id as `daydream.trajectory.id`. Each phase scope adds `daydream.phase.start` and
+`daydream.phase.end` events to the active span with `daydream.phase` and the ATIF
+`scope_id` as `daydream.phase_scope.id`; the end event adds `daydream.phase_scope.status`
+and, when set, `daydream.phase_scope.reason_code`. Each fan-out adds
+`daydream.dispatch.start` and `daydream.dispatch.end` events with the ATIF `dispatch_id` as
+`daydream.dispatch.id`. The trajectory recorder assigns both ids, so a run without one
+records neither event.
 
 [Span construction](../daydream/observability/spans.py),
 [trajectory metrics](../daydream/trajectory/), and

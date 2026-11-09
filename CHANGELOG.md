@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exporter named `local`; see [trace exporters](docs/extensions.md#trace-exporters)
   (part of [#1719](https://github.com/existential-birds/daydream/issues/1719),
   [#1791](https://github.com/existential-birds/daydream/pull/1791)).
+- Trace spans record each phase scope as `daydream.phase.start` and `daydream.phase.end`
+  events and each fan-out as `daydream.dispatch.start` and `daydream.dispatch.end` events
+  on the active span, carrying the trajectory's phase scope and dispatch ids and the phase's
+  terminal status ([#1792](https://github.com/existential-birds/daydream/issues/1792),
+  [#1798](https://github.com/existential-birds/daydream/pull/1798)).
 
 ### Changed
 

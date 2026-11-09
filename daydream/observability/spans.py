@@ -61,24 +61,21 @@ _agent_depth: ContextVar[int] = ContextVar("daydream_agent_depth", default=0)
 def _admit_observed_identity_list(
     values: list[str] | None, *, max_chars: int, context: str
 ) -> tuple[tuple[str, ...] | None, str | None]:
-    """Admit ordered distinct identities; omit the whole list on unsafe values or overflow.
-
-    Diagnostics contain fixed codes and, for overflow, the total distinct count.
-    """
+    """Admit ordered distinct identities; omit the whole list on unsafe values or overflow."""
     if values is None:
         return None, None
     if not isinstance(values, (list, tuple)):
-        return None, f"{_DIAG_LIST_MEMBER_UNSAFE}:{context}"
+        return None, _DIAG_LIST_MEMBER_UNSAFE
     distinct: list[str] = []
     for value in values:
         admitted, _diagnostic = _admit_identity_label(value, max_chars=max_chars, context=context)
         if admitted is None:
-            return None, f"{_DIAG_LIST_MEMBER_UNSAFE}:{context}"
+            return None, _DIAG_LIST_MEMBER_UNSAFE
         if admitted not in distinct:
             distinct.append(admitted)
     if len(distinct) > _MAX_ORDERED_IDENTITY_ENTRIES:
         # A partial list would falsely claim complete identity evidence.
-        return None, f"{_DIAG_LIST_OVERFLOW}:{len(distinct)}"
+        return None, _DIAG_LIST_OVERFLOW
     return tuple(distinct), None
 
 
@@ -347,7 +344,7 @@ def _record_active_event(name: str, attributes: dict[str, Any]) -> None:
         return
     try:
         trace.get_current_span().add_event(
-            name, {key: session.policy.value(value) for key, value in attributes.items()},
+            name, {key: session.policy.value(value) for key, value in attributes.items() if value is not None},
         )
     except Exception:
         _logger.warning("Trace event %s could not be recorded", name)
@@ -873,7 +870,7 @@ class AttemptObserver:
             for diagnostic in (model_diagnostic, provider_diagnostic):
                 if diagnostic is not None and self.scope.span is not None:
                     self.scope.span.add_event(
-                        "daydream.backend_diagnostic", {"daydream.backend_diagnostic.code": diagnostic.split(":", 1)[0]}
+                        "daydream.backend_diagnostic", {"daydream.backend_diagnostic.code": diagnostic}
                     )
             self.scope.attrs(
                 {
