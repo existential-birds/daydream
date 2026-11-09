@@ -18,7 +18,6 @@ from daydream.backends import (
 )
 from daydream.observability.spans import _admit_observed_identity_list
 
-# --- P18 Task 1: closed typed Effective Configuration Admission Contract ----
 
 def test_admission_contract_construction_rejects_wrong_types() -> None:
     rejected: list[tuple[type[Any], dict[str, Any], str]] = [

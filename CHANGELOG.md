@@ -29,8 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Trace spans record each phase scope as `daydream.phase.start` and `daydream.phase.end`
   events and each fan-out as `daydream.dispatch.start` and `daydream.dispatch.end` events
   on the active span, carrying the trajectory's phase scope and dispatch ids and the phase's
-  terminal status, so the timing summary and archive phase states can later read them from
-  trace evidence ([#1792](https://github.com/existential-birds/daydream/issues/1792)).
+  terminal status ([#1792](https://github.com/existential-birds/daydream/issues/1792)).
 
 ### Changed
 
