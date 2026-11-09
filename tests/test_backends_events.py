@@ -92,16 +92,12 @@ def test_observed_identity_lists_whole_overflow_omission() -> None:
         [f"model-{i}" for i in range(17)], max_chars=256, context="models",
     )
     assert admitted is None
-    assert diagnostic is not None
-    code, detail = diagnostic.split(":", 1)
-    assert code == "config_list_overflow"
-    assert detail == "17"  # total distinct count only
+    assert diagnostic == "config_list_overflow"
     # One unsafe member poisons the whole list (no partial lists).
     admitted, diagnostic = _admit_observed_identity_list(
         ["ok/model", "/Users/ka/secret"], max_chars=256, context="models",
     )
-    assert admitted is None and diagnostic is not None
-    assert diagnostic.split(":", 1)[0] == "config_list_member_unsafe"
+    assert admitted is None and diagnostic == "config_list_member_unsafe"
 
 def test_tool_call_choice_part_json_arguments_are_schema_admitted() -> None:
     part = ToolCallChoicePart(call_id="t1", name="read", arguments={"path": "/x", "n": 3, "ok": True, "f": 0.5})

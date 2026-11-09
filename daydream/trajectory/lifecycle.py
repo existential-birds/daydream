@@ -171,6 +171,9 @@ def _emit_phase_start(
             scope_id=scope_id,
             **safe_metadata,
         )
+        from daydream.observability.spans import _record_active_event
+
+        _record_active_event("daydream.phase.start", {"daydream.phase": phase, "daydream.phase_scope.id": scope_id})
 
 
 def _emit_phase_end(
@@ -184,6 +187,12 @@ def _emit_phase_end(
 ) -> None:
     if recorder is None:
         return
+    from daydream.observability.spans import _record_active_event
+
+    _record_active_event("daydream.phase.end", {
+        "daydream.phase": phase, "daydream.phase_scope.id": scope_id,
+        "daydream.phase_scope.status": status, "daydream.phase_scope.reason_code": reason_code,
+    })
     try:
         recorder._emit_phase_event(
             phase,
@@ -413,6 +422,7 @@ async def dispatch_scope(
     descriptors: Sequence[str],
 ) -> AsyncIterator[DispatchHandle | None]:
     """Bracket one explicit fan-out and materialize its deterministic step."""
+    from daydream.observability.spans import _record_active_event
     from daydream.trajectory.recorder import _admitted_descriptor
 
     planned = tuple(descriptors)
@@ -428,6 +438,7 @@ async def dispatch_scope(
         _started_at=timeutil.now_iso(),
     )
     recorder._active_dispatches.append(handle)
+    _record_active_event("daydream.dispatch.start", {"daydream.dispatch.id": handle.dispatch_id})
     try:
         yield handle
     except BaseException as exc:
@@ -436,6 +447,7 @@ async def dispatch_scope(
     finally:
         handle._finalize_default()
         handle._close(timeutil.now_iso())
+        _record_active_event("daydream.dispatch.end", {"daydream.dispatch.id": handle.dispatch_id})
         try:
             recorder._create_dispatch_step(handle)
         except Exception as exc:  # noqa: BLE001 - recording never masks the body

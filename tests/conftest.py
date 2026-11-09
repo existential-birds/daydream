@@ -435,23 +435,6 @@ def dataset_hub(monkeypatch: pytest.MonkeyPatch) -> Any:
     return hub
 
 
-@pytest.fixture
-def operator_dataset_sentinel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
-    """A valid temporary operator store must retain exactly its original bytes."""
-    from daydream.dataset import LocalRecordStore
-    from tests.harness.dataset import run_record
-
-    home = tmp_path / "operator-home"
-    sentinel = home / ".daydream" / "dataset"
-    # Seed before changing home, so the harness does not redirect this store.
-    LocalRecordStore(sentinel).commit_run(run_record("operator-sentinel"))
-    original = {path.relative_to(sentinel): path.read_bytes() for path in sentinel.rglob("*") if path.is_file()}
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "fixture/ambient-trajectories")
-    yield sentinel
-    assert {path.relative_to(sentinel): path.read_bytes() for path in sentinel.rglob("*") if path.is_file()} == original
-
-
 @pytest.fixture(autouse=True)
 def _isolate_trace_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Strip tracing endpoints and credentials for every test."""

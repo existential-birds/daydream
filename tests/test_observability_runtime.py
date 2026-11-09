@@ -39,7 +39,7 @@ from daydream.observability.config import (
 from daydream.observability.privacy import PrivacyPolicy, diagnostic_scope
 from daydream.observability.runtime import current_run_trace_id, current_session, record_local_trace, trace_run
 from daydream.observability.spans import agent_scope, attempt_scope, stack_scope, step_scope
-from daydream.trajectory import DaydreamPhase, dispatch_scope
+from daydream.trajectory import DaydreamPhase, LifecycleReasonCode, LifecycleStatus, dispatch_scope, phase_scope
 from tests.harness.backend import ScriptedBackend
 from tests.harness.trajectory import make_recorder
 
@@ -371,7 +371,7 @@ async def test_run_trace_identity_and_delivery_failures_never_block_the_run(
 # --- P18 Task 3: no global providers, ambient metrics/logs, or instrumentation -
 
 @pytest.mark.anyio
-async def test_stack_binding_preserves_precedence_and_restores_context_on_every_exit(tmp_path: Path) -> None:
+async def test_stack_binding_restores_on_every_exit_and_recorder_scopes_annotate_spans(tmp_path: Path) -> None:
     """Spanless attribution restores the caller after a normal exit and after a cancelled reviewer."""
     for inherited_stack, exit_path in ((None, "normal"), ("", "cancellation")):
         exporter, registry = _memory_tracing()
@@ -403,20 +403,35 @@ async def test_stack_binding_preserves_precedence_and_restores_context_on_every_
             assert (restored.attributes or {})["daydream.stack"] == inherited_stack, exit_path
         assert all((span.attributes or {})["daydream.iteration"] == 0 for span in generations)
 
-    # Spans opened inside a forked recorder carry that child's trajectory identity.
+    # Spans inside a fork carry its trajectory id; phase and dispatch scopes add events to the enclosing span.
     exporter, registry = _memory_tracing()
     root = make_recorder(tmp_path)
-    async with (
-        root,
-        dispatch_scope(root, phase=DaydreamPhase.DEEP, descriptors=("stack-python",)) as dispatch,
-        root.fork("stack-python", dispatch=dispatch) as child,
-    ):
-        async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
-            with step_scope("review", stack=None, iteration=0):
-                pass
-    step, = [span for span in exporter.get_finished_spans() if span.name == "daydream.step.review"]
+    async with root, trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
+        with step_scope("deep", stack=None, iteration=0):
+            async with (
+                phase_scope(DaydreamPhase.DEEP) as phase,
+                dispatch_scope(root, phase=DaydreamPhase.DEEP, descriptors=("stack-python",)) as dispatch,
+                root.fork("stack-python", dispatch=dispatch) as child,
+                phase_scope(DaydreamPhase.REVIEW) as review,
+            ):
+                with step_scope("review", stack=None, iteration=0):
+                    pass
+                phase.finish(LifecycleStatus.PARTIAL, LifecycleReasonCode.SOME_CHILDREN_FAILED)
+    by_name = {span.name: span for span in exporter.get_finished_spans()}
+    step = by_name["daydream.step.review"]
     assert (step.attributes or {})["daydream.trajectory.descriptor"] == "stack-python"
     assert (step.attributes or {})["daydream.trajectory.id"] == child.trajectory_id == "test:dispatch:1:fork:1"
+    assert (phase.scope_id, review.scope_id) == ("test:phase:1", "test:dispatch:1:fork:1:phase:1")
+    deep = {"daydream.phase": "deep", "daydream.phase_scope.id": phase.scope_id}
+    nested = {"daydream.phase": "review", "daydream.phase_scope.id": review.scope_id}
+    fanout = {"daydream.dispatch.id": "test:dispatch:1"}
+    assert [(event.name, dict(event.attributes or {})) for event in by_name["daydream.step.deep"].events] == [
+        ("daydream.phase.start", deep), ("daydream.dispatch.start", fanout), ("daydream.phase.start", nested),
+        ("daydream.phase.end", {**nested, "daydream.phase_scope.status": "succeeded"}),
+        ("daydream.dispatch.end", fanout),
+        ("daydream.phase.end", {**deep, "daydream.phase_scope.status": "partial",
+                                "daydream.phase_scope.reason_code": "some_children_failed"}),
+    ]
 
 
 async def test_codex_lifecycle_export_retains_exit_without_creating_usage() -> None:
