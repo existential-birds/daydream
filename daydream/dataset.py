@@ -576,17 +576,11 @@ class LocalRecordStore:
                 for kind, listed in names.items()}
 
     def read_record(self, kind: str, name: str) -> tuple[bytes, Record]:
-        """Read one listed record file's exact bytes and fully validated record outside the lock.
-
-        An observation must also resolve against its run in this store.
-        """
+        """Read one listed record file's exact bytes and fully validated record outside the lock."""
         if kind not in ("runs", "observations") or not _RECORD_NAME.fullmatch(name):
             raise StoreError("unknown_shard")
         try:
-            data, record = self._checked(kind, self.root / kind / name)
-            if kind == "observations":
-                self._validate_target(record)
-            return data, record
+            return self._checked(kind, self.root / kind / name)
         except OSError:
             raise StoreError("persistence_failed") from None
 

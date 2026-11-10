@@ -77,7 +77,8 @@ only while listing record files, so reviews keep committing while it runs; recor
 committed after the listing wait for the next publish. Publishers on other stores or
 hosts coordinate through the guarded parent commit and retry. A publish reads only the
 remote `manifest.json`, never remote shards: a record is pending when the manifest lacks
-its identity. It reads local records one at a time and commits at most 64 MiB of shards
+its identity, so its time grows with the manifest's per-record entries, not with shard
+content. It reads local records one at a time and commits at most 64 MiB of shards
 per commit, each acknowledged by its own receipt once the manifest read back after the
 commit matches. Its memory stays within one commit and one record, plus small
 per-record name and digest indexes, however large the stored history or backlog.
@@ -85,7 +86,7 @@ Already-published records are not scanned again on publish or download, so a sca
 update cannot block either.
 
 A pending record that fails validation or the publication scanner is left out of the
-commit, and so is an observation whose run is refused or invalid in the local store,
+commit, and so is an observation whose run is missing from the local store or refused,
 and a local copy of a published record that fails validation; the other
 records still publish. A valid local copy whose content differs from the published
 record is an identity conflict and stops the publish. The output lists each skipped

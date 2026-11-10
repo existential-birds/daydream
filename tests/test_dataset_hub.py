@@ -75,14 +75,10 @@ def test_offline_queue_retry_download_and_immutable_history(
 
 
 def test_rejected_records_are_skipped_with_safe_errors(tmp_path: Path, api: Any) -> None:
-    """A refused record and the observation that targets it stay local; other records still publish.
-
-    The observation reports its run's local refusal, or ``unknown_run_reference`` for a valid run refused only
-    for publication.
-    """
+    """A refused or missing record and the observation that targets it stay local; other records still publish."""
     for fault, expected in (("oversized", "record_exceeds_shard_limit"), ("secret", "blocking_secret_findings"),
-                            ("partial", "malformed_or_interrupted_record"), ("path", "unsafe_storage_path"),
-                            ("unknown", "unknown_shard")):
+                            ("partial", "malformed_or_interrupted_record"), ("missing", None),
+                            ("path", "unsafe_storage_path"), ("unknown", "unknown_shard")):
         root = tmp_path / fault
         hub = FakeDatasetHub()
         store = LocalRecordStore(root / "records")
@@ -93,6 +89,8 @@ def test_rejected_records_are_skipped_with_safe_errors(tmp_path: Path, api: Any)
         shard = store.root / "runs" / record_name("run-1")
         if fault == "partial":
             shard.write_bytes(shard.read_bytes()[:-1])
+        if fault == "missing":
+            shard.unlink()
         if fault == "path":
             target = root / "outside"
             target.write_bytes(shard.read_bytes())
@@ -102,16 +100,16 @@ def test_rejected_records_are_skipped_with_safe_errors(tmp_path: Path, api: Any)
             (store.root / "runs" / "notes.txt").write_text("not a record\n")
         publisher = api.DatasetUploader(store, TEST_REPO, backend=hub, max_shard_bytes=2048)
         result = publisher.upload()
-        assert shard.exists() and "private-sensitive-body" not in str(result)
+        assert shard.exists() != (fault == "missing") and "private-sensitive-body" not in str(result)
         if fault in ("path", "unknown"):
             assert result.error == expected and result.published == 0 and not hub.commits
             continue
-        assert (result.queued, result.published, result.failed, result.error) == (2, 1, 2, None)
-        assert result.skipped == (
-            api.SkippedRecord("observations", hashlib.sha256(b"judgment-1").hexdigest(),
-                              "unknown_run_reference" if fault != "partial" else expected),
-            api.SkippedRecord("runs", hashlib.sha256(b"run-1").hexdigest(), expected),
-        )
+        run = hashlib.sha256(b"run-1").hexdigest()
+        refused = () if expected is None else (api.SkippedRecord("runs", run, expected),)
+        assert (result.queued, result.published, result.failed, result.error) == (
+            1 + len(refused), 1, 1 + len(refused), None)
+        assert result.skipped == (api.SkippedRecord(
+            "observations", hashlib.sha256(b"judgment-1").hexdigest(), "unknown_run_reference"), *refused)
         manifest = json.loads(hub.trees[hub.revision][api.MANIFEST_PATH])
         assert [record["identity"] for kind in ("runs", "observations") for shard_entry in manifest["shards"][kind]
                 for record in shard_entry["records"]] == ["kept"]

@@ -7,7 +7,7 @@ import json
 import os
 import re
 import stat
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -241,11 +241,13 @@ class DatasetUploader:
 
     def _seal(
         self, pending: Sequence[tuple[str, str]], skipped: dict[tuple[str, str], str], shards: dict[str, list[Record]],
+        runs: Collection[str],
     ) -> tuple[dict[str, bytes], bool]:
         """Seal the next commit's pending records into ``shards``, read one at a time, and say whether more remain.
 
-        A refused record is left out and recorded in ``skipped``, with any observation of a refused run.
-        Runs precede observations, so every other target run is published or sealed by then.
+        A refused record is left out and recorded in ``skipped``, with any observation whose run is not among the
+        local ``runs`` or was refused. Runs precede observations, so every other target run is published or sealed
+        by then; the store validated each observation's finding target against its immutable run when appending it.
         """
         files: dict[str, bytes] = {}
         batch: list[bytes] = []
@@ -270,7 +272,8 @@ class DatasetUploader:
                 _scan(record)
                 if len(data) > self.max_shard_bytes:
                     raise StoreError("record_exceeds_shard_limit")
-                if record_kind == "observations" and ("runs", record_name(record["run_id"])) in skipped:
+                run = record_name(record["run_id"]) if record_kind == "observations" else None
+                if run is not None and (run not in runs or ("runs", run) in skipped):
                     raise StoreError("unknown_run_reference")
             except StoreError as refusal:
                 skipped[record_kind, name] = refusal.code
@@ -322,7 +325,7 @@ class DatasetUploader:
                                         skipped[kind, name] = refusal.code
                                     else:
                                         raise StoreError("immutable_identity_conflict")
-                        files, more = self._seal(pending, skipped, merged["shards"])
+                        files, more = self._seal(pending, skipped, merged["shards"], index["runs"])
                         if files:
                             files[MANIFEST_PATH] = _json_bytes(merged)
                             _manifest(files[MANIFEST_PATH])
