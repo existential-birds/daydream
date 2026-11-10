@@ -77,7 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   record is still scanned before it is sent. A corrupt upload receipt no longer blocks
   publishing; the next commit replaces it. Observation targets resolve against runs in
   the local store only. Commits are sealed in memory, without staged shards under the
-  store's `uploads/` directory (leftover `*.jsonl` files there can be deleted).
+  store's `uploads/` directory; publish deletes any staged by earlier versions.
   `dataset download` reports a moving revision as `invalid_revision` instead of
   `exact_revision_required`
   ([#1678](https://github.com/existential-birds/daydream/issues/1678)).

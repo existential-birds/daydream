@@ -293,6 +293,8 @@ class DatasetUploader:
         receipt, revision = _empty_manifest(), None
         try:
             with self._locked():
+                for staged in self.queue.glob("*.jsonl"):  # Shard copies staged by earlier versions.
+                    staged.unlink()
                 index = self.store.record_index()
                 _validate_repo(self.repo_id)
                 backend = self.backend or HfDatasetHub()

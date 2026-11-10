@@ -39,8 +39,10 @@ def test_offline_queue_retry_download_and_immutable_history(
     assert (failure.queued, failure.failed, failure.published, failure.error) == (2, 2, 0, "network_failed")
     hub.fail_before = False
     publisher = api.DatasetUploader(LocalRecordStore(store.root), TEST_REPO, backend=hub)
+    (publisher.queue / "runs-staged.jsonl").write_bytes(b"stale shard copy\n")
     result = publisher.upload()
     assert (result.queued, result.published, result.failed) == (0, 2, 0)
+    assert not list(publisher.queue.glob("*.jsonl"))
     assert publisher.status() == result
     assert len(hub.commits) == 1
     tree = hub.trees[result.revision]
