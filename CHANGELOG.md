@@ -57,8 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own receipt, so its memory no longer grows with stored history or the pending backlog.
   `dataset status` no longer parses records. A pending record that fails validation or
   the publication scanner, a local copy of a published record that fails validation, or
-  an observation whose run is missing from the local store or refused, is now left out while the other records publish, where
-  one such record used to stop all publication. The `publish` JSON lists it under
+  an observation whose run is missing from the local store or refused, is now left out
+  while the other records publish, where one such record used to stop all publication.
+  The `publish` JSON lists it under
   `skipped` with its kind, identity SHA-256 and error code and counts it as `failed`, so
   `publish` exits 1, `dataset status` reports `records_skipped` and exits 1 until a
   publish skips nothing, and a synchronous review reports the upload as failed. Shards
@@ -69,8 +70,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [#1786](https://github.com/existential-birds/daydream/pull/1786)).
 - Dataset publication reads only the remote `manifest.json`, never remote shards, so
   its time grows only with the manifest, not with shard content, and it no longer
-  re-verifies a backlog once per commit. Publish and `dataset download` no longer re-scan already-published records, so
-  a scanner update cannot block either; each new record is still scanned before it is
+  re-verifies a backlog once per commit. Publish and `dataset download` no longer
+  re-scan already-published records, so a scanner update cannot block either; each new
+  record is still scanned before it is
   sent. Observation targets resolve against runs in the local store only. Commits are
   sealed in memory, without staged shards under the store's `uploads/` directory
   (leftover `*.jsonl` files there can be deleted). `dataset download` reports a moving
