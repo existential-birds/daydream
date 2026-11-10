@@ -4,6 +4,7 @@ import fcntl
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -53,42 +54,10 @@ def test_dataset_download_rejects_moving_revision_before_network(
     assert not destination.exists()
 
 
-def test_cli_retries_lost_publication_response_without_duplicate_records(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-) -> None:
-    from tests.harness.dataset_hub import FakeDatasetHub
-
-    hub = FakeDatasetHub()
-    hub.lose_response = True
-    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
-    store = LocalRecordStore(tmp_path / "records")
-    store.commit_run(run_record())
-    store.append_observation(observation())
-    publish = ["corpus", "dataset", "publish", "--store", str(store.root)]
-    assert cli_main(publish) == 1
-    failed = json.loads(capsys.readouterr().out)
-    assert (failed["queued"], failed["published"], failed["failed"]) == (2, 0, 2)
-    committed = hub.revision
-    assert len(hub.commits) == 1
-
-    assert cli_main(publish) == 0
-    retried = json.loads(capsys.readouterr().out)
-    assert (retried["queued"], retried["published"], retried["failed"]) == (0, 2, 0)
-    assert retried["revision"] == committed and len(hub.commits) == 1
-    destination = tmp_path / "download"
-    assert cli_main(["corpus", "dataset", "download", "--revision", committed,
-                     "--output", str(destination)]) == 0
-    assert json.loads(capsys.readouterr().out)["observations"] == 1
-    assert LocalRecordStore(destination).read_records() == store.read_records()
-
-
 def test_cli_rival_manifest_commit_preserves_both_record_sets(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], dataset_hub: Any,
 ) -> None:
-    from tests.harness.dataset_hub import FakeDatasetHub
-
-    hub = FakeDatasetHub()
-    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
+    hub = dataset_hub
     first = LocalRecordStore(tmp_path / "first")
     rival = LocalRecordStore(tmp_path / "rival")
     first.commit_run(run_record("first"))
@@ -136,28 +105,3 @@ def test_cli_rival_manifest_commit_preserves_both_record_sets(
     assert cli_main(["corpus", "dataset", "publish", "--store", str(first.root)]) == 1
     later = json.loads(capsys.readouterr().out)
     assert (later["published"], later["skipped"], len(hub.commits)) == (3, published["skipped"], 3)
-
-
-def test_cli_rejects_corrupt_pinned_snapshot_before_exposing_records(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-) -> None:
-    from tests.harness.dataset_hub import FakeDatasetHub
-
-    hub = FakeDatasetHub()
-    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
-    store = LocalRecordStore(tmp_path / "records")
-    store.commit_run(run_record())
-    assert cli_main(["corpus", "dataset", "publish", "--store", str(store.root)]) == 0
-    capsys.readouterr()
-    revision = hub.revision
-    tree = hub.trees[revision]
-    manifest = json.loads(tree["manifest.json"])
-    manifest["schema_version"] = "unsupported"
-    tree["manifest.json"] = json.dumps(manifest).encode()
-    destination = tmp_path / "download"
-    assert cli_main(["corpus", "dataset", "download", "--revision", revision,
-                     "--output", str(destination)]) == 1
-    output = capsys.readouterr()
-    assert "Data Collection" in output.out
-    assert "SECRET_CORRUPT_SNAPSHOT" not in output.out + output.err
-    assert not destination.exists()
