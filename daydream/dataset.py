@@ -8,7 +8,7 @@ import os
 import re
 import stat
 import tempfile
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
@@ -304,25 +304,16 @@ def parse_snapshot(raw: Mapping[str, Any] | str | bytes) -> Record:
     return _parse_typed(raw, versions=("daydream.snapshot.v1", "daydream.snapshot.v2"), name="Snapshot")
 
 
-def finding_targets(run: Record) -> frozenset[str]:
-    """The finding item identities that an observation of ``run`` may target."""
-    return frozenset(item["item_uid"] for item in (run["findings"]["value"] or {}).get("items", []))
-
-
-def validate_observation_target(record: Record, targets: Mapping[str, Collection[str]]) -> None:
-    """Resolve an observation against a compact ``run_id -> finding_targets`` index."""
-    items = targets.get(record["run_id"])
-    if items is None:
-        raise StoreError("unknown_run_reference")
-    if record.get("item_uid") is not None and record["item_uid"] not in items:
-        raise StoreError("orphan_finding_reference")
-
-
 def validate_record_targets(runs: Sequence[Record], observations: Sequence[Record]) -> None:
     """Validate observation references against a complete collection of typed runs."""
-    targets = {run["run_id"]: finding_targets(run) for run in runs}
+    targets = {run["run_id"]: {item["item_uid"] for item in (run["findings"]["value"] or {}).get("items", [])}
+               for run in runs}
     for record in observations:
-        validate_observation_target(record, targets)
+        items = targets.get(record["run_id"])
+        if items is None:
+            raise StoreError("unknown_run_reference")
+        if record.get("item_uid") is not None and record["item_uid"] not in items:
+            raise StoreError("orphan_finding_reference")
 
 
 def semantic_evidence_digest(value: Any) -> str:
@@ -585,11 +576,17 @@ class LocalRecordStore:
                 for kind, listed in names.items()}
 
     def read_record(self, kind: str, name: str) -> tuple[bytes, Record]:
-        """Read one listed record file's exact bytes and fully validated record outside the lock."""
+        """Read one listed record file's exact bytes and fully validated record outside the lock.
+
+        An observation must also resolve against its run in this store.
+        """
         if kind not in ("runs", "observations") or not _RECORD_NAME.fullmatch(name):
             raise StoreError("unknown_shard")
         try:
-            return self._checked(kind, self.root / kind / name)
+            data, record = self._checked(kind, self.root / kind / name)
+            if kind == "observations":
+                self._validate_target(record)
+            return data, record
         except OSError:
             raise StoreError("persistence_failed") from None
 
@@ -795,12 +792,7 @@ class LocalRecordStore:
         path = self._shard("runs", record["run_id"])
         if not path.exists():
             raise StoreError("unknown_run_reference")
-        run = self._load("runs", path)[1]
-        self._validate_finding_target(record, run)
-
-    @staticmethod
-    def _validate_finding_target(record: Record, run: Record) -> None:
-        validate_record_targets((run,), (record,))
+        validate_record_targets((self._load("runs", path)[1],), (record,))
 
     def _checked(self, kind: str, path: Path, expected: Record | None = None) -> tuple[bytes, Record]:
         if not _RECORD_NAME.fullmatch(path.name):
@@ -920,7 +912,7 @@ class LocalRecordStore:
                     raise StoreError("snapshot_temporal_membership_conflict")
                 if record["run_id"] not in selected_runs:
                     raise StoreError("orphan_snapshot_observation")
-                self._validate_finding_target(record, selected_runs[record["run_id"]])
+                validate_record_targets((selected_runs[record["run_id"]],), (record,))
             valid_cutoff = _timestamp(pinned["valid_before"]) if pinned["valid_before"] else None
             eligible = tuple(record for record in typed_observations
                              if valid_cutoff is None or _timestamp(record["valid_at"]) <= valid_cutoff)

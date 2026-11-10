@@ -17,6 +17,7 @@ from daydream.dataset import LocalRecordStore, StoreError, record_name
 from tests.harness.dataset import observation, read_records, run_record
 
 TEST_REPO = "test-user/private-trajectories"
+SECRET = "-----BEGIN PRIVATE KEY-----\nprivate-sensitive-body\n-----END PRIVATE KEY-----"
 
 
 @pytest.fixture
@@ -27,7 +28,9 @@ def api() -> Any:
         return None
 
 
-def test_offline_queue_retry_download_and_immutable_history(tmp_path: Path, api: Any) -> None:
+def test_offline_queue_retry_download_and_immutable_history(
+    tmp_path: Path, api: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     assert api is not None, "The JSONL HF publication API is not implemented"
     from tests.harness.dataset_hub import FakeDatasetHub
 
@@ -62,9 +65,16 @@ def test_offline_queue_retry_download_and_immutable_history(tmp_path: Path, api:
     assert before.effective_judgment("run-1", "item:1")["disposition"] == "accepted"
     assert stat.S_IMODE(downloaded.root.stat().st_mode) == 0o700
     store.append_observation(observation("later", observed_at="2026-10-04T14:00:00Z"))
-    later = publisher.upload()
-    assert later.published == 3 and len(hub.commits) == 2
+    store.commit_run(run_record("leaked", provenance={"key": SECRET}))
+    with monkeypatch.context() as earlier_scanner:  # a published record that today's scanner flags
+        earlier_scanner.setattr(api, "_scan", lambda record: None)
+        later = publisher.upload()
+    assert later.published == 4 and len(hub.commits) == 2
+    hub.reads.clear()
     assert publisher.upload().revision == later.revision and len(hub.commits) == 2
+    assert set(hub.reads) == {api.MANIFEST_PATH}
+    leaked = api.download_snapshot(TEST_REPO, later.revision, tmp_path / "leaked", backend=hub)
+    assert len(read_records(leaked).runs) == 2
     old = api.download_snapshot(TEST_REPO, result.revision, tmp_path / "old", backend=hub)
     assert read_records(old).observations == before.observations
 
@@ -81,9 +91,12 @@ def test_credentials_alone_do_not_construct_a_hub(tmp_path: Path, api: Any, monk
 
 
 def test_rejected_records_are_skipped_with_safe_errors(tmp_path: Path, api: Any) -> None:
-    """A refused record and the observation that targets it stay local; other records still publish."""
+    """A refused record and the observation that targets it stay local; other records still publish.
+
+    The observation reports its run's local refusal, or ``unknown_run_reference`` for a valid run refused only
+    for publication.
+    """
     from tests.harness.dataset_hub import FakeDatasetHub
-    secret = "-----BEGIN PRIVATE KEY-----\nprivate-sensitive-body\n-----END PRIVATE KEY-----"
     for fault, expected in (("oversized", "record_exceeds_shard_limit"), ("secret", "blocking_secret_findings"),
                             ("schema", "invalid_or_unknown_record_schema"),
                             ("partial", "malformed_or_interrupted_record"), ("path", "unsafe_storage_path"),
@@ -92,7 +105,7 @@ def test_rejected_records_are_skipped_with_safe_errors(tmp_path: Path, api: Any)
         hub = FakeDatasetHub()
         store = LocalRecordStore(root / "records")
         store.commit_run(run_record("kept"))
-        store.commit_run(run_record(provenance={"nested": secret} if fault == "secret" else
+        store.commit_run(run_record(provenance={"nested": SECRET} if fault == "secret" else
                                     {"pad": "x" * 4096} if fault == "oversized" else {}))
         store.append_observation(observation())
         shard = store.root / "runs" / record_name("run-1")
@@ -115,7 +128,8 @@ def test_rejected_records_are_skipped_with_safe_errors(tmp_path: Path, api: Any)
             continue
         assert (result.queued, result.published, result.failed, result.error) == (2, 1, 2, None)
         assert result.skipped == (
-            api.SkippedRecord("observations", hashlib.sha256(b"judgment-1").hexdigest(), "unknown_run_reference"),
+            api.SkippedRecord("observations", hashlib.sha256(b"judgment-1").hexdigest(),
+                              "unknown_run_reference" if fault in ("oversized", "secret") else expected),
             api.SkippedRecord("runs", hashlib.sha256(b"run-1").hexdigest(), expected),
         )
         manifest = json.loads(hub.trees[hub.revision][api.MANIFEST_PATH])
@@ -239,14 +253,13 @@ def test_interruption_after_remote_commit_recovers_from_content_identity(tmp_pat
         def read_file(self, repo_id: str, path: str, revision: str) -> bytes | None:
             if self.commits and self.interrupt:
                 self.interrupt = False
-                raise KeyboardInterrupt
+                return None  # the committed manifest cannot be read back
             return super().read_file(repo_id, path, revision)
 
     hub = InterruptedHub()
     store = LocalRecordStore(tmp_path / "records")
     store.commit_run(run_record())
-    with pytest.raises(KeyboardInterrupt):
-        api.DatasetUploader(store, TEST_REPO, backend=hub).upload()
+    assert api.DatasetUploader(store, TEST_REPO, backend=hub).upload().error == "publication_not_confirmed"
     restarted = api.DatasetUploader(LocalRecordStore(store.root), TEST_REPO, backend=hub)
     assert restarted.status().queued == 1 and restarted.status().published == 0
     assert restarted.upload().published == 1 and len(hub.commits) == 1
@@ -261,29 +274,6 @@ def test_interruption_after_remote_commit_recovers_from_content_identity(tmp_pat
         after = restarted.upload()
         assert (after.published, after.error, len(hub.commits)) == (index + 1, None, index + 2)
         assert after.skipped == (api.SkippedRecord("runs", hashlib.sha256(b"run-1").hexdigest(), code),)
-
-
-def test_failed_queue_write_keeps_original_and_retries_privately(
-    tmp_path: Path, api: Any, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from tests.harness.dataset_hub import FakeDatasetHub
-
-    store = LocalRecordStore(tmp_path / "records")
-    store.commit_run(run_record())
-    hub = FakeDatasetHub()
-    original = api.atomic_write_bytes
-
-    def fail_write(path: Path, data: bytes, **options: Any) -> None:
-        if path.suffix == ".jsonl":
-            raise OSError("private-do-not-export")
-        original(path, data, **options)
-
-    with monkeypatch.context() as fault:
-        fault.setattr(api, "atomic_write_bytes", fail_write)
-        status = api.DatasetUploader(store, TEST_REPO, backend=hub).upload()
-    assert status.error == "queue_persistence_failed" and status.queued == 1
-    assert not hub.commits and len(read_records(store).runs) == 1
-    assert api.DatasetUploader(store, TEST_REPO, backend=hub).upload().published == 1
 
 
 def test_download_refuses_unrelated_destination_data(tmp_path: Path, api: Any) -> None:

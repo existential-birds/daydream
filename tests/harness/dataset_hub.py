@@ -16,6 +16,7 @@ class FakeDatasetHub:
         self.lose_response = False
         self.before_commit: Callable[[], None] | None = None
         self.commits: list[str] = []
+        self.reads: list[str] = []
         self.trees: dict[str, dict[str, bytes]] = {}
         self.revision = self._save({})
 
@@ -45,6 +46,7 @@ class FakeDatasetHub:
             raise HubError("network_failed")
         if revision not in self.trees:
             raise HubError("unknown_revision")
+        self.reads.append(path)
         return self.trees[revision].get(path)
 
     def commit(self, repo_id: str, files: Mapping[str, bytes], parent_revision: str) -> str:
