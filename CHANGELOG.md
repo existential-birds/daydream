@@ -68,20 +68,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [separate publication](docs/runbooks/record-dataset.md#separate-publication)
   ([#1715](https://github.com/existential-birds/daydream/issues/1715),
   [#1786](https://github.com/existential-birds/daydream/pull/1786)).
-- Dataset publication reads only the remote `manifest.json` and local file names. It
-  never reads remote shards or already-published local records, so its time grows with
-  the manifest and the pending backlog, not with shard content or stored history, and it
-  no longer re-verifies a backlog once per commit. A published identity is never sent
-  again, so a different local copy of it is no longer an `immutable_identity_conflict`
-  and a damaged one is no longer skipped; an observation of a run whose local copy
-  differs is held back as `run_differs_from_published`. Publish and `dataset download`
-  no longer re-scan already-published records, so a scanner update cannot block either;
-  each new record is still scanned before it is sent. A corrupt upload receipt no longer
-  blocks publishing; the next commit replaces it. Observation targets resolve against
-  runs in the local store only. Commits are sealed in memory, without staged shards
-  under the store's `uploads/` directory; publish deletes any staged by earlier
-  versions. `dataset download` reports a moving revision as `invalid_revision` instead
-  of `exact_revision_required`
+- Dataset publication reads the remote `manifest.json` but never remote shards, and
+  reads a local published record only to check a run that a pending observation targets,
+  so its time grows with the manifest and the pending backlog, not with shard content or
+  stored history, and it no longer re-verifies a backlog once per commit. A published
+  identity is never sent again, so a different local copy of it is no longer an
+  `immutable_identity_conflict` and a damaged one is no longer skipped; an observation
+  of a run whose local copy differs is held back as `run_differs_from_published`.
+  Publish and `dataset download` no longer re-scan already-published records, so a
+  scanner update cannot block either; each new record is still scanned before it is
+  sent. A corrupt upload receipt no longer blocks publishing; the next commit replaces
+  it. Observation targets resolve against runs in the local store only. Commits are
+  sealed in memory, without staged shards under the store's `uploads/` directory;
+  publish deletes any staged by earlier versions. `dataset download` reports a moving
+  revision as `invalid_revision` instead of `exact_revision_required`
   ([#1678](https://github.com/existential-birds/daydream/issues/1678)).
 - Run finalization holds one trajectory document at a time, so its peak memory follows
   the largest document instead of the run's size times the number of consumers. One

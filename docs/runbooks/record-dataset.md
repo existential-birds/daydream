@@ -75,10 +75,11 @@ destination only to the publish command.
 Publishers of one store and destination take turns. A publish holds the store lock
 only while listing record files, so reviews keep committing while it runs; records
 committed after the listing wait for the next publish. Publishers on other stores or
-hosts coordinate through the guarded parent commit and retry. A publish reads only the
-remote `manifest.json` and the local file names: a record is pending when the manifest
-lacks its identity, and a published record is never read, compared or sent again. Its
-time grows with the manifest's per-record entries and the pending backlog, not with
+hosts coordinate through the guarded parent commit and retry. A publish reads the
+remote `manifest.json`, never remote shards: a record is pending when the manifest lacks
+its identity, and a published record is never sent again. Of the local published
+records it reads only a run that a pending observation targets, once per publish.
+Its time grows with the manifest's per-record entries and the pending backlog, not with
 shard content or stored history. It reads pending records one at a time and commits at
 most 64 MiB of shards per commit, each acknowledged by its own receipt once the
 manifest read back after the commit matches. Its memory stays within one commit and
