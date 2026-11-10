@@ -68,7 +68,8 @@ def test_offline_queue_retry_download_and_immutable_history(
         earlier_scanner.setattr(api, "_scan", lambda record: None)
         later = publisher.upload()
     assert later.published == 4 and len(hub.commits) == 2
-    assert publisher.upload().revision == later.revision and len(hub.commits) == 2
+    again = publisher.upload()
+    assert (again.revision, again.error, again.published, len(hub.commits)) == (later.revision, None, 4, 2)
     assert set(hub.reads) == {api.MANIFEST_PATH}
     leaked = api.download_snapshot(TEST_REPO, later.revision, tmp_path / "leaked", backend=hub)
     assert len(read_records(leaked).runs) == 2

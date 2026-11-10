@@ -221,7 +221,8 @@ class DatasetUploader:
 
     def _status(self, index: Mapping[str, Sequence[str]], manifest: Record, revision: str | None,
                 error: str | None = None, skipped: Mapping[tuple[str, str], str] | None = None) -> UploadStatus:
-        published = sum(name in _members(manifest, kind) for kind in _SCHEMAS for name in index[kind])
+        known = {kind: _members(manifest, kind) for kind in _SCHEMAS}
+        published = sum(name in known[kind] for kind in _SCHEMAS for name in index[kind])
         queued = sum(len(index[kind]) for kind in _SCHEMAS) - published
         refused = tuple(SkippedRecord(kind, name.removesuffix(".jsonl"), code)
                         for (kind, name), code in sorted((skipped or {}).items()))
