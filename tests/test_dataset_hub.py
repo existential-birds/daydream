@@ -168,7 +168,7 @@ def test_bounded_publication_keeps_whole_records_and_identity_conflicts_fail(tmp
 
 def test_corrupt_pinned_snapshots_never_expose_records(tmp_path: Path, api: Any) -> None:
     for fault, code in (("digest", "shard_digest_mismatch"), ("duplicate", "invalid_or_unknown_manifest"),
-                        ("count", "invalid_or_unknown_manifest"),
+                        ("count", "invalid_or_unknown_manifest"), ("schemas", "invalid_or_unknown_manifest"),
                         ("missing", "missing_shard"), ("partial", "malformed_or_interrupted_shard"),
                         ("record", "shard_record_identity_mismatch"), ("version", "invalid_or_unknown_record_schema"),
                         ("orphan", "unknown_run_reference")):
@@ -188,6 +188,8 @@ def test_corrupt_pinned_snapshots_never_expose_records(tmp_path: Path, api: Any)
             manifest["shards"]["runs"].append(shard)
         elif fault == "count":
             shard["count"] += 1
+        elif fault == "schemas":
+            manifest["record_schemas"]["runs"] = ["daydream.run.v9"]
         elif fault in {"partial", "record", "version"}:
             data = tree.pop(shard["path"])
             data = (data[:-1] if fault == "partial" else data.replace(b'"success"', b'"failed"') if fault == "record"
