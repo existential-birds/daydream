@@ -56,14 +56,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records one at a time and commits at most 64 MiB of shards per commit, each with its
   own receipt, so its memory no longer grows with stored history or the pending backlog.
   `dataset status` no longer reads records. A pending record that fails validation or
-  the publication scanner, or an observation whose run is missing from the local store
-  or refused, is now left out while the other records publish, where one such record
-  used to stop all publication. The `publish` JSON lists it under `skipped` with its
-  kind, identity SHA-256 and error code and counts it as `failed`, so `publish` exits 1,
-  `dataset status` reports `records_skipped` and exits 1 until a publish skips nothing,
-  and a synchronous review reports the upload as failed. Shards now group pending
-  records in store-file order. To keep Hub work out of review processes, capture without
-  a destination and schedule `publish`; see
+  the publication scanner, or an observation whose run is missing from the local store,
+  refused, or differs locally from the published run, is now left out while the other
+  records publish, where one such record used to stop all publication. The `publish`
+  JSON lists it under `skipped` with its kind, identity SHA-256 and error code and
+  counts it as `failed`, so `publish` exits 1, `dataset status` reports
+  `records_skipped` and exits 1 until a publish skips nothing, and a synchronous review
+  reports the upload as failed. Shards now group pending records in store-file order. To
+  keep Hub work out of review processes, capture without a destination and schedule
+  `publish`; see
   [separate publication](docs/runbooks/record-dataset.md#separate-publication)
   ([#1715](https://github.com/existential-birds/daydream/issues/1715),
   [#1786](https://github.com/existential-birds/daydream/pull/1786)).
@@ -72,14 +73,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the manifest and the pending backlog, not with shard content or stored history, and it
   no longer re-verifies a backlog once per commit. A published identity is never sent
   again, so a different local copy of it is no longer an `immutable_identity_conflict`
-  and a damaged one is no longer skipped. Publish and `dataset download` no longer
-  re-scan already-published records, so a scanner update cannot block either; each new
-  record is still scanned before it is sent. A corrupt upload receipt no longer blocks
-  publishing; the next commit replaces it. Observation targets resolve against runs in
-  the local store only. Commits are sealed in memory, without staged shards under the
-  store's `uploads/` directory; publish deletes any staged by earlier versions.
-  `dataset download` reports a moving revision as `invalid_revision` instead of
-  `exact_revision_required`
+  and a damaged one is no longer skipped; an observation of a run whose local copy
+  differs is held back as `run_differs_from_published`. Publish and `dataset download`
+  no longer re-scan already-published records, so a scanner update cannot block either;
+  each new record is still scanned before it is sent. A corrupt upload receipt no longer
+  blocks publishing; the next commit replaces it. Observation targets resolve against
+  runs in the local store only. Commits are sealed in memory, without staged shards
+  under the store's `uploads/` directory; publish deletes any staged by earlier
+  versions. `dataset download` reports a moving revision as `invalid_revision` instead
+  of `exact_revision_required`
   ([#1678](https://github.com/existential-birds/daydream/issues/1678)).
 - Run finalization holds one trajectory document at a time, so its peak memory follows
   the largest document instead of the run's size times the number of consumers. One

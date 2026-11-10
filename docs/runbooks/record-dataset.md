@@ -86,8 +86,9 @@ one record, plus small per-record name indexes. Already-published records are no
 scanned again on publish or download, so a scanner update cannot block either.
 
 A pending record that fails validation or the publication scanner is left out of the
-commit, and so is an observation whose run is missing from the local store or refused;
-the other records still publish. The output lists each skipped
+commit, and so is an observation whose run is missing from the local store, refused, or
+a local copy that differs from the published run (`run_differs_from_published`); the
+other records still publish. The output lists each skipped
 record under `skipped` with its kind, identity SHA-256 and error code, and the
 command exits 1; `dataset status` then reports `records_skipped` and exits 1 until a
 publish skips nothing. A skipped record stays unchanged in the local store, counts as

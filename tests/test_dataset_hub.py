@@ -122,7 +122,7 @@ def test_bounded_publication_keeps_whole_records_and_never_resends_published_ide
     tmp_path: Path, api: Any,
 ) -> None:
     """Shards and commits stay within their limits, memory stays flat as stored history grows,
-    and a different local copy of a published identity is never sent."""
+    and neither a different local copy of a published identity nor an observation of it is sent."""
     between = [LocalRecordStore(tmp_path / "between")]
     between[0].commit_run(run_record("between"))
 
@@ -149,8 +149,11 @@ def test_bounded_publication_keeps_whole_records_and_never_resends_published_ide
         assert 0 < sum(len(hub.trees[child][path]) for path in added) <= bound
     rival = LocalRecordStore(tmp_path / "rival")
     rival.commit_run(run_record("run-0", outcome="failed"))
+    rival.append_observation(observation("rival-judgment", run_id="run-0"))
     conflicting = api.DatasetUploader(rival, TEST_REPO, backend=hub).upload()
-    assert (conflicting.published, conflicting.error, len(hub.commits)) == (1, None, 4)
+    assert (conflicting.published, conflicting.queued, len(hub.commits)) == (1, 1, 4)
+    assert conflicting.skipped == (api.SkippedRecord(
+        "observations", hashlib.sha256(b"rival-judgment").hexdigest(), "run_differs_from_published"),)
 
     def publication_peak(history: int) -> int:
         stored = LocalRecordStore(tmp_path / f"history-{history}")

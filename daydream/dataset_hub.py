@@ -96,9 +96,10 @@ def _manifest(raw: bytes) -> Record:
         raise StoreError("invalid_or_unknown_manifest") from None
 
 
-def _members(manifest: Record, kind: str) -> set[str]:
-    """The local file names of each published record."""
-    return {record_name(record["identity"]) for shard in manifest["shards"][kind] for record in shard["records"]}
+def _members(manifest: Record, kind: str) -> dict[str, str]:
+    """Map each published record's local file name to its record digest."""
+    return {record_name(record["identity"]): record["sha256"] for shard in manifest["shards"][kind]
+            for record in shard["records"]}
 
 
 def _scan(record: Record) -> None:
@@ -220,7 +221,7 @@ class DatasetUploader:
 
     def _status(self, index: Mapping[str, Sequence[str]], manifest: Record, revision: str | None,
                 error: str | None = None, skipped: Mapping[tuple[str, str], str] | None = None) -> UploadStatus:
-        published = sum(len(_members(manifest, kind).intersection(index[kind])) for kind in _SCHEMAS)
+        published = sum(name in _members(manifest, kind) for kind in _SCHEMAS for name in index[kind])
         queued = sum(len(index[kind]) for kind in _SCHEMAS) - published
         refused = tuple(SkippedRecord(kind, name.removesuffix(".jsonl"), code)
                         for (kind, name), code in sorted((skipped or {}).items()))
@@ -234,14 +235,16 @@ class DatasetUploader:
 
     def _seal(
         self, pending: Sequence[tuple[str, str]], skipped: dict[tuple[str, str], str], shards: dict[str, list[Record]],
-        runs: Collection[str],
+        runs: Collection[str], published: Mapping[str, str],
     ) -> tuple[dict[str, bytes], bool]:
         """Seal the next commit's pending records into ``shards``, read one at a time, and say whether more remain.
 
         A refused record is left out and recorded in ``skipped``, with any observation whose run is not among the
-        local ``runs`` or was refused. Runs precede observations, so every other target run is published or sealed
-        by then; the store validated each observation's finding target against its immutable run when appending it.
+        local ``runs``, was refused, or differs from its ``published`` digest. Runs precede observations, so every
+        other target run is published or sealed by then; the store validated each observation's finding target
+        against its local run when appending it, so only a local run that matches what was sent keeps it valid.
         """
+        copies: dict[str, str] = {}  # Digest of each published target run's local copy, read once.
         files: dict[str, bytes] = {}
         batch: list[bytes] = []
         members: list[Record] = []
@@ -265,9 +268,14 @@ class DatasetUploader:
                 _scan(record)
                 if len(data) > self.max_shard_bytes:
                     raise StoreError("record_exceeds_shard_limit")
-                run = record_name(record["run_id"]) if record_kind == "observations" else None
-                if run is not None and (run not in runs or ("runs", run) in skipped):
+                run = record_name(record["run_id"])
+                if record_kind == "observations" and (run not in runs or ("runs", run) in skipped):
                     raise StoreError("unknown_run_reference")
+                if record_kind == "observations" and run in published:
+                    if run not in copies:
+                        copies[run] = _sha(self.store.read_record("runs", run)[0][:-1])
+                    if copies[run] != published[run]:
+                        raise StoreError("run_differs_from_published")
             except StoreError as refusal:
                 skipped[record_kind, name] = refusal.code
                 continue
@@ -307,7 +315,7 @@ class DatasetUploader:
                         known = {kind: _members(merged, kind) for kind in _SCHEMAS}
                         pending = [(kind, name) for kind in _SCHEMAS for name in index[kind]
                                    if name not in known[kind] and (kind, name) not in skipped]
-                        files, more = self._seal(pending, skipped, merged["shards"], set(index["runs"]))
+                        files, more = self._seal(pending, skipped, merged["shards"], set(index["runs"]), known["runs"])
                         if files:
                             files[MANIFEST_PATH] = _json_bytes(merged)
                             _manifest(files[MANIFEST_PATH])
