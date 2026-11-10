@@ -116,9 +116,11 @@ def test_rejected_records_are_skipped_with_safe_errors(tmp_path: Path, api: Any)
         assert publisher.upload().skipped == result.skipped and len(hub.commits) == 1
 
 
-def test_bounded_publication_keeps_whole_records_and_identity_conflicts_fail(tmp_path: Path, api: Any) -> None:
+def test_bounded_publication_keeps_whole_records_and_never_resends_published_identities(
+    tmp_path: Path, api: Any,
+) -> None:
     """Shards and commits stay within their limits, memory stays flat as stored history grows,
-    and an identity conflict fails before any commit."""
+    and a different local copy of a published identity is never sent."""
     between = [LocalRecordStore(tmp_path / "between")]
     between[0].commit_run(run_record("between"))
 
@@ -145,8 +147,8 @@ def test_bounded_publication_keeps_whole_records_and_identity_conflicts_fail(tmp
         assert 0 < sum(len(hub.trees[child][path]) for path in added) <= bound
     rival = LocalRecordStore(tmp_path / "rival")
     rival.commit_run(run_record("run-0", outcome="failed"))
-    failure = api.DatasetUploader(rival, TEST_REPO, backend=hub).upload()
-    assert failure.error == "immutable_identity_conflict" and len(hub.commits) == 4
+    conflicting = api.DatasetUploader(rival, TEST_REPO, backend=hub).upload()
+    assert (conflicting.published, conflicting.error, len(hub.commits)) == (1, None, 4)
 
     def publication_peak(history: int) -> int:
         stored = LocalRecordStore(tmp_path / f"history-{history}")
@@ -230,9 +232,7 @@ def test_interruption_after_remote_commit_recovers_from_content_identity(tmp_pat
     published.write_bytes(published.read_bytes().replace(b"daydream.run.v1", b"daydream.run.v9"))
     store.commit_run(run_record("after"))
     after = restarted.upload()
-    assert (after.published, after.error, len(hub.commits)) == (1, None, 2)
-    assert after.skipped == (
-        api.SkippedRecord("runs", hashlib.sha256(b"run-1").hexdigest(), "invalid_or_unknown_record_schema"),)
+    assert (after.published, after.error, after.skipped, len(hub.commits)) == (2, None, (), 2)
 
 
 def test_download_refuses_unrelated_destination_data(tmp_path: Path, api: Any) -> None:

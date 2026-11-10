@@ -30,10 +30,9 @@ def _handle_dataset_operation(argv: list[str], *, operation: str) -> int:
     args = parser.parse_args(argv)
     try:
         if operation == "download":
-            store = download_snapshot(args.trajectory_hub_repo, args.revision, args.output)
-            records = store.read_records()
-            summary = {"revision": args.revision, "runs": len(records["runs"]),
-                       "observations": len(records["observations"])}
+            listed = download_snapshot(args.trajectory_hub_repo, args.revision, args.output).record_index()
+            summary = {"revision": args.revision, "runs": len(listed["runs"]),
+                       "observations": len(listed["observations"])}
             failed = False
         else:
             uploader = DatasetUploader(LocalRecordStore(args.store), args.trajectory_hub_repo)

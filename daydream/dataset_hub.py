@@ -96,10 +96,9 @@ def _manifest(raw: bytes) -> Record:
         raise StoreError("invalid_or_unknown_manifest") from None
 
 
-def _members(manifest: Record, kind: str) -> dict[str, str]:
-    """Map each published record's local file name to its record digest."""
-    return {record_name(record["identity"]): record["sha256"] for shard in manifest["shards"][kind]
-            for record in shard["records"]}
+def _members(manifest: Record, kind: str) -> set[str]:
+    """The local file names of each published record."""
+    return {record_name(record["identity"]) for shard in manifest["shards"][kind] for record in shard["records"]}
 
 
 def _scan(record: Record) -> None:
@@ -219,16 +218,10 @@ class DatasetUploader:
         except (ValueError, TypeError, KeyError, RecursionError):
             raise StoreError("invalid_upload_receipt") from None
 
-    def _status(self, index: Mapping[str, Mapping[str, str | None]], manifest: Record, revision: str | None,
+    def _status(self, index: Mapping[str, Sequence[str]], manifest: Record, revision: str | None,
                 error: str | None = None, skipped: Mapping[tuple[str, str], str] | None = None) -> UploadStatus:
-        published = queued = 0
-        for kind in _SCHEMAS:
-            known = _members(manifest, kind)
-            for name, digest in index[kind].items():
-                if digest is not None and known.get(name) == digest:
-                    published += 1
-                else:
-                    queued += 1
+        published = sum(len(_members(manifest, kind).intersection(index[kind])) for kind in _SCHEMAS)
+        queued = sum(len(index[kind]) for kind in _SCHEMAS) - published
         refused = tuple(SkippedRecord(kind, name.removesuffix(".jsonl"), code)
                         for (kind, name), code in sorted((skipped or {}).items()))
         return UploadStatus(queued, published, queued if error else len(refused), error, revision, refused)
@@ -295,12 +288,11 @@ class DatasetUploader:
 
     def upload(self) -> UploadStatus:
         """Retry from current remote membership; retain local evidence after any failure."""
-        index: dict[str, dict[str, str | None]] = {kind: {} for kind in _SCHEMAS}
+        index: dict[str, list[str]] = {kind: [] for kind in _SCHEMAS}
         skipped: dict[tuple[str, str], str] = {}
-        receipt, revision, error = _empty_manifest(), None, None
+        receipt, revision = _empty_manifest(), None
         try:
             with self._locked():
-                receipt, revision, error = self._receipt()
                 index = self.store.record_index()
                 _validate_repo(self.repo_id)
                 backend = self.backend or HfDatasetHub()
@@ -310,22 +302,10 @@ class DatasetUploader:
                         head = backend.private_revision(self.repo_id)
                         raw = backend.read_file(self.repo_id, MANIFEST_PATH, head)
                         merged = _empty_manifest() if raw is None else _manifest(raw)
-                        pending = []
-                        for kind in _SCHEMAS:
-                            known = _members(merged, kind)
-                            for name, digest in index[kind].items():
-                                if (kind, name) in skipped:
-                                    continue
-                                if name not in known:
-                                    pending.append((kind, name))
-                                elif known[name] != digest:
-                                    try:
-                                        self.store.read_record(kind, name)
-                                    except StoreError as refusal:
-                                        skipped[kind, name] = refusal.code
-                                    else:
-                                        raise StoreError("immutable_identity_conflict")
-                        files, more = self._seal(pending, skipped, merged["shards"], index["runs"])
+                        known = {kind: _members(merged, kind) for kind in _SCHEMAS}
+                        pending = [(kind, name) for kind in _SCHEMAS for name in index[kind]
+                                   if name not in known[kind] and (kind, name) not in skipped]
+                        files, more = self._seal(pending, skipped, merged["shards"], set(index["runs"]))
                         if files:
                             files[MANIFEST_PATH] = _json_bytes(merged)
                             _manifest(files[MANIFEST_PATH])

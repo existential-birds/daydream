@@ -76,20 +76,18 @@ Publishers of one store and destination take turns. A publish holds the store lo
 only while listing record files, so reviews keep committing while it runs; records
 committed after the listing wait for the next publish. Publishers on other stores or
 hosts coordinate through the guarded parent commit and retry. A publish reads only the
-remote `manifest.json`, never remote shards: a record is pending when the manifest lacks
-its identity, so its time grows with the manifest's per-record entries, not with shard
-content. It reads local records one at a time and commits at most 64 MiB of shards
-per commit, each acknowledged by its own receipt once the manifest read back after the
-commit matches. Its memory stays within one commit and one record, plus small
-per-record name and digest indexes, however large the stored history or backlog.
-Already-published records are not scanned again on publish or download, so a scanner
-update cannot block either.
+remote `manifest.json` and the local file names: a record is pending when the manifest
+lacks its identity, and a published record is never read, compared or sent again. Its
+time grows with the manifest's per-record entries and the pending backlog, not with
+shard content or stored history. It reads pending records one at a time and commits at
+most 64 MiB of shards per commit, each acknowledged by its own receipt once the
+manifest read back after the commit matches. Its memory stays within one commit and
+one record, plus small per-record name indexes. Already-published records are not
+scanned again on publish or download, so a scanner update cannot block either.
 
 A pending record that fails validation or the publication scanner is left out of the
-commit, and so is an observation whose run is missing from the local store or refused,
-and a local copy of a published record that fails validation; the other
-records still publish. A valid local copy whose content differs from the published
-record is an identity conflict and stops the publish. The output lists each skipped
+commit, and so is an observation whose run is missing from the local store or refused;
+the other records still publish. The output lists each skipped
 record under `skipped` with its kind, identity SHA-256 and error code, and the
 command exits 1; `dataset status` then reports `records_skipped` and exits 1 until a
 publish skips nothing. A skipped record stays unchanged in the local store, counts as

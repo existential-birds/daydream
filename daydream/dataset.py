@@ -563,17 +563,13 @@ class LocalRecordStore:
                 self._validate_target(record)
             return {"runs": runs, "observations": observations}
 
-    def record_index(self) -> dict[str, dict[str, str | None]]:
-        """Map each kind's record files, in name order, to their record digests without parsing.
+    def record_index(self) -> dict[str, list[str]]:
+        """List each kind's record file names in name order without reading them.
 
-        Only the listing holds the store lock: a listed name is fully published and never
-        changes. Each digest is the SHA-256 of the file without its newline, read one file at
-        a time outside the lock; a file that fails the store's read check has none.
+        A listed name is fully published and never changes, so the lock is released on return.
         """
         with self._locked():
-            names = {kind: self._published(kind) for kind in ("runs", "observations")}
-        return {kind: {name: self._record_digest(self.root / kind / name) for name in listed}
-                for kind, listed in names.items()}
+            return {kind: self._published(kind) for kind in ("runs", "observations")}
 
     def read_record(self, kind: str, name: str) -> tuple[bytes, Record]:
         """Read one listed record file's exact bytes and fully validated record outside the lock."""
@@ -697,14 +693,6 @@ class LocalRecordStore:
 
     def _shard(self, kind: str, identity: str) -> Path:
         return self.root / kind / record_name(identity)
-
-    def _record_digest(self, path: Path) -> str | None:
-        try:
-            return _sha(self._read_bytes(path)[:-1])
-        except StoreError:
-            return None
-        except OSError:
-            raise StoreError("persistence_failed") from None
 
     def _commit_run(self, envelope: Record, documents: Iterable[Any] | None) -> CommitResult:
         """Stage one run record outside the store lock, then compare or publish it under the lock.
