@@ -245,7 +245,7 @@ class DatasetUploader:
         other target run is published or sealed by then; the store validated each observation's finding target
         against its local run when appending it, so only a local run that matches what was sent keeps it valid.
         """
-        copies: dict[str, str] = {}  # Digest of each published target run's local copy, read once.
+        copies: dict[str, str] = {}  # Digest of each published target run's local copy, read once per commit.
         files: dict[str, bytes] = {}
         batch: list[bytes] = []
         members: list[Record] = []

@@ -78,7 +78,7 @@ committed after the listing wait for the next publish. Publishers on other store
 hosts coordinate through the guarded parent commit and retry. A publish reads the
 remote `manifest.json`, never remote shards: a record is pending when the manifest lacks
 its identity, and a published record is never sent again. Of the local published
-records it reads only a run that a pending observation targets, once per publish.
+records it reads only a run that a pending observation targets.
 Its time grows with the manifest's per-record entries and the pending backlog, not with
 shard content or stored history. It reads pending records one at a time and commits at
 most 64 MiB of shards per commit, each acknowledged by its own receipt once the
