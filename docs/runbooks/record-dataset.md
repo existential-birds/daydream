@@ -82,8 +82,7 @@ per commit, each acknowledged by its own receipt once the manifest read back aft
 commit matches. Its memory stays within one commit and one record, plus small
 per-record name and digest indexes, however large the stored history or backlog.
 Already-published records are not scanned again on publish or download, so a scanner
-update cannot block either; download still checks every shard's digest, line count and
-record identities against the manifest.
+update cannot block either.
 
 A pending record that fails validation or the publication scanner is left out of the
 commit, and so is an observation whose run is refused or invalid in the local store,

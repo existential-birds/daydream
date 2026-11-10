@@ -53,9 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dataset publication (`daydream corpus dataset publish` and a review's synchronous
   upload) no longer loads the store's history into memory. It holds the store lock only
   while listing record files, so reviews can commit during a publish; it reads local
-  records one at a time and commits at most 64 MiB
-  of shards per commit, each with its own receipt, so its memory no longer grows with
-  stored history or the pending backlog. `dataset status` no longer parses records. A
+  records one at a time and commits at most 64 MiB of shards per commit, each with its
+  own receipt, so its memory no longer grows with stored history or the pending backlog. `dataset status` no longer parses records. A
   pending record that fails validation or the publication scanner, a local copy of a
   published record that fails validation, or an observation whose run is refused or
   invalid in the local store, is now left out while the other records publish, where
@@ -68,16 +67,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [separate publication](docs/runbooks/record-dataset.md#separate-publication)
   ([#1715](https://github.com/existential-birds/daydream/issues/1715),
   [#1786](https://github.com/existential-birds/daydream/pull/1786)).
-- **Breaking (0.y.z):** Dataset publication reads only the remote `manifest.json`, never
-  remote shards, so its time no longer grows with the published dataset or re-verifies a
-  backlog once per commit. Publish and `dataset download` no longer re-scan
-  already-published records, so a scanner update cannot block either; each new record is
-  still scanned before it is sent, and download still checks every shard's digest, line
-  count and record identities against the manifest. Observation targets resolve against
-  runs in the local store only, so an observation of a locally invalid run is skipped
-  with that run's error code. Commits are sealed in memory, without staged shards under
-  the store's `uploads/` directory (leftover `*.jsonl` files there can be deleted).
-  `daydream.dataset` no longer exports `finding_targets` or `validate_observation_target`
+- Dataset publication reads only the remote `manifest.json`, never remote shards, so
+  its time no longer grows with the published dataset or re-verifies a backlog once per
+  commit. Publish and `dataset download` no longer re-scan already-published records, so
+  a scanner update cannot block either; each new record is still scanned before it is
+  sent. Observation targets resolve against runs in the local store only. Commits are
+  sealed in memory, without staged shards under the store's `uploads/` directory
+  (leftover `*.jsonl` files there can be deleted). `dataset download` reports a moving
+  revision as `invalid_revision` instead of `exact_revision_required`
   ([#1678](https://github.com/existential-birds/daydream/issues/1678)).
 - Run finalization holds one trajectory document at a time, so its peak memory follows
   the largest document instead of the run's size times the number of consumers. One

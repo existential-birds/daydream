@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 from dataclasses import asdict
 from functools import partial
 from pathlib import Path
@@ -31,8 +30,6 @@ def _handle_dataset_operation(argv: list[str], *, operation: str) -> int:
     args = parser.parse_args(argv)
     try:
         if operation == "download":
-            if re.fullmatch(r"[0-9a-f]{40}", args.revision) is None:
-                raise StoreError("exact_revision_required")
             store = download_snapshot(args.trajectory_hub_repo, args.revision, args.output)
             records = store.read_records()
             summary = {"revision": args.revision, "runs": len(records["runs"]),
