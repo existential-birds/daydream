@@ -515,11 +515,8 @@ def test_post_findings_final_failure_reports_writes_and_safe_recovery_path(
         assert "payload preserved at" in message
         # Rich may wrap this machine path; removing whitespace recovers the displayed value.
         assert str(payload_path) in message.replace(" ", "")
-        if file_posts:
-            assert "1 file-level comment(s) were already posted." in message
-            assert "No comments were posted." not in message
-        else:
-            assert "No comments were posted." in message
+        assert ("1 file-level comment(s) were already posted." in message) is file_posts
+        assert "No comments were posted." not in message
         assert secret not in message
     finally:
         payload_path.unlink(missing_ok=True)

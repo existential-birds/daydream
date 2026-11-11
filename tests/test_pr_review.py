@@ -64,9 +64,9 @@ def _recording_fake_submit(captured: dict[str, pr_review.ClassifiedReviewPlan],)
     def fake_submit(plan: pr_review.ClassifiedReviewPlan, *, transport: pr_review.ReviewTransport
     ) -> pr_review.ClassifiedReviewResult:
         captured["plan"] = plan
-        return pr_review.ClassifiedReviewResult(status=pr_review.SubmissionStatus.POSTED,
+        return pr_review.ClassifiedReviewResult(
             review_url="https://github.com/acme/widgets/pull/42#pullrequestreview-1",
-            posted_file_level=(), folded_file_level=(), final_review_posted=True, safe_error=None,
+            posted_file_level=(), folded_file_level=(), safe_error=None,
         )
     return fake_submit
 
@@ -337,22 +337,13 @@ def _assumed_context(answer: str) -> RunContext:
     return RunContext(InteractionPolicy(assume=answer))
 
 
-def _stub_post(monkeypatch: pytest.MonkeyPatch, pr: PRInfo, classified: pr_review.ClassifiedIssues, *,
-               submit: Any = None, messages: list[str] | None = None,
+def _stub_post(monkeypatch: pytest.MonkeyPatch, pr: PRInfo, classified: pr_review.ClassifiedIssues,
                ) -> dict[str, pr_review.ClassifiedReviewPlan]:
-    """Stub every ``pr_review._post`` seam and return the dict that receives the submitted plan.
-
-    Pass *submit* to replace the recording stub (e.g. to return ``FAILED``); pass *messages* to
-    collect ``print_success``/``print_warning`` output that is otherwise dropped.
-    """
+    """Stub every ``pr_review._post`` seam and return the dict that receives the submitted plan."""
     captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
-    collect = messages.append if messages is not None else lambda *_a: None
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
     monkeypatch.setattr(pr_review, "classify", lambda *_a, **_k: classified)
-    monkeypatch.setattr(pr_review, "post_classified_review", submit or _recording_fake_submit(captured))
-    monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
-    monkeypatch.setattr(pr_review, "print_success", lambda _c, msg: collect(msg))
-    monkeypatch.setattr(pr_review, "print_warning", lambda _c, msg: collect(msg))
+    monkeypatch.setattr(pr_review, "post_classified_review", _recording_fake_submit(captured))
     return captured
 
 
