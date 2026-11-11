@@ -96,7 +96,7 @@ def test_prior_verdict_reuse_requires_rule_uid_digest_and_a_resolved_verdict() -
         "rule_version": 1, "verdicts": []}
     assert _prior_selection_payload({"selection": "invalid"}) is None
     shown = {"issue_id": 2, "verdict": "uncertain", "evidence": "shown"}
-    stray = [{"issue_id": n, "verdict": "contradicts", "evidence": "stray"} for n in (3, 9, 99)]
+    stray = [{"issue_id": n, "verdict": "contradicts", "evidence": "stray"} for n in (3, 9, 99, "2")]
     decisions = [*current[:2], replace(current[2], selected=False)]
     verdicts = _merge_reused_verdicts([reused["item:1"]], [shown, *stray], decisions, reused)
     assert verdicts == [reused["item:1"], shown]

@@ -185,8 +185,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ExtensionError`); and `MIN_SUPPORTED_EXTENSION_API_VERSION`
   ([#1680](https://github.com/existential-birds/daydream/issues/1680)).
 - **Breaking (0.y.z):** `RunConfig.verify_all` and `RunConfig.verify_extra_risk_categories`;
-  the `extra_risk_categories` setting (`DaydreamFileConfig.extra_risk_categories`);
-  `resolve_selection_config`, `UnknownRiskCategoryError` and `validate_extra_categories`;
+  the `extra_risk_categories` setting (`DaydreamFileConfig.extra_risk_categories`), which
+  could only name categories that are always verified; `resolve_selection_config`,
+  `UnknownRiskCategoryError` and `validate_extra_categories`;
   `SelectionConfig.extra_categories`; and `selection.extra_categories` in
   `recommendation-verdicts.json`. No known caller. `verify_all` still works: set it in
   `[tool.daydream]` or `.daydream.toml`, or pass
