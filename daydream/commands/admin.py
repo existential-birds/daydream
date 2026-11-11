@@ -70,12 +70,7 @@ def _handle_ext_validate_command() -> int:
     import importlib.util
     import os
 
-    from daydream.extensions import (
-        EXTENSION_API_VERSION,
-        MIN_SUPPORTED_EXTENSION_API_VERSION,
-        ExtensionError,
-        build_registry,
-    )
+    from daydream.extensions import EXTENSION_API_VERSION, ExtensionError, build_registry
 
     try:
         registry = build_registry()
@@ -91,10 +86,7 @@ def _handle_ext_validate_command() -> int:
     else:
         source = "extension source: no extension found (builtins only)"
     console.print(source, soft_wrap=True)
-    console.print(
-        f"extension API version {EXTENSION_API_VERSION} "
-        f"(supported: {MIN_SUPPORTED_EXTENSION_API_VERSION}..{EXTENSION_API_VERSION})"
-    )
+    console.print(f"extension API version {EXTENSION_API_VERSION}")
     supervisor_status = "registered" if registry.tool_supervisor_if_registered() is not None else "none"
     console.print(f"tool supervisor: {supervisor_status}")
     console.print(f"trace exporters: {', '.join(registry.trace_exporter_names()) or 'none'}")

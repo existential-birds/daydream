@@ -215,7 +215,7 @@ Each shard's status derives from its targets and the current (non-superseded) wo
 responsible for them; required phases are `challenge` and `cross_assignment`.
 Superseded failed work whose responsibilities were transferred and accepted elsewhere
 remains evidence but does not make the review incomplete. The staged deep path keeps
-its own rule ([stage-aware builders](extensions.md#stage-aware-review-builders-api-8)).
+its own rule ([stage-aware builders](extensions.md#stage-aware-review-builders)).
 
 ### Captured local source
 
@@ -302,11 +302,11 @@ Private stage/cache contract 17 invalidates older cache entries. Captured review
 paths reject `--start-at` and do not restore judgment shards: a complete shard
 marker does not establish that its enclosing review completed. Stopped reviews
 restart; retained evidence cannot restore assignment authority. Replace incompatible
-inputs by starting a new review; no historical converter is provided. The optional
-request/revision fields retain extension API 8. This changes local review semantics
-under the current `0.y.z` policy and requires release notes; package version bumps
-remain release work. Queued-scope admission and the shared canonical change follow the
-[stage-aware review contract](extensions.md#stage-aware-review-builders-api-8).
+inputs by starting a new review; no historical converter is provided. This changes
+local review semantics under the current `0.y.z` policy and requires release notes;
+package version bumps remain release work. Queued-scope admission and the shared
+canonical change follow the
+[stage-aware review contract](extensions.md#stage-aware-review-builders).
 
 Run-record capture keeps `head_sha` as real provenance and retains local `source_id`
 in the task and final state. `captured_working` identifies its population policy;
@@ -367,7 +367,7 @@ private session and conflict-safe installation. Existing source public artifacts
 are restored unchanged. Diagnostics stay under `private_base`; output destinations
 do not become model write grants. Recorded policy/configuration identities omit
 credentials and callback capabilities. This additive API retains the committed result
-schema and extension API 8.
+schema.
 
 For ordinary hosted committed input, the preparation attestation is required **before Git worktree materialization**:
 the operator must control/audit source Git configuration, checkout hooks and filters.
@@ -471,7 +471,7 @@ authorize a successful candidate or delivery.
 
 This is an additive minor feature under the current `0.y.z` policy. Immutable
 request 1, committed result 2 and findings 3 must be consumed together; ordinary
-result 1/findings 2 and extension API 8 retain their existing contracts. The bounded
+result 1/findings 2 retain their existing contracts. The bounded
 Harbor adapter consumes this API; ordinary CLI/bot migration (#1679), broader
 Harbor/native migration (#1639), and supported-default cutover (#1641) remain
 separately owned. This contract does not claim other-backend or large-plan parity.

@@ -97,7 +97,7 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
         'def staged(**kw):\n'
         '    return build_per_stack_prompt(**kw) + \"\\nCUSTOM_UTF8=é🙂 CUSTOM_ATTEMPT=\" '
         '+ str(kw[\"review_stage\"][\"attempt\"])\n'
-        'def register(r): r.override_prompt(\"per-stack\", staged)\n', api_version=8,
+        'def register(r): r.override_prompt(\"per-stack\", staged)\n',
     )
     review = staged_review(tmp_path, monkeypatch)
     attempts = 0

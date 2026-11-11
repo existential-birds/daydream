@@ -15,12 +15,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import cast
 
-from daydream.extensions.api import (
-    EXTENSION_API_VERSION,
-    MIN_SUPPORTED_EXTENSION_API_VERSION,
-    ExtensionError,
-    ExtensionVersionError,
-)
+from daydream.extensions.api import EXTENSION_API_VERSION, ExtensionError
 from daydream.extensions.builtins import register_builtins
 from daydream.extensions.registry import Registry
 
@@ -63,21 +58,10 @@ def _load_extension_module() -> tuple[ModuleType, str] | None:
 
 def _require_version(module: ModuleType, source: str) -> None:
     version = getattr(module, "DAYDREAM_EXT_API", None)
-    if version is None:
-        raise ExtensionVersionError(
-            f"extension module at {source} does not export DAYDREAM_EXT_API; "
-            f"this daydream supports {MIN_SUPPORTED_EXTENSION_API_VERSION}..{EXTENSION_API_VERSION} "
-            f"(see {_CONTRACT_DOC})"
-        )
-    if not (
-        isinstance(version, int)
-        and not isinstance(version, bool)
-        and MIN_SUPPORTED_EXTENSION_API_VERSION <= version <= EXTENSION_API_VERSION
-    ):
-        raise ExtensionVersionError(
-            f"extension module at {source} declares DAYDREAM_EXT_API = {version!r}; "
-            f"this daydream supports {MIN_SUPPORTED_EXTENSION_API_VERSION}..{EXTENSION_API_VERSION} "
-            f"(see {_CONTRACT_DOC})"
+    if type(version) is not int or version != EXTENSION_API_VERSION:
+        raise ExtensionError(
+            f"extension module at {source} must declare DAYDREAM_EXT_API = {EXTENSION_API_VERSION}; "
+            f"found {version!r} (see {_CONTRACT_DOC})"
         )
 
 

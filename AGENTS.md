@@ -206,7 +206,7 @@ rules in these owners rather than expanding this file with defaults and inventor
 | Change | Required reference |
 |--------|--------------------|
 | Flow order, extension phases/prompts, configuration | [Extension contract](docs/extensions.md), [configuration](daydream/config.py); defaults in `config.py`, resolution in `run_config.py` / `runner._resolve_backend()` |
-| Staged review, Pi output, budgets/retries, sharding | [Stage-aware builders](docs/extensions.md#stage-aware-review-builders-api-8), [review assignments](daydream/review_stage_inputs.py), [budget ledger](docs/runtime.md#budget-ledger), [retry policy](daydream/agent_retry.py) |
+| Staged review, Pi output, budgets/retries, sharding | [Stage-aware builders](docs/extensions.md#stage-aware-review-builders), [review assignments](daydream/review_stage_inputs.py), [budget ledger](docs/runtime.md#budget-ledger), [retry policy](daydream/agent_retry.py) |
 | Latency routing or diff bounding | [Latency routing](daydream/deep/latency.py); `deep/latency.py` and `deep/routing_record.py` own selection and evidence |
 | Record identity or merge/adjudication | [Finding identity](docs/extensions.md#finding-identity), [built-in flow steps](docs/extensions.md#built-in-flows-and-steps); `deep/records.py` owns identities |
 | Fix, verify, test, commit, remote CI | [Flow gates](docs/extensions.md#built-in-flows-and-steps), [validation contracts](docs/runtime.md#validation-and-repair), [repair jobs](docs/extensions.md#repair-jobs-test-step) |

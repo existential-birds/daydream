@@ -10,7 +10,6 @@ import pytest
 from daydream.deep.dependency import build_import_graph
 from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.deep.sharding import shard_stacks
-from daydream.extensions import Registry, StackRule
 
 
 def test_mixed_repository_routes_source_metadata_and_extension_evidence(tmp_path: Path) -> None:
@@ -61,7 +60,7 @@ def test_mixed_repository_routes_source_metadata_and_extension_evidence(tmp_path
             "config.yaml": "enabled: true\n",
             "Dockerfile": "FROM scratch\n",
             "shared.sql": "SELECT 1;\n",
-            "scripts/custom.cjs": "// Explicit extension owner\n",
+            "scripts/custom.cjs": "// Build script\n",
             "unowned/App.tsx": "export const App = () => <div/>;",
         }
     )
@@ -69,8 +68,6 @@ def test_mixed_repository_routes_source_metadata_and_extension_evidence(tmp_path
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body)
-    registry = Registry()
-    registry.add_stack(StackRule("build", ("scripts/custom.cjs",)))
 
     standalone = detect_stacks(["config.yaml", "pyproject.toml"], target_dir=tmp_path)
     assert [(stack.stack_name, stack.files) for stack in standalone] == [
@@ -83,7 +80,7 @@ def test_mixed_repository_routes_source_metadata_and_extension_evidence(tmp_path
         ("python", ["backend/api/main.py", "migrations/001.sql", "pyproject.toml"]),
         ("structure", ["backend/api/main.py", "migrations/001.sql", "pyproject.toml"]),
     ]
-    result = detect_stacks(list(reversed(bodies)), target_dir=tmp_path, registry=registry)
+    result = detect_stacks(list(reversed(bodies)), target_dir=tmp_path)
     react_names = {
         "static-import",
         "require",
@@ -105,11 +102,10 @@ def test_mixed_repository_routes_source_metadata_and_extension_evidence(tmp_path
     }
     python = {"backend/api/main.py", "backend/api/queries.sql", "pyproject.toml"}
     expected = {
-        "build": ["scripts/custom.cjs"],
         "python": sorted(python),
         "react": sorted(react),
         "rust": ["src/lib.rs"],
-        "generic": sorted(set(bodies) - react - python - {"scripts/custom.cjs", "src/lib.rs"}),
+        "generic": sorted(set(bodies) - react - python - {"src/lib.rs"}),
         "structure": sorted(bodies),
     }
     assert {stack.stack_name: stack.files for stack in result} == expected
@@ -232,8 +228,8 @@ def test_workspace_inventory_keeps_each_unowned_child_generic(tmp_path: Path) ->
     assert (set(stacks["react"]), set(stacks["generic"])) == (set(react_files), set(infrastructure))
 
 
-def test_local_packages_and_explicit_config_rules(tmp_path: Path) -> None:
-    """A sibling React file and root dependency cannot overwrite another package or an explicit rule."""
+def test_local_packages_route_their_own_configs(tmp_path: Path) -> None:
+    """A sibling React file and root dependency cannot overwrite another package."""
     bodies = {
         "package.json": {"workspaces": ["packages/*"], "dependencies": {"react": "*"}},
         "tsconfig.json": {"compilerOptions": {"jsx": "react-jsx"}},
@@ -254,15 +250,12 @@ def test_local_packages_and_explicit_config_rules(tmp_path: Path) -> None:
         path = f"packages/{package}/App.tsx"
         (tmp_path / path).write_text("export const App = () => <div/>;")
         files.append(path)
-    registry = Registry()
-    registry.add_stack(StackRule("custom", ("packages/react/tsconfig.json", "packages/node/package.json")))
-    scopes = {s.stack_name: s.files for s in detect_stacks(files, target_dir=tmp_path, registry=registry)}
+    scopes = {s.stack_name: s.files for s in detect_stacks(files, target_dir=tmp_path)}
     assert scopes["react"] == [
-        "package.json", "packages/react/App.tsx", "packages/react/package.json",
+        "package.json", "packages/react/App.tsx", "packages/react/package.json", "packages/react/tsconfig.json",
         "packages/web/App.tsx", "packages/web/tsconfig.json", "tsconfig.json",
     ]
-    assert scopes["custom"] == ["packages/node/package.json", "packages/react/tsconfig.json"]
-    assert scopes["generic"] == sorted(set(files) - set(scopes["react"]) - set(scopes["custom"]))
+    assert scopes["generic"] == sorted(set(files) - set(scopes["react"]))
     assert Counter(f for s, paths in scopes.items() if s != "structure" for f in paths) == Counter(files)
 
 

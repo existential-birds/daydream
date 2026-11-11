@@ -301,9 +301,9 @@ def _write_improve_probe_extension(ext_dir: Any) -> None:
         "    registry.register_phase(\n"
         "        FlowStep(name='artifact-visibility-audit-probe', run=_audit_probe)\n"
         "    )\n"
-        "    registry.insert_after(\n"
-        "        'improve', anchor='recon', step='artifact-visibility-audit-probe'\n"
-        "    )\n"
+        "    flow = registry.flow('improve')\n"
+        "    flow.insert(flow.index('recon') + 1, 'artifact-visibility-audit-probe')\n"
+        "    registry.set_flow('improve', flow)\n"
     )
 
 

@@ -499,9 +499,6 @@ def archive_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pat
     yield path
 
 
-_CURRENT_API = object()  # sentinel: "use the tool's current version"
-
-
 class ExtDir:
     """Helper for the ``ext_dir`` fixture: writes a ``daydream_ext`` package to tmp."""
 
@@ -509,18 +506,13 @@ class ExtDir:
         self._root = root
         self._monkeypatch = monkeypatch
 
-    def write_module(self, source: str, *, api_version: Any = _CURRENT_API) -> Path:
+    def write_module(self, source: str, *, api_version: Any = EXTENSION_API_VERSION) -> Path:
         """Write a package and point DAYDREAM_EXT_DIR at it.
 
-        api_version defaults to the current API. Explicit values are interpolated
-        as raw Python (including malformed test declarations); None omits it."""
-        if api_version is _CURRENT_API:
-            api_version = EXTENSION_API_VERSION
-        if api_version is not None:
-            source = f"DAYDREAM_EXT_API = {api_version}\n{source}"
+        api_version is interpolated as raw Python, so tests can declare malformed values."""
         package = self._root / "daydream_ext"
         package.mkdir(exist_ok=True)
-        (package / "__init__.py").write_text(source)
+        (package / "__init__.py").write_text(f"DAYDREAM_EXT_API = {api_version}\n{source}")
         self._monkeypatch.setenv("DAYDREAM_EXT_DIR", str(package))
         return package
 

@@ -1,7 +1,7 @@
 """Per-run extension registry, seeded with builtins before extension registration.
 
-Own phases, flows, prompts, renderers, supervision, trace factories and stack
-rules. Never import runner or phases here; that would create import cycles."""
+Own phases, flows, prompts, renderers, supervision and trace factories. Never
+import runner or phases here; that would create import cycles."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from daydream.extensions.api import (
     ExtensionError,
     FlowStep,
     LoopGroup,
-    StackRule,
     ToolSupervisor,
     UnresolvedExtensionError,
 )
@@ -32,14 +31,13 @@ _VALIDATE_HINT = "run 'daydream ext validate' to check the extension registry"
 
 
 class Registry:
-    """Mutable per-run store for phases, flows, prompts, renderers, supervision, tracing, and stack rules."""
+    """Mutable per-run store for phases, flows, prompts, renderers, supervision, and tracing."""
 
     def __init__(self) -> None:
         self._phases: dict[str, FlowStep] = {}
         self._flows: dict[str, list[FlowEntry]] = {}
         self._prompts: dict[str, Callable[..., str]] = {}
         self._renderers: dict[str, Callable[..., str]] = {}
-        self._stack_rules: dict[str, StackRule] = {}
         self._tool_supervisor: ToolSupervisor | None = None
         self._trace_exporters: dict[str, TraceExporterFactory] = {}
 
@@ -60,7 +58,7 @@ class Registry:
 
     def flow(self, flow_name: str) -> list[FlowEntry]:
         """Return the flow's ordered entry list, or raise ``UnresolvedExtensionError``."""
-        return list(self._entries(flow_name))
+        return self._lookup(self._flows, "flow", flow_name).copy()
 
     def phase_names(self) -> tuple[str, ...]:
         """Return every registered phase name in registration order."""
@@ -70,50 +68,12 @@ class Registry:
         """Return every registered flow name in registration order."""
         return tuple(self._flows)
 
-    def insert_before(self, flow_name: str, *, anchor: str, step: FlowEntry) -> None:
-        """Insert ``step`` immediately before ``anchor`` in the named flow."""
-        self._insert(flow_name, anchor=anchor, step=step, offset=0)
-
-    def insert_after(self, flow_name: str, *, anchor: str, step: FlowEntry) -> None:
-        """Insert ``step`` immediately after ``anchor`` in the named flow."""
-        self._insert(flow_name, anchor=anchor, step=step, offset=1)
-
-    def remove(self, flow_name: str, step: str) -> None:
-        """Remove the entry named ``step`` from the named flow."""
-        entries = self._entries(flow_name)
-        del entries[self._index_of(flow_name, entries, step)]
-
-    def _insert(self, flow_name: str, *, anchor: str, step: FlowEntry, offset: int) -> None:
-        entries = self._entries(flow_name)
-        entries.insert(self._index_of(flow_name, entries, anchor) + offset, step)
-
     @staticmethod
     def _lookup(mapping: dict[str, _T], kind: str, name: str) -> _T:
         try:
             return mapping[name]
         except KeyError:
             raise UnresolvedExtensionError(f"{kind} '{name}' is not registered; {_VALIDATE_HINT}") from None
-
-    def _entries(self, flow_name: str) -> list[FlowEntry]:
-        return self._lookup(self._flows, "flow", flow_name)
-
-    @staticmethod
-    def _entry_name(entry: FlowEntry) -> str:
-        return entry if isinstance(entry, str) else entry.name
-
-    def _index_of(self, flow_name: str, entries: list[FlowEntry], name: str) -> int:
-        for index, entry in enumerate(entries):
-            if self._entry_name(entry) == name:
-                return index
-        # Check whether the name exists inside a LoopGroup body so the error
-        # message names the containing group instead of implying the step is absent.
-        for entry in entries:
-            if isinstance(entry, LoopGroup) and name in entry.steps:
-                raise UnresolvedExtensionError(
-                    f"flow '{flow_name}' step '{name}' is inside loop group '{entry.name}'"
-                    f" and cannot be addressed directly; {_VALIDATE_HINT}"
-                )
-        raise UnresolvedExtensionError(f"flow '{flow_name}' has no step '{name}'; {_VALIDATE_HINT}")
 
     def override_prompt(self, name: str, builder: Callable[..., str]) -> None:
         """Upsert the prompt builder for a named prompt."""
@@ -180,11 +140,3 @@ class Registry:
     def trace_exporter_names(self) -> tuple[str, ...]:
         """Return destination names in deterministic registration order."""
         return tuple(self._trace_exporters)
-
-    def add_stack(self, rule: StackRule) -> None:
-        """Upsert a fork stack rule, keyed by ``stack_name``."""
-        self._stack_rules[rule.stack_name] = rule
-
-    def stack_rules(self) -> tuple[StackRule, ...]:
-        """Return all fork stack rules in registration order."""
-        return tuple(self._stack_rules.values())

@@ -9,7 +9,6 @@ import daydream.extensions as ext
 from daydream.extensions import (
     ExtensionError,
     FlowStep,
-    LoopGroup,
     ObservabilityConfig,
     Registry,
     ToolDecision,
@@ -67,22 +66,6 @@ def test_replace_requires_flag_and_prompt_roundtrip() -> None:
         reg.override_prompt("x", cast(Any, None))
 
 
-def test_flow_mutation_and_unresolved_lookup() -> None:
-    """set_flow/insert_after/remove edit the order; loop-internal removal and unknown phases fail by name."""
-    reg = Registry()
-    reg.register_phase(FlowStep(name="a", run=_noop))
-    reg.register_phase(FlowStep(name="b", run=_noop))
-    reg.set_flow("deep", ["a"])
-    reg.insert_after("deep", anchor="a", step="b")
-    reg.remove("deep", "a")
-    assert reg.flow("deep") == ["b"]
-    with pytest.raises(UnresolvedExtensionError, match="phase 'ghost'"):
-        reg.phase("ghost")
-    loop = LoopGroup(name="fix-loop", steps=("inner_step",), max_iterations=lambda ctx: 3)
-    reg.set_flow("deep", [loop])
-    with pytest.raises(UnresolvedExtensionError, match="inside loop group 'fix-loop'"):
-        reg.remove("deep", "inner_step")
-
 def test_tool_supervisor_registration_is_exclusive() -> None:
     reg = Registry()
     def supervisor(name: str, tool_input: dict[str, Any], *, phase: DaydreamPhase) -> ToolDecision:
@@ -113,7 +96,7 @@ def test_comment_contract_types_are_frozen_and_public() -> None:
         fingerprint="a" * 64,
     )
     sc = ext.SummaryContext(
-        findings=(ext.SummaryFinding(finding=cf, body_block="X"),), agent_prompt="P", review_info="I",
+        findings=(ext.SummaryFinding(finding=cf, body_block="X"),), review_info="I",
     )
     assert ext.FindingRenderContext(placement="summary").placement == "summary"
     assert sc.findings[0].body_block == "X" and sc.diagrams is None

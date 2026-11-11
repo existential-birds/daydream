@@ -1,14 +1,14 @@
 # Extension contract (`daydream_ext`)
 
 Read before changing extension behavior or implementing a fork extension.
-Current API: **8**, supported range **8..8**. Exact exported types/methods live in
+Current API: **9**, the only version accepted. Exact exported types/methods live in
 [api.py](../daydream/extensions/api.py), [registry.py](../daydream/extensions/registry.py),
 and [builtins.py](../daydream/extensions/builtins.py); consult builder signatures
 for prompt names/kwargs instead of maintaining another inventory.
 
 ## Implement and validate
 
-1. Create `daydream_ext/__init__.py` with `DAYDREAM_EXT_API = 8` and
+1. Create `daydream_ext/__init__.py` with `DAYDREAM_EXT_API = 9` and
    `register(registry)`. Built-ins are seeded first; registries are per-run.
 2. After creating the package, run `uv sync --reinstall-package daydream` for
    editable discovery. Fork wheels include it through Hatch configuration.
@@ -18,8 +18,8 @@ for prompt names/kwargs instead of maintaining another inventory.
 Discovery prefers `$DAYDREAM_EXT_DIR/__init__.py`, then importable `daydream_ext`,
 then built-ins. Invalid versions/imports/registration fail before agent work.
 Breaking registry, step, prompt, stable data, or supervision contracts require
-an API bump; additive optional fields/kwargs do not. Raise both supported bounds
-for a hard break; validate migrated extensions after upgrading Daydream.
+an API bump; additive optional fields/kwargs do not. Validate migrated extensions
+after upgrading Daydream.
 
 ## Flows and custom phases
 
@@ -29,10 +29,10 @@ or the step name. Custom phase keys work in `[tool.daydream.phases.NAME]` or
 `.daydream.toml`'s `[phases.NAME]`. Resolution is CLI → phase → global → backend;
 custom phases skip built-in phase defaults.
 
-`set_flow` resolves references at preflight; insert/remove require existing anchors
-immediately. Replace a `LoopGroup` to edit its members. Custom flows use `--flow`;
-review/comment/shallow are modes of `deep`. Fork stack rules win first-match
-routing, while profiles/builders supply review behavior. The preamble's workspace,
+`set_flow` resolves references at preflight. To reorder a flow, edit the list
+`registry.flow(name)` returns and pass it to `set_flow`; replace a `LoopGroup` to
+edit its members. Custom flows use `--flow`; review/comment/shallow are modes of
+`deep`, and profiles/builders supply review behavior. The preamble's workspace,
 identity, diff, and recorder work precedes every extension step.
 
 ### Built-in flows and steps
@@ -83,7 +83,7 @@ folding; custom strategy text alone does not. Merge receives language plus retai
 structural pools; its validated synthesis is authoritative. Preserve source UIDs;
 structural whole-file privileges require actual structural attribution.
 
-### Stage-aware review builders (API 8)
+### Stage-aware review builders
 
 The host invokes `per-stack`, `structural`, or `generic-fallback` anew per stage
 with `review_stage`; overrides always run. Extension API and internal stage/cache
@@ -136,7 +136,7 @@ malformed envelopes cannot recover nested fragments. Private stage contract 17
 uses selector submissions for every backend and one host-accepted canonical result;
 Pi's result follows clean native settlement. The model schema is distinct from
 retained canonical output. The private cache identity changes with this contract,
-while extension API 8 and persisted canonical evidence remain compatible.
+while persisted canonical evidence remains compatible.
 Budgets/reserves remain host policy; feedback is system instruction, never a
 synthetic user turn. Read
 [output selection](../daydream/agent_output.py) and the relevant backend.
@@ -159,9 +159,8 @@ batch ratio are defined in [configuration](../daydream/config.py).
 ### Committed-review program
 
 The [committed-review API](runtime.md#committed-review-requestresult) owns review
-independently of extension flow steps/builders. Optional `CommittedReviewRequest.local` and `AnalyzedRevision.source_id` retain
-extension API 8; captured local and committed subjects follow the
-[captured-source contract](runtime.md#captured-local-source). Its
+independently of extension flow steps/builders. Captured local and committed subjects
+follow the [captured-source contract](runtime.md#captured-local-source). Its
 [assignment policy and work records](runtime.md#assignment-policy-and-work) are host-owned;
 profile strategy text cannot change work authority or drop host-appended assignment
 context. Broader route integration is #1679; default cutover is #1641 after #1686
@@ -239,7 +238,6 @@ execution incomplete. No possibly accepted mutation is replayed.
 Native provider/model/authentication, genuine conversation roles, ordinary tools,
 and sibling ownership remain with their existing owners.
 
-This additive callback keyword and source-option metadata retain extension API 8.
 The private callback error envelope and typed exception contract are introduced
 by this unreleased change and ship together with the native extensions. Callers
 must use `HostToolRejected` to certify a correctable preacceptance fault; arbitrary
@@ -268,15 +266,15 @@ providers or requires credentials. Operator environment owns credentials; runtim
 owns flush/shutdown, spans, redaction, and content policy. Vendor compatibility
 mutates copies only. See [observability](observability.md). `local` is reserved for
 the built-in [local trace](observability.md#ownership-and-evidence); registering it
-raises `ExtensionError` (extension API 8 is retained).
+raises `ExtensionError`.
 
 ## Renderers
 
 `finding(finding, ctx)` returns inner finding Markdown; `summary(ctx)` returns
 inner summary Markdown. Preserve summary finding `body_block` dedup markers and
-`ctx.diagrams` verbatim. `agent_prompt` is compatibility-only and empty.
-The host adds comment count, incomplete warnings, reviewed commit, footer, and
-review event. Empty/invalid output or exceptions fall back to the built-in renderer.
+`ctx.diagrams` verbatim. The host adds comment count, incomplete warnings, reviewed
+commit, footer, and review event. Empty/invalid output or exceptions fall back to
+the built-in renderer.
 
 ## Working artifact paths
 
@@ -292,7 +290,7 @@ opened by the host carries its ownership authority through artifact-session clos
 and worktree cleanup. Live-code consumers use `ctx.artifacts.code_workspace.run`
 for guarded operations; no separate path/identity or validation callback is needed.
 Existing session routing/validation methods and standalone analysis paths remain
-available under API 8.
+available.
 
 Pass `ctx.run_context` to agents/built-in phases. Use `confirm`/`choice` with safe
 defaults for unattended runs. GitHub helpers receive `ctx.github_execution.auth`
@@ -301,7 +299,7 @@ nonsecret login may appear in ordinary identity metadata.
 
 ## Stable `ctx.data` keys
 
-These remain readable under API 8; other keys are internal:
+These remain readable; other keys are internal:
 
 | Keys | Contract |
 |---|---|
@@ -326,5 +324,4 @@ Duplicate record UIDs are fatal. Accessors live in
 
 Backends and coupled host parse/test/commit/control-loop prompts are not registry
 extension seams. Host dispatch, preamble, validation, identities, and publication
-remain authoritative under overrides. Fork stack rules are additive; they cannot
-remove the built-in routing table.
+remain authoritative under overrides.

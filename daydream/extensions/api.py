@@ -1,4 +1,4 @@
-"""Versioned extension types: flows, control signals, stack rules and errors.
+"""Versioned extension types: flows, control signals and errors.
 
 Never import runner or phases here; FlowContext is type-only to avoid cycles."""
 
@@ -12,18 +12,11 @@ if TYPE_CHECKING:
     from daydream.flows.engine import FlowContext
     from daydream.trajectory import DaydreamPhase
 
-# Current/preferred extension contract version; doubles as the max accepted (range ceiling).
-EXTENSION_API_VERSION: int = 8
-# Oldest extension contract version still accepted (range floor).
-MIN_SUPPORTED_EXTENSION_API_VERSION: int = 8
+EXTENSION_API_VERSION: int = 9
 
 
 class ExtensionError(Exception):
     """Base error for the extension seam."""
-
-
-class ExtensionVersionError(ExtensionError):
-    """The extension module's ``DAYDREAM_EXT_API`` is absent or incompatible."""
 
 
 class UnresolvedExtensionError(ExtensionError):
@@ -125,18 +118,8 @@ class SummaryFinding:
 
 @dataclass(frozen=True)
 class SummaryContext:
-    """Summary-renderer input with optional host-grounded diagram blocks.
-    The last, optional diagrams field preserves existing positional constructors."""
+    """Summary-renderer input with optional host-grounded diagram blocks."""
 
     findings: tuple[SummaryFinding, ...]
-    agent_prompt: str  # Retained for compatibility; the host supplies an empty string.
     review_info: str
     diagrams: str | None = None
-
-
-@dataclass(frozen=True)
-class StackRule:
-    """A fork-registered stack: changed-file globs routed to a named stack."""
-
-    stack_name: str
-    patterns: tuple[str, ...]

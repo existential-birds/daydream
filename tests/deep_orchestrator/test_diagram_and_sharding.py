@@ -112,22 +112,21 @@ async def test_below_scale4_overloaded_stack_publishes_automatic_shards(
 
 
 def test_tiny_diff_collapse_and_fanout_cap_preserve_routing_and_only_coarsen_the_largest_stack() -> None:
-    """Explicit and JavaScript-generic routing survive tiny-diff collapse; the cap coarsens only what it must.
+    """JavaScript-generic routing survives tiny-diff collapse; the cap coarsens only what it must.
 
-    Runner sharding journeys use one language and no explicit rules, so neither guard nor the
-    early cap exit is reached there.
+    Runner sharding journeys use one language, so neither the guard nor the early cap exit
+    is reached there.
     """
     from daydream.deep.detection import StackAssignment
     from daydream.deep.sharding import shard_stacks
 
-    explicit = [StackAssignment('python', ['a.py'], has_explicit_rule=True), StackAssignment('react', ['b.tsx'])]
     script = [StackAssignment('python', ['a.py']), StackAssignment('generic', ['b.ts'])]
-    for stacks in (explicit, script):
-        assert orchestrator._collapse_stacks_for_tiny_diff(stacks, ['a.py', 'b.ts'], threshold=4) == (stacks, False)
+    assert orchestrator._collapse_stacks_for_tiny_diff(script, ['a.py', 'b.ts'], threshold=4) == (script, False)
     # Shallow collapse cannot give one language agent two per-language scopes: it uses generic.
+    languages = [StackAssignment('python', ['a.py']), StackAssignment('react', ['b.tsx'])]
     structure = StackAssignment('structure', ['a.py', 'b.tsx'])
     collapsed, single = orchestrator._collapse_stacks_for_shallow(
-        [*explicit, structure], ['a.py', 'b.tsx'], RunConfig(target='.'))
+        [*languages, structure], ['a.py', 'b.tsx'], RunConfig(target='.'))
     assert single and [(s.stack_name, s.files) for s in collapsed] == [
         ('structure', ['a.py', 'b.tsx']), ('generic', ['a.py', 'b.tsx'])]
     python = StackAssignment('python', [f'p{index}.py' for index in range(4)])

@@ -96,7 +96,7 @@ def _closed_decisions(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _note_context(notes: list[Any]) -> list[dict[str, Any]]:
-    """Add attribution without changing API 8 builders' notes:list[str] contract."""
+    """Add attribution without changing extension builders' notes:list[str] contract."""
     return [{'note_index': index, **{key: value for key, value in note.items() if key != 'text'}}
             for index, note in enumerate(notes)]
 

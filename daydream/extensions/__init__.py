@@ -6,15 +6,12 @@ against: the versioned contract types from ``api`` and the ``Registry``.
 
 from daydream.extensions.api import (
     EXTENSION_API_VERSION,
-    MIN_SUPPORTED_EXTENSION_API_VERSION,
     BreakLoop,
     CommentFinding,
     ExtensionError,
-    ExtensionVersionError,
     FindingRenderContext,
     FlowStep,
     LoopGroup,
-    StackRule,
     Stop,
     SummaryContext,
     SummaryFinding,
@@ -28,17 +25,14 @@ from daydream.observability.config import ObservabilityConfig, TraceExporterFact
 
 __all__ = [
     "EXTENSION_API_VERSION",
-    "MIN_SUPPORTED_EXTENSION_API_VERSION",
     "BreakLoop",
     "CommentFinding",
     "ExtensionError",
-    "ExtensionVersionError",
     "FindingRenderContext",
     "FlowStep",
     "LoopGroup",
     "ObservabilityConfig",
     "Registry",
-    "StackRule",
     "Stop",
     "SummaryContext",
     "SummaryFinding",
