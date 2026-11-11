@@ -189,6 +189,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its cross-process lock on the same lock file.
 - `scripts/redrive_post.py`, an untested manual re-post script
   ([#1679](https://github.com/existential-birds/daydream/issues/1679)).
+- `ReviewRenderers.fallback_finding` and `fallback_summary` (also via
+  `daydream.pr_review`), which nothing set; a failed custom renderer always falls
+  back to the built-in default. No known caller
+  ([#1680](https://github.com/existential-birds/daydream/issues/1680)).
 
 ### Fixed
 
@@ -210,7 +214,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Review completeness unavailable"). Before, the clean rerun posted nothing, so
   the unfinished notice stayed the newest Daydream review. The earlier notice is
   never edited, dismissed or minimized, and nothing is approved unless
-  `approve_on_clean` already allowed it. Without an earlier notice, a complete
+  `--approve-on-clean` already allowed it. Without an earlier notice, a complete
   clean review posts nothing beyond that approval. Both `--comment` and
   `post-findings` follow this
   ([#1766](https://github.com/existential-birds/daydream/issues/1766)).
