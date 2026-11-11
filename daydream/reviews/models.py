@@ -22,13 +22,6 @@ class ReviewEvent(StrEnum):
     APPROVE = "APPROVE"
 
 
-class SubmissionStatus(StrEnum):
-    """Whether the final classified review was posted."""
-
-    POSTED = "posted"
-    FAILED = "failed"
-
-
 @dataclass
 class ParsedIssue:
     """A finding with a potentially stale line hint and stable cross-run fingerprint.
@@ -91,15 +84,13 @@ class ReviewPostResult:
 class ClassifiedReviewResult:
     """Confirmed write results from the shared submitter.
 
-    ``final_review_posted=False`` means no successful response was confirmed;
+    ``review_url=None`` means no successful response was confirmed;
     it does not prove that an ambiguous failed request had no remote effect.
     """
 
-    status: SubmissionStatus
     review_url: str | None
     posted_file_level: tuple[ParsedIssue, ...]
     folded_file_level: tuple[ParsedIssue, ...]
-    final_review_posted: bool
     safe_error: str | None
 
 

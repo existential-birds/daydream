@@ -488,7 +488,8 @@ def test_post_findings_orders_file_writes_and_folds_failed_thread_once(
     markers = parse_finding_markers(payload["body"])
     assert markers == ["c" * 64, "b" * 64]
     assert payload["body"].index("Original body") < payload["body"].index("Folded thread")
-    assert "1 file-level comment(s) failed to post; folded into the review body." in _console_text(capsys)
+    assert ("1 file-level comment(s) could not be confirmed as posted; folded into the review body."
+            in _console_text(capsys))
 
 @pytest.mark.parametrize("file_posts", [False, True], ids=["zero-writes", "partial-write"])
 def test_post_findings_final_failure_reports_writes_and_safe_recovery_path(
@@ -511,15 +512,12 @@ def test_post_findings_final_failure_reports_writes_and_safe_recovery_path(
     try:
         assert json.loads(payload_path.read_text()) == review.payload
         message = _console_text(capsys)
-        assert "PR Review Post Failed" in message
+        already = " 1 file-level comment(s) were already posted." if file_posts else ""
+        assert f"PR Review Unconfirmed Could not confirm the PR review was posted.{already} (GitHub review" in message
         assert "payload preserved at" in message
         # Rich may wrap this machine path; removing whitespace recovers the displayed value.
         assert str(payload_path) in message.replace(" ", "")
-        if file_posts:
-            assert "1 file-level comment(s) were already posted." in message
-            assert "No comments were posted." not in message
-        else:
-            assert "No comments were posted." in message
+        assert "No comments were posted." not in message
         assert secret not in message
     finally:
         payload_path.unlink(missing_ok=True)

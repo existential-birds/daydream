@@ -165,6 +165,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S`, `DAYDREAM_CODEX_PROCESS_REAP_TIMEOUT_S`,
   `DAYDREAM_CODEX_CLEANUP_TIMEOUT_S` and `DAYDREAM_REVIEW_PROFILE_CANDIDATE`; their
   defaults are now fixed ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
+- **Breaking (0.y.z):** `SubmissionStatus` (`daydream.reviews.models` and its
+  `daydream.pr_review` re-export) and the `ClassifiedReviewResult.status` and
+  `final_review_posted` fields. They duplicated `review_url`, which is `None` whenever no
+  successful response was confirmed; test `review_url is None` instead. No known caller
+  used them ([#1679](https://github.com/existential-birds/daydream/issues/1679)).
 - Dead code no configuration path reached: `RepairJobPolicy.max_cost_usd`, the
   `setup_timeout_ms` Pi host packet field, `resolve_harbor_profile` and
   `config.DEFAULT_TOOL_CALL_BUDGET`, which was always `None`
@@ -177,6 +182,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [code-review-benchmarks](https://github.com/existential-birds/code-review-benchmarks),
   and `daydream benchmark` exits with a pointer there. Repair-job ownership keeps
   its cross-process lock on the same lock file.
+- `scripts/redrive_post.py`, an untested manual re-post script
+  ([#1679](https://github.com/existential-birds/daydream/issues/1679)).
 
 ### Fixed
 
@@ -209,6 +216,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a lower invocation total replace observed turn usage
   ([#1718](https://github.com/existential-birds/daydream/issues/1718),
   [#1797](https://github.com/existential-birds/daydream/pull/1797)).
+- When a review, diagram comment or file-level comment POST is not confirmed, `--comment`,
+  `--diagram-only` and `post-findings` say it could not be confirmed instead of reporting
+  a failure or "No comments were posted.", since the request may still have reached
+  GitHub; they still report file-level comments already posted and the safe error
+  ([#1679](https://github.com/existential-birds/daydream/issues/1679)).
 
 ## [0.34.0] - 2026-11-03
 

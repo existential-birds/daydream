@@ -49,7 +49,6 @@ from daydream.reviews.models import (
     ReviewEvent as ReviewEvent,
     ReviewPayload as ReviewPayload,
     ReviewPostResult as ReviewPostResult,
-    SubmissionStatus as SubmissionStatus,
 )
 from daydream.reviews.rendering import (
     ReviewRenderers as ReviewRenderers,
@@ -884,14 +883,11 @@ def post_classified_review(
         review_summary=plan.review_summary,
     )
     review_result = transport.post_review(plan.pr, review_payload)
-    posted_review = review_result.review_url is not None
     return ClassifiedReviewResult(
-        status=SubmissionStatus.POSTED if posted_review else SubmissionStatus.FAILED,
         review_url=review_result.review_url,
         posted_file_level=tuple(posted),
         folded_file_level=tuple(folded),
-        final_review_posted=posted_review,
-        safe_error=None if posted_review else review_result.safe_error,
+        safe_error=review_result.safe_error,
     )
 
 
@@ -1074,20 +1070,15 @@ async def _post(
     if result.folded_file_level:
         print_warning(
             console,
-            f"{len(result.folded_file_level)} file-level comment(s) failed to post; "
+            f"{len(result.folded_file_level)} file-level comment(s) could not be confirmed as posted; "
             "folded into the review body.",
         )
 
-    if result.status is SubmissionStatus.FAILED:
+    if result.review_url is None:
         suffix = f" ({result.safe_error})" if result.safe_error else ""
-        # File-level comments post before the review, so some may already be
-        # live on the PR — saying "no comments were posted" would be false.
-        already = (
-            f" {len(result.posted_file_level)} file-level comment(s) were already posted."
-            if result.posted_file_level
-            else " No comments were posted."
-        )
-        print_warning(console, f"Failed to post PR review;{already}{suffix}")
+        already = (f" {len(result.posted_file_level)} file-level comment(s) were already posted."
+                   if result.posted_file_level else "")
+        print_warning(console, f"Could not confirm the PR review was posted.{already}{suffix}")
         return PostStatus.FAILED
 
     print_success(console, f"Posted review: {result.review_url}")
@@ -1278,18 +1269,15 @@ def post_findings_from_artifact(
     if result.folded_file_level:
         print_info(
             console,
-            f"{len(result.folded_file_level)} file-level comment(s) failed to post; "
+            f"{len(result.folded_file_level)} file-level comment(s) could not be confirmed as posted; "
             "folded into the review body.",
         )
 
-    if result.status is SubmissionStatus.FAILED:
+    if result.review_url is None:
         suffix = f" ({result.safe_error})" if result.safe_error else ""
-        already = (
-            f"{len(result.posted_file_level)} file-level comment(s) were already posted."
-            if result.posted_file_level
-            else "No comments were posted."
-        )
-        print_error(console, "PR Review Post Failed", f"{already}{suffix}")
+        already = (f" {len(result.posted_file_level)} file-level comment(s) were already posted."
+                   if result.posted_file_level else "")
+        print_error(console, "PR Review Unconfirmed", f"Could not confirm the PR review was posted.{already}{suffix}")
         return 1
     print_success(console, f"Posted review: {result.review_url}")
     return 0

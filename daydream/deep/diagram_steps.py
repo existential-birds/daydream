@@ -821,7 +821,8 @@ async def _step_post_diagram(ctx: FlowContext) -> Stop:
     )
     if url is None:
         suffix = f" ({error})" if error else ""
-        print_error(console, "Diagram Comment Post Failed", f"No comment was posted.{suffix}")
+        print_error(console, "Diagram Comment Unconfirmed",
+                    f"Could not confirm the diagram comment was posted.{suffix}")
         return Stop(1)
     print_success(console, f"Posted diagram comment: {url}")
     return Stop(0)
