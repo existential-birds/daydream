@@ -73,25 +73,7 @@ def _emit(value: Any, jq: str | None) -> str:
     return "".join(json.dumps(item) + "\n" for item in items)
 
 
-def _take_response(state: Path, key: str, value: Any) -> Any:
-    """Return one canned response, advancing a configured sequence once."""
-    if not isinstance(value, dict) or "__sequence__" not in value:
-        return value
-    sequence = value["__sequence__"]
-    if not isinstance(sequence, list):
-        return {"__error__": f"fake gh: invalid response sequence for {key}"}
-    cursor_path = state / "response_cursors.json"
-    cursors = (json.loads(cursor_path.read_text(encoding="utf-8")) if cursor_path.exists() else {})
-    index = cursors.get(key, 0)
-    if not isinstance(index, int) or index < 0 or index >= len(sequence):
-        return {"__error__": f"fake gh: response sequence exhausted for {key}"}
-    cursors[key] = index + 1
-    cursor_path.write_text(json.dumps(cursors), encoding="utf-8")
-    return sequence[index]
-
-
-def _serve_api_response(state: Path, key: str, value: Any, jq: str | None,) -> tuple[int, str, str]:
-    value = _take_response(state, key, value)
+def _serve_api_response(key: str, value: Any, jq: str | None,) -> tuple[int, str, str]:
     if isinstance(value, dict) and isinstance(value.get("__error__"), str):
         return 1, "", value["__error__"] + "\n"
     if isinstance(value, dict) and isinstance(value.get("__stdout__"), str):
@@ -240,11 +222,11 @@ def _handle_api(argv: list[str], state: Path) -> tuple[int, str, str]:
         return 1, "", "fake gh: unrecognized graphql query\n"
     key = f"{method} {endpoint}"
     if key in responses:
-        return _serve_api_response(state, key, responses[key], jq)
+        return _serve_api_response(key, responses[key], jq)
     # Query strings select/paginate; the canned response is keyed by path alone.
     bare_key = f"{method} {endpoint.split('?')[0]}"
     if bare_key in responses:
-        return _serve_api_response(state, bare_key, responses[bare_key], jq)
+        return _serve_api_response(bare_key, responses[bare_key], jq)
     if method == "GET" and re.fullmatch(
         r"repos/[^/]+/[^/]+/(?:pulls/\d+/(?:reviews|files|comments)|issues/\d+/comments)", endpoint
     ):
@@ -420,15 +402,6 @@ class FakeGh:
         else:
             responses[f"{method.upper()} {endpoint.lstrip('/')}"] = value
         self._responses_path.write_text(json.dumps(responses), encoding="utf-8")
-
-    def set_response_sequence(self, key: str, responses: list[Any]) -> None:
-        """Serve successive responses for one exact ``METHOD endpoint`` key."""
-        self.set_response(key, value={"__sequence__": responses})
-        cursor_path = self.state_dir / "response_cursors.json"
-        if cursor_path.exists():
-            cursors = json.loads(cursor_path.read_text(encoding="utf-8"))
-            cursors.pop(key, None)
-            cursor_path.write_text(json.dumps(cursors), encoding="utf-8")
 
     def serve_blocking_process(self, key: str, *, pid_file: Path) -> None:
         """Serve a process that blocks with a stdout-holding grandchild."""

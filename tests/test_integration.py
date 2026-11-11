@@ -146,7 +146,7 @@ async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
     if resume:
         _seed_fix_resume(project, [_fix_item()])
     seed_pr_identity(fake_gh, head_sha=old_sha)
-    seeder = start_remote_ci_fake(project, fake_gh, hook_marker, outcome="blocking")
+    seeder = start_remote_ci_fake(project, fake_gh, hook_marker)
     install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
     task = asyncio.create_task(
         run(_shallow_pr_config( make_config, project, archive=False, start_at="fix" if resume else "ttt", ))
