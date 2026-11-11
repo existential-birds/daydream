@@ -42,7 +42,7 @@ from tests.harness.review_payload import payload_for
 from tests.harness.review_profile import sample_pr
 from tests.harness.review_result import review_coverage, terminal_result
 
-SNAP =Path(__file__).parent / "fixtures" / "comment_snapshots"
+SNAP = Path(__file__).parent / "fixtures" / "comment_snapshots"
 BUILTIN_RENDERERS = ReviewRenderers(default_render_finding, default_render_summary)
 
 
