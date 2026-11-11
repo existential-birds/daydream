@@ -86,7 +86,6 @@ def test_repair_turn_wall_budget_follows_the_jobs_own_allowance(
     deep.mkdir(parents=True, exist_ok=True)
     job = RepairJobRecord(
         job_id=repair_job_id("s1"),
-        state=RepairJobState.PAUSED,
         policy=RepairJobPolicy(execution_s=900.0, job_total_s=1000.0, reserve_s=60.0),
         consumed_s=500.0,
     )

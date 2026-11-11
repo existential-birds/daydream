@@ -269,7 +269,7 @@ async def test_coordinator_restores_only_trusted_candidates_and_blocks_unrecover
     job = _job(progress_evidence=(BOUNDED_VALIDATION_EXPERIMENT,))
     repair: Any = NS(outcome=RepairOutcome.BUDGET_INTERRUPTED, execution_id="e2", changed_paths=("src/handler.py",),
                 checkpoint_ref="repair-checkpoint.json")
-    job = _charge_failure(job, result=None, repair=repair, checkpoint=candidate, elapsed_s=1.0, cost_usd=0.0)
+    job = _charge_failure(job, result=None, repair=repair, checkpoint=candidate, elapsed_s=1.0)
     assert any("re-validated against the same failure sha256:f" in entry for entry in job.unchanged_evidence)
 
     footprint = AuthorizedFixFootprint(run_allowed_paths=frozenset({"src/handler.py"}), policy_revision=3)

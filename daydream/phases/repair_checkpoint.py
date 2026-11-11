@@ -70,7 +70,6 @@ def failure_identity(failure_output: str) -> str:
 # The bounded follow-up each interrupted turn owes the job that resumes it. These
 # are host-authored names, not model prose: the next job decides which to run.
 _NEXT_EXPERIMENT: dict[RepairOutcome, str | None] = {
-    RepairOutcome.CANDIDATE_COMPLETE: None,
     RepairOutcome.BUDGET_INTERRUPTED: "resume_execution_with_bounded_allowance",
     RepairOutcome.DIAGNOSIS_UNRESOLVED: "continue_diagnosis_from_recorded_excerpt",
     RepairOutcome.EXECUTION_ERROR: "retry_execution_after_transport_failure",
@@ -102,12 +101,7 @@ class RepairCheckpoint:
     policy_revision: int = 0
     failure_identity: str = ""
     test_command: str = ""
-    #: Run-relative to the repository root; the host's absolute cwd is an
-    #: environment value and is deliberately not persisted.
-    test_cwd: str = "."
     focused_results: tuple[str, ...] = ()
-    completed_experiments: tuple[str, ...] = ()
-    disproven_hypotheses: tuple[str, ...] = ()
     next_experiment: str | None = None
     backend_name: str = ""
     model: str = ""
@@ -136,10 +130,7 @@ class RepairCheckpoint:
             "policy_revision": self.policy_revision,
             "failure_identity": self.failure_identity,
             "test_command": self.test_command,
-            "test_cwd": self.test_cwd,
             "focused_results": list(self.focused_results),
-            "completed_experiments": list(self.completed_experiments),
-            "disproven_hypotheses": list(self.disproven_hypotheses),
             "next_experiment": self.next_experiment,
             "backend_name": self.backend_name,
             "model": self.model,
@@ -167,10 +158,7 @@ class RepairCheckpoint:
             policy_revision=int(raw.get("policy_revision") or 0),
             failure_identity=_str(raw, "failure_identity"),
             test_command=_str(raw, "test_command"),
-            test_cwd=_str(raw, "test_cwd") or ".",
             focused_results=tuple(_str_list(raw, "focused_results")),
-            completed_experiments=tuple(_str_list(raw, "completed_experiments")),
-            disproven_hypotheses=tuple(_str_list(raw, "disproven_hypotheses")),
             next_experiment=_str(raw, "next_experiment") or None,
             backend_name=_str(raw, "backend_name"),
             model=_str(raw, "model"),

@@ -4,6 +4,7 @@ import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -11,7 +12,6 @@ from daydream.test_execution import (
     RecipeConfinementError,
     TestExecutionResult,
     TestRecipe,
-    canonical_test_command,
     resolve_package,
     resolve_test_command_fact,
     resolve_test_recipe,
@@ -25,7 +25,6 @@ def _run(argv: list[str], tmp_path: Path, *, wall_budget_s: float = 10.0, env: d
 
 def test_command_and_provenance_share_cli_over_config_precedence() -> None:
     cfg, run = SimpleNamespace(test_command="pytest -x"), SimpleNamespace(test_command="/cli/cmd")
-    assert canonical_test_command(cfg, run) == ["/cli/cmd"]
     fact = resolve_test_command_fact(cfg, run)
     assert fact.value == ("/cli/cmd",)
     assert fact.source == "cli"
@@ -75,7 +74,7 @@ def test_recipe_config_digest_is_a_named_miss_when_an_input_is_unreadable(tmp_pa
     assert recipe.package.config_digest is None
     assert "uv.lock" in recipe.package.absent_components
 
-def test_runner_flags_a_truncated_output_buffer_as_incomplete(tmp_path: Path) -> None:
+def test_runner_flags_a_truncated_output_buffer_as_incomplete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     res = _run([sys.executable, "-c", "import sys; sys.stdout.write('x' * 600000)"], tmp_path,)
 
     assert res.exit_status == 0
@@ -83,3 +82,16 @@ def test_runner_flags_a_truncated_output_buffer_as_incomplete(tmp_path: Path) ->
     assert res.output_truncated is True     # ...but the retained buffer is incomplete
     assert res.incomplete is True
     assert len(res.merged_output) <= 512 * 1024
+
+    spawned: list[asyncio.subprocess.Process] = []
+    spawn = asyncio.create_subprocess_exec
+
+    async def spawn_then_cancel(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        spawned.append(await spawn(*args, **kwargs))
+        cast("asyncio.Task[None]", asyncio.current_task()).cancel()
+        return spawned[0]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn_then_cancel)
+    with pytest.raises(asyncio.CancelledError):
+        _run([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path)
+    assert spawned[0].returncode is not None

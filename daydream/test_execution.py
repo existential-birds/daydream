@@ -177,11 +177,6 @@ def _parse_test_command(config: object, run_config: object) -> tuple[tuple[str, 
     return argv, source
 
 
-def canonical_test_command(config: object, run_config: object) -> list[str]:
-    """Resolve canonical argv or raise with actionable configuration evidence."""
-    return list(_parse_test_command(config, run_config)[0])
-
-
 def resolve_test_command_fact(config: object, run_config: object) -> ResolvedFact:
     try:
         argv, source = _parse_test_command(config, run_config)
@@ -434,11 +429,7 @@ def resolve_test_recipe(
     command = resolve_test_command_fact(config, run_config)
     package = resolve_package(repo_root, cwd if cwd is not None else repo_root)
     command = check_test_command_executable(command, cwd=repo_root / package.cwd_relative)
-    declared = tuple(
-        getattr(run_config, "test_required_suites", None)
-        or getattr(config, "test_required_suites", None)
-        or ()
-    )
+    declared = tuple(getattr(config, "test_required_suites", None) or ())
     return TestRecipe(
         command=command,
         package=package,
@@ -618,6 +609,9 @@ async def run_test_command(
             timed_out = True
             await terminate_process(proc)
             exit_status = proc.returncode if proc.returncode is not None else -1
+        except BaseException:
+            await terminate_process(proc)
+            raise
 
         # Bound the post-exit drain with a salvage window. After a group kill the
         # pipes hit EOF; a suite-spawned grandchild that inherited the pipe write

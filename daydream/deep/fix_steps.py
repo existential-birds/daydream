@@ -720,7 +720,6 @@ def _test_attempt_payload(attempt: TestAttemptEvidence) -> dict[str, Any]:
         "passed": attempt.passed,
         "input_tree_key": attempt.input_tree_key,
         "output_tree_key": attempt.output_tree_key,
-        "abort_reason": attempt.abort_reason,
     }
     if attempt.identity is not None:
         payload["identity"] = attempt.identity.payload()
@@ -867,6 +866,7 @@ async def finalize_retained_tree_after_test(
             evidence.session_id == state.session_id
             and evidence.input_tree_key == snapshot.tree_key
             and evidence.output_tree_key == snapshot.tree_key
+            and evidence.command_source != "admitted"
         )
         ran_test = False
         if not matching_test and pass_number == 1:

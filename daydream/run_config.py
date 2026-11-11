@@ -108,9 +108,6 @@ class RunConfig:
     # None preserves file precedence, including a repository's explicit diagram mode=off.
     diagram: str | None = None
     test_command: str | None = None
-    # Explicit suite declarations for the single test command; empty falls back to file policy.
-    # resolve_test_recipe never invents a suite or creates a second runner.
-    test_required_suites: list[str] = field(default_factory=list)
 
 
 def _file_config_or_empty(config: RunConfig) -> DaydreamFileConfig:

@@ -63,14 +63,13 @@ def repair_job_id(session_id: str) -> str:
 class RepairJobState(StrEnum):
     """Where a repair job stands; every terminal state names why in its reason.
 
-    ``running`` is the in-flight state. ``paused`` and ``ready_to_resume`` are
-    both non-terminal: the job owes another bounded execution. ``validating`` is
+    ``running`` is the in-flight state. ``ready_to_resume`` is non-terminal:
+    the job owes another bounded execution. ``validating`` is
     the final execution that re-runs the suite. ``completed`` is the only state
     from which a green verdict or a commit is even representable.
     """
 
     RUNNING = "running"
-    PAUSED = "paused"
     READY_TO_RESUME = "ready_to_resume"
     VALIDATING = "validating"
     COMPLETED = "completed"
@@ -137,7 +136,6 @@ class RepairJobRecord:
     #: Cumulative *job* wall seconds already spent, across every execution and
     #: process. The only time value ever persisted.
     consumed_s: float = 0.0
-    cumulative_cost_usd: float = 0.0
     #: Additional allowance an operator granted. Recorded separately from usage
     #: so replenishment is visible and an exhausted job is never silently topped up.
     granted_allowance_s: float = 0.0
@@ -147,7 +145,6 @@ class RepairJobRecord:
     progress_evidence: tuple[str, ...] = ()
     next_experiment: str | None = None
     completed_experiments: tuple[str, ...] = ()
-    disproven_hypotheses: tuple[str, ...] = ()
     last_transition_reason: str | None = None
     checkpoint_ref: str | None = None
     diagnostics: tuple[str, ...] = ()
@@ -213,14 +210,11 @@ class RepairJobRecord:
     def record_execution(
         self, *, progress: bool, next_experiment: str | None,
         completed_experiments: Sequence[str] = (),
-        disproven_hypotheses: Sequence[str] = (),
         unchanged_evidence: Sequence[str] = (),
         candidate_patch_confirmed: bool = False,
         infrastructure_failed: bool = False,
-        tool_calls: int = 0,
         changed_paths: Sequence[str] = (),
         elapsed_s: float = 0.0,
-        cost_usd: float = 0.0,
     ) -> RepairAction:
         """Charge one finished execution to the job and resolve its termination state.
 
@@ -233,9 +227,7 @@ class RepairJobRecord:
         """
         self.executions += 1
         self.consumed_s += max(0.0, elapsed_s)
-        self.cumulative_cost_usd += max(0.0, cost_usd)
         self.completed_experiments = _extend(self.completed_experiments, completed_experiments)
-        self.disproven_hypotheses = _extend(self.disproven_hypotheses, disproven_hypotheses)
         self.next_experiment = next_experiment
 
         observed = tuple(unchanged_evidence)
@@ -257,7 +249,7 @@ class RepairJobRecord:
         else:
             self.state = RepairJobState.BLOCKED
             self.last_transition_reason = self._no_progress_reason(
-                tool_calls=tool_calls, changed_paths=tuple(changed_paths),
+                changed_paths=tuple(changed_paths),
                 infrastructure_failed=infrastructure_failed,
             )
 
@@ -268,7 +260,7 @@ class RepairJobRecord:
         return self.next_action()
 
     def _no_progress_reason(
-        self, *, tool_calls: int, changed_paths: tuple[str, ...], infrastructure_failed: bool,
+        self, *, changed_paths: tuple[str, ...], infrastructure_failed: bool,
     ) -> str:
         """Name the unchanged evidence (requirement 41) plus what the turn did instead."""
         if infrastructure_failed:
@@ -277,7 +269,7 @@ class RepairJobRecord:
             head = "no discriminating result"
         seen = ", ".join(self.unchanged_evidence) or "none recorded"
         tail = (
-            f"{tool_calls} tool call(s) touched {len(changed_paths)} path(s) "
+            f"touched {len(changed_paths)} path(s) "
             f"({', '.join(changed_paths) if changed_paths else 'none'}) without narrowing the failure"
         )
         return f"{head}; unchanged evidence: {seen}; {tail}"
@@ -315,7 +307,6 @@ class RepairJobRecord:
             "policy_revision": self.policy_revision,
             "policy": asdict(self.policy),
             "consumed_s": self.consumed_s,
-            "cumulative_cost_usd": self.cumulative_cost_usd,
             "granted_allowance_s": self.granted_allowance_s,
             "executions": self.executions,
             "scope_request": dict(self.scope_request) if self.scope_request is not None else None,
@@ -323,7 +314,6 @@ class RepairJobRecord:
             "progress_evidence": list(self.progress_evidence),
             "next_experiment": self.next_experiment,
             "completed_experiments": list(self.completed_experiments),
-            "disproven_hypotheses": list(self.disproven_hypotheses),
             "last_transition_reason": self.last_transition_reason,
             "checkpoint_ref": self.checkpoint_ref,
             "diagnostics": list(self.diagnostics),
@@ -350,7 +340,6 @@ class RepairJobRecord:
             policy_revision=_plain_int(raw.get("policy_revision")) or 0,
             policy=RepairJobPolicy.from_payload(raw.get("policy")),
             consumed_s=max(0.0, _finite_float(raw.get("consumed_s")) or 0.0),
-            cumulative_cost_usd=max(0.0, _finite_float(raw.get("cumulative_cost_usd")) or 0.0),
             granted_allowance_s=max(0.0, _finite_float(raw.get("granted_allowance_s")) or 0.0),
             executions=max(0, _plain_int(raw.get("executions")) or 0),
             scope_request=dict(scope_request) if isinstance(scope_request, Mapping) else None,
@@ -358,7 +347,6 @@ class RepairJobRecord:
             progress_evidence=_str_tuple(raw.get("progress_evidence")),
             next_experiment=_opt_str(raw.get("next_experiment")),
             completed_experiments=_str_tuple(raw.get("completed_experiments")),
-            disproven_hypotheses=_str_tuple(raw.get("disproven_hypotheses")),
             last_transition_reason=_opt_str(raw.get("last_transition_reason")),
             checkpoint_ref=_opt_str(raw.get("checkpoint_ref")),
             diagnostics=_str_tuple(raw.get("diagnostics")),

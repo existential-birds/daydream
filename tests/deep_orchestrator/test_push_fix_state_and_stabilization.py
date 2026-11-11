@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -296,6 +297,12 @@ async def test_stabilization_stops_after_two_passes_without_third_or_heal(
     assert phase_states["fix"]["status"] == "failed"
     assert phase_states["test"]["status"] == "failed"
     assert derive_pipeline_status("complete", None, phase_states, runs_fix=True, runs_test=True) == "failed"
+
+    admitted = replace(stale, passed=True, input_tree_key=snapshot.tree_key, output_tree_key=snapshot.tree_key,
+                       command_source="admitted")
+    monkeypatch.setattr("daydream.deep.fix_state._strict_scope_and_scrub", lambda *_a, **_k: False)
+    assert await finalize_retained_tree_after_test(ctx, TestAndHealResult(True, 0, True, False, (admitted,))) is None
+    assert test_calls == 2 and state.latest_test_evidence is not admitted
 
 async def test_stabilization_audit_write_failure_stops_before_retest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

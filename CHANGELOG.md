@@ -194,6 +194,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `file_config=DaydreamFileConfig(verify_all=True)`. A leftover `extra_risk_categories`
   key is ignored without a warning, so a misspelled category no longer stops a fix run
   ([#1631](https://github.com/existential-birds/daydream/issues/1631)).
+- **Breaking (0.y.z):** `RunConfig.test_required_suites`, which nothing set. No known
+  caller. The setting still works: set `test_required_suites` in `[tool.daydream]` or
+  `.daydream.toml`, or pass `file_config=DaydreamFileConfig(test_required_suites=[...])`
+  ([#1681](https://github.com/existential-birds/daydream/issues/1681)).
 - Dead code no configuration path reached: `RepairJobPolicy.max_cost_usd`, the
   `setup_timeout_ms` Pi host packet field, `resolve_harbor_profile` and
   `config.DEFAULT_TOOL_CALL_BUDGET`, which was always `None`
@@ -217,6 +221,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#1633](https://github.com/existential-birds/daydream/issues/1633)).
 - `phase_fix_verify`'s unused `console_lock` keyword argument. No known caller
   ([#1631](https://github.com/existential-birds/daydream/issues/1631)).
+- Repair and test-evidence plumbing nothing set or read, with no known caller:
+  `continue_repair_job(cost_usd=)`; `RepairJobRecord.cumulative_cost_usd` and
+  `disproven_hypotheses`; `record_execution`'s `cost_usd`, `tool_calls` and
+  `disproven_hypotheses` arguments; `RepairJobState.PAUSED`;
+  `RepairOutcome.CANDIDATE_COMPLETE`; `RepairCheckpoint`'s `completed_experiments`,
+  `disproven_hypotheses` and `test_cwd`; `RepairContinuationResult.passed`;
+  `TestAttemptEvidence.abort_reason`; `canonical_test_command`. Their constant keys leave
+  the repair and test-verdict artifacts, and a blocked repair job's reason no longer claims
+  "0 tool call(s)" ([#1681](https://github.com/existential-birds/daydream/issues/1681)).
 
 ### Fixed
 
@@ -263,6 +276,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `recommendation-verdicts.json`, counted in the verification summary and scored in
   captured data, and the fixer saw it as that skipped or exempt finding's verdict and
   evidence ([#1631](https://github.com/existential-birds/daydream/issues/1631)).
+- A replacement test command approved from the interactive retry menu no longer finalizes
+  the tree for commit on its own result: Daydream now runs the configured test command on
+  the final tree once, with the existing override prompt if that run is red
+  ([#1681](https://github.com/existential-birds/daydream/issues/1681)).
+- Cancelling a run now stops a running test command, or a check a regression claim names,
+  with its child processes; before, they kept running and could write to the checkout
+  ([#1681](https://github.com/existential-birds/daydream/issues/1681)).
 
 ## [0.34.0] - 2026-11-03
 
