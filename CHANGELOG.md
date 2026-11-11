@@ -224,12 +224,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Repair and test-evidence plumbing nothing set or read, with no known caller:
   `continue_repair_job(cost_usd=)`; `RepairJobRecord.cumulative_cost_usd` and
   `disproven_hypotheses`; `record_execution`'s `cost_usd`, `tool_calls` and
-  `disproven_hypotheses` arguments; `RepairJobState.PAUSED`; `RepairOutcome.CANDIDATE_COMPLETE`;
-  `RepairCheckpoint`'s `completed_experiments`, `disproven_hypotheses` and `test_cwd`;
-  `RepairContinuationResult.passed`; `TestAttemptEvidence.abort_reason`; `canonical_test_command`.
-  Their always-empty keys leave the repair and test-verdict artifacts, and a blocked repair
-  job's reason no longer claims "0 tool call(s)"
-  ([#1681](https://github.com/existential-birds/daydream/issues/1681)).
+  `disproven_hypotheses` arguments; `RepairJobState.PAUSED`;
+  `RepairOutcome.CANDIDATE_COMPLETE`; `RepairCheckpoint`'s `completed_experiments`,
+  `disproven_hypotheses` and `test_cwd`; `RepairContinuationResult.passed`;
+  `TestAttemptEvidence.abort_reason`; `canonical_test_command`. Their constant keys leave
+  the repair and test-verdict artifacts, and a blocked repair job's reason no longer claims
+  "0 tool call(s)" ([#1681](https://github.com/existential-birds/daydream/issues/1681)).
 
 ### Fixed
 
@@ -277,8 +277,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   captured data, and the fixer saw it as that skipped or exempt finding's verdict and
   evidence ([#1631](https://github.com/existential-birds/daydream/issues/1631)).
 - A replacement test command approved from the interactive retry menu no longer finalizes
-  the tree for commit on its own pass: Daydream now runs the configured test command on
-  the final tree first ([#1681](https://github.com/existential-birds/daydream/issues/1681)).
+  the tree for commit on its own result: Daydream now runs the configured test command on
+  the final tree once, with the existing override prompt if that run is red
+  ([#1681](https://github.com/existential-birds/daydream/issues/1681)).
 - Cancelling a run now stops a running test command, or a check a regression claim names,
   with its child processes; before, they kept running and could write to the checkout
   ([#1681](https://github.com/existential-birds/daydream/issues/1681)).

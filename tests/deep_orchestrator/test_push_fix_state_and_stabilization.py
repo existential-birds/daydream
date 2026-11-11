@@ -302,7 +302,7 @@ async def test_stabilization_stops_after_two_passes_without_third_or_heal(
                        command_source="admitted")
     monkeypatch.setattr("daydream.deep.fix_state._strict_scope_and_scrub", lambda *_a, **_k: False)
     assert await finalize_retained_tree_after_test(ctx, TestAndHealResult(True, 0, True, False, (admitted,))) is None
-    assert test_calls == 2
+    assert test_calls == 2 and state.latest_test_evidence is not admitted
 
 async def test_stabilization_audit_write_failure_stops_before_retest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
