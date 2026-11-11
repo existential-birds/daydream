@@ -120,15 +120,9 @@ class RunContext:
         *,
         default: str,
         safe_default: str,
-        assume_yes: str | None = None,
-        assume_no: str | None = None,
         console: Console | None = None,
     ) -> str:
         """Resolve a menu or free-form choice through this run's policy."""
-        if self.policy.assume == "yes" and assume_yes is not None:
-            return assume_yes
-        if self.policy.assume == "no" and assume_no is not None:
-            return assume_no
         if not self.policy.interactive:
             return safe_default
         with bind_run_context(self):
