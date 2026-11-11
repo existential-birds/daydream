@@ -205,6 +205,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `RunContext.choice`'s undocumented `assume_yes` and `assume_no` keyword arguments,
   which only an unreachable menu path passed. No known caller
   ([#1633](https://github.com/existential-birds/daydream/issues/1633)).
+- `phase_fix_verify`'s unused `console_lock` keyword argument. No known caller
+  ([#1631](https://github.com/existential-birds/daydream/issues/1631)).
 
 ### Fixed
 
@@ -246,6 +248,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ExtensionError`, as `override_renderer` already did, so the run stops before any
   work. Before, only `daydream ext validate` caught it, and a run failed when it first
   built that prompt ([#1680](https://github.com/existential-birds/daydream/issues/1680)).
+- Recommendation verification keeps only verdicts for the findings shown to the verifier.
+  A verdict for a skipped, exempt or unknown finding number was saved to
+  `recommendation-verdicts.json`, counted in the verification summary and scored in
+  captured data, and the fixer saw it as that skipped or exempt finding's verdict and
+  evidence ([#1631](https://github.com/existential-birds/daydream/issues/1631)).
 
 ## [0.34.0] - 2026-11-03
 

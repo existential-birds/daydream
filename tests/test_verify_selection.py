@@ -1,3 +1,4 @@
+from dataclasses import replace
 from typing import Any, cast
 
 import pytest
@@ -93,10 +94,21 @@ def test_prior_verdict_reuse_requires_rule_uid_digest_and_a_resolved_verdict() -
     assert [d.item_uid for d in to_verify] == ["item:2", "item:3"]
     assert plan_reuse({**prior, "decisions": "invalid"}, current) == ({}, current)
     # The verify phase reads prior selection plus verdicts from its artifact; a foreign block misses.
-    from daydream.phases.verify import _prior_selection_payload
+    from daydream.deep.fix_steps import _attach_verdicts
+    from daydream.phases.verify import _merge_reused_verdicts, _prior_selection_payload
     assert _prior_selection_payload({"selection": {"rule_version": 1}, "verdicts": "invalid"}) == {
         "rule_version": 1, "verdicts": []}
     assert _prior_selection_payload({"selection": "invalid"}) is None
+    shown = {"issue_id": 2, "verdict": "uncertain", "evidence": "shown"}
+    stray = [{"issue_id": n, "verdict": "contradicts", "evidence": "stray"} for n in (3, 9, 99)]
+    decisions = [*current[:2], replace(current[2], selected=False)]
+    verdicts = _merge_reused_verdicts([reused["item:1"]], [shown, *stray], decisions, reused)
+    assert verdicts == [reused["item:1"], shown]
+    findings = [_item("item:1", id=9), _item("item:2", id=2), _item("item:3", id=3)]
+    assert _attach_verdicts(findings, {"verdicts": verdicts}) == [
+        {**_item("item:1", id=9), "verifier_verdict": "consistent", "evidence": "e", "unverified_assumptions": []},
+        {**_item("item:2", id=2), "verifier_verdict": "uncertain", "evidence": "shown", "unverified_assumptions": []},
+        _item("item:3", id=3)]
     prior = {"rule_version": SELECTION_RULE_VERSION + 1, "decisions": [{"item_uid": "item:1", "content_digest": "d1"}],
         "verdicts": [{"issue_id": 1}],
     }
