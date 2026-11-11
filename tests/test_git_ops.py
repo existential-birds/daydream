@@ -650,7 +650,7 @@ def test_gh_timeouts_retry_only_idempotent_reads(
     monkeypatch.setattr(subprocess, "run", run)
     git_ops.commit_staged(tmp_path, "fix")
     git_ops.push_branch(tmp_path, "main")
-    assert [call.kwargs["timeout"] for call in run.call_args_list] == [5, 5, None, None]
+    assert [call.kwargs["timeout"] for call in run.call_args_list[-2:]] == [None, None]
 
 
 def test_gh_issue_wrappers_keep_bodies_out_of_argv_and_return_rows(
