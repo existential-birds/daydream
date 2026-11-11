@@ -867,6 +867,7 @@ async def finalize_retained_tree_after_test(
             evidence.session_id == state.session_id
             and evidence.input_tree_key == snapshot.tree_key
             and evidence.output_tree_key == snapshot.tree_key
+            and evidence.command_source != "admitted"
         )
         ran_test = False
         if not matching_test and pass_number == 1:
