@@ -234,8 +234,8 @@ class RemoteCISnapshot:
 
     @property
     def evidence(self) -> tuple[str, tuple[CIObservation, ...]]:
-        """Prefer populated merge-commit evidence; otherwise use the pushed head."""
-        if self.binding.merge_sha is not None and self.merge_observations:
+        """Prefer the pushed head's evidence; use merge-commit evidence only when the head has none."""
+        if self.binding.merge_sha is not None and self.merge_observations and not self.head_observations:
             return self.binding.merge_sha, self.merge_observations
         return self.target.pushed_sha, self.head_observations
 
