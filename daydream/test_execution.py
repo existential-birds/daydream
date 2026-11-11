@@ -618,6 +618,9 @@ async def run_test_command(
             timed_out = True
             await terminate_process(proc)
             exit_status = proc.returncode if proc.returncode is not None else -1
+        except BaseException:
+            await terminate_process(proc)
+            raise
 
         # Bound the post-exit drain with a salvage window. After a group kill the
         # pipes hit EOF; a suite-spawned grandchild that inherited the pipe write

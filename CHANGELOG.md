@@ -266,6 +266,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A replacement test command approved from the interactive retry menu no longer finalizes
   the tree for commit on its own pass: Daydream now runs the configured test command on
   the final tree first ([#1681](https://github.com/existential-birds/daydream/issues/1681)).
+- Cancelling a run now stops a running test command, or a check a regression claim names,
+  with its child processes; before, they kept running and could write to the checkout
+  ([#1681](https://github.com/existential-birds/daydream/issues/1681)).
 
 ## [0.34.0] - 2026-11-03
 
