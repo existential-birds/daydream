@@ -47,9 +47,7 @@ _EXT_USAGE = (
 
 
 def _ext_resolve_failure(registry: "Registry") -> str | None:
-    """Return the first phase/config/callable registry failure, including loop-group bodies in run_flow
-    preflight.
-    """
+    """Return the first phase/config registry failure, including loop-group bodies in run_flow preflight."""
     from daydream.extensions import UnresolvedExtensionError
     from daydream.flows.engine import _resolve_steps
 
@@ -62,12 +60,6 @@ def _ext_resolve_failure(registry: "Registry") -> str | None:
         phase_key = registry.phase(name).phase_key
         if not isinstance(phase_key, str):
             return f"phase '{name}' has a non-string config key: {phase_key!r}"
-    for name in registry.prompt_names():
-        if not callable(registry.prompt(name)):
-            return f"prompt slot '{name}' does not resolve to a callable"
-    for name in registry.renderer_names():
-        if not callable(registry.renderer(name)):
-            return f"renderer slot '{name}' does not resolve to a callable"
     return None
 
 

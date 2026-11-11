@@ -226,6 +226,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a failure or "No comments were posted.", since the request may still have reached
   GitHub; they still report file-level comments already posted and the safe error
   ([#1679](https://github.com/existential-birds/daydream/issues/1679)).
+- `Registry.override_prompt` rejects a non-callable builder at registration with
+  `ExtensionError`, as `override_renderer` already did, so the run stops before any
+  work. Before, only `daydream ext validate` caught it, and a run failed when it first
+  built that prompt ([#1680](https://github.com/existential-birds/daydream/issues/1680)).
 
 ## [0.34.0] - 2026-11-03
 

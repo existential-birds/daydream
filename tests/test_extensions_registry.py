@@ -63,6 +63,8 @@ def test_replace_requires_flag_and_prompt_roundtrip() -> None:
     reg.register_phase(FlowStep(name="a", run=_other), replace=True)
     reg.override_prompt("review", lambda **kw: "X")
     assert reg.prompt("review")() == "X"
+    with pytest.raises(ExtensionError, match="prompt 'x' builder must be callable"):
+        reg.override_prompt("x", cast(Any, None))
 
 
 def test_flow_mutation_and_unresolved_lookup() -> None:

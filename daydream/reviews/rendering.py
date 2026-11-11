@@ -81,7 +81,7 @@ def _render_finding(issue: ParsedIssue, placement: str, renderers: ReviewRendere
     _label = "builtin" if _fn is default_render_finding else "custom"
     return _render_component(
         lambda: _fn(cf, ctx),
-        lambda: renderers.fallback_finding(cf, ctx),
+        lambda: default_render_finding(cf, ctx),
         f"{_label} 'finding'",
     )
 
@@ -141,12 +141,10 @@ def default_render_summary(ctx: SummaryContext) -> str:
 
 @dataclass(frozen=True)
 class ReviewRenderers:
-    """Resolved comment renderers and their explicit built-in fallbacks."""
+    """Resolved comment renderers."""
 
     finding: Callable[[CommentFinding, FindingRenderContext], str]
     summary: Callable[[SummaryContext], str]
-    fallback_finding: Callable[[CommentFinding, FindingRenderContext], str] = default_render_finding
-    fallback_summary: Callable[[SummaryContext], str] = default_render_summary
 
 
 def resolve_review_renderers(registry: Registry) -> ReviewRenderers:
@@ -224,7 +222,7 @@ def build_payload_for_event(
     )
     summary_body = _render_component(
         lambda: renderers.summary(summary_ctx),
-        lambda: renderers.fallback_summary(summary_ctx),
+        lambda: default_render_summary(summary_ctx),
         "custom 'summary'",
     )
 
