@@ -30,7 +30,6 @@ from daydream.deep.reuse_store import (
     reuse_cache_for,
 )
 from daydream.deep.review_reuse import ReviewReuseUnit, _loop_grounding, _records_bytes_by_basename
-from daydream.deep.settings import _resolve_opt_in
 from daydream.deep.state import DeepState
 from daydream.extensions.api import Stop
 from daydream.flows.engine import FlowContext
@@ -505,7 +504,7 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
         renderers=resolve_review_renderers(ctx.registry),
         console=console,
         post=deep_state.mode == "comment",
-        approve_on_clean=_resolve_opt_in(ctx.config, "approve_on_clean"),
+        approve_on_clean=ctx.config.approve_on_clean,
         diagram_blocks=(deep_state.diagrams or {}).get("blocks"),
         run_context=ctx.run_context,
         auth=ctx.github_execution.auth,

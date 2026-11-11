@@ -117,6 +117,8 @@ class Registry:
 
     def override_prompt(self, name: str, builder: Callable[..., str]) -> None:
         """Upsert the prompt builder for a named prompt."""
+        if not callable(builder):
+            raise ExtensionError(f"prompt '{name}' builder must be callable")
         self._prompts[name] = builder
 
     def prompt(self, name: str) -> Callable[..., str]:

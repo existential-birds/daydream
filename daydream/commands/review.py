@@ -133,8 +133,7 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         "--approve-on-clean",
         action="store_true",
         help="Approve the PR when a deep review has zero high/medium findings "
-             "(issue #343): post event: 'APPROVE' instead of 'COMMENT'. Also "
-             "settable via [tool.daydream] approve_on_clean in a config file."
+             "(issue #343): post event: 'APPROVE' instead of 'COMMENT'."
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(

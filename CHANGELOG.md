@@ -170,6 +170,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `final_review_posted` fields. They duplicated `review_url`, which is `None` whenever no
   successful response was confirmed; test `review_url is None` instead. No known caller
   used them ([#1679](https://github.com/existential-birds/daydream/issues/1679)).
+- **Breaking (0.y.z):** `approve_on_clean` in `[tool.daydream]` or `.daydream.toml`.
+  Pass `--approve-on-clean` to `daydream --comment` or `daydream post-findings`.
+  Repository content can no longer turn a posted review into an approval. A leftover
+  key is ignored without a warning
+  ([#1680](https://github.com/existential-birds/daydream/issues/1680)).
 - Dead code no configuration path reached: `RepairJobPolicy.max_cost_usd`, the
   `setup_timeout_ms` Pi host packet field, `resolve_harbor_profile` and
   `config.DEFAULT_TOOL_CALL_BUDGET`, which was always `None`
@@ -184,6 +189,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its cross-process lock on the same lock file.
 - `scripts/redrive_post.py`, an untested manual re-post script
   ([#1679](https://github.com/existential-birds/daydream/issues/1679)).
+- `ReviewRenderers.fallback_finding` and `fallback_summary` (also via
+  `daydream.pr_review`), which nothing set; a failed custom renderer always falls
+  back to the built-in default. No known caller
+  ([#1680](https://github.com/existential-birds/daydream/issues/1680)).
 
 ### Fixed
 
@@ -205,7 +214,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Review completeness unavailable"). Before, the clean rerun posted nothing, so
   the unfinished notice stayed the newest Daydream review. The earlier notice is
   never edited, dismissed or minimized, and nothing is approved unless
-  `approve_on_clean` already allowed it. Without an earlier notice, a complete
+  `--approve-on-clean` already allowed it. Without an earlier notice, a complete
   clean review posts nothing beyond that approval. Both `--comment` and
   `post-findings` follow this
   ([#1766](https://github.com/existential-birds/daydream/issues/1766)).
@@ -221,6 +230,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a failure or "No comments were posted.", since the request may still have reached
   GitHub; they still report file-level comments already posted and the safe error
   ([#1679](https://github.com/existential-birds/daydream/issues/1679)).
+- `Registry.override_prompt` rejects a non-callable builder at registration with
+  `ExtensionError`, as `override_renderer` already did, so the run stops before any
+  work. Before, only `daydream ext validate` caught it, and a run failed when it first
+  built that prompt ([#1680](https://github.com/existential-birds/daydream/issues/1680)).
 
 ## [0.34.0] - 2026-11-03
 
