@@ -20,11 +20,9 @@ def test_ext_validate_rejects_previous_api(ext_dir: ExtDir, capsys: pytest.Captu
                                          monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv('COLUMNS', "80")
-    ext_dir.write_module("def register(r): ...\n", api_version=7)
+    ext_dir.write_module("def register(r): ...\n", api_version=8)
     assert _run_main(["ext", "validate"]) == 1
-    out = collapse_panel_text(capsys)
-    assert "DAYDREAM_EXT_API = 7" in out
-    assert "supports 8..8" in out
+    assert "must declare DAYDREAM_EXT_API = 9; found 8 " in collapse_panel_text(capsys)
 
 def test_ext_validate_rejects_invalid_supervisor_registration(ext_dir: ExtDir, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -49,7 +47,6 @@ def test_ext_validate_reports_registered_renderer_count(
     assert _run_main(["ext", "validate"]) == 0
     baseline = strip_ansi(capsys.readouterr().out)
     assert "tool supervisor: none" in baseline.lower()
-    assert "supported: 8..8" in baseline.lower()
     ext_dir.write_module(
         "from daydream.extensions import ToolDecision\n"
         "def supervise(name, tool_input, *, phase):\n"
@@ -68,7 +65,7 @@ def test_ext_validate_reports_registered_renderer_count(
         assert match is not None, text
         return int(match.group(1))
 
-    assert "DAYDREAM_EXT_DIR" in out and "api version 8" in out.lower()
+    assert "DAYDREAM_EXT_DIR" in out and "api version 9" in out.lower()
     assert "tool supervisor: registered" in out.lower()
     assert "trace exporters: langsmith, honeyhive, otlp, custom" in out
     assert "registry OK:" in out

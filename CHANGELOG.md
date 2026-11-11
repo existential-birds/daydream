@@ -175,6 +175,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Repository content can no longer turn a posted review into an approval. A leftover
   key is ignored without a warning
   ([#1680](https://github.com/existential-birds/daydream/issues/1680)).
+- **Breaking (0.y.z):** Extension API 9: extensions must declare `DAYDREAM_EXT_API = 9`,
+  and one that declares 8 is rejected before any work. Removed, with no known caller:
+  `Registry.insert_before`, `insert_after` and `remove` (edit the list
+  `registry.flow(name)` returns and pass it to `set_flow`); fork stack rules
+  (`StackRule`, `Registry.add_stack`, `Registry.stack_rules` and the `registry`
+  parameter of `detect_stacks`) and `StackAssignment.has_explicit_rule`;
+  `SummaryContext.agent_prompt`; `ExtensionVersionError` (version failures raise
+  `ExtensionError`); and `MIN_SUPPORTED_EXTENSION_API_VERSION`
+  ([#1680](https://github.com/existential-birds/daydream/issues/1680)).
 - Dead code no configuration path reached: `RepairJobPolicy.max_cost_usd`, the
   `setup_timeout_ms` Pi host packet field, `resolve_harbor_profile` and
   `config.DEFAULT_TOOL_CALL_BUDGET`, which was always `None`

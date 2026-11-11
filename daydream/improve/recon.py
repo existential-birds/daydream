@@ -316,14 +316,8 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
     groups: list[PartitionGroup] = []
     omissions: list[PartitionStackOmission] = []
     if not description_mode:
-        # Availability is resolved once in runner.run and threaded via config;
-        # None flows through to detect_stacks' optimistic default.
         tracked = branch_files if branch_focus else repository_files
-        stacks = detect_stacks(
-            tracked,
-            registry=ctx.registry,
-            target_dir=target,
-        )
+        stacks = detect_stacks(tracked, target_dir=target)
         if ctx.config.improve_scope:
             stacks = audit_scope._stacks_for_services(stacks, services)
             tracked = sorted({path for stack in stacks for path in stack.files})

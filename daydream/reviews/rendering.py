@@ -135,7 +135,7 @@ def default_render_summary(ctx: SummaryContext) -> str:
 
     The host owns the actionable count, warnings, reviewed commit, event, and footer."""
     return "\n\n".join(part for part in (
-        _render_body_section(ctx.findings), ctx.diagrams, ctx.agent_prompt, ctx.review_info,
+        _render_body_section(ctx.findings), ctx.diagrams, ctx.review_info,
     ) if part)
 
 
@@ -216,7 +216,6 @@ def build_payload_for_event(
     summary_ctx = SummaryContext(
         findings=tuple(SummaryFinding(finding=_comment_finding(issue), body_block=_summary_body_block(issue, renderers))
                        for issue in classified.body_only),
-        agent_prompt="",
         review_info=review_info_block,
         diagrams=diagram_blocks or None,
     )

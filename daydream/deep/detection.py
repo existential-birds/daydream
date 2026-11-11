@@ -1,19 +1,16 @@
 """Deterministic stack routing for changed files.
 
-Order: first matching fork rule, bounded local JS/TS evidence, Markdown pinning,
-extension lookup, config promotion, nearest ancestor, then generic on ambiguity.
-Built-in scopes are registry-independent; extensions contribute names and globs.
+Order: bounded local JS/TS evidence, Markdown pinning, extension lookup, config
+promotion, nearest ancestor, then generic on ambiguity.
 """
 
 from __future__ import annotations
 
-import fnmatch
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.framework_detection import JS_SOURCE_SUFFIXES, FrameworkInspection
-from daydream.extensions import Registry, StackRule, get_registry
 
 # Extension -> stack-key (lowercase, matches the supported built-in stacks).
 # This table is about review routing, not syntactic parsing
@@ -66,8 +63,6 @@ class StackAssignment:
     # Never added to ``files`` (union of primary sets stays the changed set).
     # Empty for unsplit stacks and the structural meta-stack.
     frontier_files: list[str] = field(default_factory=list)
-    # Automatic tiny-diff collapse must retain explicit extension routing.
-    has_explicit_rule: bool = False
 
 
 def _ext(path: str) -> str:
@@ -124,44 +119,19 @@ def _nearest_ancestor_stack(path: str, assigned: dict[str, str]) -> str | None:
     return None
 
 
-def _match_stack_rule(path: str, rules: tuple[StackRule, ...]) -> StackRule | None:
-    """Return the first fork rule whose glob matches ``path`` (registration order)."""
-    for rule in rules:
-        if any(fnmatch.fnmatchcase(path, pattern) for pattern in rule.patterns):
-            return rule
-    return None
-
-
-def detect_stacks(
-    changed_files: list[str],
-    *,
-    registry: Registry | None = None,
-    target_dir: Path | None = None,
-) -> list[StackAssignment]:
-    """Route changed POSIX paths, consulting the registry only for fork rules.
+def detect_stacks(changed_files: list[str], *, target_dir: Path | None = None) -> list[StackAssignment]:
+    """Route changed POSIX paths.
 
     Return nonempty language scopes alphabetically, then generic, then structure.
     The structure meta-stack contains all changed files unless the diff is docs-only.
-    An omitted registry resolves from the current context.
     """
-    if registry is None:
-        registry = get_registry()
-    rules = registry.stack_rules()
     inspection = FrameworkInspection(target_dir)
-    explicit: set[str] = set()
 
     assigned: dict[str, str] = {}  # path -> stack_name
     ambiguous: list[str] = []
 
-    # Unambiguous routing (fork rules + extension + .md pinning + config default).
+    # Unambiguous routing (extension + .md pinning + config default).
     for path in sorted(set(changed_files)):
-        # Fork StackRule globs win per-file, before any built-in routing.
-        rule = _match_stack_rule(path, rules)
-        if rule is not None:
-            assigned[path] = rule.stack_name
-            explicit.add(path)
-            continue
-
         base = _basename(path)
         suffix = _ext(path)
         if suffix in JS_SOURCE_SUFFIXES:
@@ -194,7 +164,7 @@ def detect_stacks(
     for path in list(assigned.keys()):
         base = _basename(path)
         owner = _CONFIG_OWNERSHIP_SIGNALS.get(base)
-        if path not in explicit and owner and owner in present_stacks:
+        if owner and owner in present_stacks:
             assigned[path] = owner
 
     # Ambiguous files (D-12).
@@ -208,10 +178,6 @@ def detect_stacks(
             continue
         nearest = _nearest_ancestor_stack(path, assigned)
         assigned[path] = nearest if nearest is not None else GENERIC_STACK
-
-    # D-16 is removed: a built-in stack never degrades to generic merely
-    # because a plugin registry is absent. Unknown/unassigned files route to the
-    # native generic fallback, never a detected built-in stack.
 
     groups: dict[str, list[str]] = {}
     for path, stack in assigned.items():
@@ -235,7 +201,6 @@ def detect_stacks(
                 stack_name=stack_name,
                 files=files,
                 is_docs_only=all(_ext(f) == ".md" for f in files),
-                has_explicit_rule=any(f in explicit for f in files),
             )
         )
     if GENERIC_STACK in groups:
@@ -245,7 +210,6 @@ def detect_stacks(
                 stack_name=GENERIC_STACK,
                 files=files,
                 is_docs_only=diff_is_docs_only,
-                has_explicit_rule=any(f in explicit for f in files),
             )
         )
 
