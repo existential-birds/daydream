@@ -512,11 +512,11 @@ def test_post_findings_final_failure_reports_writes_and_safe_recovery_path(
     try:
         assert json.loads(payload_path.read_text()) == review.payload
         message = _console_text(capsys)
-        assert "PR Review Unconfirmed Could not confirm the PR review was posted." in message
+        already = " 1 file-level comment(s) were already posted." if file_posts else ""
+        assert f"PR Review Unconfirmed Could not confirm the PR review was posted.{already} (GitHub review" in message
         assert "payload preserved at" in message
         # Rich may wrap this machine path; removing whitespace recovers the displayed value.
         assert str(payload_path) in message.replace(" ", "")
-        assert ("1 file-level comment(s) were already posted." in message) is file_posts
         assert "No comments were posted." not in message
         assert secret not in message
     finally:
