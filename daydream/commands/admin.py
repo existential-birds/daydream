@@ -6,9 +6,8 @@ from pathlib import Path
 from daydream import git_ops
 from daydream.agent import console
 from daydream.commands import common
-from daydream.config_file import load_file_config
 from daydream.extensions import Registry
-from daydream.ui import create_console, print_error, print_warning
+from daydream.ui import create_console, print_error
 
 
 def _build_summarize_parser() -> argparse.ArgumentParser:
@@ -151,7 +150,7 @@ def _build_post_findings_parser() -> argparse.ArgumentParser:
         "--target",
         type=Path,
         metavar="PATH",
-        help="Checkout directory for configuration, diagram evidence, and GitHub operations (default: cwd).",
+        help="Checkout directory for diagram evidence and GitHub operations (default: cwd).",
     )
     parser.add_argument(
         "--pr",
@@ -194,8 +193,7 @@ def _build_post_findings_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Approve the PR when the posted findings contain no high/medium "
         "severity issues (issue #343): post event: 'APPROVE' instead of "
-        "'COMMENT'. Also settable via [tool.daydream] approve_on_clean in a "
-        "repo config file.",
+        "'COMMENT'.",
     )
     return parser
 
@@ -217,24 +215,17 @@ def _handle_post_findings_command(argv: list[str]) -> int:
     if not target_dir.is_dir():
         parser.error(f"--target must be an existing directory: {target_dir}")
 
-    console = create_console()
-    # Malformed repo config must not abort unattended posting; warn and fall back to the CLI flag.
-    approve = args.approve_on_clean
-    try:
-        approve = approve or bool(load_file_config(target_dir).approve_on_clean)
-    except ValueError as exc:
-        print_warning(console, f"Ignoring malformed repo config: {exc}")
     return pr_review.post_findings_from_artifact(
         target_dir,
         args.artifact,
         pr_number=args.pr_number,
         head_sha=args.head_sha,
         repo=args.repo,
-        console=console,
+        console=create_console(),
         base_sha=args.base_sha,
         comparison_sha=args.comparison_sha,
         bot_login=args.bot_login,
-        approve_on_clean=approve, auth=git_ops.INHERIT_GITHUB_AUTH,
+        approve_on_clean=args.approve_on_clean, auth=git_ops.INHERIT_GITHUB_AUTH,
     )
 
 

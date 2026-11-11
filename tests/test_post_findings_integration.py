@@ -160,19 +160,6 @@ def test_immutable_publisher_uses_original_head_and_gates_approval_on_complete_c
     assert len(posts) == 2 and posts[1].payload['event'] == 'APPROVE'
     assert posts[1].payload['commit_id'] == 'a' * 40
 
-def test_malformed_repo_config_warns_and_still_posts(fake_gh: FakeGh, tmp_path: Path,) -> None:
-    (tmp_path / ".daydream.toml").write_text("this is [not valid toml ==")
-    artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
-    code = cli_main(_post_argv(artifact, target=tmp_path))
-    assert code == 0
-    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
-
-
-def _write_single_finding_artifact(path: Path, fingerprint: str) -> Path:
-    return _write_artifact(path / "findings.json",
-        [_finding(fingerprint, path="src/app.py", line=10, placement="inline", title="Real finding",)],
-    )
-
 def test_post_findings_drops_flowchart_nodes_absent_from_source(
     fake_gh: FakeGh, git_repo: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -400,6 +387,17 @@ def test_post_findings_approves_on_clean_with_a_degraded_artifact(fake_gh: FakeG
     assert len(posts[0].payload["comments"]) == 1
     assert posts[0].payload["body"].startswith("Actionable comments posted: 1\n\n")
     assert "```mermaid" not in posts[0].payload["body"]
+
+def test_post_findings_repo_config_cannot_approve(fake_gh: FakeGh, tmp_path: Path,) -> None:
+    (tmp_path / ".daydream.toml").write_text("approve_on_clean = true\n")
+    artifact = _api_head_artifact(
+        tmp_path, [_finding("a" * 64, path="a.py", line=1, placement="inline", title="Nit", severity="low")],
+    )
+
+    assert cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path)) == 0
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert posts[0].payload["event"] == "COMMENT"
 
 @pytest.mark.parametrize("schema_version", [2, 3])
 def test_post_findings_matched_blocking_finding_prevents_approval(

@@ -62,7 +62,6 @@ class DaydreamFileConfig:
     phases: dict[str, dict[str, str]] = field(default_factory=dict)
     shallow_fanout_threshold: int | None = None
     precision_mode: bool | None = None
-    approve_on_clean: bool | None = None
     scope_issue_filing: bool | None = None
     group_max_wall_s: float | None = None
     group_max_serial_items: int | None = None
@@ -294,7 +293,6 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         phases=_coerce_phases(merged.get("phases")),
         shallow_fanout_threshold=threshold,
         precision_mode=_coerce_optional_bool(merged.get("precision_mode")),
-        approve_on_clean=_coerce_optional_bool(merged.get("approve_on_clean")),
         scope_issue_filing=_coerce_optional_bool(merged.get("scope_issue_filing")),
         group_max_wall_s=_coerce_non_negative_float(merged.get("group_max_wall_s")),
         group_max_serial_items=_coerce_non_negative_int(merged.get("group_max_serial_items")),
