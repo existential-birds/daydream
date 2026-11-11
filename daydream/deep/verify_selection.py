@@ -3,7 +3,7 @@
 Selection returns one decision per canonical item, in order, including exempt
 structural and wonder findings. Missing or unreadable evidence selects an item;
 only a confirmed, unrevised, strongly evidenced routine finding may be skipped.
-Configuration can widen selection; unknown risk categories raise.
+Configuration can widen selection.
 
 Changed-text evidence comes from added lines in the cited hunk, without
 reapplying location snapping. Reuse requires the same rule version, durable item
@@ -13,17 +13,13 @@ identity, verifier-relevant digest, and a resolved prior verdict.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from daydream.deep.adjudication_provenance import RecordProvenance
 from daydream.deep.records import item_source_uids, item_uid
-from daydream.deep.risk_categories import (
-    UnknownRiskCategoryError,
-    categories_in,
-    validate_extra_categories,
-)
+from daydream.deep.risk_categories import categories_in
 from daydream.hunk_index import parse_hunks
 from daydream.json_utils import canonical_json
 
@@ -86,15 +82,9 @@ def changed_text_at(diff_text: str, file: str, line: object) -> str:
 
 @dataclass(frozen=True)
 class SelectionConfig:
-    """Resolved policy: verify_all selects every non-exempt item; extras are validated, never applied.
-
-    The mandatory vocabulary itself is what selection reads. ``extra_categories``
-    survives only as provenance -- it is echoed into the selection artifact --
-    after :func:`validate_extra_categories` has rejected unknown names.
-    """
+    """Resolved policy: verify_all selects every non-exempt item."""
 
     verify_all: bool = True
-    extra_categories: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -122,18 +112,6 @@ class SelectionDecision:
             "content_digest": self.content_digest,
             "verdict_reused": self.verdict_reused,
         }
-
-
-def resolve_selection_config(
-    *, verify_all: bool | None, extra_categories: Iterable[str] | None
-) -> SelectionConfig:
-    """Default absent verify_all to True and reject unknown categories before dispatch."""
-    categories = tuple(extra_categories or ())
-    validate_extra_categories(categories)
-    return SelectionConfig(
-        verify_all=True if verify_all is None else bool(verify_all),
-        extra_categories=categories,
-    )
 
 
 def plan_reuse(
@@ -396,10 +374,8 @@ __all__ = [
     "SKIP_REASON_CODE",
     "SelectionConfig",
     "SelectionDecision",
-    "UnknownRiskCategoryError",
     "changed_text_at",
     "item_content_digest",
     "plan_reuse",
-    "resolve_selection_config",
     "select_items",
 ]

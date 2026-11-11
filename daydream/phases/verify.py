@@ -121,7 +121,6 @@ async def phase_verify_recommendations(
     selection_block: dict[str, Any] = {
         "rule_version": SELECTION_RULE_VERSION,
         "mode": "verify_all" if config.verify_all else "selective",
-        "extra_categories": list(config.extra_categories),
         "decisions": [decision.as_dict() for decision in decisions],
         "selected": sum(1 for decision in decisions if decision.selected),
         # Count selected skips, excluding lens exemptions; verify_all reports zero.

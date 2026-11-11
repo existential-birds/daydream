@@ -39,9 +39,6 @@ class DaydreamFileConfig:
     ``latency_profile`` is deliberately parsed without validating its vocabulary:
     the runtime resolver promotes unknown names to forensic. ``review_profile``
     is only a path here; review_profile.py owns strict profile validation.
-    ``extra_risk_categories`` likewise gets fail-loud vocabulary validation at
-    verification; the declared vocabulary is the mandatory set, so it can
-    change nothing.
 
     Improve service roots/groups and partition bounds come from ``[improve]``;
     issue publication requires explicit ``[improve.github] publish_issues=true``.
@@ -79,7 +76,6 @@ class DaydreamFileConfig:
     review_cache_max_bytes: int | None = None
     review_cache_max_age_days: int | None = None
     verify_all: bool | None = None
-    extra_risk_categories: list[str] = field(default_factory=list)
     quality_gate_enabled: bool | None = None
     quality_gate_erosion_delta: float | None = None
     quality_gate_verbosity_delta: float | None = None
@@ -311,7 +307,6 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         review_cache_max_bytes=_coerce_non_negative_int(merged.get("review_cache_max_bytes")),
         review_cache_max_age_days=_coerce_non_negative_int(merged.get("review_cache_max_age_days")),
         verify_all=_coerce_optional_bool(merged.get("verify_all")),
-        extra_risk_categories=_coerce_string_list(merged.get("extra_risk_categories")),
         quality_gate_enabled=_coerce_optional_bool(merged.get("quality_gate_enabled")),
         quality_gate_erosion_delta=_coerce_non_negative_float(merged.get("quality_gate_erosion_delta")),
         quality_gate_verbosity_delta=_coerce_non_negative_float(merged.get("quality_gate_verbosity_delta")),

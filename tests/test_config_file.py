@@ -27,7 +27,7 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(
         "quality_gate_erosion_absolute = 100\nquality_gate_verbosity_absolute = 0.25\n"
         "review_cache_enabled = false\nreview_cache_max_entries = 7\n"
         "review_cache_max_bytes = 2048\nreview_cache_max_age_days = 3\n"
-        'verify_all = true\nextra_risk_categories = ["security", "migration"]\n'
+        "verify_all = true\n"
         '[phases.fix]\nbackend = "codex"\n[diagram]\nmode = "off"\n'
     )
 
@@ -52,7 +52,7 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(
         config.review_cache_max_bytes,
         config.review_cache_max_age_days,
     ) == (False, 7, 2048, 3)
-    assert (config.verify_all, config.extra_risk_categories) == (True, ["security", "migration"])
+    assert config.verify_all is True
     assert config.improve_service_roots == ["apps/*"]
     assert config.improve_service_groups == {"core": ["apps/billing", "apps/catalog"]}
     assert config.improve_github_publish_issues is True
@@ -64,7 +64,7 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(
         'tool_supervisor = "unknown"\ntool_bash_deny = [1]\n'
         'review_cache_enabled = "yes"\nreview_cache_max_entries = -1\n'
         "review_cache_max_bytes = 1.5\nreview_cache_max_age_days = -1\n"
-        'verify_all = 1\nextra_risk_categories = "security"\n'
+        "verify_all = 1\n"
         '[improve]\npartition-max-files = 0\nmax-partition-groups = "many"\n'
         "[improve.github]\npublish_issues = 1\n"
         '[diagram]\nmode = "both"\nmin_code_files = 0\nmin_modules = "two"\n'
@@ -82,7 +82,7 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(
         degraded.review_cache_max_bytes,
         degraded.review_cache_max_age_days,
     ) == (None, None, None, None)
-    assert (degraded.verify_all, degraded.extra_risk_categories) == (None, [])
+    assert degraded.verify_all is None
     assert (degraded.improve_partition_max_files, degraded.improve_max_partition_groups) == (None, None)
     assert degraded.improve_github_publish_issues is False
     assert DaydreamFileConfig().improve_github_publish_issues is False

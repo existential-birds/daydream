@@ -184,6 +184,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SummaryContext.agent_prompt`; `ExtensionVersionError` (version failures raise
   `ExtensionError`); and `MIN_SUPPORTED_EXTENSION_API_VERSION`
   ([#1680](https://github.com/existential-birds/daydream/issues/1680)).
+- **Breaking (0.y.z):** `RunConfig.verify_all` and `RunConfig.verify_extra_risk_categories`;
+  the `extra_risk_categories` setting (`DaydreamFileConfig.extra_risk_categories`);
+  `resolve_selection_config`, `UnknownRiskCategoryError` and `validate_extra_categories`;
+  `SelectionConfig.extra_categories`; and `selection.extra_categories` in
+  `recommendation-verdicts.json`. No known caller. `verify_all` still works: set it in
+  `[tool.daydream]` or `.daydream.toml`, or pass
+  `file_config=DaydreamFileConfig(verify_all=True)`. A leftover `extra_risk_categories`
+  key is ignored without a warning, so a misspelled category no longer stops a fix run
+  ([#1631](https://github.com/existential-birds/daydream/issues/1631)).
 - Dead code no configuration path reached: `RepairJobPolicy.max_cost_usd`, the
   `setup_timeout_ms` Pi host packet field, `resolve_harbor_profile` and
   `config.DEFAULT_TOOL_CALL_BUDGET`, which was always `None`

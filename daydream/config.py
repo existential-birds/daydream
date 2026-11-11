@@ -219,9 +219,8 @@ DEFAULT_REVIEW_CACHE_MAX_BYTES: int = 1024**3
 DEFAULT_REVIEW_CACHE_MAX_AGE_DAYS: int = 30
 
 # Selective verification is the evidence-approved default; latency is reported,
-# not gated. Config verify_all=true restores every non-exempt finding, while
-# extra_risk_categories is validated against the mandatory vocabulary and can
-# change nothing. Neither has a CLI flag.
+# not gated. Config verify_all=true restores every non-exempt finding; it has no
+# CLI flag.
 DEFAULT_VERIFY_ALL: bool = False
 
 # Synthetic scope metadata for structural review alongside language stacks;
