@@ -105,7 +105,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Pi admits a tool start and accepts `budget=` (a bare `deadline=` still builds one);
   `restrict()` now only narrows `allowed_tools`, and `charged_starts` is gone. Backends
   that declare `supports_budget_preamble`, such as Pi, receive the ledger's absolute
-  `deadline` instead of `wall_budget_s`. Extension API 8 is
+  `deadline` instead of `wall_budget_s`. The extension API is
   unchanged because `run_agent` is not exported from `daydream.extensions`; callers
   migrate by building `BudgetLedger(owner, wall_s=..., limit=..., deadline=...)`
   ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
