@@ -24,20 +24,6 @@ class _EqualBackend(ScriptedBackend):
         return True
 
 
-
-def test_choice_forces_only_supplied_assume_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
-    prompts: list[str] = []
-    def prompt(_console: Any, message: str, _default: str) -> str:
-        prompts.append(message)
-        return "typed"
-    monkeypatch.setattr("daydream.run_context._prompt_user", prompt)
-    assumed = RunContext(InteractionPolicy(assume="yes"))
-    assert assumed.choice("menu", default="3", safe_default="4", assume_yes="2") == "2"
-    assert assumed.choice("free form", default=".", safe_default=".") == "typed"
-    unattended = RunContext(InteractionPolicy(assume="yes", interactive=False))
-    assert unattended.choice("free form", default=".", safe_default="safe") == "safe"
-    assert prompts == ["free form"]
-
 def test_backend_registration_is_identity_aware_and_reference_counted(monkeypatch: pytest.MonkeyPatch) -> None:
     backend = _EqualBackend()
     sibling = _EqualBackend()

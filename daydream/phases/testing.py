@@ -888,8 +888,6 @@ async def phase_test_and_heal(
             "Choice",
             default="2",
             safe_default="4",
-            assume_yes="2",
-            assume_no="4",
             console=agent.console,
         )
 
