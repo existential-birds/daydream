@@ -202,6 +202,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `daydream.pr_review`), which nothing set; a failed custom renderer always falls
   back to the built-in default. No known caller
   ([#1680](https://github.com/existential-birds/daydream/issues/1680)).
+- `RunContext.choice`'s undocumented `assume_yes` and `assume_no` keyword arguments,
+  which only an unreachable menu path passed. No known caller
+  ([#1633](https://github.com/existential-birds/daydream/issues/1633)).
 
 ### Fixed
 

@@ -99,7 +99,7 @@ async def test_overlapping_runs_keep_prompt_and_console_policy(monkeypatch: pyte
             mine.set()
             await sibling.wait()  # Both runs are bound while each one prompts and prints.
             choices[label] = resolve_run_context().choice(
-                f"{label} choice", default="safe-default", safe_default="safe-default", console=console)
+                f"{label} choice", default="prompt-default", safe_default="safe-default", console=console)
             console.print(f"{label}-token={sentinel}", markup=False, highlight=False)
 
     with console.capture() as captured, anyio.fail_after(5):
