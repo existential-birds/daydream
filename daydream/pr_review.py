@@ -1070,7 +1070,7 @@ async def _post(
     if result.folded_file_level:
         print_warning(
             console,
-            f"{len(result.folded_file_level)} file-level comment(s) failed to post; "
+            f"{len(result.folded_file_level)} file-level comment(s) could not be confirmed as posted; "
             "folded into the review body.",
         )
 
@@ -1078,7 +1078,7 @@ async def _post(
         suffix = f" ({result.safe_error})" if result.safe_error else ""
         already = (f" {len(result.posted_file_level)} file-level comment(s) were already posted."
                    if result.posted_file_level else "")
-        print_warning(console, f"Failed to post PR review.{already}{suffix}")
+        print_warning(console, f"Could not confirm the PR review was posted.{already}{suffix}")
         return PostStatus.FAILED
 
     print_success(console, f"Posted review: {result.review_url}")
@@ -1269,15 +1269,15 @@ def post_findings_from_artifact(
     if result.folded_file_level:
         print_info(
             console,
-            f"{len(result.folded_file_level)} file-level comment(s) failed to post; "
+            f"{len(result.folded_file_level)} file-level comment(s) could not be confirmed as posted; "
             "folded into the review body.",
         )
 
     if result.review_url is None:
         suffix = f" ({result.safe_error})" if result.safe_error else ""
-        already = (f"{len(result.posted_file_level)} file-level comment(s) were already posted."
+        already = (f" {len(result.posted_file_level)} file-level comment(s) were already posted."
                    if result.posted_file_level else "")
-        print_error(console, "PR Review Post Failed", f"{already}{suffix}".strip())
+        print_error(console, "PR Review Unconfirmed", f"Could not confirm the PR review was posted.{already}{suffix}")
         return 1
     print_success(console, f"Posted review: {result.review_url}")
     return 0
