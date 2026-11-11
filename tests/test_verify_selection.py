@@ -1,16 +1,13 @@
+from dataclasses import replace
 from typing import Any, cast
-
-import pytest
 
 from daydream.deep.adjudication_provenance import RecordProvenance
 from daydream.deep.verify_selection import (
     SELECTION_RULE_VERSION,
     SelectionConfig,
     SelectionDecision,
-    UnknownRiskCategoryError,
     item_content_digest,
     plan_reuse,
-    resolve_selection_config,
     select_items,
 )
 
@@ -51,7 +48,7 @@ def test_only_a_strong_adjudicated_routine_item_skips() -> None:
     provenance = {str(item["item_uid"]): _provenance(str(item["item_uid"])) for item in items}
     provenance["item:11"] = _provenance("item:11", verdict_bound=False)
     provenance["item:12"] = _provenance("item:12", revised_fields=("severity",))
-    config = resolve_selection_config(verify_all=False, extra_categories=["security", "migration", "security"])
+    config = SelectionConfig(verify_all=False)
     decisions = select_items(items, provenance=provenance, diff_text=_DIFF, config=config)
     assert [(d.item_uid, d.item_id, d.selected, d.reason_code) for d in decisions] == [
         ("item:1", 1, False, "strongly_evidenced_adjudicated_routine"), ("item:2", 2, True, "cross_stack"),
@@ -68,7 +65,7 @@ def test_only_a_strong_adjudicated_routine_item_skips() -> None:
     # grounded on changed text cannot be ruled out and the item selects -- never
     # skips, whatever else the item's own evidence says (verify_selection:29-31).
     decisions = select_items([_item("item:1")], provenance={"item:1": _provenance("item:1")},
-        diff_text="", config=SelectionConfig(verify_all=False, extra_categories=()),
+        diff_text="", config=SelectionConfig(verify_all=False),
     )
     assert decisions[0].selected is True
     assert decisions[0].reason_code == "unreadable_diff"
@@ -93,10 +90,21 @@ def test_prior_verdict_reuse_requires_rule_uid_digest_and_a_resolved_verdict() -
     assert [d.item_uid for d in to_verify] == ["item:2", "item:3"]
     assert plan_reuse({**prior, "decisions": "invalid"}, current) == ({}, current)
     # The verify phase reads prior selection plus verdicts from its artifact; a foreign block misses.
-    from daydream.phases.verify import _prior_selection_payload
+    from daydream.deep.fix_steps import _attach_verdicts
+    from daydream.phases.verify import _merge_reused_verdicts, _prior_selection_payload
     assert _prior_selection_payload({"selection": {"rule_version": 1}, "verdicts": "invalid"}) == {
         "rule_version": 1, "verdicts": []}
     assert _prior_selection_payload({"selection": "invalid"}) is None
+    shown = {"issue_id": 2, "verdict": "uncertain", "evidence": "shown"}
+    stray = [{"issue_id": n, "verdict": "contradicts", "evidence": "stray"} for n in (3, 9, 99, "2")]
+    decisions = [*current[:2], replace(current[2], selected=False)]
+    verdicts = _merge_reused_verdicts([reused["item:1"]], [shown, *stray], decisions, reused)
+    assert verdicts == [reused["item:1"], shown]
+    findings = [_item("item:1", id=9), _item("item:2", id=2), _item("item:3", id=3)]
+    assert _attach_verdicts(findings, {"verdicts": verdicts}) == [
+        {**_item("item:1", id=9), "verifier_verdict": "consistent", "evidence": "e", "unverified_assumptions": []},
+        {**_item("item:2", id=2), "verifier_verdict": "uncertain", "evidence": "shown", "unverified_assumptions": []},
+        _item("item:3", id=3)]
     prior = {"rule_version": SELECTION_RULE_VERSION + 1, "decisions": [{"item_uid": "item:1", "content_digest": "d1"}],
         "verdicts": [{"issue_id": 1}],
     }
@@ -110,8 +118,6 @@ def test_prior_verdict_reuse_requires_rule_uid_digest_and_a_resolved_verdict() -
     assert plan_reuse(None, [_decision("item:1", digest="d1")]) == ({}, [_decision("item:1", digest="d1")])
     assert plan_reuse(cast(Any, []), [_decision("item:1", digest="d1")])[0] == {}
 
-    with pytest.raises(UnknownRiskCategoryError, match="public_interface"):
-        resolve_selection_config(verify_all=False, extra_categories=["public_interface"])
     a = _item("item:1")
     assert item_content_digest(a) == item_content_digest({**a, "id": 7, "verifier_verdict": "consistent"})
     assert item_content_digest(a) != item_content_digest({**a, "evidence": "a.py:1 rewritten"})

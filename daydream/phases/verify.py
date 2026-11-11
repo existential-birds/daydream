@@ -5,8 +5,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-import anyio
-
 from daydream import agent, config as phase_config, review_profile as _rp
 from daydream.backends import (
     Backend,
@@ -123,7 +121,6 @@ async def phase_verify_recommendations(
     selection_block: dict[str, Any] = {
         "rule_version": SELECTION_RULE_VERSION,
         "mode": "verify_all" if config.verify_all else "selective",
-        "extra_categories": list(config.extra_categories),
         "decisions": [decision.as_dict() for decision in decisions],
         "selected": sum(1 for decision in decisions if decision.selected),
         # Count selected skips, excluding lens exemptions; verify_all reports zero.
@@ -182,16 +179,13 @@ def _merge_reused_verdicts(
     decisions: list[SelectionDecision],
     reused: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Join prior and fresh verdicts, preserving reused slots against overreaching model output."""
-    reused_ids = {
+    """Join reused verdicts with fresh ones for the findings this turn was asked to verify."""
+    asked = {
         decision.item_id
         for decision in decisions
-        if decision.item_uid in reused and decision.item_id is not None
+        if decision.selected and decision.item_uid not in reused and decision.item_id is not None
     }
-    kept_fresh = [
-        verdict for verdict in fresh_verdicts if verdict.get("issue_id") not in reused_ids
-    ]
-    return [*reused_verdicts, *kept_fresh]
+    return [*reused_verdicts, *(verdict for verdict in fresh_verdicts if verdict.get("issue_id") in asked)]
 
 
 def _read_diff_text(deep_dir: Path) -> str:
@@ -211,7 +205,6 @@ async def phase_fix_verify(
     items: list[dict[str, Any]],
     changed_hunks: str,
     *,
-    console_lock: anyio.Lock | None = None,
     round_number: int = 1,
     run_context: RunContext | None = None,
 ) -> list[dict[str, Any]]:
@@ -220,14 +213,13 @@ async def phase_fix_verify(
     Return resolved, unresolved, wrong_target, or regressed outcomes keyed by the
     supplied item IDs, in order. Missing verdicts become unresolved; path-bearing
     outcomes are cleaned/defaulted here because the schema cannot require paths
-    conditionally. Use the registered fix-verify prompt; console_lock serializes UI.
+    conditionally. Use the registered fix-verify prompt.
 
     This phase never reverts changes. Orchestration may continue exhausted unresolved
     or wrong-target findings through tests, but blocks regressions and new actionable
     outcomes during post-test stabilization. Empty changed_hunks remains a valid
     input; the prompt limits inspection to the supplied hunks.
     """
-    del console_lock  # interactive progress is not printed per finding here
     run_context = resolve_run_context(run_context)
     if not items:
         return []

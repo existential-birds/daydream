@@ -6,7 +6,7 @@ import json
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 from daydream import git_ops
 from daydream.agent import console
@@ -34,7 +34,7 @@ from daydream.deep.settings import (
     repair_job_policy,
 )
 from daydream.deep.state import DeepState
-from daydream.deep.verify_selection import SelectionConfig, resolve_selection_config
+from daydream.deep.verify_selection import SelectionConfig
 from daydream.extensions.api import BreakLoop, Stop
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.flows.engine import FlowContext
@@ -75,9 +75,6 @@ from daydream.ui import (
     print_verification_summary,
     print_warning,
 )
-
-if TYPE_CHECKING:
-    from daydream.run_config import RunConfig
 
 
 def _attach_verdicts(items: list[dict[str, Any]], payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -251,7 +248,7 @@ async def _step_verify(ctx: FlowContext) -> None:
 
     # Accepted fresh and resumed fix gates verify recommendations; declined gates
     # produce neither a verifier call nor its artifact.
-    selection = _resolve_verify_selection(ctx.config)
+    selection = SelectionConfig(verify_all=_resolve_config_value(ctx.config, "verify_all", DEFAULT_VERIFY_ALL))
     async with phase_scope(DaydreamPhase.VERIFY):
         verdicts_file, verdicts_payload = await phase_verify_recommendations(
             ctx.backend_for("verify"),
@@ -281,25 +278,6 @@ async def _step_verify(ctx: FlowContext) -> None:
             other=other_ids,
             total=len(items),
         )
-    )
-
-
-def _resolve_verify_selection(config: RunConfig) -> SelectionConfig:
-    """Resolve CLI-over-file verification selection, then built-in defaults.
-
-    Only real booleans control verify_all. Extra risk categories are additive;
-    unknown names raise before verification instead of changing selection silently.
-    """
-    file_config = config.file_config
-    verify_all = config.verify_all
-    if verify_all is None and file_config is not None:
-        verify_all = file_config.verify_all
-    extra = config.verify_extra_risk_categories
-    if extra is None and file_config is not None:
-        extra = file_config.extra_risk_categories
-    return resolve_selection_config(
-        verify_all=verify_all if verify_all is not None else DEFAULT_VERIFY_ALL,
-        extra_categories=extra,
     )
 
 

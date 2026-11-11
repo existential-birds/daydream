@@ -184,6 +184,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SummaryContext.agent_prompt`; `ExtensionVersionError` (version failures raise
   `ExtensionError`); and `MIN_SUPPORTED_EXTENSION_API_VERSION`
   ([#1680](https://github.com/existential-birds/daydream/issues/1680)).
+- **Breaking (0.y.z):** `RunConfig.verify_all` and `RunConfig.verify_extra_risk_categories`;
+  the `extra_risk_categories` setting (`DaydreamFileConfig.extra_risk_categories`), which
+  could only name categories that are always verified; `resolve_selection_config`,
+  `UnknownRiskCategoryError` and `validate_extra_categories`;
+  `SelectionConfig.extra_categories`; and `selection.extra_categories` in
+  `recommendation-verdicts.json`. No known caller. `verify_all` still works: set it in
+  `[tool.daydream]` or `.daydream.toml`, or pass
+  `file_config=DaydreamFileConfig(verify_all=True)`. A leftover `extra_risk_categories`
+  key is ignored without a warning, so a misspelled category no longer stops a fix run
+  ([#1631](https://github.com/existential-birds/daydream/issues/1631)).
 - Dead code no configuration path reached: `RepairJobPolicy.max_cost_usd`, the
   `setup_timeout_ms` Pi host packet field, `resolve_harbor_profile` and
   `config.DEFAULT_TOOL_CALL_BUDGET`, which was always `None`
@@ -205,6 +215,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `RunContext.choice`'s undocumented `assume_yes` and `assume_no` keyword arguments,
   which only an unreachable menu path passed. No known caller
   ([#1633](https://github.com/existential-birds/daydream/issues/1633)).
+- `phase_fix_verify`'s unused `console_lock` keyword argument. No known caller
+  ([#1631](https://github.com/existential-birds/daydream/issues/1631)).
 
 ### Fixed
 
@@ -246,6 +258,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ExtensionError`, as `override_renderer` already did, so the run stops before any
   work. Before, only `daydream ext validate` caught it, and a run failed when it first
   built that prompt ([#1680](https://github.com/existential-birds/daydream/issues/1680)).
+- Recommendation verification keeps only verdicts for the findings shown to the verifier.
+  A verdict for a skipped, exempt or unknown finding number was saved to
+  `recommendation-verdicts.json`, counted in the verification summary and scored in
+  captured data, and the fixer saw it as that skipped or exempt finding's verdict and
+  evidence ([#1631](https://github.com/existential-birds/daydream/issues/1631)).
 
 ## [0.34.0] - 2026-11-03
 

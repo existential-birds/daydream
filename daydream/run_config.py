@@ -102,9 +102,6 @@ class RunConfig:
     review_cache_max_entries: int | None = None
     review_cache_max_bytes: int | None = None
     review_cache_max_age_days: int | None = None
-    # File-config-only controls: risk categories widen selection and validate before verification.
-    verify_all: bool | None = None
-    verify_extra_risk_categories: list[str] | None = None
     # Resolve the CLI/env path once into a validated profile with source and digest.
     review_profile_path: str | Path | None = None
     review_profile: ResolvedProfile | None = None

@@ -22,6 +22,7 @@ from daydream.backends import (
     ResultEvent,
     TextEvent,
 )
+from daydream.config_file import DaydreamFileConfig
 from daydream.dataset import LocalRecordStore
 from daydream.run_config import RunConfig
 from daydream.runner import run
@@ -110,6 +111,7 @@ async def _run_real_phases_deep(
             multi_stack_target, pr_number=no_ci_remote.pr_number, pr_repo=pr_repo or no_ci_remote.base_repository,
             dataset_capture=dataset_store is not None, dataset_store_path=dataset_store,
             dump_artifacts=None if dump_path is None else str(dump_path),
+            file_config=DaydreamFileConfig(verify_all=True),
         )
     )
     return remote, exit_code
@@ -197,6 +199,7 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     verification = captured["verification"]["value"]
     verdicts = verification["recommendation-verdicts.json"]
     assert verdicts["selection"]["decisions"][0]["item_uid"] == item["item_uid"]
+    assert verdicts["selection"]["mode"] == "verify_all"
     assert verdicts["verdicts"][0]["issue_id"] == item["id"]
     assert verification["fix-outcomes.json"]["outcomes"][item["item_uid"]]["verdict"] == "resolved"
     assert captured["scoring"]["value"]["persisted_breakdown"]["correctness_per_finding"] == [1.0]

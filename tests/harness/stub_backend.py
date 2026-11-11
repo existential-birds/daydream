@@ -73,8 +73,6 @@ class StubBackend:
         # Per-stack findings can vary file/severity/confidence to control suppression selection.
         self.parse_by_stack: dict[str, dict[str, Any]] | None = None
         self.calls: list[dict[str, Any]] = []
-        # Recommendation verdict for issue 1; "contradicts" changes the fix prompt.
-        self.verifier_verdict: str = "consistent"
         # Forbidden legacy TEST dispatch count: real suites use host commands.
         self.test_suite_calls: int = 0
         # Override for the merge agent's item list (None -> default three-item payload).
@@ -502,7 +500,7 @@ class StubBackend:
         if "you are the recommendation-verifier agent" in pl:
             yield TextEvent(text="")
             yield ResultEvent(structured_output={"verdicts": [{
-                            "issue_id": 1, "verdict": self.verifier_verdict, "evidence": "stub",
+                            "issue_id": 1, "verdict": "consistent", "evidence": "stub",
                             "unverified_assumptions": [],
                         }
                     ]

@@ -9,8 +9,6 @@ diverge between them.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 MANDATORY_RISK_CATEGORIES: tuple[str, ...] = (
     "security",
     "concurrency",
@@ -18,12 +16,7 @@ MANDATORY_RISK_CATEGORIES: tuple[str, ...] = (
     "public-interface",
     "migration",
 )
-"""The issue's five mandatory risk categories, in fixed declaration order.
-
-These are also the whole declared vocabulary: configuration can neither narrow
-nor extend them, so ``extra_risk_categories`` is validated against this tuple
-and nothing more.
-"""
+"""The issue's five mandatory risk categories, in fixed declaration order."""
 
 # Calibration surfaces: match only changed content and post-state paths, never context.
 CATEGORY_TRIGGERS: dict[str, tuple[str, ...]] = {
@@ -54,10 +47,6 @@ one vocabulary.
 """
 
 
-class UnknownRiskCategoryError(ValueError):
-    """Raised when a configured risk category is not in the declared vocabulary."""
-
-
 def category_matches(category: str, text: str) -> bool:
     """Return whether ``text`` contains any trigger for ``category`` (case-insensitive)."""
     lowered = text.lower()
@@ -70,21 +59,3 @@ def categories_in(text: str) -> tuple[str, ...]:
     Deterministic: categories are returned in declaration order.
     """
     return tuple(category for category in MANDATORY_RISK_CATEGORIES if category_matches(category, text))
-
-
-def validate_extra_categories(extra: Iterable[str]) -> None:
-    """Reject any configured category outside :data:`MANDATORY_RISK_CATEGORIES`.
-
-    The declared vocabulary *is* the mandatory set, so a configured name can
-    only ever be a no-op -- there is nothing to widen. Validating it anyway is the
-    point: a typo must fail the run loudly before the verify pass instead of
-    silently verifying less than the operator asked for. The raised
-    :class:`UnknownRiskCategoryError` names the offending value; it is never
-    coerced to a default or silently narrowed.
-    """
-    for category in extra:
-        if category not in MANDATORY_RISK_CATEGORIES:
-            declared = ", ".join(MANDATORY_RISK_CATEGORIES)
-            raise UnknownRiskCategoryError(
-                f"Unknown risk category: {category!r}; declared vocabulary: {declared}"
-            )
