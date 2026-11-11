@@ -14,7 +14,7 @@ import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Literal, overload
+from typing import Any, Iterator, Literal, cast, overload
 from urllib.parse import urlparse
 
 from daydream.backends._subprocess import terminate_process
@@ -147,7 +147,7 @@ def _retrying_subprocess(
     text: bool,
     input_data: str | bytes | None,
     env: Any | None,
-    timeout: int | float,
+    timeout: int | float | None,
     retries: int,
     scrub: Callable[[str], str] = str,
     suffix: str = "",
@@ -201,10 +201,10 @@ def _retrying_subprocess(
 
 
 def _bounded_subprocess(
-    argv: list[str], *, cwd: Path, env: Any | None, timeout: int | float, limit: int, pass_fds: tuple[int, ...] = (),
+    argv: list[str], *, cwd: Path, env: Any | None, timeout: float | None, limit: int, pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess[bytes]:
     """Drain both pipes within one byte/deadline budget, killing and reaping on refusal."""
-    deadline = time.monotonic() + timeout
+    deadline = None if timeout is None else time.monotonic() + timeout
     with subprocess.Popen(
         argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, pass_fds=pass_fds,
     ) as proc:
@@ -216,9 +216,9 @@ def _bounded_subprocess(
                 for descriptor in output:
                     selector.register(descriptor, selectors.EVENT_READ)
                 while selector.get_map():
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise subprocess.TimeoutExpired(argv, timeout)
+                    remaining = None if deadline is None else deadline - time.monotonic()
+                    if remaining is not None and remaining <= 0:
+                        raise subprocess.TimeoutExpired(argv, cast(float, timeout))
                     for key, _ in selector.select(remaining):
                         chunk = os.read(key.fd, min(65536, limit - total + 1))
                         if not chunk:
@@ -228,7 +228,7 @@ def _bounded_subprocess(
                         if total > limit:
                             raise GitError(f"{argv[0]} output exceeds the supported size")
                         output[key.fd].extend(chunk)
-                proc.wait(timeout=max(0, deadline - time.monotonic()))
+                proc.wait(timeout=None if deadline is None else max(0, deadline - time.monotonic()))
             return subprocess.CompletedProcess(argv, proc.returncode, bytes(output[proc.stdout.fileno()]),
                                                bytes(output[proc.stderr.fileno()]))
         finally:
@@ -382,7 +382,7 @@ def _run_git(
     repo: Path,
     args: list[str],
     *,
-    timeout: int | float = 5,
+    timeout: int | float | None = 5,
     capture_bytes: Literal[True],
     retries: int = _GIT_TIMEOUT_RETRIES,
     input_text: str | None = None,
@@ -400,7 +400,7 @@ def _run_git(
     repo: Path,
     args: list[str],
     *,
-    timeout: int | float = 5,
+    timeout: int | float | None = 5,
     capture_bytes: Literal[False] = False,
     retries: int = _GIT_TIMEOUT_RETRIES,
     input_text: str | None = None,
@@ -417,7 +417,7 @@ def _run_git(
     repo: Path,
     args: list[str],
     *,
-    timeout: int | float = 5,
+    timeout: int | float | None = 5,
     capture_bytes: bool = False,
     retries: int = _GIT_TIMEOUT_RETRIES,
     input_text: str | None = None,
