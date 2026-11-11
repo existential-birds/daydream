@@ -12,7 +12,6 @@ from daydream.test_execution import (
     RecipeConfinementError,
     TestExecutionResult,
     TestRecipe,
-    canonical_test_command,
     resolve_package,
     resolve_test_command_fact,
     resolve_test_recipe,
@@ -26,7 +25,6 @@ def _run(argv: list[str], tmp_path: Path, *, wall_budget_s: float = 10.0, env: d
 
 def test_command_and_provenance_share_cli_over_config_precedence() -> None:
     cfg, run = SimpleNamespace(test_command="pytest -x"), SimpleNamespace(test_command="/cli/cmd")
-    assert canonical_test_command(cfg, run) == ["/cli/cmd"]
     fact = resolve_test_command_fact(cfg, run)
     assert fact.value == ("/cli/cmd",)
     assert fact.source == "cli"

@@ -432,12 +432,6 @@ class RepairContinuationResult:
     reason: str
     executions_dispatched: int = 0
 
-    @property
-    def passed(self) -> bool:
-        """Whether the latest execution passed *and* the job completed canonically."""
-        return self.result is not None and self.result.passed and self.job is not None \
-            and self.job.state is RepairJobState.COMPLETED
-
 
 def _last_repair(result: TestAndHealResult | None) -> RepairAttemptEvidence | None:
     """The most recent repair turn of one execution, or ``None`` when it ran none."""
@@ -467,7 +461,6 @@ async def continue_repair_job(
     first: TestAndHealResult | None,
     dispatch: Callable[[], Awaitable[TestAndHealResult]],
     policy: RepairJobPolicy | None = None,
-    cost_usd: float = 0.0,
     first_elapsed_s: float = 0.0,
     granted_allowance_s: float = 0.0,
 ) -> RepairContinuationResult:
@@ -479,11 +472,10 @@ async def continue_repair_job(
     every pass is charged to the job, the job's bounds are its own, and unchanged
     evidence ends it.
 
-    ``cost_usd`` is what the *caller* observed for the executions this call
-    charged, and ``first_elapsed_s`` how long its own execution took. The typed
-    result carries neither billing nor a duration, so a caller that measured them
-    passes them in and a caller that could not leaves them at their defaults: an
-    under-charge, never an over-charge, with the execution ceiling still binding.
+    ``first_elapsed_s`` is how long the caller's own execution took. The typed
+    result carries no duration, so a caller that measured it passes it in and a
+    caller that could not leaves it at its default: an under-charge, never an
+    over-charge, with the execution ceiling still binding.
 
     ``granted_allowance_s`` is the operator's *additional finite* allowance
     (requirement 43). It is applied only to a job that ran out of time, never to
@@ -509,7 +501,7 @@ async def continue_repair_job(
             return await _continue_locked(
                 work=work, deep=deep, job_id=job_id, footprint=footprint,
                 capture_tree_key=capture_tree_key, first=first, dispatch=dispatch,
-                policy=policy, cost_usd=cost_usd, first_elapsed_s=first_elapsed_s,
+                policy=policy, first_elapsed_s=first_elapsed_s,
                 granted_allowance_s=granted_allowance_s,
             )
     except LockContentionError as exc:
@@ -532,7 +524,6 @@ async def _continue_locked(
     first: TestAndHealResult | None,
     dispatch: Callable[[], Awaitable[TestAndHealResult]],
     policy: RepairJobPolicy | None,
-    cost_usd: float,
     first_elapsed_s: float,
     granted_allowance_s: float,
 ) -> RepairContinuationResult:
@@ -569,7 +560,7 @@ async def _continue_locked(
         elapsed = _elapsed(result, repair, measured)
 
         if result is not None and result.passed and _validated_against(result, capture_tree_key):
-            _charge_completion(job, elapsed_s=elapsed, cost_usd=cost_usd, repair=repair)
+            _charge_completion(job, elapsed_s=elapsed, repair=repair)
             return _settle(
                 _persist(deep, job.with_state(
                     RepairJobState.COMPLETED,
@@ -585,7 +576,6 @@ async def _continue_locked(
             # would invent a failure nobody observed.
             job = _charge_failure(
                 job, result=result, repair=repair, checkpoint=checkpoint, elapsed_s=elapsed,
-                cost_usd=cost_usd,
             )
             job = _persist(deep, job)
             action = job.next_action()
@@ -771,7 +761,7 @@ def _settle(
 
 
 def _charge_completion(
-    job: RepairJobRecord, *, elapsed_s: float, cost_usd: float,
+    job: RepairJobRecord, *, elapsed_s: float,
     repair: RepairAttemptEvidence | None,
 ) -> None:
     """Charge the validating execution, with the repair that led to it as evidence."""
@@ -780,7 +770,7 @@ def _charge_completion(
         completed.insert(0, repair.execution_id)
     job.record_execution(
         progress=True, next_experiment=None, completed_experiments=completed,
-        elapsed_s=elapsed_s, cost_usd=cost_usd,
+        elapsed_s=elapsed_s,
     )
 
 
@@ -791,7 +781,6 @@ def _charge_failure(
     repair: RepairAttemptEvidence | None,
     checkpoint: RepairCheckpoint | None,
     elapsed_s: float,
-    cost_usd: float,
 ) -> RepairJobRecord:
     """Charge one unfinished execution and resolve the job's next state.
 
@@ -849,7 +838,7 @@ def _charge_failure(
         progress=progress, next_experiment=next_experiment, completed_experiments=completed,
         unchanged_evidence=unchanged, candidate_patch_confirmed=patch_confirmed,
         infrastructure_failed=infrastructure_failed, changed_paths=changed_paths,
-        elapsed_s=elapsed_s, cost_usd=cost_usd,
+        elapsed_s=elapsed_s,
     )
     return job
 

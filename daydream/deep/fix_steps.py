@@ -720,7 +720,6 @@ def _test_attempt_payload(attempt: TestAttemptEvidence) -> dict[str, Any]:
         "passed": attempt.passed,
         "input_tree_key": attempt.input_tree_key,
         "output_tree_key": attempt.output_tree_key,
-        "abort_reason": attempt.abort_reason,
     }
     if attempt.identity is not None:
         payload["identity"] = attempt.identity.payload()

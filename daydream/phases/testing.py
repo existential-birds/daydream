@@ -567,7 +567,6 @@ async def phase_test_and_heal(
     attempts: list[TestAttemptEvidence] = []
     repairs: list[RepairAttemptEvidence] = []
     job_started = time.monotonic()
-    continuation: ContinuationToken | None = None
     # The repair job is host-owned: one identity per heal loop, one execution
     # per repair turn, so a resumed job can tell the two apart. The identity is
     # built by the module that owns the record, because a checkpoint captured
@@ -578,7 +577,7 @@ async def phase_test_and_heal(
     host_failure_output: str | None = None
 
     async def _launch_fix(output: str) -> bool:
-        nonlocal retries_used, continuation
+        nonlocal retries_used
         # Snapshot each healing turn because deep's earlier batch guard cannot
         # protect existing generated files from subsequent test-healing edits.
         # The snapshot is also the checkpoint's base ref, which is why it is taken
@@ -753,9 +752,6 @@ async def phase_test_and_heal(
                 "uncaptured repair tree.",
             )
             return False
-        # Each repair turn still starts a fresh context; the token is recorded for
-        # a resuming job, never fed to the next turn of this loop.
-        continuation = None
         guard_result = _reject_test_healing_generated_file_edits(
             work.repo,
             snapshot=snapshot,
@@ -822,13 +818,12 @@ async def phase_test_and_heal(
             output, host_failure_output = host_failure_output, None
             test_passed = False
         else:
-            evidence, continuation, output = await phase_test_once(
+            evidence, _, output = await phase_test_once(
                 backend,
                 work,
                 config=config,
                 session_id=session_id,
                 capture_tree_key=capture_tree_key,
-                continuation=continuation,
                 recipe=recipe,
                 run_context=run_context,
             )

@@ -1,6 +1,6 @@
 """The bounded vocabulary of a single test-repair turn, and how a host abort maps onto it.
 
-A repair turn has exactly five possible fates, and the host — not the model —
+A repair turn has exactly four possible fates, and the host — not the model —
 decides which one happened. This module is pure vocabulary plus classification:
 no I/O, no state, and no new public stop reason (every interruption converges on
 an existing :class:`~daydream.review_result.ReasonCode`).
@@ -30,12 +30,10 @@ from daydream.review_result import ReasonCode, reason_for_budget
 class RepairOutcome(StrEnum):
     """What the host observed a repair turn to be.
 
-    ``CANDIDATE_COMPLETE`` and ``SCOPE_BLOCKED`` are reachable only from the
-    explicit scope-request and host-validation paths, never from
-    :func:`classify_repair_outcome` — an interrupted turn never claims either.
+    ``SCOPE_BLOCKED`` is reachable only from a failed confinement, never from
+    :func:`classify_repair_outcome` — an interrupted turn never claims it.
     """
 
-    CANDIDATE_COMPLETE = "candidate_complete"
     DIAGNOSIS_UNRESOLVED = "diagnosis_unresolved"
     BUDGET_INTERRUPTED = "budget_interrupted"
     EXECUTION_ERROR = "execution_error"

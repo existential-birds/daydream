@@ -164,9 +164,6 @@ class TestAttemptEvidence:
     """Tree-bound host execution evidence or an explicit configuration stop.
 
     Only host runs carry a reusable execution identity; no-execution never does.
-    ``abort_reason`` names why an agent turn's result is not a result: a turn the
-    host cut short is never evidence of a passing suite, however much its partial
-    output looks like one.
     """
 
     session_id: str
@@ -176,7 +173,6 @@ class TestAttemptEvidence:
     input_tree_key: str
     output_tree_key: str
     identity: TestExecutionIdentity | None = None
-    abort_reason: str | None = None
     command_source: FactSource = "unresolved"
     diagnostic: TestCommandDiagnostic | None = None
 
