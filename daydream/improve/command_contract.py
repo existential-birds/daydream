@@ -301,11 +301,7 @@ def has_shell_composition(literal: str) -> bool:
     )
 
 
-def literal_command_error(
-    literal: Any,
-    *,
-    allow_shell_composition: bool = False,
-) -> str | None:
+def literal_command_error(literal: Any) -> str | None:
     """Return a stable error for non-literal or malformed command text."""
     if not isinstance(literal, str):
         return "MALFORMED_COMMAND"
@@ -320,27 +316,14 @@ def literal_command_error(
     ):
         return "MALFORMED_COMMAND"
     syntax_tokens = _command_syntax_tokens(literal)
-    has_unquoted_parentheses = (
-        syntax_tokens is not None
-        and any(token in {"(", ")"} for token in syntax_tokens)
-    )
     if (
         syntax_tokens is None
-        or (
-            has_unquoted_parentheses
-            and not (
-                allow_shell_composition
-                and _SHELL_SUBSTITUTION.search(literal)
-            )
-        )
+        or any(token in {"(", ")"} for token in syntax_tokens)
         or any(
             token.casefold() in {"...", "todo", "tbd", "${todo}"}
             for token in argv
         )
-        or (
-            not allow_shell_composition
-            and has_shell_composition(literal)
-        )
+        or has_shell_composition(literal)
     ):
         return "MALFORMED_COMMAND"
     first = argv[0]

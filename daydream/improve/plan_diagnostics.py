@@ -167,7 +167,7 @@ def record_plan_write_diagnostics(
     path: Path,
     attempts: Sequence[dict[str, Any]],
     *,
-    artifact_provenance: dict[str, str] | None = None,
+    artifact_provenance: dict[str, str],
 ) -> None:
     """Append sanitized plan-attempt metadata without retaining model content."""
     existing_attempts: list[dict[str, Any]] = []
@@ -181,11 +181,7 @@ def record_plan_write_diagnostics(
             and existing.get("schema_version")
             == PLAN_WRITE_DIAGNOSTICS_SCHEMA_VERSION
             and isinstance(existing.get("attempts"), list)
-            and (
-                artifact_provenance is None
-                or existing.get("artifact_provenance")
-                == artifact_provenance
-            )
+            and existing.get("artifact_provenance") == artifact_provenance
         ):
             existing_attempts = [
                 redact_value(item)
@@ -195,11 +191,7 @@ def record_plan_write_diagnostics(
     payload = {
         "schema_version": PLAN_WRITE_DIAGNOSTICS_SCHEMA_VERSION,
         "artifact_type": "daydream.plan-write-diagnostics",
-        **(
-            {"artifact_provenance": dict(artifact_provenance)}
-            if artifact_provenance is not None
-            else {}
-        ),
+        "artifact_provenance": dict(artifact_provenance),
         "attempts": [
             redact_value(item)
             for item in [*existing_attempts, *attempts]

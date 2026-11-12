@@ -235,9 +235,6 @@ class AuditWorkspace:
     """
 
     repo: Path
-    source: Path
-    repo_git_common_dir: Path
-    source_git_common_dir: Path
     outward_symlinks: frozenset[Path]
     branch_base_sha: str | None = None
 
@@ -323,9 +320,6 @@ async def open_audit_workspace(
                 )
         yield AuditWorkspace(
             repo=snapshot.repo,
-            source=source,
-            repo_git_common_dir=git_ops.git_common_dir(snapshot.repo),
-            source_git_common_dir=git_ops.git_common_dir(source),
             outward_symlinks=snapshot.outward_symlinks,
             branch_base_sha=branch_base_sha,
         )

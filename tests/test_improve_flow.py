@@ -106,10 +106,7 @@ def _flow_context_with_audit_root(root: Path, *, audit_repo: Path,) -> FlowConte
         repo=root, source=root, base_branch="main", base_sha="1" * 40, head_branch="feature", head_sha="2" * 40,
         is_ephemeral=False, run_id="run-1",
     )
-    boundary = AuditWorkspace(
-        repo=audit_repo, source=root, repo_git_common_dir=audit_repo / ".git", source_git_common_dir=root / ".git",
-        outward_symlinks=frozenset(),
-    )
+    boundary = AuditWorkspace(repo=audit_repo, outward_symlinks=frozenset())
     return FlowContext(config=RunConfig(target=str(root), flow_name="improve"), work=work, registry=build_registry(),
         audit_workspace=boundary,
     )
@@ -476,10 +473,7 @@ async def test_unborn_plan_write_never_constructs_a_writer(tmp_path: Path, monke
         repo=source, source=source, base_branch="trunk", base_sha=None, head_branch="trunk", head_sha=None,
         is_ephemeral=False, run_id="run-unborn",
     )
-    boundary = AuditWorkspace(
-        repo=audit, source=source, repo_git_common_dir=audit / ".git", source_git_common_dir=source / ".git",
-        outward_symlinks=frozenset(),
-    )
+    boundary = AuditWorkspace(repo=audit, outward_symlinks=frozenset())
     context = FlowContext(
         config=RunConfig(target=str(source), flow_name="improve"), work=work, registry=build_registry(),
         audit_workspace=boundary,
@@ -721,6 +715,8 @@ async def test_vet_dispatch_interval_batch_failure_fails_closed_per_batch(
     code = await _run_improve(make_config, improve_monorepo_target, improve_focus="security", file_config=file_config)
 
     assert code == 0
+    report = improve_artifact(improve_monorepo_target, "report.md").read_text()
+    assert "Findings dropped without a usable vet verdict: 5" in report
     assert _load_improve_json(improve_monorepo_target, "audit-findings.json")["categories_run"] == ["security"]
     assert all(call["read_only"] for call in stub.calls if call["marker"] == "audit")
     vet_calls = [call for call in stub.calls if call["marker"] == "vet"]
@@ -739,6 +735,10 @@ async def test_vet_dispatch_interval_batch_failure_fails_closed_per_batch(
     end = _phase_end(trajectory, "vet")
     assert end["status"] == "partial"
     assert end["reason_code"] == "some_children_failed"
+    stub.fail_vet_titles = {f"Security finding {number:02d}" for number in range(1, 46)}
+    code = await _run_improve(make_config, improve_monorepo_target, improve_focus="security", file_config=file_config)
+    assert code == 1
+    assert _load_improve_json(improve_monorepo_target, "vetted-findings.json")["findings"] == []
 
 def test_host_enumeration_failure_is_visible_and_keeps_model_commands(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],

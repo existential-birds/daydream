@@ -31,8 +31,6 @@ class ImprovePublishError(RuntimeError):
 class PublishResult:
     """Outcome of publishing one locally written plan."""
 
-    package_id: str
-    plan_path: Path
     disposition: PublicationDisposition
     issue_url: str
 
@@ -81,7 +79,7 @@ def issue_body(
     package_id: str,
     plan_markdown: str,
     *,
-    member_aliases: Sequence[str] = (),
+    member_aliases: Sequence[str],
     member_fingerprints: Sequence[str] = (),
 ) -> str:
     """Prefix a complete plan with its durable GitHub reconciliation marker."""
@@ -96,7 +94,7 @@ def issue_body(
 
 
 def _repo_slug(
-    repo: Path, explicit: str | None, *, auth: GitHubAuth = INHERIT_GITHUB_AUTH
+    repo: Path, explicit: str | None, *, auth: GitHubAuth
 ) -> str:
     if explicit is not None:
         parsed = git_ops.split_owner_repo(explicit)
@@ -288,8 +286,6 @@ class IssuePublisher:
         existing = self._existing(marker, required_markers, related_markers)
         if existing is not None:
             return PublishResult(
-                package_id=package_id,
-                plan_path=plan_path,
                 disposition="existing",
                 issue_url=str(existing["url"]),
             )
@@ -310,8 +306,6 @@ class IssuePublisher:
                     f"GitHub issue creation failed and no matching issue appeared during reconciliation: {create_error}"
                 ) from create_error
             return PublishResult(
-                package_id=package_id,
-                plan_path=plan_path,
                 disposition="reconciled",
                 issue_url=str(existing["url"]),
             )
@@ -326,8 +320,6 @@ class IssuePublisher:
             }
         )
         return PublishResult(
-            package_id=package_id,
-            plan_path=plan_path,
             disposition="created",
             issue_url=url,
         )

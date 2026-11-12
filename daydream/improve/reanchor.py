@@ -49,7 +49,7 @@ def _private_reanchor_root(repo: Path, owner: PrivateWorkspaceOwner | None) -> P
     return root
 
 
-def prune_stale_reanchor_worktrees(repo: Path, *, private_workspace_owner: PrivateWorkspaceOwner | None = None) -> int:
+def prune_stale_reanchor_worktrees(repo: Path, *, private_workspace_owner: PrivateWorkspaceOwner | None) -> int:
     """Prune current private re-anchors, preserving live locks and tolerating individual Git failures.
 
     Locks no older than _OPERATIONAL_LOCK_STALE_AFTER_S belong to active runs and

@@ -163,7 +163,7 @@ def group_partitions(
     partitions: Sequence[Partition],
     stack_of: Mapping[str, str],
     *,
-    max_files: int = PARTITION_MAX_FILES,
+    max_files: int,
     max_groups: int | None = None,
 ) -> tuple[list[PartitionGroup], list[PartitionStackOmission]]:
     """Pack stack-homogeneous groups bounded by ``max_files``, named ``group-01`` onward.

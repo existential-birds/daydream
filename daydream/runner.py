@@ -934,7 +934,7 @@ async def _run_improve(
         )
         return 1
 
-    directory = improve_dir(target_dir, session=run_artifacts.session, allow_standalone=False)
+    directory = improve_dir(target_dir, session=run_artifacts.session)
     tier = EFFORT_TIERS[config.improve_effort]
 
     async with _open_recorder(
@@ -977,7 +977,6 @@ async def _run_improve(
             ctx.data["improve_publish_issues"] = (
                 _file_config_or_empty(config).improve_github_publish_issues
             )
-            ctx.data["github_repo"] = config.pr_repo
 
             try:
                 _preflight_improve_backends(ctx)

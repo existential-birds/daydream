@@ -230,6 +230,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TestAttemptEvidence.abort_reason`; `canonical_test_command`. Their constant keys leave
   the repair and test-verdict artifacts, and a blocked repair job's reason no longer claims
   "0 tool call(s)" ([#1681](https://github.com/existential-birds/daydream/issues/1681)).
+- Improve internals nothing read: `AuditWorkspace.source`, `repo_git_common_dir` and
+  `source_git_common_dir`; `PublishResult.package_id` and `plan_path`; and the
+  `allow_standalone` and `allow_shell_composition` keyword arguments of `improve_dir` and
+  `literal_command_error`. `improve_dir`, `filter_scope`, `enumerate_repository_commands`,
+  `issue_body` and other Improve helpers now require the arguments every caller already
+  passed. No known caller ([#1637](https://github.com/existential-birds/daydream/issues/1637)).
 
 ### Fixed
 
@@ -293,6 +299,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commit has none. Before, any result on the merge commit replaced the pushed commit's own,
   so a failed or pending required check on the pushed commit could be reported as passed
   ([#1682](https://github.com/existential-birds/daydream/issues/1682)).
+- Improve's report now counts findings that vetting dropped because a vet turn failed
+  or returned no usable verdict, and a run in which no finding received a usable
+  verdict stops with exit code 1 instead of printing
+  "No vetted defect findings -- done." and exiting 0. The findings stay in
+  `audit-findings.json` ([#1637](https://github.com/existential-birds/daydream/issues/1637)).
 
 ## [0.34.0] - 2026-11-03
 

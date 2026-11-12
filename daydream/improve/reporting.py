@@ -39,11 +39,11 @@ def _report_with_provenance(content: str) -> str:
     )
 
 
-def _group_roots_cell(group: PartitionGroup, *, limit: int = 4) -> str:
+def _group_roots_cell(group: PartitionGroup) -> str:
     """Render a group's roots for a report line, truncating a long tail."""
     roots = group.roots
-    shown = ", ".join(f"`{root}/`" for root in roots[:limit])
-    remainder = len(roots) - limit
+    shown = ", ".join(f"`{root}/`" for root in roots[:4])
+    remainder = len(roots) - 4
     return f"{shown} +{remainder} more" if remainder > 0 else shown
 
 
@@ -243,6 +243,7 @@ def _render_report(ctx: FlowContext) -> str:
         "## Audit filtering\n\n"
         f"- Findings without `path:line` evidence discarded: {discarded_no_evidence}\n"
         f"- Findings rejected during vetting: {vet_rejected}\n"
+        f"- Findings dropped without a usable vet verdict: {ctx.data['vet_undecided']}\n"
         f"- Non-HIGH-confidence findings dropped by tier: {dropped_low_confidence}\n"
         f"- Lowest-leverage findings dropped by tier cap: {dropped_by_cap}\n"
         f"- Previously rejected findings suppressed: {previously_rejected}\n"

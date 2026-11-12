@@ -339,9 +339,6 @@ class PlanWriteSession:
         slug = plan_slug(selection.get("title"))
         if selection.get("error"):
             raw_errors = attempt.get("errors") if attempt is not None else None
-            if not isinstance(raw_errors, (list, tuple)) and attempt is not None:
-                legacy_code = attempt.get("transport_error_code")
-                raw_errors = (legacy_code,) if isinstance(legacy_code, str) else ()
             error_entries = tuple(
                 entry
                 for entry in (
