@@ -163,29 +163,16 @@ async def test_second_diagram_run_minimizes_only_its_own_kind(
 # --- Spec test 7 (diagram-only half): omission notice -----------------------
 
 async def test_omitted_kind_posts_an_omission_notice_and_a_failed_kind_exits_one(
-    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], target: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], target: Path,
 ) -> None:
-    """An explicit request that grounds to nothing explains its omission; a failed kind exits 1.
-
-    A recovery marker that cannot be cleared disables recovery metadata without failing generation.
-    """
+    """An explicit request that grounds to nothing explains its omission; a failed kind exits 1."""
     thin = dr.sequence_spec()
     thin["messages"] = thin["messages"][:2]
-    unlink, blocked = Path.unlink, []
-
-    def blocked_marker(path: Path, *args: Any, **kwargs: Any) -> None:
-        if path.name == "diagram-complete.json":
-            blocked.append(path)
-            raise PermissionError("marker cleanup denied")
-        unlink(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "unlink", blocked_marker)
 
     exit_code, _ = await diagram_run(target, diagram="sequence", specs={"sequence": [thin]})
 
     assert exit_code == 0, "an omission is a successful run, not a failure"
     assert _artifact(target)["results"]["sequence"]["status"] == "omitted"
-    assert blocked and not blocked[0].exists(), "no recovery marker may follow an uncleared one"
     body = _issue_comments(fake_gh)[0]["body"]
     assert SEQUENCE_HEADING not in body
     assert "No sequence diagram was rendered for this pull request." in body
@@ -213,6 +200,9 @@ async def test_nothing_eligible_posts_an_explanatory_comment(
 
     assert parse_diagram_markers(body) == []
     assert all("You are the sequence-diagram author" not in call["prompt"] for call in stub.calls)
+    fake_gh.set_response("POST", "/repos/acme/widgets/issues/7/comments", value={"__error__": "HTTP 502"})
+    exit_code, _ = await diagram_run(target, diagram="auto")
+    assert exit_code == 1, "a comment that was not confirmed is not a delivered diagram"
 
 
 # --- Spec test 13: Phase A -> Phase B ---------------------------------------
@@ -255,6 +245,8 @@ async def test_findings_out_rejects_dirty_moved_or_unresolved_heads_before_diagr
     assert exit_code == 1
     assert base[:12] in panel and git_ops.head_sha(target)[:12] in panel
     assert "re-run against the new head" in panel
+    exit_code, _ = await diagram_run(target, diagram="flowchart", specs={"flowchart": [dr.flowchart_spec()]})
+    assert exit_code == 1 and _issue_comments(fake_gh) == []
 
     def explode(*_a: Any, **_k: Any) -> Any:
         raise git_ops.GitError("gh pr view: connection reset")

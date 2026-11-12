@@ -35,14 +35,14 @@ _MAX_DEFINITION_PROBE_FILES = 20
 def token_hits(
     repo_root: Path, symbol: str, files: list[str] | None = None
 ) -> list[str]:
-    """Return sorted token-bearing paths; Git/read failures provide no evidence."""
+    """Return sorted token-bearing paths: the named files read directly, else tracked files via ``git grep``."""
     if not symbol:
         return []
-    pathspecs = [strip_dot_slash(path) for path in files] if files else None
+    if files is not None:
+        lines = SourceCache(repo_root).lines
+        return sorted(path for path in map(strip_dot_slash, files) if token_on_line("\n".join(lines(path)), symbol))
     try:
-        matches = grep_fixed_matches(
-            repo_root, [symbol], word=True, pathspecs=pathspecs
-        )
+        matches = grep_fixed_matches(repo_root, [symbol], word=True)
     except (GitError, OSError):
         return []
     return sorted({path for path, _ in matches})

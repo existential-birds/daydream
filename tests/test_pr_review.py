@@ -29,6 +29,7 @@ from daydream.pr_review import (
 )
 from daydream.reconcile import PriorDiagramComment
 from daydream.review_reporting import render_github_review_context
+from daydream.reviews.diagrams import post_diagram_comment_to_pr
 from daydream.reviews.rendering import (
     build_payload_for_event,
     format_comment_body,
@@ -701,7 +702,7 @@ def _diagram_replacement_post_failure_keeps_prior_comment(
 
     monkeypatch.setattr(git_ops, "gh_api", fail_post)
 
-    result = pr_review.post_diagram_comment_to_pr(
+    result = post_diagram_comment_to_pr(
         tmp_path,
         pr,
         body="diagram",

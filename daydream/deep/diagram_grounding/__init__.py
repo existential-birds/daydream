@@ -8,8 +8,6 @@ is empty. spec_final contains schema keys only for posting to revalidate.
 from daydream.deep.diagram_grounding.evidence import RepoSymbols as RepoSymbols
 from daydream.deep.diagram_grounding.flowchart import ground_flowchart as ground_flowchart
 from daydream.deep.diagram_grounding.models import (
-    OMIT_REASONS as OMIT_REASONS,
-    REASON_CODES as REASON_CODES,
     ElementCheck as ElementCheck,
     GroundingReport as GroundingReport,
 )

@@ -163,9 +163,10 @@ def test_immutable_publisher_uses_original_head_and_gates_approval_on_complete_c
 def test_post_findings_drops_flowchart_nodes_absent_from_source(
     fake_gh: FakeGh, git_repo: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    (git_repo / "a.py").write_text("def run():\n    return 1\n")
+    (git_repo / "a.py").write_text("def run():\f\n    return 1\n")
     git(git_repo, "add", "a.py")
     head_sha = commit(git_repo, "add flowchart source")
+    assert validate_diagram_payload(_flowchart_payload(), target_dir=git_repo, head_sha=head_sha) is None
     payload = _flowchart_payload()
     flowchart = payload["results"]["flowchart"]
     flowchart["spec_final"]["nodes"][0]["kind"] = "decision"

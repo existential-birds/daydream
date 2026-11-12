@@ -236,6 +236,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `literal_command_error`. `improve_dir`, `filter_scope`, `enumerate_repository_commands`,
   `issue_body` and other Improve helpers now require the arguments every caller already
   passed. No known caller ([#1637](https://github.com/existential-birds/daydream/issues/1637)).
+- Resuming with `--start-at per-stack` or `--start-at merge` no longer restores the
+  earlier run's completed diagrams; they are generated again, and `diagram-complete.json`
+  is no longer written. Diagram internals nothing read also go: the reason-code sets
+  `REASON_CODES` and `OMIT_REASONS`, `DiagramInputs.settings`, and the
+  `diagram_comment_kinds`, `render_diagram_comment_body` and `post_diagram_comment_to_pr`
+  re-exports from `daydream.pr_review` (all three remain in `daydream.reviews.diagrams`).
+  `post_diagram_artifact` now takes the diagram payload instead of the findings artifact.
+  No known caller ([#1683](https://github.com/existential-birds/daydream/issues/1683)).
 
 ### Fixed
 
@@ -304,6 +312,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verdict stops with exit code 1 instead of printing
   "No vetted defect findings -- done." and exiting 0. The findings stay in
   `audit-findings.json` ([#1637](https://github.com/existential-birds/daydream/issues/1637)).
+- `post-findings` no longer rejects a valid sequence diagram whose calls were proven by
+  the callee's name in files Daydream cannot parse (only `.go`, `.js`, `.jsx`, `.py`,
+  `.rs`, `.ts` and `.tsx` files have a parser) as "not grounded in immutable head". Its
+  check against the pull request head now finds those names in the cited files, as the
+  run did. Before, such a diagram-only artifact failed to post, and a review artifact
+  dropped its diagram ([#1683](https://github.com/existential-birds/daydream/issues/1683)).
+- `--diagram-only` without `--findings-out` now checks the diagram against the pull
+  request's current head before posting it, as `post-findings` does, and exits 1 without
+  posting when a cited line does not hold there. Before, a diagram drawn from unpushed
+  commits or uncommitted edits was posted under that head's marker and the run exited 0
+  ([#1683](https://github.com/existential-birds/daydream/issues/1683)).
+- `post-findings` and the live post no longer reject a valid flowchart whose file
+  contains a form feed or another character Python treats as a line break before a
+  cited line ([#1683](https://github.com/existential-birds/daydream/issues/1683)).
 
 ## [0.34.0] - 2026-11-03
 

@@ -19,8 +19,6 @@ from daydream.ui import print_error, print_success, print_warning
 if TYPE_CHECKING:
     from rich.console import Console
 
-    from daydream.findings import FindingsArtifact
-
 
 def post_diagram_comment_to_pr(
     target_dir: Path,
@@ -305,7 +303,7 @@ def _diagram_head_evidence_problem(
             problem = check(evidence)
             if problem is not None:
                 return problem
-            source = "\n".join(head.lines(evidence["file"])).encode()
+            source = head.read(evidence["file"])
             language = language_for_path(evidence["file"])
             line = evidence["line"]
             if isinstance(root_end, int) and not root["line"] <= line <= root_end:
@@ -413,7 +411,7 @@ def validate_diagram_payload(
 
 
 def post_diagram_artifact(
-    artifact: "FindingsArtifact",
+    payload: dict[str, Any] | None,
     pr: PRInfo,
     target_dir: Path,
     *,
@@ -421,8 +419,7 @@ def post_diagram_artifact(
     bot_login: str | None,
     auth: GitHubAuth,
 ) -> int:
-    """Validate and post a standalone diagram artifact; return 0 on success, 1 on failure."""
-    payload = artifact.diagrams
+    """Validate and post a standalone diagram payload; return 0 on success, 1 on failure."""
     if not isinstance(payload, dict):
         print_error(
             console,

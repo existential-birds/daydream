@@ -30,7 +30,7 @@ from daydream.deep.diagram_types import CandidateRoot, DiagramThresholds
 from daydream.exploration import _BOUNDARY_BLOCKQUOTE
 from daydream.extensions import Registry
 from daydream.flows.engine import FlowContext
-from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, SanctionedInputUnavailable
+from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, SanctionedInputTransport, SanctionedInputUnavailable
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from daydream.workspace import WorkContext
@@ -216,10 +216,9 @@ def _clone_test_ctx(tmp_path: Path, exploration_summary: str | None, deps_text: 
 
 def test_clone_mode_inlines_only_scrubbed_bounded_exploration(tmp_path: Path) -> None:
     """Clone prompts never fake missing exploration, drop over-budget dependencies, and scrub artifact names."""
-    backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
     (tmp_path / "missing").mkdir()
     ctx = _clone_test_ctx(tmp_path / "missing", exploration_summary=None, deps_text=None)
-    prompt = deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), backend)
+    prompt = deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), SanctionedInputTransport.INLINE)
     assert ".daydream/exploration" not in prompt
     assert "a -> b" not in prompt
     assert "diff --git a/a.py b/a.py" in prompt
