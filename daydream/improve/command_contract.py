@@ -316,13 +316,9 @@ def literal_command_error(literal: Any) -> str | None:
     ):
         return "MALFORMED_COMMAND"
     syntax_tokens = _command_syntax_tokens(literal)
-    has_unquoted_parentheses = (
-        syntax_tokens is not None
-        and any(token in {"(", ")"} for token in syntax_tokens)
-    )
     if (
         syntax_tokens is None
-        or has_unquoted_parentheses
+        or any(token in {"(", ")"} for token in syntax_tokens)
         or any(
             token.casefold() in {"...", "todo", "tbd", "${todo}"}
             for token in argv

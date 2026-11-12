@@ -738,6 +738,7 @@ async def test_vet_dispatch_interval_batch_failure_fails_closed_per_batch(
     stub.fail_vet_titles = {f"Security finding {number:02d}" for number in range(1, 46)}
     code = await _run_improve(make_config, improve_monorepo_target, improve_focus="security", file_config=file_config)
     assert code == 1
+    assert _load_improve_json(improve_monorepo_target, "vetted-findings.json")["findings"] == []
 
 def test_host_enumeration_failure_is_visible_and_keeps_model_commands(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
