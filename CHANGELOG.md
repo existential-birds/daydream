@@ -254,7 +254,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package re-exports of `PerFindingLabel`, `PerFindingResolution`,
   `derive_per_finding_labels` and `per_finding_resolution_signal`, which remain in their
   modules. `project_findings` also drops `return_adjudication` and always returns its
-  adjudication entries, as every caller already asked. No known caller
+  adjudication entries, as every caller already asked. `build_frozen_corpus` returns only
+  the `emitted` and `adjudication` counts `corpus build` prints; its other summary keys,
+  which nothing read, can be derived from `lineage.json` and the output files.
+  `LocalRecordStore.read_snapshot` takes only a snapshot id, not the mapping
+  `select_snapshot` returns. No known caller
   ([#1684](https://github.com/existential-birds/daydream/issues/1684)).
 
 ### Fixed

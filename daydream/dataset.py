@@ -841,9 +841,8 @@ class LocalRecordStore:
                 self._atomic_write(path, data)
             return {**document, "diagnostics": diagnostics}
 
-    def read_snapshot(self, snapshot: Mapping[str, Any] | str) -> SnapshotRecords:
+    def read_snapshot(self, snapshot_id: str) -> SnapshotRecords:
         """Read only the immutable shards pinned by a saved snapshot."""
-        snapshot_id = snapshot.get("snapshot_id") if isinstance(snapshot, Mapping) else snapshot
         if not isinstance(snapshot_id, str) or not _DIGEST.fullmatch(snapshot_id):
             raise StoreError("invalid_snapshot_identity")
         with self._locked() as diagnostics:
@@ -864,8 +863,6 @@ class LocalRecordStore:
                 if isinstance(error, StoreError):
                     raise
                 raise StoreError("malformed_snapshot") from None
-            if isinstance(snapshot, Mapping) and {k: v for k, v in snapshot.items() if k != "diagnostics"} != pinned:
-                raise StoreError("snapshot_content_conflict")
             typed_runs = tuple(self._load("runs", self.root / "runs" / member["shard"], member)[1]
                                for member in pinned["runs"])
             typed_observations = tuple(

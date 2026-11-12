@@ -141,7 +141,7 @@ async def test_runner_cleanup_outage_preserves_captured_root_and_review_output(
     assert len(trace_id) == 32 and int(trace_id, 16) != 0
     assert config.dataset_store_path is not None
     store = LocalRecordStore(config.dataset_store_path)
-    records = store.read_snapshot(store.select_snapshot(observed_before="2100-01-01T00:00:00Z"))
+    records = store.read_snapshot(store.select_snapshot(observed_before="2100-01-01T00:00:00Z")["snapshot_id"])
     record, = records.runs
     assert record["outcome"] == "success" and record["trace_id"] == trace_id
     assert "review completed during outage" in json.dumps(record["trajectories"]["value"])

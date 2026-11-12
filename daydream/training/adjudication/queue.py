@@ -36,28 +36,6 @@ def _profile_label(resolution: Mapping[str, object], provenance: Mapping[str, An
     return str(flat) if flat is not None else None
 
 
-_ITEM_KEYS = (
-    "record_id",
-    "item_uid",
-    "fingerprint",
-    "disposition",
-    "evidence",
-    "evidence_digest",
-    "evidence_digest_scheme",
-    "reply_captures",
-    "correction",
-    "session_id",
-    "trajectory_id",
-    "segment_id",
-    "profile",
-    "stack",
-    "status",
-    "rubric_version",
-    "prior_disposition",
-    "review_required",
-)
-
-
 def build_queue(
     sessions: Sequence[Mapping[str, object]],
     *,
@@ -163,7 +141,6 @@ def build_queue(
             ):
                 item["status"] = "reopened"
                 item["prior_disposition"] = str(prior["disposition"])
-            assert set(item) == set(_ITEM_KEYS), "queue item key drift"
             items.append(item)
     items.sort(key=lambda item: str(item["record_id"]))
     return items

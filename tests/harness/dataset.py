@@ -27,4 +27,5 @@ def observation(observation_id: str = "judgment-1", **overrides: Any) -> dict[st
 
 
 def read_records(store: LocalRecordStore, **cutoffs: Any) -> SnapshotRecords:
-    return store.read_snapshot(store.select_snapshot(**{"observed_before": "2100-01-01T00:00:00Z", **cutoffs}))
+    snapshot = store.select_snapshot(**{"observed_before": "2100-01-01T00:00:00Z", **cutoffs})
+    return store.read_snapshot(snapshot["snapshot_id"])

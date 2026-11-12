@@ -86,10 +86,10 @@ def test_real_cli_applies_caps_and_pins_matching_report(
         "non-decisive-adjudication": 0, "share-cap:stack:python": 3,
         "share-cap:repo:owner/repo-a": 1, "share-cap:profile:deep-review": 2,
     }
-    direct = build_frozen_corpus(projection_config(
+    build_frozen_corpus(projection_config(
         store, tmp_path, out_dir=tmp_path / "direct", max_stack_share=0.5, max_repo_share=0.6, max_profile_share=0.7,
     ))
-    assert direct["share_caps"] == report
+    assert json.loads((tmp_path / "direct" / "lineage.json").read_text())["share_caps"] == report
 
 
 def test_cli_refuses_invalid_share_before_creating_output(tmp_path: Path) -> None:

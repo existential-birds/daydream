@@ -590,9 +590,8 @@ class HarvestConfig:
 class _ProductionHarvestServices:
     """Per-run adapters for records, repository, GitHub, cache, and clocks."""
 
-    def __init__(self, config: HarvestConfig, github_auth: GitHubAuth) -> None:
+    def __init__(self, config: HarvestConfig) -> None:
         self._config = config
-        self._github_auth = github_auth
         self._cache: BackfillCache | None = None
         self._fetched_repos: set[Path] = set()
         self._records = LocalRecordStore(config.store_dir).read_snapshot(config.snapshot_id)
@@ -618,7 +617,7 @@ class _ProductionHarvestServices:
         return _github_with_retry(
             repo,
             endpoint,
-            auth=self._github_auth,
+            auth=git_ops.INHERIT_GITHUB_AUTH,
             backoff_sleep=self.backoff_sleep,
             **kwargs,
         )
@@ -940,7 +939,7 @@ class _ProductionHarvestServices:
 
 def make_harvest_services(config: HarvestConfig) -> HarvestServices:
     """Create side-effect-free production adapters for one harvest pass."""
-    return _ProductionHarvestServices(config, git_ops.INHERIT_GITHUB_AUTH)
+    return _ProductionHarvestServices(config)
 
 
 def collect_annotation(

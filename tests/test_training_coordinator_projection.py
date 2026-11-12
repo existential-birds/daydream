@@ -153,7 +153,7 @@ def _build_projection_50(tmp_path: Path) -> Path:
         add_projection_run(store, run_id=f"sess-amb-{index}", dispositions=("ambiguous",))
     config = projection_config(store, tmp_path / "projection-fixture", salt="issue-1081-fixture-salt",
                                holdout_rate=HOLDOUT_RATE, val_rate=VAL_RATE)
-    assert build_frozen_corpus(config)["total"] == 50
+    assert build_frozen_corpus(config)["emitted"] == 50
     return config.out_dir
 
 

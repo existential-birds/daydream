@@ -19,7 +19,6 @@ from daydream.training.corpus_projection.selection import (
     Record,
     _apply_share_caps,
     _share_caps_report,
-    count_by,
 )
 from daydream.training.corpus_projection.splits import SPLIT_FILENAMES, assign_split
 from daydream.training.corpus_projection.tiers import classify_tier
@@ -398,14 +397,4 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
     # Consumers require _SUCCESS; write it only after every artifact succeeds.
     _write_artifact(config.out_dir / "_SUCCESS", b"ok\n")
 
-    return {
-        "total": len(records),
-        "emitted": len(records),
-        "adjudication": len(adjudication),
-        **{f"split_{name}": count for name, count in split_counts.items()},
-        "records_by_type": count_by(records, lambda r: str(r["record_type"])),
-        "records_by_tier": count_by(records, lambda r: str(r["tier"])),
-        "records_by_split": dict(split_counts),
-        **share_caps_entry,
-        "exclusions_by_reason": dict(sorted(exclusions_by_reason.items())),
-    }
+    return {"emitted": len(records), "adjudication": len(adjudication)}
