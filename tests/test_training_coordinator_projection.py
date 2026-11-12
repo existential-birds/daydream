@@ -17,7 +17,7 @@ from daydream.training.coordinator import PipelineConfig, run_pipeline
 from daydream.training.corpus_projection.projector import build_frozen_corpus
 from daydream.training.corpus_projection.splits import assign_split
 from daydream.training.reward_model import OutcomeModel, score_comment
-from daydream.training.stacks import load_v2_projection
+from daydream.training.stacks import _directory_digest, load_v2_projection
 from tests.harness.record_projection import add_projection_run, projection_config
 
 SALT = "issue-1081-coordinator-salt"
@@ -175,10 +175,13 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     shutil.copytree(proj_dir, copied)
     assert load_v2_projection(copied).digest == projection.digest
     (copied / "train.jsonl").write_bytes((copied / "train.jsonl").read_bytes() + b"\n")
+    assert _directory_digest(copied) != projection.digest
     with pytest.raises(ValueError, match="digest mismatch"):
         load_v2_projection(copied)
     (copied / "SHA256SUMS").write_text("")
     pytest.raises(ValueError, load_v2_projection, copied).match("leaves out")
+    (copied / "SHA256SUMS").unlink()
+    pytest.raises(ValueError, load_v2_projection, copied).match("missing SHA256SUMS")
     gold_labels = {cast(str, r["outcome_label"]) for r in projection.records if r.get("tier") == "gold"}
     assert {"accepted", "rejected"} <= gold_labels
 
