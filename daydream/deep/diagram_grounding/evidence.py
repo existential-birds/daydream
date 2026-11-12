@@ -35,7 +35,7 @@ _MAX_DEFINITION_PROBE_FILES = 20
 def token_hits(
     repo_root: Path, symbol: str, files: list[str] | None = None
 ) -> list[str]:
-    """Return sorted token-bearing paths; Git/read failures provide no evidence."""
+    """Return sorted token-bearing paths; outside Git (the head check's snapshot), scan the named files."""
     if not symbol:
         return []
     pathspecs = [strip_dot_slash(path) for path in files] if files else None
@@ -44,7 +44,8 @@ def token_hits(
             repo_root, [symbol], word=True, pathspecs=pathspecs
         )
     except (GitError, OSError):
-        return []
+        sources = SourceCache(repo_root)
+        return sorted(path for path in pathspecs or [] if token_on_line("\n".join(sources.lines(path)), symbol))
     return sorted({path for path, _ in matches})
 
 

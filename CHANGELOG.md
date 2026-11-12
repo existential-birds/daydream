@@ -304,6 +304,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verdict stops with exit code 1 instead of printing
   "No vetted defect findings -- done." and exiting 0. The findings stay in
   `audit-findings.json` ([#1637](https://github.com/existential-birds/daydream/issues/1637)).
+- `post-findings` no longer rejects a valid sequence diagram whose calls were proven by
+  the callee's name in files Daydream cannot parse (only `.go`, `.js`, `.jsx`, `.py`,
+  `.rs`, `.ts` and `.tsx` files have a parser) as "not grounded in immutable head". Its
+  check against the pull request head now finds those names in the cited files, as the
+  run did. Before, such a diagram-only artifact failed to post, and a review artifact
+  dropped its diagram ([#1683](https://github.com/existential-birds/daydream/issues/1683)).
 
 ## [0.34.0] - 2026-11-03
 
