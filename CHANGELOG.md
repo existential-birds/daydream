@@ -326,6 +326,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `post-findings` and the live post no longer reject a valid flowchart whose file
   contains a form feed or another character Python treats as a line break before a
   cited line ([#1683](https://github.com/existential-birds/daydream/issues/1683)).
+- `daydream train` now refuses a projection whose files no longer match its `SHA256SUMS`,
+  or that has none, as `corpus calibrate-reward` already did. Before, a projection with an
+  edited label or a dropped record, from a hand edit or an interrupted copy, was loaded and
+  trained on, and the run reported "Training run complete"
+  ([#1684](https://github.com/existential-birds/daydream/issues/1684)).
 
 ## [0.34.0] - 2026-11-03
 

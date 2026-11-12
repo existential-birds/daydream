@@ -122,6 +122,8 @@ def _build_projection(
         + "\n",
         encoding="utf-8",
     )
+    (out / "SHA256SUMS").write_text("".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
+                                            for path in sorted(out.iterdir())))
     (out / "_SUCCESS").write_text("ok\n", encoding="utf-8")
     return out
 
@@ -173,7 +175,8 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     shutil.copytree(proj_dir, copied)
     assert load_v2_projection(copied).digest == projection.digest
     (copied / "train.jsonl").write_bytes((copied / "train.jsonl").read_bytes() + b"\n")
-    assert load_v2_projection(copied).digest != projection.digest
+    with pytest.raises(ValueError, match="digest mismatch"):
+        load_v2_projection(copied)
     gold_labels = {cast(str, r["outcome_label"]) for r in projection.records if r.get("tier") == "gold"}
     assert {"accepted", "rejected"} <= gold_labels
     record_types = {cast(str, r["record_type"]) for r in projection.records}
