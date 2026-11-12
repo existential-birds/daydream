@@ -200,6 +200,9 @@ async def test_nothing_eligible_posts_an_explanatory_comment(
 
     assert parse_diagram_markers(body) == []
     assert all("You are the sequence-diagram author" not in call["prompt"] for call in stub.calls)
+    fake_gh.set_response("POST", "/repos/acme/widgets/issues/7/comments", value={"__error__": "HTTP 502"})
+    exit_code, _ = await diagram_run(target, diagram="auto")
+    assert exit_code == 1, "a comment that was not confirmed is not a delivered diagram"
 
 
 # --- Spec test 13: Phase A -> Phase B ---------------------------------------
