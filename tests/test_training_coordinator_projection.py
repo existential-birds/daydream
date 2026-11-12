@@ -177,6 +177,8 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     (copied / "train.jsonl").write_bytes((copied / "train.jsonl").read_bytes() + b"\n")
     with pytest.raises(ValueError, match="digest mismatch"):
         load_v2_projection(copied)
+    (copied / "SHA256SUMS").write_text("")
+    pytest.raises(ValueError, load_v2_projection, copied).match("leaves out")
     gold_labels = {cast(str, r["outcome_label"]) for r in projection.records if r.get("tier") == "gold"}
     assert {"accepted", "rejected"} <= gold_labels
 

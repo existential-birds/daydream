@@ -129,6 +129,7 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
 def _check_digests(corpus_dir: Path) -> None:
     sums_path = corpus_dir / "SHA256SUMS"
     _gate(sums_path.exists(), f"missing SHA256SUMS manifest at {sums_path}")
+    unlisted = {path.name for path in corpus_dir.glob("*.jsonl")} | {"lineage.json"}
     for entry in sums_path.read_text().splitlines():
         if not entry.strip():
             continue
@@ -141,6 +142,8 @@ def _check_digests(corpus_dir: Path) -> None:
         _gate(target.is_file(), f"SHA256SUMS names missing file {target}")
         actual = hashlib.sha256(target.read_bytes()).hexdigest()
         _gate(actual == expected.strip(), f"digest mismatch for {target}")
+        unlisted.discard(name.strip())
+    _gate(not unlisted, f"{sums_path} leaves out {', '.join(sorted(unlisted))}")
 
 
 def _check_record_schema(record: dict[str, Any], index: int) -> str:

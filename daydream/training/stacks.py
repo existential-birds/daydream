@@ -2,8 +2,8 @@
 
 Require current-schema records, repository identity, and _SUCCESS. C5
 exclusions always refuse consumption. Full projection
-loading also verifies pinned split assignments and computes a deterministic
-file-tree digest. Exclusion-list parsing remains owned by training.exclusion.
+loading also verifies pinned split assignments and SHA256SUMS, and computes a
+deterministic file-tree digest. Exclusion-list parsing remains owned by training.exclusion.
 """
 
 from __future__ import annotations
