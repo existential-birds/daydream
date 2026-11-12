@@ -39,11 +39,11 @@ def _report_with_provenance(content: str) -> str:
     )
 
 
-def _group_roots_cell(group: PartitionGroup, *, limit: int = 4) -> str:
+def _group_roots_cell(group: PartitionGroup) -> str:
     """Render a group's roots for a report line, truncating a long tail."""
     roots = group.roots
-    shown = ", ".join(f"`{root}/`" for root in roots[:limit])
-    remainder = len(roots) - limit
+    shown = ", ".join(f"`{root}/`" for root in roots[:4])
+    remainder = len(roots) - 4
     return f"{shown} +{remainder} more" if remainder > 0 else shown
 
 

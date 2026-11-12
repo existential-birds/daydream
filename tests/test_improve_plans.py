@@ -880,7 +880,7 @@ def test_host_blocked_attempt_reuses_reserved_number_when_retry_succeeds(repo: P
     plans_dir = repo / "daydream_plans"
     if failure_kind == "transport":
         failed_selection = {"finding": _finding(),
-            "_attempt": {"transport_error_code": "NO_STRUCTURED_OBJECT", "received_result": None,}, "error": True,
+            "_attempt": {"errors": ("NO_STRUCTURED_OBJECT",), "received_result": None,}, "error": True,
         }
     else:
         invalid = _authored_plan()
@@ -943,7 +943,7 @@ def test_attempt_diagnostics_distinguish_failure_stages_and_success(repo: Path, 
 
     selections = [{"finding": _finding(fingerprint="fp-transport"),
             "_attempt": {"descriptor": "plan-transport", "backend": "FakeBackend", "model": "fake-model",
-                "received_result": None, "transport_error_code": "NO_STRUCTURED_OBJECT",
+                "received_result": None, "errors": ("NO_STRUCTURED_OBJECT",),
             }, "error": True,
         }, _authoring_failure_selection(_issues(repo, authoring_invalid), fingerprint="fp-authoring",),
         {"finding": _finding(fingerprint="fp-success"),

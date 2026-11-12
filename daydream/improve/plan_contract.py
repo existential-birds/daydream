@@ -294,7 +294,7 @@ def _collect_issues(
     *,
     repo: Path,
     recon_by_id: dict[str, dict[str, Any]],
-    expected_fingerprints: Sequence[str] | None = None,
+    expected_fingerprints: Sequence[str] | None,
 ) -> list[AssemblyIssue]:
     issues: list[AssemblyIssue] = []
     seen: set[tuple[str, str, str | None]] = set()

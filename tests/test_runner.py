@@ -627,10 +627,7 @@ def test_improve_backend_preflight_fails_closed(tmp_path: Path, monkeypatch: pyt
         repo=source, source=source, base_branch="main", base_sha="1" * 40, head_branch="feature", head_sha="2" * 40,
         is_ephemeral=False, run_id="run-1",
     )
-    boundary = AuditWorkspace(
-        repo=audit, source=source, repo_git_common_dir=audit / ".git", source_git_common_dir=source / ".git",
-        outward_symlinks=frozenset(),
-    )
+    boundary = AuditWorkspace(repo=audit, outward_symlinks=frozenset())
     context = FlowContext(
         config=RunConfig(target=str(source), flow_name="improve"), work=work, registry=build_registry(),
         audit_workspace=boundary,

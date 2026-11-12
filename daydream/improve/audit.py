@@ -451,10 +451,10 @@ def _apply_vet_verdicts(
     verdicts: list[Any],
     *,
     rejected_at_sha: str | None,
-    repo: Path | None = None,
-    default_provenance: str | None = None,
-    services: list[Service] | None = None,
-    partitions: list[Partition] | None = None,
+    repo: Path,
+    default_provenance: str | None,
+    services: list[Service],
+    partitions: list[Partition],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Match 1-based vet IDs in any order; absent or malformed verdicts drop the finding."""
     by_vet_id: dict[int, dict[str, Any]] = {}
@@ -519,9 +519,9 @@ def _apply_vet_verdicts(
             restamped = audit_scope._stamp_finding(
                 corrected,
                 str(corrected.get("category", "")),
-                services or [],
-                partitions or [],
-                repo=repo or Path.cwd(),
+                services,
+                partitions,
+                repo=repo,
             )
             if restamped is not None:
                 corrected = restamped

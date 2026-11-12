@@ -93,8 +93,8 @@ def _is_verification_name(name: str) -> bool:
 def enumerate_repository_commands(
     repo: Path,
     *,
-    directories: Sequence[str] = (".",),
-    reserved_ids: Iterable[str] = (),
+    directories: Sequence[str],
+    reserved_ids: Iterable[str],
 ) -> list[dict[str, Any]]:
     """Read recon commands without shadowing model-supplied ``reserved_ids``.
 

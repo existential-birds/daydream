@@ -429,7 +429,7 @@ def _render_index(
 
 
 def _index_row(
-    entry: PlanIndexEntry, *, plans_dir: Path | None = None
+    entry: PlanIndexEntry, *, plans_dir: Path | None
 ) -> str:
     """Render an index row, suppressing dangling links when plans_dir is supplied."""
     filename = entry.path

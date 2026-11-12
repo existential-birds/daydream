@@ -10,11 +10,9 @@ from daydream.artifact_visibility import ArtifactSession, artifact_dir_for
 from daydream.trajectory import DaydreamPhase, get_current_recorder
 
 
-def improve_dir(
-    target: Path, *, session: ArtifactSession | None = None, allow_standalone: bool = False,
-) -> Path:
+def improve_dir(target: Path, *, session: ArtifactSession) -> Path:
     """Return the target's ``.daydream/improve`` directory, creating it."""
-    directory = artifact_dir_for(target, session=session, allow_standalone=allow_standalone) / "improve"
+    directory = artifact_dir_for(target, session=session, allow_standalone=False) / "improve"
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 

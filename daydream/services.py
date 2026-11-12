@@ -139,7 +139,7 @@ def enumerate_services(
 def filter_scope(
     services: list[Service],
     scope: str,
-    service_groups: dict[str, list[str]] | None = None,
+    service_groups: dict[str, list[str]],
 ) -> list[Service]:
     """Filter services by exact name, root path, a glob over root paths, or a named group.
 
@@ -147,7 +147,7 @@ def filter_scope(
     exact root path or glob (the same matching a root pattern uses).
     """
     normalized_scope = scope.removeprefix("./").rstrip("/")
-    group_patterns = service_groups.get(scope, []) if service_groups else []
+    group_patterns = service_groups.get(scope, [])
     matched = [
         service
         for service in services

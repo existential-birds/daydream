@@ -299,7 +299,6 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         services = audit_scope._services_for_files(services, tuple(branch_files))
 
     ctx.data["branch_diff"] = branch_diff
-    ctx.data["branch_files"] = branch_files
 
     # Survey remains repository-wide even for branch/scoped/description runs.
     # Reuse this inventory for partitioning instead of having repo_scan query it.
