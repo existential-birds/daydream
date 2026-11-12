@@ -331,6 +331,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   edited label or a dropped record, from a hand edit or an interrupted copy, was loaded and
   trained on, and the run reported "Training run complete"
   ([#1684](https://github.com/existential-birds/daydream/issues/1684)).
+- `corpus build` now also refuses a captured run whose pull request belongs to a
+  repository excluded as a benchmark holdout. Before, a run captured in a fork's clone was
+  checked only under the fork's name, so the exclusion missed it and its findings could
+  reach the corpus and training input
+  ([#1684](https://github.com/existential-birds/daydream/issues/1684)).
 
 ## [0.34.0] - 2026-11-03
 

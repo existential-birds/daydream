@@ -182,6 +182,10 @@ def test_cli_identity_and_benchmark_refusal_writes_no_projection(
         captured = capsys.readouterr()
         assert reason in captured.out + captured.err
         assert not config.out_dir.exists()
+    fork = projection_run(repo_slug="contributor/sentry")
+    fork["original_task"]["value"]["pr"]["repo"] = "getsentry/sentry"
+    (store := LocalRecordStore(tmp_path / "fork")).commit_run(fork)
+    assert cli_main(_cli_args(projection_config(store, tmp_path / "fork-out"))) == 1
 
 
 def test_required_frozen_inputs_fail_before_output(tmp_path: Path) -> None:

@@ -235,9 +235,11 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         task = original_task["value"] if original_task["status"] == "available" else {}
         raw_slug = task.get("repository", {}).get("repo_slug")
         slug = normalize_repo_slug(raw_slug) if isinstance(raw_slug, str) else ""
+        pr_repo = task.get("pr", {}).get("repo")
+        pr_slug = normalize_repo_slug(pr_repo) if isinstance(pr_repo, str) else ""
         if not slug:
             identity_refusals.append((run_id, REASON_CODE_REPO_IDENTITY_MISSING))
-        elif slug.casefold() in excluded:
+        elif slug.casefold() in excluded or pr_slug.casefold() in excluded:
             identity_refusals.append((run_id, REASON_CODE_C5_EXCLUDED_REPO))
         else:
             repo_slugs[run_id] = slug
