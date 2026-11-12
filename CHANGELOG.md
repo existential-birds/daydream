@@ -283,6 +283,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cancelling a run now stops a running test command, or a check a regression claim names,
   with its child processes; before, they kept running and could write to the checkout
   ([#1681](https://github.com/existential-birds/daydream/issues/1681)).
+- The fix loop's `git commit` and `git push`, and those of `daydream setup`, now run without
+  a time limit, as they do when run by hand, so the repository's own hooks can finish.
+  Interrupting the run still stops them. Before, Daydream stopped them after 30 and 60
+  seconds and reported a failure while the hook kept running, so a pre-push hook that runs
+  a full test suite could never let a push through
+  ([#1682](https://github.com/existential-birds/daydream/issues/1682)).
+- Remote CI now uses the pull request's test merge commit results only when the pushed
+  commit has none. Before, any result on the merge commit replaced the pushed commit's own,
+  so a failed or pending required check on the pushed commit could be reported as passed
+  ([#1682](https://github.com/existential-birds/daydream/issues/1682)).
 
 ## [0.34.0] - 2026-11-03
 

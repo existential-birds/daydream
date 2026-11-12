@@ -164,6 +164,10 @@ def test_evaluate_classifies_discovery_policyless_and_superseded_states(target: 
     snapshot = _snapshot(target, binding=_binding(target, state="closed"))
 
     assert evaluate_remote_ci(snapshot, elapsed=1, stable_polls=1, limits=RemoteCILimits()).status == "superseded"
+    masked = _snapshot(target, policy=RequiredPolicy((RequiredContext("Build", 10),), False),
+        binding=_binding(target, merge_sha=MERGE_SHA), head=(_observation("Build", "fail"),),
+        merge=(_observation("Build", "pass"),))
+    assert evaluate_remote_ci(masked, elapsed=10, stable_polls=2, limits=RemoteCILimits()).status == "failed"
 
 
 def test_handoff_payload_is_only_for_non_success_and_preserves_identity(target: RemoteCITarget) -> None:

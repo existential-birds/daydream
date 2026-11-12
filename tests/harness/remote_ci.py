@@ -3,7 +3,7 @@
 This module owns every fake-GitHub identity/evidence response the remote-CI tests
 need, plus the one pre-push-hook seeder that publishes them for the *pushed* SHA.
 ``NoCIRemote`` is the fixture-facing convenience wrapper for "a push that lands
-and whose PR has no configured CI"; the remote-CI outcome tests drive
+and whose PR has no configured CI"; the cancellation test drives
 :func:`start_remote_ci_fake` directly.
 """
 
@@ -123,17 +123,13 @@ class RemoteCISeeder(NamedTuple):
 
 
 def start_remote_ci_fake(
-    project: Path, fake_gh: FakeGh, hook_marker: Path, *, outcome: str, branch: str = "feature",
-    on_pushed: Callable[[str], None] | None = None,
+    project: Path, fake_gh: FakeGh, hook_marker: Path, *, on_pushed: Callable[[str], None] | None = None,
 ) -> RemoteCISeeder:
     """Let the real pre-push hook publish the new SHA to the external fake.
 
-    *outcome* selects the evidence the seeder publishes for that SHA: ``"no_ci"``
-    (the shared :func:`serve_no_ci_evidence` catalog), ``"blocking"`` (a gh process
-    that never returns), ``"failed"``, ``"delayed"`` or ``"merge-delayed"``. A
-    caller that owns its own evidence catalog passes *on_pushed* instead, which
-    replaces the outcome seeding; the fixture paths (``hook_marker``-derived sha
-    and ready files) are unchanged either way.
+    *on_pushed* seeds the caller's evidence for that SHA; without it the PR read
+    becomes a gh process that never returns. The ``hook_marker``-derived sha and
+    ready files are the same either way.
     """
     sha_path = hook_marker.with_name(hook_marker.name + " sha")
     ready_path = hook_marker.with_name(hook_marker.name + " ready")
@@ -149,103 +145,10 @@ def start_remote_ci_fake(
             pushed_shas.append(sha)
             if on_pushed is not None:
                 on_pushed(sha)
-                ready_path.write_text("ready\n")
-                return
-            if outcome == "no_ci":
-                serve_no_ci_evidence(fake_gh, branch=branch, head_sha=sha)
-                ready_path.write_text("ready\n")
-                return
-            pr_row = {
-                "number": PR_NUMBER, "html_url": f"https://github.com/{BASE_REPOSITORY}/pull/{PR_NUMBER}",
-                "state": "open", "base": {"ref": "main", "repo": {"full_name": BASE_REPOSITORY}},
-                "head": {"ref": branch, "sha": sha, "repo": {"full_name": HEAD_REPOSITORY}},
-                "merge_commit_sha": "e" * 40 if outcome == "merge-delayed" else None,
-            }
-            if outcome == "blocking":
+            else:
                 fake_gh.serve_blocking_process(
                     f"GET repos/{BASE_REPOSITORY}/pulls/{PR_NUMBER}",
                     pid_file=hook_marker.with_name(hook_marker.name + " pids"),
-                )
-                ready_path.write_text("ready\n")
-                return
-            fake_gh.set_response("GET", f"repos/{BASE_REPOSITORY}/pulls/{PR_NUMBER}", pr_row)
-            fake_gh.set_response("GET", f"repos/{BASE_REPOSITORY}/rules/branches/main?per_page=100&page=1", [])
-            required_name = "Build [matrix]" if outcome == "failed" else "Build"
-            pinned_checks = (
-                [{"context": required_name, "app_id": 10}]
-                if outcome in {"failed", "delayed", "merge-delayed"}
-                else []
-            )
-            fake_gh.set_response(
-                "GET", f"repos/{BASE_REPOSITORY}/branches/main/protection/required_status_checks",
-                {"strict": False, "contexts": [], "checks": pinned_checks},
-            )
-            fake_gh.set_response(
-                "GET", f"repos/{BASE_REPOSITORY}/actions/workflows?per_page=100&page=1",
-                {"total_count": 0, "workflows": []},
-            )
-            checks: list[dict[str, object]] = []
-            if outcome in {"failed", "delayed", "merge-delayed"}:
-                checks.append(
-                    {
-                        "id": 1, "name": required_name, "head_sha": sha, "app": {"id": 10}, "status": "completed",
-                        "conclusion": "failure" if outcome == "failed" else "success",
-                        "details_url": (
-                            "https://github.com/base-user/project/actions/runs/[matrix]/7"
-                            if outcome == "failed"
-                            else "https://github.com/base-user/project/actions/runs/7"
-                        ),
-                        "output": {
-                            "title": "Build failed", "summary": "secret=top-secret build failed",
-                            "text": "must not persist",
-                        },
-                    }
-                )
-            if outcome == "failed":
-                checks.append(
-                    {
-                        "id": 2, "name": "Lint [optional]", "head_sha": sha, "app": {"id": 20}, "status": "completed",
-                        "conclusion": "failure",
-                        "details_url": "https://github.com/base-user/project/actions/runs/[optional]/8",
-                        "output": {
-                            "title": "Advisory lint failed", "summary": "advisory failure", "text": "must not persist",
-                        },
-                    }
-                )
-            check_key = (
-                f"GET repos/{BASE_REPOSITORY}/commits/"
-                f"{sha}/check-runs?filter=latest&per_page=100&page=1"
-            )
-            if outcome == "delayed":
-                fake_gh.set_response_sequence(
-                    check_key,
-                    [
-                        {"total_count": 0, "check_runs": []}, {"total_count": 1, "check_runs": checks},
-                        {"total_count": 1, "check_runs": checks},
-                    ],
-                )
-            else:
-                fake_gh.set_response(
-                    "GET", check_key.removeprefix("GET "), {"total_count": len(checks), "check_runs": checks},
-                )
-            fake_gh.set_response("GET", f"repos/{BASE_REPOSITORY}/commits/{sha}/statuses?per_page=100&page=1", [])
-            if outcome == "merge-delayed":
-                merge_sha = "e" * 40
-                merge_key = (
-                    f"GET repos/{BASE_REPOSITORY}/commits/"
-                    f"{merge_sha}/check-runs?filter=latest&per_page=100&page=1"
-                )
-                pending = dict(checks[0], head_sha=merge_sha, status="in_progress", conclusion=None)
-                passed = dict(checks[0], head_sha=merge_sha)
-                fake_gh.set_response_sequence(
-                    merge_key,
-                    [
-                        {"total_count": 1, "check_runs": [pending]}, {"total_count": 1, "check_runs": [passed]},
-                        {"total_count": 1, "check_runs": [passed]},
-                    ],
-                )
-                fake_gh.set_response(
-                    "GET", f"repos/{BASE_REPOSITORY}/commits/{merge_sha}/statuses?per_page=100&page=1", [],
                 )
             ready_path.write_text("ready\n")
         except BaseException as exc:  # thread failures are re-raised by the test
@@ -382,7 +285,7 @@ class NoCIRemote:
 
         marker = self._tmp_path / f"remote-ci-{len(self._seeders)}"
         self._seeders.append(
-            start_remote_ci_fake(repo, self._fake_gh, marker, outcome="no_ci", branch=branch, on_pushed=seed_pushed)
+            start_remote_ci_fake(repo, self._fake_gh, marker, on_pushed=seed_pushed)
         )
 
     def finish(self) -> None:

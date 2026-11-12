@@ -12,6 +12,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 
@@ -645,6 +646,11 @@ def test_gh_timeouts_retry_only_idempotent_reads(
         git_ops.gh_api(tmp_path, "/app-manifests/manifest-code-sentinel/conversions", method="POST", idempotent=True)
     assert "manifest-code-sentinel" not in str(masked.value) and "/app-manifests/***/" in str(masked.value)
     assert caplog.records and all("/app-manifests" not in record.getMessage() for record in caplog.records)
+    run = mock.Mock(return_value=subprocess.CompletedProcess([], 0))
+    monkeypatch.setattr(subprocess, "run", run)
+    git_ops.commit_staged(tmp_path, "fix")
+    git_ops.push_branch(tmp_path, "main")
+    assert [call.kwargs["timeout"] for call in run.call_args_list[-2:]] == [None, None]
 
 
 def test_gh_issue_wrappers_keep_bodies_out_of_argv_and_return_rows(

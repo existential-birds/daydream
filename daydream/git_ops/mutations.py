@@ -386,7 +386,7 @@ def commit_staged(repo: Path, message: str) -> None:
             "user.name=daydream",
             *commit_args,
         ]
-    process._run_git(repo, commit_args, timeout=30, retries=0, error_context=f"git commit failed in {repo}")
+    process._run_git(repo, commit_args, timeout=None, retries=0, error_context=f"git commit failed in {repo}")
 
 
 def commit_paths(repo: Path, paths: list[Path], message: str) -> None:
@@ -401,7 +401,7 @@ def push_branch(repo: Path, branch: str, *, remote: str = "origin") -> None:
     process._run_git(
         repo,
         ["push", "-u", remote, branch],
-        timeout=60,
+        timeout=None,
         retries=0,
         error_context=f"git push -u {remote} {branch} failed in {repo}",
     )

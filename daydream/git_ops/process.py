@@ -147,7 +147,7 @@ def _retrying_subprocess(
     text: bool,
     input_data: str | bytes | None,
     env: Any | None,
-    timeout: int | float,
+    timeout: int | float | None,
     retries: int,
     scrub: Callable[[str], str] = str,
     suffix: str = "",
@@ -160,8 +160,8 @@ def _retrying_subprocess(
     for attempt in range(retries + 1):
         try:
             if max_output_bytes is not None:
-                if input_data is not None or max_output_bytes < 0:
-                    raise GitError("bounded git capture requires no input and a nonnegative output limit")
+                if input_data is not None or max_output_bytes < 0 or timeout is None:
+                    raise GitError("bounded git capture requires no input, a nonnegative output limit and a time limit")
                 bounded = _bounded_subprocess(
                     argv, cwd=cwd, env=env, timeout=timeout, limit=max_output_bytes, pass_fds=pass_fds,
                 )
@@ -382,7 +382,7 @@ def _run_git(
     repo: Path,
     args: list[str],
     *,
-    timeout: int | float = 5,
+    timeout: int | float | None = 5,
     capture_bytes: Literal[True],
     retries: int = _GIT_TIMEOUT_RETRIES,
     input_text: str | None = None,
@@ -400,7 +400,7 @@ def _run_git(
     repo: Path,
     args: list[str],
     *,
-    timeout: int | float = 5,
+    timeout: int | float | None = 5,
     capture_bytes: Literal[False] = False,
     retries: int = _GIT_TIMEOUT_RETRIES,
     input_text: str | None = None,
@@ -417,7 +417,7 @@ def _run_git(
     repo: Path,
     args: list[str],
     *,
-    timeout: int | float = 5,
+    timeout: int | float | None = 5,
     capture_bytes: bool = False,
     retries: int = _GIT_TIMEOUT_RETRIES,
     input_text: str | None = None,
