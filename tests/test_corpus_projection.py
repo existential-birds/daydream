@@ -183,9 +183,10 @@ def test_cli_identity_and_benchmark_refusal_writes_no_projection(
         assert reason in captured.out + captured.err
         assert not config.out_dir.exists()
     fork = projection_run(repo_slug="contributor/sentry")
-    fork["original_task"]["value"]["pr"]["repo"] = "getsentry/sentry"
+    fork["original_task"]["value"]["pr"]["repo"] = "https://github.com/GetSentry/Sentry.git"
     (store := LocalRecordStore(tmp_path / "fork")).commit_run(fork)
-    assert cli_main(_cli_args(projection_config(store, tmp_path / "fork-out"))) == 1
+    assert cli_main(_cli_args(config := projection_config(store, tmp_path / "fork-out"))) == 1
+    assert "c5_excluded_repo" in "".join(capsys.readouterr()) and not config.out_dir.exists()
 
 
 def test_required_frozen_inputs_fail_before_output(tmp_path: Path) -> None:
