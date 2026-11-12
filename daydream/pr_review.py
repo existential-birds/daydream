@@ -22,7 +22,6 @@ from daydream.git_ops import INHERIT_GITHUB_AUTH, GitError, GitHubAuth
 from daydream.pr_comment_renderer import render_run_info
 from daydream.reviews.diagrams import (
     post_diagram_artifact as post_diagram_artifact,
-    post_diagram_comment_to_pr as post_diagram_comment_to_pr,
     render_diagram_blocks_from_payload as render_diagram_blocks_from_payload,
     validate_diagram_payload as validate_diagram_payload,
 )

@@ -240,9 +240,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   earlier run's completed diagrams; they are generated again, and `diagram-complete.json`
   is no longer written. Diagram internals nothing read also go: the reason-code sets
   `REASON_CODES` and `OMIT_REASONS`, `DiagramInputs.settings`, and the
-  `diagram_comment_kinds` and `render_diagram_comment_body` re-exports from
-  `daydream.pr_review` (both remain in `daydream.reviews.diagrams`). No known caller
-  ([#1683](https://github.com/existential-birds/daydream/issues/1683)).
+  `diagram_comment_kinds`, `render_diagram_comment_body` and `post_diagram_comment_to_pr`
+  re-exports from `daydream.pr_review` (all three remain in `daydream.reviews.diagrams`).
+  `post_diagram_artifact` now takes the diagram payload instead of the findings artifact.
+  No known caller ([#1683](https://github.com/existential-birds/daydream/issues/1683)).
 
 ### Fixed
 
