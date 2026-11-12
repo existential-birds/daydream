@@ -303,7 +303,7 @@ def _diagram_head_evidence_problem(
             problem = check(evidence)
             if problem is not None:
                 return problem
-            source = "\n".join(head.lines(evidence["file"])).encode()
+            source = head.read(evidence["file"])
             language = language_for_path(evidence["file"])
             line = evidence["line"]
             if isinstance(root_end, int) and not root["line"] <= line <= root_end:

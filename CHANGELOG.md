@@ -322,6 +322,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   posting when a cited line does not hold there. Before, a diagram drawn from unpushed
   commits or uncommitted edits was posted under that head's marker and the run exited 0
   ([#1683](https://github.com/existential-birds/daydream/issues/1683)).
+- `post-findings` and the live post no longer reject a valid flowchart whose file
+  contains a form feed or another character Python treats as a line break before a
+  cited line ([#1683](https://github.com/existential-birds/daydream/issues/1683)).
 
 ## [0.34.0] - 2026-11-03
 
