@@ -293,6 +293,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commit has none. Before, any result on the merge commit replaced the pushed commit's own,
   so a failed or pending required check on the pushed commit could be reported as passed
   ([#1682](https://github.com/existential-birds/daydream/issues/1682)).
+- Improve's report now counts findings that vetting dropped because a vet turn failed
+  or returned no usable verdict, and a run in which no finding received a usable
+  verdict stops with exit code 1 instead of printing
+  "No vetted defect findings -- done." and exiting 0. The findings stay in
+  `audit-findings.json` ([#1637](https://github.com/existential-birds/daydream/issues/1637)).
 
 ## [0.34.0] - 2026-11-03
 

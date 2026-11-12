@@ -243,6 +243,7 @@ def _render_report(ctx: FlowContext) -> str:
         "## Audit filtering\n\n"
         f"- Findings without `path:line` evidence discarded: {discarded_no_evidence}\n"
         f"- Findings rejected during vetting: {vet_rejected}\n"
+        f"- Findings dropped without a usable vet verdict: {ctx.data['vet_undecided']}\n"
         f"- Non-HIGH-confidence findings dropped by tier: {dropped_low_confidence}\n"
         f"- Lowest-leverage findings dropped by tier cap: {dropped_by_cap}\n"
         f"- Previously rejected findings suppressed: {previously_rejected}\n"

@@ -531,7 +531,7 @@ def _apply_vet_verdicts(
     return kept, rejected
 
 
-async def _step_vet(ctx: FlowContext) -> None:
+async def _step_vet(ctx: FlowContext) -> Stop | None:
     """Re-verify audit findings and persist model-confirmed rejections."""
     directory: Path = ctx.data["improve_dir"]
     plans_dir = ctx.work.repo / "daydream_plans"
@@ -681,6 +681,7 @@ async def _step_vet(ctx: FlowContext) -> None:
     ctx.data["vetted"] = vetted
     ctx.data["previously_rejected"] = previously_rejected
     ctx.data["vet_rejected"] = len(rejected)
+    ctx.data["vet_undecided"] = undecided = len(candidates) - len(kept) - len(rejected)
     ctx.data["defects"] = ordered_defects
     if branch_focus:
         introduced = [finding for finding in ordered_defects if finding.get("provenance") == "introduced"]
@@ -693,3 +694,7 @@ async def _step_vet(ctx: FlowContext) -> None:
         )
     else:
         ctx.data["findings_table"] = _findings_table(ordered_defects)
+    if candidates and undecided == len(candidates):
+        print_error(console, "Improve vetting failed", "no audit finding received a usable vet verdict")
+        return Stop(1)
+    return None
