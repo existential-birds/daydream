@@ -1,73 +1,9 @@
-"""Grounding verdicts and the shared reason-code vocabulary."""
+"""Grounding verdicts."""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from typing import Any
-
-# --- Vocabulary --------------------------------------------------------------
-
-# Reason codes shared by both kinds. Every one names a fact about the cited
-# evidence itself, so the same check runs for a sequence message, a block
-# branch and a flowchart node.
-_SHARED_REASON_CODES = frozenset(
-    {
-        "PATH_ESCAPES_REPO",
-        "FILE_MISSING",
-        "LINE_OUT_OF_RANGE",
-        "SYMBOL_NOT_ON_LINE",
-        "NOT_A_BRANCH_STATEMENT",
-        # Invalid shape has no evidence to adjudicate.
-        "MALFORMED_ELEMENT",
-    }
-)
-_SEQUENCE_REASON_CODES = frozenset(
-    {
-        "EVIDENCE_NOT_IN_SOURCE_PARTICIPANT",
-        "CALLEE_NOT_DEFINED_IN_TARGET",
-        "NOT_A_REPLY_STATEMENT",
-        "PARTICIPANT_NO_FILES",
-        "PARTICIPANT_FILE_MISSING",
-        "REPLY_NOT_IN_ENCLOSING_FUNCTION",
-        "REPLY_NOT_PRECEDED_BY_CALL",
-        "EXTERNAL_MISUSED",
-    }
-)
-_FLOWCHART_REASON_CODES = frozenset(
-    {
-        "ROOT_NOT_CANDIDATE",
-        "NODE_OUTSIDE_ROOT",
-        "NOT_AN_EXECUTABLE_STATEMENT",
-        "NOT_A_TERMINAL_STATEMENT",
-        "SUBROUTINE_NOT_DEFINED",
-        "SUBROUTINE_NOT_CALLED_HERE",
-        "DECISION_EDGES_INVALID",
-        "EDGE_ENDPOINT_UNGROUNDED",
-        "MULTIPLE_START",
-    }
-)
-
-#: Every per-element reason code either grounder can emit. Exposed so the
-#: repair-turn prompt and the tests enumerate one list rather than three.
-REASON_CODES: frozenset[str] = (
-    _SHARED_REASON_CODES | _SEQUENCE_REASON_CODES | _FLOWCHART_REASON_CODES
-)
-
-#: Every whole-kind omission reason. ``NO_END`` is a floor reason, not an
-#: element reason: a flowchart with no terminal node is structurally fine, it
-#: is simply not worth drawing.
-OMIT_REASONS: frozenset[str] = frozenset(
-    {
-        "TOO_FEW_MESSAGES",
-        "NO_CHANGED_INTERACTION",
-        "TOO_FEW_PARTICIPANTS",
-        "TOO_FEW_NODES",
-        "NO_DECISION",
-        "NO_END",
-    }
-)
-
-# --- Report types ------------------------------------------------------------
 
 
 @dataclass

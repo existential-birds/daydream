@@ -22,11 +22,6 @@ from daydream.config import (
 )
 from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.detection import detect_stacks
-from daydream.deep.diagram_checkpoint import (
-    complete_diagram_checkpoint,
-    diagram_checkpoint_key,
-    restore_diagram_checkpoint,
-)
 from daydream.deep.diagram_grounding import RepoSymbols, ground_flowchart, ground_sequence
 from daydream.deep.diagram_prompts import build_diagram_repair_prompt
 from daydream.deep.diagram_render import render_diagram_blocks, render_flowchart_mermaid, render_sequence_mermaid
@@ -93,7 +88,6 @@ class DiagramSettings:
 class DiagramInputs:
     """Deterministic drawing inputs, prepared once before provider admission."""
 
-    settings: DiagramSettings
     eligibility: Eligibility
     hunk_ranges: dict[str, list[tuple[int, int]]]
 
@@ -264,9 +258,7 @@ def _diagram_author_prompt(
     ctx: FlowContext,
     kind: str,
     eligibility: Eligibility,
-    backend: Any,
-    *,
-    inline_transport: SanctionedInputTransport | None = None,
+    transport: SanctionedInputTransport,
 ) -> str:
     """Build a registry prompt using the resolved sanctioned-input transport.
 
@@ -278,11 +270,6 @@ def _diagram_author_prompt(
     diff_path: Path = deep_state.diff_path
     inline_diff = _ttt_diff_text(ctx)
     exploration_dir: Path | None = deep_state.exploration_dir_or_none
-    transport = (
-        inline_transport
-        if inline_transport is not None
-        else sanctioned_transport_for(backend, ctx.work.repo, read_only=True)
-    )
     inline = transport is SanctionedInputTransport.INLINE
     builder = get_registry().prompt(
         "diagram_sequence" if kind == "sequence" else "diagram_flowchart"
@@ -445,7 +432,7 @@ async def _run_diagram_kind(
         # The prompt is shaped and rendered to its final, private-path-free form
         # here, so the bytes this call site decides on are the bytes the backend
         # receives; run_agent re-applies the renderer idempotently for revalidation.
-        prompt = _diagram_author_prompt(ctx, kind, eligibility, backend, inline_transport=transport)
+        prompt = _diagram_author_prompt(ctx, kind, eligibility, transport)
         if sanctioned_inputs is not None:
             prompt = sanctioned_inputs.render_prompt(prompt)
         advisory = selection.to_dict() if selection is not None else None
@@ -633,7 +620,7 @@ def _prepare_diagram_inputs(ctx: FlowContext) -> DiagramInputs:
         thresholds=settings.thresholds,
         force=settings.mode,
     )
-    return DiagramInputs(settings, eligibility, hunk_ranges)
+    return DiagramInputs(eligibility, hunk_ranges)
 
 
 async def _run_diagram_step(
@@ -643,26 +630,11 @@ async def _run_diagram_step(
     """Run the durable diagram step inside its identified phase scope."""
     deep_state = DeepState(ctx.data)
     prepared = inputs if inputs is not None else _prepare_diagram_inputs(ctx)
-    settings, eligibility, hunk_ranges = prepared.settings, prepared.eligibility, prepared.hunk_ranges
+    eligibility, hunk_ranges = prepared.eligibility, prepared.hunk_ranges
     mode = deep_state.mode
     target_dir = ctx.work.repo
-    dd = deep_state.dd
 
     kinds = eligibility.eligible_kinds()
-    checkpoint_key = (
-        diagram_checkpoint_key(ctx, settings=settings, eligibility=eligibility.to_dict()) if kinds else None
-    )
-    restored = restore_diagram_checkpoint(ctx, checkpoint_key)
-    if restored is not None:
-        _persist_diagrams(ctx, restored)
-        print_info(console, "Grounded diagrams: restored completed generation for this snapshot")
-        return None
-    try:
-        DeepArtifact.DIAGRAM_COMPLETE.at(dd).unlink(missing_ok=True)
-    except OSError as exc:
-        checkpoint_key = None
-        print_warning(console, f"Diagram recovery checkpoint could not be cleared ({type(exc).__name__}); "
-                      "generation will continue without recovery metadata.")
 
     results: dict[str, DiagramResult | None] = {}
     for kind in DIAGRAM_KINDS:
@@ -722,8 +694,6 @@ async def _run_diagram_step(
     ordered: dict[str, DiagramResult | None] = {kind: results.get(kind) for kind in DIAGRAM_KINDS}
     payload: dict[str, Any] = {"eligibility": eligibility.to_dict(), "results": ordered}
     _persist_diagrams(ctx, payload)
-    if kinds and not failures:
-        complete_diagram_checkpoint(ctx, checkpoint_key)
 
     if not kinds:
         phase.finish(LifecycleStatus.SKIPPED, LifecycleReasonCode.NO_ELIGIBLE_WORK)

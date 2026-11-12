@@ -20,9 +20,9 @@ from daydream.config import (
     DIAGRAM_MAX_NODES,
     DIAGRAM_MAX_PARTICIPANTS,
 )
-from daydream.deep.diagram_types import BLOCK_KINDS, as_dict, as_list, as_optional_str
+from daydream.deep.diagram_types import BLOCK_KINDS, as_list, as_optional_str
 
-_mapping, _list, _key = as_dict, as_list, as_optional_str
+_list, _key = as_list, as_optional_str
 
 # Sanitization
 

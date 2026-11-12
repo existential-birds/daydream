@@ -44,7 +44,6 @@ class DeepArtifact(StrEnum):
     # Diagram decisions are auditable even when no kind renders.
     DIAGRAM = "diagram.json"
     DIAGRAM_MARKDOWN = "diagram.md"
-    DIAGRAM_COMPLETE = "diagram-complete.json"
     # Canonical merged JSON drives fixes and posting; markdown is a derived view.
     MERGED_REPORT = "review-output.md"
     MERGED_ITEMS = "merged-items.json"

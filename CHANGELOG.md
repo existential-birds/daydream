@@ -236,6 +236,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `literal_command_error`. `improve_dir`, `filter_scope`, `enumerate_repository_commands`,
   `issue_body` and other Improve helpers now require the arguments every caller already
   passed. No known caller ([#1637](https://github.com/existential-birds/daydream/issues/1637)).
+- Resuming with `--start-at per-stack` or `--start-at merge` no longer restores the
+  earlier run's completed diagrams; they are generated again, and `diagram-complete.json`
+  is no longer written. Diagram internals nothing read also go: the reason-code sets
+  `REASON_CODES` and `OMIT_REASONS`, `DiagramInputs.settings`, and the
+  `diagram_comment_kinds` and `render_diagram_comment_body` re-exports from
+  `daydream.pr_review` (both remain in `daydream.reviews.diagrams`). No known caller
+  ([#1683](https://github.com/existential-birds/daydream/issues/1683)).
 
 ### Fixed
 
