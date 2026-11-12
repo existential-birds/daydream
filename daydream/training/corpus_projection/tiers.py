@@ -1,4 +1,4 @@
-"""Classify projection tiers solely from record type, disposition, and human/developer evidence.
+"""Classify projection tiers solely from disposition and human/developer evidence.
 Intrinsic rewards and LLM self-scores cannot promote records to gold.
 """
 
@@ -19,18 +19,14 @@ class GoldGateError(ValueError):
     """
 
 
-def classify_tier(resolution: Mapping[str, object], *, record_type: str = "outcome-finding") -> Tier:
-    """Process traces are always silver, regardless of disposition. Nondecisive findings are task-only
-    and go to adjudication.
+def classify_tier(resolution: Mapping[str, object]) -> Tier:
+    """Nondecisive findings are task-only and go to adjudication.
 
     Decisive findings require a nonempty evidence list or raise GoldGateError. Evidence after as_of
     is retained as silver; eligible decisive findings are gold.
     """
     if not isinstance(resolution, Mapping):
         raise TypeError(f"resolution must be a mapping, got {type(resolution).__name__}")
-
-    if record_type == "process-trace":
-        return "silver"
 
     disposition = resolution.get("disposition")
     if not isinstance(disposition, str):

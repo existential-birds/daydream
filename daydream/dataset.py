@@ -465,10 +465,6 @@ class _TrajectoryChecks:
         known[invocation_id] = invocation
 
 
-def run_record_schema() -> Record:
-    return deepcopy(_RUN_SCHEMA)
-
-
 _DEFAULT_MAX_RECORD_BYTES = 64 * 1024 * 1024
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _RECORD_NAME = re.compile(r"[0-9a-f]{64}\.jsonl")
@@ -598,11 +594,6 @@ class LocalRecordStore:
             if path.is_symlink() or (path.exists() and not stat.S_ISREG(path.lstat().st_mode)):
                 raise StoreError("unsafe_storage_path")
             self._atomic_write(path, self._payload(dict(source)))
-
-    def download_source(self) -> Record | None:
-        """Read the authenticated exact-commit provenance saved by canonical download."""
-        with self._locked():
-            return self._download_source()
 
     def _download_source(self) -> Record | None:
         path = self.root / "source.json"
@@ -818,19 +809,14 @@ class LocalRecordStore:
 
     def select_snapshot(
         self, *, observed_before: str, valid_before: str | None = None,
-        run_ids: Sequence[str] | None = None,
     ) -> Record:
         """Pin observe-time membership; valid-time only controls eligible evidence."""
         observed_cutoff = _timestamp(observed_before)
         if valid_before is not None:
             _timestamp(valid_before)
         with self._locked() as diagnostics:
-            all_runs = self._members("runs")
-            if run_ids is not None and set(run_ids) - {member["identity"] for member, _ in all_runs}:
-                raise StoreError("unknown_run_reference")
-            runs = tuple(member for member, record in all_runs if
-                         _timestamp(record["captured_at"]) <= observed_cutoff
-                         and (run_ids is None or member["identity"] in run_ids))
+            runs = tuple(member for member, record in self._members("runs") if
+                         _timestamp(record["captured_at"]) <= observed_cutoff)
             selected = {member["identity"] for member in runs}
             all_observations = self._members("observations")
             for _member, record in all_observations:
@@ -855,9 +841,8 @@ class LocalRecordStore:
                 self._atomic_write(path, data)
             return {**document, "diagnostics": diagnostics}
 
-    def read_snapshot(self, snapshot: Mapping[str, Any] | str) -> SnapshotRecords:
+    def read_snapshot(self, snapshot_id: str) -> SnapshotRecords:
         """Read only the immutable shards pinned by a saved snapshot."""
-        snapshot_id = snapshot.get("snapshot_id") if isinstance(snapshot, Mapping) else snapshot
         if not isinstance(snapshot_id, str) or not _DIGEST.fullmatch(snapshot_id):
             raise StoreError("invalid_snapshot_identity")
         with self._locked() as diagnostics:
@@ -878,8 +863,6 @@ class LocalRecordStore:
                 if isinstance(error, StoreError):
                     raise
                 raise StoreError("malformed_snapshot") from None
-            if isinstance(snapshot, Mapping) and {k: v for k, v in snapshot.items() if k != "diagnostics"} != pinned:
-                raise StoreError("snapshot_content_conflict")
             typed_runs = tuple(self._load("runs", self.root / "runs" / member["shard"], member)[1]
                                for member in pinned["runs"])
             typed_observations = tuple(

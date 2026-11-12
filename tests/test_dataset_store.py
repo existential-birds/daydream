@@ -11,10 +11,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
-import jsonschema
 import pytest
 
-from daydream.dataset import LocalRecordStore, StoreError, parse_run, run_record_schema
+from daydream.dataset import LocalRecordStore, StoreError, parse_run
 from daydream.dataset_capture import capture_run_record, capture_scoring
 from daydream.dataset_scoring import assemble_scoring_inputs
 from daydream.deep.render import insert_review_context
@@ -72,7 +71,6 @@ def test_current_records_read_all_history_without_creating_snapshot(store: Local
     store.record_download_source(source, **current)
     path = store.root / "source.json"
     assert json.loads(path.read_bytes()) == source
-    assert store.download_source() == source
     assert path.read_bytes().endswith(b"\n")
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert list((store.root / "snapshots").iterdir()) == []
@@ -254,10 +252,8 @@ def test_run_sections_require_complete_semantic_payload_and_bound_membership(tmp
     raw[field] = {"status": "available", "value": {}}
     with pytest.raises(ValueError, match="invalid RunRecord"):
         parse_run(raw)
-    with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(raw, run_record_schema())
     raw[field] = {"status": "unavailable", "reason": "not acquired"}
-    jsonschema.validate(parse_run(raw), run_record_schema())
+    parse_run(raw)
     summary: dict[str, Any] = {"trajectory_id": "run-1", "invocation_id": "attempt-1", "step_ids": [1],
                                "phase": "review"}
     agent = {"name": "daydream", "version": "test"}
@@ -314,7 +310,7 @@ def test_download_source_read_refuses_unsafe_provenance(
     path = store.root / "source.json"
     path.write_text("[]")
     with pytest.raises(StoreError, match="invalid_download_source|unsafe_storage_path"):
-        store.download_source()
+        store.select_snapshot(observed_before="2100-01-01T00:00:00Z")
 
 
 def test_scoring_inputs_without_review_evidence_earn_no_credit(tmp_path: Path) -> None:

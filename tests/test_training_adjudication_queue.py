@@ -57,9 +57,9 @@ def test_digest_drift_reopens_item_and_missing_digest_fails_closed() -> None:
 def test_decisive_adjudication_entry_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _session("s1", "fp-a", "ambiguous", "d1")
 
-    def _forge_decisive(s: dict[str, object], **_kw: object) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    def _forge_decisive(s: dict[str, object]) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
         # Forge a decisive record outside the projector to prove the queue guard is independent.
-        _, adjudication = project_findings(s, return_adjudication=True)
+        _, adjudication = project_findings(s)
         return [], [dict(e, disposition="accepted") for e in adjudication]
 
     monkeypatch.setattr(queue_module, "project_findings", _forge_decisive)

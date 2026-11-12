@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Literal, Mapping, cast, overload
+from typing import Any, Mapping, cast
 
 from daydream.dataset import LocalRecordStore
 from daydream.json_utils import atomic_write_bytes, canonical_json
@@ -19,8 +19,6 @@ from daydream.training.corpus_projection.selection import (
     Record,
     _apply_share_caps,
     _share_caps_report,
-    count_by,
-    retain_group_limits,
 )
 from daydream.training.corpus_projection.splits import SPLIT_FILENAMES, assign_split
 from daydream.training.corpus_projection.tiers import classify_tier
@@ -51,14 +49,9 @@ class BuildFrozenCorpusConfig:
     holdout_rate: float = 0.1
     val_rate: float = 0.1
     salt: str = "daydream-projection-salt"
-    caps: dict[str, int] = field(default_factory=dict)
     max_stack_share: float | None = None
     max_repo_share: float | None = None
     max_profile_share: float | None = None
-    labeler_policy_version: str = LABELER_POLICY_VERSION
-    reply_classifier_version: str = REPLY_CLASSIFIER_VERSION
-    rubric_schema_version: str = RUBRIC_SCHEMA_VERSION
-    emit_process_traces: bool = False
 
     def __post_init__(self) -> None:
         for name in ("out_dir", "store_dir"):
@@ -108,23 +101,10 @@ def _max_valid_at(evidence: list[Record], base: str | None) -> str | None:
     return result
 
 
-@overload
-def project_findings(session: Mapping[str, object], *, return_adjudication: Literal[False] = False) -> list[Record]: ...
-
-
-@overload
-def project_findings(
-    session: Mapping[str, object], *, return_adjudication: Literal[True]
-) -> tuple[list[Record], list[Record]]: ...
-
-
-def project_findings(
-    session: Mapping[str, object], *, return_adjudication: bool = False
-) -> list[Record] | tuple[list[Record], list[Record]]:
+def project_findings(session: Mapping[str, object]) -> tuple[list[Record], list[Record]]:
     """Project one segmented session's per-finding resolutions into records.
 
-    Returns the record list, or ``(records, adjudication_entries)`` when
-    ``return_adjudication`` is true. Raises ``ValueError`` naming the
+    Returns ``(records, adjudication_entries)``. Raises ``ValueError`` naming the
     session and the offending key on a malformed resolution.
     """
     session_id = session.get("session_id")
@@ -203,9 +183,7 @@ def project_findings(
                 }
             )
 
-    if return_adjudication:
-        return records, adjudication
-    return records
+    return records, adjudication
 
 
 def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
@@ -235,9 +213,11 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         task = original_task["value"] if original_task["status"] == "available" else {}
         raw_slug = task.get("repository", {}).get("repo_slug")
         slug = normalize_repo_slug(raw_slug) if isinstance(raw_slug, str) else ""
+        pr_repo = task.get("pr", {}).get("repo")
+        pr_slug = normalize_repo_slug(pr_repo) if isinstance(pr_repo, str) else ""
         if not slug:
             identity_refusals.append((run_id, REASON_CODE_REPO_IDENTITY_MISSING))
-        elif slug.casefold() in excluded:
+        elif slug.casefold() in excluded or pr_slug.casefold() in excluded:
             identity_refusals.append((run_id, REASON_CODE_C5_EXCLUDED_REPO))
         else:
             repo_slugs[run_id] = slug
@@ -262,88 +242,73 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         first = segments[0]
         session_view = {"session_id": run_id, "trajectory_id": first.trajectory_id,
                         "segment_id": first.segment_id, "resolutions": row["resolutions"]}
-        projected, report = project_findings(session_view, return_adjudication=True)
+        projected, report = project_findings(session_view)
         adjudication.extend({"session_id": run_id, **entry} for entry in report)
         resolution_by_uid = {str(item["item_uid"]): item for item in row["resolutions"]}
         task = run["original_task"]["value"] if run["original_task"]["status"] == "available" else {}
         items = run["findings"]["value"]["items"] if run["findings"]["status"] == "available" else []
         findings_by_uid = {item["item_uid"]: item for item in items}
-        for projected_record in projected:
-            fingerprint = str(projected_record["finding_fingerprint"])
-            item_uid = str(projected_record["item_uid"])
+        for rec in projected:
+            fingerprint = str(rec["finding_fingerprint"])
+            item_uid = str(rec["item_uid"])
             resolution = resolution_by_uid[item_uid]
-            if projected_record["tier"] == "task-only":
-                if not config.emit_process_traces:
-                    continue
-                emit_records = []
-                for record_type in ("process-trace", "task-only"):
-                    derived = dict(projected_record)
-                    derived.update(record_type=record_type, tier=classify_tier(resolution, record_type=record_type),
-                                   outcome_label=None, record_id=record_finding_id(run_id, first.trajectory_id,
-                                   first.segment_id, f"{record_type}:{item_uid}"))
-                    emit_records.append(derived)
-            else:
-                emit_records = [projected_record]
-            for rec in emit_records:
-                evidence = cast(list[Record], rec["evidence"])
-                _refuse_posterior_evidence(run_id, fingerprint, evidence, as_of)
-                prov = _provenance_for(resolution, run["provenance"])
-                rec["profile"], rec["stack"] = prov["profile"], prov["stack"]
-                rec["lineage"] = {
-                    "hub_commit": hub_commit, "snapshot_id": config.snapshot_id,
-                    "source_identity_version": SOURCE_IDENTITY_VERSION,
-                    "content_digests": [run_digests[run_id], *sorted(
-                        member["record_digest"] for member in frozen.snapshot["observations"]
-                        if any(obs["observation_id"] == member["identity"] and obs["run_id"] == run_id
-                               for obs in frozen.eligible_observations))],
-                    "labeler_policy_version": config.labeler_policy_version,
-                    "reply_classifier_version": config.reply_classifier_version,
-                    "rubric_schema_version": config.rubric_schema_version,
-                    "as_of": as_of, "valid_at": _max_valid_at(evidence, as_of),
-                    "split": assign_split(str(rec["record_id"]), holdout_rate=config.holdout_rate,
-                                          val_rate=config.val_rate, salt=config.salt),
-                    "exclusion_reason": None, "repo_slug": repo_slugs[run_id],
-                }
-                finding = findings_by_uid.get(item_uid, {})
-                text = finding.get("body")
-                if isinstance(text, str):
-                    rec["finding_text"] = text
-                    rec["finding_text_sha256"] = hashlib.sha256(text.encode()).hexdigest()
-                revision = task.get("analyzed_revision", {})
-                task_identity: dict[str, Any] = {"repo_slug": repo_slugs[run_id]}
-                for name, value in (("base_sha", revision.get("pr_base_sha") or revision.get("merge_base_sha")),
-                                    ("head_sha", revision.get("head_sha"))):
-                    if value:
-                        task_identity[name] = value
-                if task.get("diff"):
-                    rec["diff"] = task["diff"]
-                    diff_digest = task["diff_sha256"]
-                    diff_ref = {"run_id": run_id, "record_digest": run_digests[run_id], "section": "original_task.diff"}
-                    task_identity.update(diff_digest=diff_digest, diff_ref=diff_ref)
-                    cast(dict[str, Any], rec["lineage"]).update(diff_digest=diff_digest, diff_ref=diff_ref)
-                rec["task_identity"] = task_identity
-                rec["schema_version"] = "3"
-                scoring = run["scoring"]
-                if scoring["status"] == "available":
-                    rec["reward_version"] = scoring["value"]["persisted_breakdown"]["reward_version"]
-                    rec["intrinsic_reward"] = scoring["value"]["persisted_breakdown"]
-                    rec["verification"] = run["verification"]
-                    rec["scoring"] = scoring
-                rec["has_posterior"] = bool(evidence)
-                rec["decisive_only"] = rec["disposition"] in {"accepted", "rejected"}
-                rec["decisive_mix"] = False
-                if row.get("annotation") is not None:
-                    rec["annotation"] = row["annotation"]
-                records.append(rec)
+            if rec["tier"] == "task-only":
+                continue
+            evidence = cast(list[Record], rec["evidence"])
+            _refuse_posterior_evidence(run_id, fingerprint, evidence, as_of)
+            prov = _provenance_for(resolution, run["provenance"])
+            rec["profile"], rec["stack"] = prov["profile"], prov["stack"]
+            rec["lineage"] = {
+                "hub_commit": hub_commit, "snapshot_id": config.snapshot_id,
+                "source_identity_version": SOURCE_IDENTITY_VERSION,
+                "content_digests": [run_digests[run_id], *sorted(
+                    member["record_digest"] for member in frozen.snapshot["observations"]
+                    if any(obs["observation_id"] == member["identity"] and obs["run_id"] == run_id
+                           for obs in frozen.eligible_observations))],
+                "labeler_policy_version": LABELER_POLICY_VERSION,
+                "reply_classifier_version": REPLY_CLASSIFIER_VERSION,
+                "rubric_schema_version": RUBRIC_SCHEMA_VERSION,
+                "as_of": as_of, "valid_at": _max_valid_at(evidence, as_of),
+                "split": assign_split(str(rec["record_id"]), holdout_rate=config.holdout_rate,
+                                      val_rate=config.val_rate, salt=config.salt),
+                "exclusion_reason": None, "repo_slug": repo_slugs[run_id],
+            }
+            finding = findings_by_uid.get(item_uid, {})
+            text = finding.get("body")
+            if isinstance(text, str):
+                rec["finding_text"] = text
+                rec["finding_text_sha256"] = hashlib.sha256(text.encode()).hexdigest()
+            revision = task.get("analyzed_revision", {})
+            task_identity: dict[str, Any] = {"repo_slug": repo_slugs[run_id]}
+            for name, value in (("base_sha", revision.get("pr_base_sha") or revision.get("merge_base_sha")),
+                                ("head_sha", revision.get("head_sha"))):
+                if value:
+                    task_identity[name] = value
+            if task.get("diff"):
+                rec["diff"] = task["diff"]
+                diff_digest = task["diff_sha256"]
+                diff_ref = {"run_id": run_id, "record_digest": run_digests[run_id], "section": "original_task.diff"}
+                task_identity.update(diff_digest=diff_digest, diff_ref=diff_ref)
+                cast(dict[str, Any], rec["lineage"]).update(diff_digest=diff_digest, diff_ref=diff_ref)
+            rec["task_identity"] = task_identity
+            rec["schema_version"] = "3"
+            scoring = run["scoring"]
+            if scoring["status"] == "available":
+                rec["reward_version"] = scoring["value"]["persisted_breakdown"]["reward_version"]
+                rec["intrinsic_reward"] = scoring["value"]["persisted_breakdown"]
+                rec["verification"] = run["verification"]
+                rec["scoring"] = scoring
+            rec["has_posterior"] = bool(evidence)
+            rec["decisive_only"] = rec["disposition"] in {"accepted", "rejected"}
+            rec["decisive_mix"] = False
+            if row.get("annotation") is not None:
+                rec["annotation"] = row["annotation"]
+            records.append(rec)
 
     records.sort(key=lambda r: str(r["record_id"]))
     adjudication.sort(key=lambda r: str(r["fingerprint"]))
 
-    # Cap the deduplicated population after split assignment; account for every exclusion.
-    exclusions_by_reason["non-decisive-adjudication"] = 0 if config.emit_process_traces else len(adjudication)
-    if config.caps:
-        records, tier_exclusions = retain_group_limits(records, lambda record: str(record["tier"]), config.caps)
-        exclusions_by_reason.update({f"tier-cap:{tier}": count for tier, count in tier_exclusions.items()})
+    exclusions_by_reason["non-decisive-adjudication"] = len(adjudication)
 
     share_caps_report: dict[str, Any] | None = None
     if (
@@ -391,8 +356,6 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         f"{kind}/{member['identity']}": member["record_digest"]
         for kind in ("runs", "observations") for member in frozen.snapshot[kind]
     }
-    caps_report = {"configured": dict(sorted(config.caps.items())),
-                   "applied": count_by(records, lambda r: str(r["tier"])) if config.caps else {}}
     share_caps_entry = {"share_caps": share_caps_report} if share_caps_report is not None else {}
     lineage = {
         "schema_version": "lineage",
@@ -403,9 +366,9 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         "source_hub_commit": hub_commit,
         "source_repository": source.get("repository"),
         "content_digests": content_digests,
-        "labeler_policy_version": config.labeler_policy_version,
-        "reply_classifier_version": config.reply_classifier_version,
-        "rubric_schema_version": config.rubric_schema_version,
+        "labeler_policy_version": LABELER_POLICY_VERSION,
+        "reply_classifier_version": REPLY_CLASSIFIER_VERSION,
+        "rubric_schema_version": RUBRIC_SCHEMA_VERSION,
         "as_of": as_of,
         "valid_at": valid_at,
         "salt": config.salt,
@@ -416,7 +379,6 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         ),
         "split_counts": split_counts,
         "exclusions_by_reason": dict(sorted(exclusions_by_reason.items())),
-        "caps": caps_report,
         **share_caps_entry,
         "adjudication_count": len(adjudication),
         "exclusion_list_digest": hashlib.sha256(EXCLUSION_PATH.read_bytes()).hexdigest(),
@@ -435,15 +397,4 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
     # Consumers require _SUCCESS; write it only after every artifact succeeds.
     _write_artifact(config.out_dir / "_SUCCESS", b"ok\n")
 
-    return {
-        "total": len(records),
-        "emitted": len(records),
-        "adjudication": len(adjudication),
-        **{f"split_{name}": count for name, count in split_counts.items()},
-        "records_by_type": count_by(records, lambda r: str(r["record_type"])),
-        "records_by_tier": count_by(records, lambda r: str(r["tier"])),
-        "records_by_split": dict(split_counts),
-        "caps": caps_report,
-        **share_caps_entry,
-        "exclusions_by_reason": dict(sorted(exclusions_by_reason.items())),
-    }
+    return {"emitted": len(records), "adjudication": len(adjudication)}

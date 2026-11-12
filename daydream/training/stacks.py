@@ -2,8 +2,8 @@
 
 Require current-schema records, repository identity, and _SUCCESS. C5
 exclusions always refuse consumption. Full projection
-loading also verifies pinned split assignments and computes a deterministic
-file-tree digest. Exclusion-list parsing remains owned by training.exclusion.
+loading also verifies pinned split assignments and SHA256SUMS, and computes a
+deterministic file-tree digest. Exclusion-list parsing remains owned by training.exclusion.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import cast
 
 from daydream.training.admission import REASON_CODE_C5_EXCLUDED_REPO
+from daydream.training.calibration import _check_digests
 from daydream.training.corpus_projection.splits import SPLIT_FILENAMES, assign_split
 from daydream.training.exclusion import load_exclusion_list
 from daydream.training.record_identity import normalize_repo_slug
@@ -190,7 +191,7 @@ def _enforce_identity_and_gates(
 def load_v2_projection(
     path: str | Path,
 ) -> V2Projection:
-    """Load gate-clean records, verify pinned splits, and digest the directory.
+    """Load gate-clean records, verify pinned splits and SHA256SUMS, and digest the directory.
 
     Missing split files become ValueError. Missing/invalid lineage and every
     recomputed split mismatch refuse the entire load before grouping."""
@@ -204,6 +205,7 @@ def load_v2_projection(
         ) from exc
     lineage = _load_lineage(projection_dir)
     _enforce_split_consistency(records, lineage, projection_dir)
+    _check_digests(projection_dir)
 
     by_split: dict[str, list[dict[str, object]]] = {name: [] for name in SPLIT_FILENAMES}
     for record in records:

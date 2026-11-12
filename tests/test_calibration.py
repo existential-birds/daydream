@@ -68,8 +68,6 @@ def _build_fixture(tmp_path: Path) -> Path:
     """Write corpus.jsonl + lineage.json + SHA256SUMS + gold.json + breakdowns.json."""
     corpus_dir = tmp_path / "corpus"
     corpus_dir.mkdir()
-    records = [_record(i) for i in range(4)]
-    _write_corpus(corpus_dir, records)
     (corpus_dir / "lineage.json").write_text(json.dumps({
                 "schema_version": "lineage", "salt": SALT, "holdout_rate": 0.1, "val_rate": 0.1, "as_of": AS_OF,
                 "valid_at": VALID_AT, "content_digests": {},
@@ -77,6 +75,7 @@ def _build_fixture(tmp_path: Path) -> Path:
         )
         + "\n"
     )
+    _write_corpus(corpus_dir, [_record(i) for i in range(4)])
     gold = {f"rec-{i:04d}": {"accepted": i % 2 == 0} for i in range(4)}
     (tmp_path / "gold.json").write_text(json.dumps(gold, sort_keys=True) + "\n")
     # w_fp is partially but not perfectly separable so bootstrap CIs are non-degenerate.
@@ -107,7 +106,9 @@ def _write_corpus(corpus_dir: Path, records: list[dict[str, Any]], *, update_dig
     payload = ("\n".join(json.dumps(record, sort_keys=True) for record in records) + "\n").encode()
     (corpus_dir / "corpus.jsonl").write_bytes(payload)
     if update_digest:
-        (corpus_dir / "SHA256SUMS").write_text(f"{hashlib.sha256(payload).hexdigest()}  corpus.jsonl\n")
+        (corpus_dir / "SHA256SUMS").write_text("".join(
+            f"{hashlib.sha256((corpus_dir / name).read_bytes()).hexdigest()}  {name}\n"
+            for name in ("corpus.jsonl", "lineage.json")))
 
 
 def _corrupt_fixture(corpus_dir: Path, flags: frozenset[str]) -> None:

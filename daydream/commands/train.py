@@ -31,7 +31,7 @@ def _build_train_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         metavar="DIR",
-        help="Frozen projection directory; verifies _SUCCESS/lineage/"
+        help="Frozen projection directory; verifies _SUCCESS/SHA256SUMS/lineage/"
              "split digests and re-applies C5 benchmark exclusions",
     )
     parser.add_argument(

@@ -1,15 +1,11 @@
-"""Deterministic tier and output-share caps over projected records."""
+"""Deterministic output-share caps over projected records."""
 
 import math
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, NoReturn, cast
 
 Record = dict[str, object]
-
-
-def count_by(records: Iterable[Any], key: Callable[[Any], str]) -> dict[str, int]:
-    return dict(sorted(Counter(map(key, records)).items()))
 
 
 def retain_group_limits(
@@ -110,9 +106,8 @@ def _apply_share_caps(
     exclusions: dict[str, int] = {}
     population = sorted(records, key=lambda r: str(r["record_id"]))
     if not population:
-        # Empty population (no decisive findings, or tier caps trimmed
-        # everything): configured caps exclude nothing — a previously
-        # completing zero-record build stays completing.
+        # Empty population (no decisive findings): configured caps exclude
+        # nothing — a previously completing zero-record build stays completing.
         return population, exclusions
     # Fail-closed degeneracy pre-check against the original input population:
     # a cap that cannot keep a single record of an over-share group covering
