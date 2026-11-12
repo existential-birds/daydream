@@ -244,6 +244,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-exports from `daydream.pr_review` (all three remain in `daydream.reviews.diagrams`).
   `post_diagram_artifact` now takes the diagram payload instead of the findings artifact.
   No known caller ([#1683](https://github.com/existential-birds/daydream/issues/1683)).
+- Corpus, dataset and harvest internals nothing set or read: `BuildFrozenCorpusConfig`'s
+  `caps`, `emit_process_traces`, `labeler_policy_version`, `reply_classifier_version` and
+  `rubric_schema_version`, so a projection's `lineage.json` no longer carries the
+  always-empty `caps` entry; `classify_tier`'s `record_type`;
+  `LocalRecordStore.select_snapshot`'s `run_ids` and `LocalRecordStore.download_source`;
+  `make_harvest_services`'s `github_auth`; `daydream.dataset.run_record_schema`;
+  `daydream.training.reply_classifier.is_qualifying_author`; and the `daydream.training`
+  package re-exports of `PerFindingLabel`, `PerFindingResolution`,
+  `derive_per_finding_labels` and `per_finding_resolution_signal`, which remain in their
+  modules. `project_findings` also drops `return_adjudication` and always returns its
+  adjudication entries, as every caller already asked. No known caller
+  ([#1684](https://github.com/existential-birds/daydream/issues/1684)).
 
 ### Fixed
 

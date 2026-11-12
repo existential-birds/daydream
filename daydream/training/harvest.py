@@ -938,13 +938,9 @@ class _ProductionHarvestServices:
         await anyio.sleep(seconds)
 
 
-def make_harvest_services(
-    config: HarvestConfig,
-    *,
-    github_auth: GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
-) -> HarvestServices:
+def make_harvest_services(config: HarvestConfig) -> HarvestServices:
     """Create side-effect-free production adapters for one harvest pass."""
-    return _ProductionHarvestServices(config, github_auth)
+    return _ProductionHarvestServices(config, git_ops.INHERIT_GITHUB_AUTH)
 
 
 def collect_annotation(

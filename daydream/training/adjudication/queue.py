@@ -91,7 +91,7 @@ def build_queue(
             expanded.append(session)
     items: list[dict[str, object]] = []
     for session in expanded:
-        records, adjudication = project_findings(session, return_adjudication=True)
+        records, adjudication = project_findings(session)
         entries = adjudication + [r for r in records if is_decisive(str(r.get("disposition")))]
         for entry in adjudication:
             if entry["disposition"] not in _NON_DECISIVE_DISPOSITIONS:

@@ -118,8 +118,7 @@ def test_cli_refuses_invalid_share_before_creating_output(tmp_path: Path) -> Non
 
 def test_build_caps_account_for_final_population_and_fail_closed(tmp_path: Path) -> None:
     store = _store_with_caps_population(tmp_path)
-    config = projection_config(store, tmp_path, max_stack_share=0.6, max_repo_share=0.6, max_profile_share=0.6,
-                               caps={"gold": 4})
+    config = projection_config(store, tmp_path, max_stack_share=0.6, max_repo_share=0.6, max_profile_share=0.6)
     summary = build_frozen_corpus(config)
     records = _read_jsonl(config.out_dir / "corpus.jsonl")
     _assert_shares_within(records, [("stack", lambda r: str(r["stack"]), 0.6),

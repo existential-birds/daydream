@@ -275,7 +275,6 @@ def test_cli_output_refuses_record_store_overlap_without_mutating_input(
 ) -> None:
     store = seed_projection_store(tmp_path)
     config = projection_config(store, tmp_path)
-    input_root = store.root
     input_root = tmp_path / "store-alias"
     input_root.symlink_to(store.root, target_is_directory=True)
     output_root = store.root

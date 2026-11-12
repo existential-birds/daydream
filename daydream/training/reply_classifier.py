@@ -134,20 +134,6 @@ def qualification_reason(
     return "excluded:non-qualifying"
 
 
-def is_qualifying_author(
-    reply: dict[str, Any],
-    pr_author_logins: set[str] | frozenset[str],
-    review_author_logins: set[str] | frozenset[str] = frozenset(),
-) -> bool:
-    """True when the reply's author is a human whose judgment counts (M6).
-
-    Qualifies when the author is not a bot, has a non-empty login that is not
-    a daydream agent, is not a marked self-reply, and is either a PR author,
-    a formal-review author, or holds OWNER/MEMBER/COLLABORATOR association.
-    """
-    return not qualification_reason(reply, pr_author_logins, review_author_logins).startswith("excluded:")
-
-
 def classify_reply(reply: dict[str, Any]) -> str:
     """Classify a single reply as ``"accepted"``/``"rejected"``/``"ambiguous"``.
 

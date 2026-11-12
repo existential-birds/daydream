@@ -146,20 +146,20 @@ def test_cli_projection_wiring(tmp_path: Path, cli_runner: Any) -> None:
 def _build_projection_50(tmp_path: Path) -> Path:
     """Build 50 schema-3 records from observation-v3 evidence through the offline projector."""
     store = LocalRecordStore(tmp_path / "projection-fixture" / "records")
-    for index in range(23):
+    for index in range(25):
         add_projection_run(store, run_id=f"sess-gold-{index:02d}", dispositions=("accepted", "rejected"),
                            repo_slug=f"owner/repo-{index % 3}")
     for index in range(2):
         add_projection_run(store, run_id=f"sess-amb-{index}", dispositions=("ambiguous",))
     config = projection_config(store, tmp_path / "projection-fixture", salt="issue-1081-fixture-salt",
-                               holdout_rate=HOLDOUT_RATE, val_rate=VAL_RATE, emit_process_traces=True)
+                               holdout_rate=HOLDOUT_RATE, val_rate=VAL_RATE)
     assert build_frozen_corpus(config)["total"] == 50
     return config.out_dir
 
 
 def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     """Feed the real 50-record projector fixture through all pipeline stages. Require stable corpus digests
-    and SFT rows without fixture post-processing; both gold classes and non-gold record types are present.
+    and SFT rows without fixture post-processing; both gold classes are present.
     """
 
     proj_dir = _build_projection_50(tmp_path)
@@ -179,8 +179,6 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
         load_v2_projection(copied)
     gold_labels = {cast(str, r["outcome_label"]) for r in projection.records if r.get("tier") == "gold"}
     assert {"accepted", "rejected"} <= gold_labels
-    record_types = {cast(str, r["record_type"]) for r in projection.records}
-    assert {"process-trace", "task-only"} <= record_types
 
     manifest = run_pipeline(PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out"), dry_run=False)
     assert manifest["stages"]["stage0"]["status"] == "complete"
@@ -196,7 +194,7 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     assert manifest2["run_identity"]["corpus_digest"] == first
     stage0 = tmp_path / "out/stage0"
     model = OutcomeModel(**json.loads((stage0 / "model-state.json").read_text()))
-    assert model.label_ratio_reported == 0.5 and model.train_rows + model.held_out_rows == 46
+    assert model.label_ratio_reported == 0.5 and model.train_rows + model.held_out_rows == 50
     assert model.split_digest == manifest["stages"]["stage0"]["split"]["digest"]
     assert score_comment(model, "accepted finding body") > score_comment(model, "rejected finding body")
     gate = json.loads((stage0 / "gate-report.json").read_text())
