@@ -162,7 +162,6 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
     else:
         target = dr.build_cross_module_repo(tmp_path)
     backend = DiagramBarrierBackend(target)
-    backend.diagram_specs = {"sequence": [dr.sequence_spec()]}
     monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", "4")
     environment = {
         "PATH": os.environ["PATH"], "HOME": str(tmp_path / "embedded-home"),
