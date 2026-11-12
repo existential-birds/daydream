@@ -413,6 +413,8 @@ def _sequence_token_strength_fallback_for_a_language_without_a_grammar(repo: Pat
     assert report.omit_reasons == ["TOO_FEW_MESSAGES"]
     payload = {"results": {"sequence": {"status": "rendered", "spec_final": report.spec_final}}}
     assert validate_diagram_payload(payload, target_dir=repo, head_sha=git(repo, "rev-parse", "HEAD")) is None
+    report.spec_final["messages"][0]["evidence"].update(line=1, symbol="call_legacy")
+    assert validate_diagram_payload(payload, target_dir=repo, head_sha=git(repo, "rev-parse", "HEAD")) is not None
 
 
 # --- Sequence prune semantics ------------------------------------------------
