@@ -310,6 +310,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   check against the pull request head now finds those names in the cited files, as the
   run did. Before, such a diagram-only artifact failed to post, and a review artifact
   dropped its diagram ([#1683](https://github.com/existential-birds/daydream/issues/1683)).
+- `--diagram-only` without `--findings-out` now checks the diagram against the pull
+  request's current head before posting it, as `post-findings` does, and exits 1 without
+  posting when a cited line does not hold there. Before, a diagram drawn from unpushed
+  commits or uncommitted edits was posted under that head's marker and the run exited 0
+  ([#1683](https://github.com/existential-birds/daydream/issues/1683)).
 
 ## [0.34.0] - 2026-11-03
 

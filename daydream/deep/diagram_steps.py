@@ -70,7 +70,7 @@ from daydream.trajectory import (
     partial_or_failed_terminal,
     phase_scope,
 )
-from daydream.ui import print_error, print_info, print_success, print_warning
+from daydream.ui import print_error, print_info, print_warning
 
 if TYPE_CHECKING:
     from daydream.run_config import RunConfig
@@ -755,13 +755,7 @@ async def _step_post_diagram(ctx: FlowContext) -> Stop:
     """
     deep_state = DeepState(ctx.data)
     from daydream.git_ops import GitError
-    from daydream.pr_review import (
-        PRInfo,
-        _resolve_pr,
-        diagram_comment_kinds,
-        post_diagram_comment_to_pr,
-        render_diagram_comment_body,
-    )
+    from daydream.pr_review import PRInfo, _resolve_pr, post_diagram_artifact
     from daydream.runner import _write_findings_for_parsed
 
     diagrams: dict[str, Any] = deep_state.diagrams or {}
@@ -811,18 +805,7 @@ async def _step_post_diagram(ctx: FlowContext) -> Stop:
             "for this branch)",
         )
         return Stop(1)
-    url, error = post_diagram_comment_to_pr(
-        ctx.work.repo,
-        pr,
-        body=render_diagram_comment_body(payload),
-        kinds=diagram_comment_kinds(payload),
-        bot_login=os.environ.get("DAYDREAM_BOT_HANDLE") or None,
-        auth=ctx.github_execution.auth,
-    )
-    if url is None:
-        suffix = f" ({error})" if error else ""
-        print_error(console, "Diagram Comment Unconfirmed",
-                    f"Could not confirm the diagram comment was posted.{suffix}")
-        return Stop(1)
-    print_success(console, f"Posted diagram comment: {url}")
-    return Stop(0)
+    return Stop(post_diagram_artifact(
+        payload, pr, ctx.work.repo, console=console,
+        bot_login=os.environ.get("DAYDREAM_BOT_HANDLE") or None, auth=ctx.github_execution.auth,
+    ))

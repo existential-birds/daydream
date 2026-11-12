@@ -21,11 +21,9 @@ from daydream.extensions import (
 from daydream.git_ops import INHERIT_GITHUB_AUTH, GitError, GitHubAuth
 from daydream.pr_comment_renderer import render_run_info
 from daydream.reviews.diagrams import (
-    diagram_comment_kinds as diagram_comment_kinds,
     post_diagram_artifact as post_diagram_artifact,
     post_diagram_comment_to_pr as post_diagram_comment_to_pr,
     render_diagram_blocks_from_payload as render_diagram_blocks_from_payload,
-    render_diagram_comment_body as render_diagram_comment_body,
     validate_diagram_payload as validate_diagram_payload,
 )
 from daydream.reviews.identity import (
@@ -1162,7 +1160,7 @@ def post_findings_from_artifact(
     # the bot's real open findings. Branch before ``fetch_prior_findings``.
     if artifact.kind == "diagram":
         return post_diagram_artifact(
-            artifact,
+            artifact.diagrams,
             pr,
             target_dir,
             console=console,

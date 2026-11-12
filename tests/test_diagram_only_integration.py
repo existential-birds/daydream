@@ -255,6 +255,8 @@ async def test_findings_out_rejects_dirty_moved_or_unresolved_heads_before_diagr
     assert exit_code == 1
     assert base[:12] in panel and git_ops.head_sha(target)[:12] in panel
     assert "re-run against the new head" in panel
+    exit_code, _ = await diagram_run(target, diagram="flowchart", specs={"flowchart": [dr.flowchart_spec()]})
+    assert exit_code == 1 and _issue_comments(fake_gh) == []
 
     def explode(*_a: Any, **_k: Any) -> Any:
         raise git_ops.GitError("gh pr view: connection reset")
