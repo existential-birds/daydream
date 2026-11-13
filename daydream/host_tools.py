@@ -640,6 +640,23 @@ class HostToolEndpoint:
         """Exact model-visible schemas: nonterminal host tools, then the terminal submission."""
         return {**self.host_schemas(), NATIVE_SUBMIT: self.binding.schema}
 
+    def description(self, name: str) -> str:
+        """Model-facing summary of one served tool; the instructions carry its contract."""
+        tool = self.binding.host_tools.get(name)
+        if tool is None:
+            return "Submit the final result. Call this tool alone as your final action."
+        if tool.mutating:
+            return ("Charged host admission of one bounded batch without ending the assignment; "
+                    "see the system instructions.")
+        return "Charged read-only host lookup; see the system instructions for its arguments and paging."
+
+    @staticmethod
+    def result_blocks(value: dict[str, Any]) -> list[str]:
+        """Host metadata as JSON; frozen captured bytes stay their own unescaped text block."""
+        content = value.pop("content", None)
+        return [json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+                *([content] if isinstance(content, str) else [])]
+
     def current(self) -> bool:
         """Whether a callback may reach the binding; revoked, unfailed and unaccepted authority changes nothing."""
         binding = self.binding
