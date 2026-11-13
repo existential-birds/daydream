@@ -69,7 +69,12 @@ from daydream.json_utils import canonical_json, validate_json_schema
 from daydream.observability.spans import record_budget_stop
 from daydream.prompt_budget import SanctionedInputUnavailable
 from daydream.review_budget import BudgetDimension, BudgetLedger
-from daydream.review_profile import ResolvedProfile, build_default_profile, resolve_from_runconfig
+from daydream.review_profile import (
+    ASSIGNMENT_POLICIES,
+    ResolvedProfile,
+    build_default_profile,
+    resolve_from_runconfig,
+)
 from daydream.review_result import (
     AnalyzedRevision,
     PlannedScope,
@@ -874,6 +879,8 @@ async def _run_committed_review(
         or type(tool_calls) is not int
     ):
         raise ValueError("committed review requires finite profile time and integer tool allowances")
+    if pipeline.assignment_policy not in ASSIGNMENT_POLICIES:
+        raise ValueError(f"pipeline.assignment_policy must be one of {sorted(ASSIGNMENT_POLICIES)}")
     if min(investigation_s + _FINALIZATION_S, wall_s) <= _FINALIZATION_S:
         raise ValueError("profile investigation and wall allowances cannot preserve finalization capacity")
     if tool_calls < 2:

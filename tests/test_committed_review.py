@@ -998,8 +998,8 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
 
     monkeypatch.setattr(os, "link", fail_install)
     review_request = CommittedReviewRequest(
-        repo, envelope["materialization"]["requested_base_sha"], hosted_policy=operator_policy,
-        immutable_input=identity,
+        repo, envelope["materialization"]["requested_base_sha"], immutable_input=identity,
+        hosted_policy=replace(operator_policy, profile=_profile_with_pipeline(assignment_policy="adaptive")),
     )
     with monkeypatch.context() as analysis_boundaries:
         for owner, names in ((process, ("_run_gh", "_run_gh_async")),
@@ -1059,6 +1059,7 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
             value = json.loads(retained.read_text())
             validate_committed_result(value)
             assert value["immutable_input"] == envelope
+            assert value["settings"]["assignment_policy"]["name"] == "adaptive"  # The operator profile's choice.
             assert value["terminal_result"]["analysis_state"] == "complete" and len(value["findings"]) == 1
             report, = frozen.glob(".explicit/*/review-output.md")
             assert "Captured zero" in report.read_text()
@@ -1855,6 +1856,12 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
                                                          "planned_assignments": 1,
                                                          "cross_assignment": "not_applicable"}
         assert allocations == [("work:1", "discovery", 4)] and value["claims"] == []
+        # A profile built in code bypasses the parser; an unknown policy must not run as broad.
+        unknown = build_default_profile()
+        unknown = replace(unknown, pipeline=replace(unknown.pipeline, assignment_policy="hierarchical"))
+        with pytest.raises(ValueError, match="assignment_policy"):
+            await run_committed_review(CommittedReviewRequest(repo, base, config=RunConfig(
+                backend="pi", output_mode="review", review_profile=ResolvedProfile(unknown, "test"))))
         return
     assert value["settings"]["assignment_policy"] == {"name": "adaptive", "decomposed": True,
                                                      "planned_assignments": 2, "cross_assignment": "required"}

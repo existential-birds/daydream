@@ -15,6 +15,8 @@ def test_review_deadline_is_profiled_and_validated() -> None:
     bounded = _profile("[pipeline]\nreview_wall_budget_s = 1200")
     assert bounded.pipeline.review_wall_budget_s == 1200
     assert bounded.digest != base.digest
+    # The digest is the trajectory's only record of the assignment policy.
+    assert _profile('[pipeline]\nassignment_policy = "adaptive"').digest != _profile().digest
     with pytest.raises(rp.ProfileError):
         _profile("[pipeline]\nreview_wall_budget_s = -1")
 

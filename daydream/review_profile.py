@@ -31,7 +31,7 @@ class ProfileError(Exception):
 # Severity is lowercase; confidence follows the uppercase finding schema.
 _SEVERITY_LEVELS: frozenset[str] = frozenset(severity.CANONICAL_LEVELS)
 _CONFIDENCE_LEVELS: frozenset[str] = frozenset(("HIGH", "MEDIUM", "LOW"))
-_ASSIGNMENT_POLICIES: frozenset[str] = frozenset(("broad", "adaptive"))
+ASSIGNMENT_POLICIES: frozenset[str] = frozenset(("broad", "adaptive"))
 
 
 # Profiles tune strategy and bounded pipeline fields, never the host evaluator,
@@ -567,9 +567,9 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
             source,
         )
     assignment_policy = data.get("assignment_policy", defaults.assignment_policy)
-    if not isinstance(assignment_policy, str) or assignment_policy not in _ASSIGNMENT_POLICIES:
+    if not isinstance(assignment_policy, str) or assignment_policy not in ASSIGNMENT_POLICIES:
         raise ProfileError(
-            f"pipeline.assignment_policy must be one of {sorted(_ASSIGNMENT_POLICIES)}", source
+            f"pipeline.assignment_policy must be one of {sorted(ASSIGNMENT_POLICIES)}", source
         )
 
     return Pipeline(
