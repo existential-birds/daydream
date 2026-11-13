@@ -906,6 +906,13 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
                 "error": "permission denied",
             },
         },
+        {"type": "item.started", "item": {"type": "mcp_tool_call", "id": "refused", "tool": "Write", "arguments": {}}},
+        {  # The CLI reports a result its MCP server marked as an error only through the status.
+            "type": "item.completed",
+            "item": {"type": "mcp_tool_call", "id": "refused", "server": "user", "tool": "Write", "error": None,
+                     "status": "failed", "result": {"content": [{"type": "text", "text": "refused"}],
+                                                    "structured_content": None}},
+        },
         {
             "type": "item.completed",
             "item": {
@@ -971,6 +978,7 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
         ("patch", "patch"),
         ("read", "Read"),
         ("write", "Write"),
+        ("refused", "Write"),
     ]
     results = {event.id: event for event in events if isinstance(event, ToolResultEvent)}
     assert results["shell"].output == "file.py\ntest.py" and not results["shell"].is_error
@@ -978,6 +986,7 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
     assert patch_start.input == {"file": "main.py", "action": "modified"}
     assert results["patch"].output == "modified: main.py" and not results["patch"].is_error
     assert results["read"].output == "file contents" and results["write"].is_error
+    assert results["refused"].is_error and results["refused"].status == "failed"
     terminal = [event for event in events if isinstance(event, ResultEvent)]
     assert len(terminal) == 1 and terminal[0].structured_output == {"issues": []}
     assert (terminal[0].session_id, terminal[0].model_name, terminal[0].provider_name) == (
@@ -1005,7 +1014,7 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
     assert [json.loads(step["message"]) for step in steps[:-1]] == [json.loads(text) for text in expected_text[:-1]]
     assert steps[-1]["message"] == "Verified"
     assert steps[0]["reasoning_content"] == "I will inspect"
-    assert [call["tool_call_id"] for call in steps[0]["tool_calls"]] == ["shell", "patch", "read", "write"]
+    assert [call["tool_call_id"] for call in steps[0]["tool_calls"]] == ["shell", "patch", "read", "write", "refused"]
     assert {result["source_call_id"] for result in steps[0]["observation"]["results"]} == set(results)
     assert process.returncode == 0 and backend._transports == []
     process.wait.assert_awaited()

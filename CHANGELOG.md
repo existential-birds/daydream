@@ -263,6 +263,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A Codex MCP tool call whose server marked the result as an error is now recorded as a
+  failed tool result. Codex reports such a result only through a `failed` status, which
+  was recorded as a success
+  ([#1646](https://github.com/existential-birds/daydream/issues/1646)).
 - A retry after a retryable provider failure refunds the failed attempt's tool calls,
   so a stage whose stream drops late can still finish within its original allowance.
   Before, the retry restarted from scratch on the already spent budget and usually
