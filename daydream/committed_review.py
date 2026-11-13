@@ -64,7 +64,7 @@ from daydream.host_tools import (
 )
 from daydream.hosted_review import HOSTED_PI_TOOLS, HostedReviewPolicy, UnsupportedHostedPolicy
 from daydream.hunk_index import write_hunk_index
-from daydream.immutable_review import ImmutableReviewInput
+from daydream.immutable_review import HISTORICAL_CONTEXT_MAX_BYTES, ImmutableReviewInput
 from daydream.json_utils import canonical_json, validate_json_schema
 from daydream.observability.spans import record_budget_stop
 from daydream.prompt_budget import SanctionedInputUnavailable
@@ -948,6 +948,12 @@ async def _run_committed_review(
             ))
             captured_root = operational_worktree_root(owner) / run_id
             assert original.head_sha is not None and original.base_sha is not None
+            if config.frozen_author_description is not None:
+                # Opaque author text: one context value, with no title/body split invented for it.
+                description = config.frozen_author_description.for_head(original.head_sha)
+                if len(description.encode()) > HISTORICAL_CONTEXT_MAX_BYTES["context"]:
+                    raise ValueError("frozen author description exceeds its UTF-8 bound")
+                settings["historical_context"] = {"context": description}
             captured = capture_source(source, captured_root, base_sha=original.base_sha,
                                       head_sha=original.head_sha, local=request.local, exclude=config.ignore_paths)
             lifetime.callback(_remove_capture, captured)

@@ -323,9 +323,7 @@ async def _step_intent(ctx: FlowContext) -> None:
         author_head = None
         if config.frozen_author_description is not None:
             frozen_author = config.frozen_author_description
-            if frozen_author.head_sha != work.head_sha:
-                raise ValueError("frozen author description does not match analyzed HEAD")
-            pr_description = frozen_author.description
+            pr_description = frozen_author.for_head(work.head_sha)
             author_head = frozen_author.head_sha
         elif config.pr_number is not None:
             try:

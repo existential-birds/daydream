@@ -71,6 +71,13 @@ base-to-final-working change described below. Committed capture excludes working
 edits, external diff drivers and text conversion; inert materialization supplies raw
 Git blobs even when the original checkout uses filters/EOL conversion.
 
+Without a hosted policy, a request whose `config.frozen_author_description` is set
+supplies that description to every assignment as `historical_context.context`, and the
+sealed result's `settings` record it. It is captured untrusted author context under the
+[immutable `context` bound](#immutable-pr-inputs), never instructions or authoritative
+intent. A description bound to a `head_sha` other than the analyzed head, or over the
+bound, is refused before any model work.
+
 The complete planned population is computed from the full captured patch before
 any prompt bounding. Host-dispatched investigation work, followed by host-scheduled
 fresh challenge, navigates it under the profile's
