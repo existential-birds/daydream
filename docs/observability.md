@@ -130,8 +130,8 @@ Codex host-tool attempts add the same host facts to the Codex lifecycle record:
 authority closure, native settlement, cleanup (the loopback server stopped after the
 process was reaped) and host call/rejection counts, on every exit path. Host calls keep
 their bare tool names in the trajectory, as Codex reports them; a rejected call is a
-failed tool result, and the assignment instructions are recorded as supplied system
-instructions. No native capacity diagnostic exists. See
+failed tool result, and the request event carries the assignment instructions as its
+system prompt. No native capacity diagnostic exists. See
 [Codex host tools](runtime.md#codex-host-tools).
 
 ## Committed-review evidence

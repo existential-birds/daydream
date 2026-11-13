@@ -1263,8 +1263,8 @@ class CodexBackend:
                         )
                         if (host is not None and error and item.get("server") == _HOST_SERVER
                                 and not host.binding.possibly_accepted):
-                            # The host never saw this call. Usually nothing the model resubmits can
-                            # fix that (a refused approval, an unreachable server), so stop here.
+                            # The host never saw this call. Often nothing the model resubmits can
+                            # fix that (a refused approval), so the invocation stops here.
                             detail = error.get("message") if isinstance(error, dict) else error
                             raise CodexError("Codex failed a host tool call itself before acceptance and the "
                                              f"invocation was stopped: {_bounded_process_excerpt(str(detail))}",

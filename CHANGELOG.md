@@ -24,9 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bound to the same host authority and registered only through additive `-c` overrides
   on `codex exec`, so a rejected submission is corrected in the same conversation.
   Daydream writes nothing to the Codex home. `daydream --backend codex` and every other
-  Codex invocation are unchanged. Codex shows the model a schema without length, range,
-  pattern and item-count limits, replaces the user's developer instructions for the
-  invocation and cannot deny its own tools before they run; see
+  Codex invocation keep their command line and environment; their one change is the
+  failed-tool-result fix listed under Fixed. Codex shows the model a schema without most
+  length, range and pattern limits, replaces the user's developer instructions for the
+  invocation, cannot deny its own tools before they run, cannot start an assignment whose
+  instructions exceed the platform's single-argument size, and on 0.139.0 and 0.153.4
+  lets a model shell command read the per-attempt callback secret; see
   [Codex host tools](docs/runtime.md#codex-host-tools) for these and the versions
   exercised. `uvicorn` is now a direct dependency
   ([#1646](https://github.com/existential-birds/daydream/issues/1646)).
@@ -277,7 +280,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A Codex MCP tool call whose server marked the result as an error is now recorded as a
   failed tool result. Codex reports such a result only through a `failed` status, which
-  was recorded as a success
+  was recorded as a success. This applies to every Codex invocation, including
+  `daydream --backend codex`, and changes the recorded tool-result evidence for such calls
   ([#1646](https://github.com/existential-birds/daydream/issues/1646)).
 - A retry after a retryable provider failure refunds the failed attempt's tool calls,
   so a stage whose stream drops late can still finish within its original allowance.

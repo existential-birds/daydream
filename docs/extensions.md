@@ -197,7 +197,7 @@ method discards an accepted result. The binding charges the invocation's
 |---|---|---|---|---|---|
 | Pi | 1.4.0 | Packaged extension, authenticated loopback HTTP | `/ready` exact schemas and model limits | Sole call in a completed generation | `contextWindow`, `maxTokens`, compaction |
 | Claude | SDK 0.2.174, bundled CLI 2.1.310 | In-process SDK MCP server, PreToolUse admission | This server's `tools/list` served; `get_mcp_status()` connected with the exact tool names | Acceptance closes authority; later starts are overshoot | Unavailable; terminal limits recorded |
-| Codex | CLI 0.139.0, 0.153.4, 0.163.0, 0.169.0 (offline, scripted provider) | Invocation-local MCP server on authenticated loopback HTTP | Codex's required-server startup; this server's `tools/list` served before the first turn | Acceptance closes authority; later starts are overshoot | Unavailable |
+| Codex | CLI 0.139.0, 0.153.4, 0.163.0, 0.169.0 (offline, scripted provider) | Invocation-local MCP server on authenticated loopback HTTP | Codex's required-server startup; this server's `tools/list` served before the first turn | Acceptance closes authority; later host calls are overshoot and Codex-owned starts stay charged | Unavailable |
 | Osprey | Not supported ([#1648](https://github.com/existential-birds/daydream/issues/1648), [#1649](https://github.com/existential-birds/daydream/issues/1649)) | — | — | — | — |
 
 An unsupported required guarantee rejects the workflow; it never switches harness.
