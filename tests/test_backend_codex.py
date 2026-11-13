@@ -463,10 +463,12 @@ async def test_codex_read_only_resume_is_refused(linked_worktree: tuple[Path, Pa
         binding = HostToolBinding(deadline=asyncio.get_running_loop().time() + 30, accept=lambda value: value)
         unsupported: tuple[dict[str, Any], ...] = (
             {"host_tools": binding}, {"host_tools": binding, "read_only": True, "finalization": True},
-            {"host_tools": binding, "read_only": True, "continuation": token}, {"review_instructions": "policy"})
+            {"host_tools": binding, "read_only": True, "continuation": token},
+            {"host_tools": binding, "read_only": True, "agents": {"explorer": {}}},
+            {"host_tools": binding, "read_only": True, "output_schema": None}, {"review_instructions": "policy"})
         for arguments in unsupported:
             with pytest.raises(ValueError, match="fresh read-only invocation|only with host tools"):
-                async for _ in backend.execute(source, "Review", {"type": "object"}, **arguments):
+                async for _ in backend.execute(source, "Review", **{"output_schema": {"type": "object"}, **arguments}):
                     pass
     assert spawn.call_count == 0 and binding.schema is None
 

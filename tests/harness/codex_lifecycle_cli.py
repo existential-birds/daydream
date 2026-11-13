@@ -171,25 +171,13 @@ def _response(prompt: str) -> tuple[str, str | None]:
     return "Synthetic lifecycle response", None
 
 
-def _overrides() -> dict[str, Any]:
-    """``-c`` overrides as Codex reads them: TOML values, or the raw text when that does not parse."""
-    values: dict[str, Any] = {}
-    for flag, text in zip(sys.argv, sys.argv[1:]):
-        if flag == "-c":
-            key, _, raw = text.partition("=")
-            try:
-                values[key] = tomllib.loads("value = " + raw)["value"]
-            except tomllib.TOMLDecodeError:
-                values[key] = raw
-    return values
-
-
 async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None:
     """Drive the invocation's host tools over MCP, as a scripted model would.
 
     A committed-review assignment in the developer instructions is reviewed (lookup, two
-    Codex-owned starts, a rejected then corrected submission, a call after acceptance)
-    or challenged; otherwise the user prompt is the JSON submission.
+    Codex-owned starts, a rejected submission, an admitted batch, the terminal submission
+    and two host calls after acceptance) or challenged. Otherwise the user prompt is the
+    JSON submission, followed by as many Codex-owned shell starts as its ``shells`` asks.
     """
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
@@ -206,13 +194,23 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
         except urllib.error.HTTPError as exc:
             return exc.code
 
-    # A request without the secret, then an authenticated request for a server-initiated stream.
-    refused = [status(data=b"{}", method="POST"), status(headers={"Authorization": "Bearer " + token})]
+    # No secret, another secret, then an authenticated request for a server-initiated stream.
+    refused = [status(data=b"{}", method="POST"),
+               status(data=b"{}", method="POST", headers={"Authorization": "Bearer " + token[::-1]}),
+               status(headers={"Authorization": "Bearer " + token})]
     calls: list[list[Any]] = []
     async with streamablehttp_client(url, headers={"Authorization": "Bearer " + token}) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            tools = sorted(tool.name for tool in (await session.list_tools()).tools)
+            host = {
+                "overrides": {key: value for key, value in overrides.items() if key != "developer_instructions"},
+                "instructions": instructions, "output_schema": "--output-schema" in sys.argv,
+                "token_exposed": any(token in text for text in (*sys.argv, prompt)),
+                "no_proxy": [os.environ.get(name) for name in ("NO_PROXY", "no_proxy")], "refused": refused,
+                "tools": sorted(tool.name for tool in (await session.list_tools()).tools),
+                "calls": calls, "token": token}
+            # Published before any call: the host may stop this process at any later point.
+            _observe("listed", mode=mode, host=host)
             _emit({"type": "thread.started", "thread_id": f"synthetic-{os.getpid()}"})
             _emit({"type": "turn.started"})
 
@@ -229,9 +227,17 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
                 calls.append([name, result.isError, [text[:160] for text in texts]])
                 return texts
 
+            def shell(name: str) -> None:
+                command = {"type": "command_execution", "id": name, "command": "git diff --check"}
+                _emit({"type": "item.started", "item": {**command, "status": "in_progress"}})
+                _emit({"type": "item.completed", "item": {**command, "status": "completed",
+                                                            "aggregated_output": "", "exit_code": 0}})
+
             _, marker, assignment = instructions.partition("\nCommitted review assignment:\n")
             if not marker:
-                await call("structured_output", json.loads(prompt))
+                await call("structured_output", submission := json.loads(prompt))
+                for index in range(submission.get("shells", 0)):
+                    shell(f"shell_{index}")
             elif (work := json.JSONDecoder().raw_decode(assignment)[0])["kind"] == "challenge":
                 claim = work["claims"][0]
                 await call("structured_output", {"verdicts": [{
@@ -245,32 +251,31 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
                 texts = await call("review_source", lookup)
                 option = next(item for item in json.loads(texts[0])["target"]["source_options"]
                               if item["side"] == "new")
-                command = {"type": "command_execution", "id": "command", "command": "git diff --check"}
-                _emit({"type": "item.started", "item": {**command, "status": "in_progress"}})
-                _emit({"type": "item.completed", "item": {**command, "status": "completed",
-                                                            "aggregated_output": "", "exit_code": 0}})
+                shell("command")
+                # Codex fails another server's call itself (the shape of a refused approval).
+                failed = {"result": None, "error": {"message": "user cancelled MCP tool call"}, "status": "failed"}
                 other = {"type": "mcp_tool_call", "id": "other", "server": "user", "tool": "search", "arguments": {}}
                 _emit({"type": "item.started", "item": {**other, "status": "in_progress"}})
-                _emit({"type": "item.completed", "item": {**other, "status": "completed", "error": None,
-                                                            "result": {"content": [], "structured_content": None}}})
+                _emit({"type": "item.completed", "item": {**other, **failed}})
                 await call("structured_output", {"targets": [{**decisions[0], "target_id": "unplanned"}],
                                                  "claims": []})
-                await call("structured_output", {"targets": decisions, "claims": [{
+                await call("review_admit", {"targets": decisions, "claims": [{
                     "uid": "", "revision": 0, "source_uids": [], "title": "Zero divides the caller", "payload": {
                         "claim": "VALUE becomes zero.", "trigger": "The caller divides by it.",
                         "consequence": "Requests fail.", "grounds": "The captured change sets zero.",
                         "file": option["path"], "line": 1, "evidence_refs": [
                             {key: option[key] for key in ("source_id", "basis", "source_range")}]}}]})
+                await call("structured_output", {"targets": [], "claims": []})
+                # After acceptance: one host call the host refuses, one Codex fails itself.
                 await call("review_source", lookup)
+                late = {"type": "mcp_tool_call", "id": "late", "server": "daydream", "tool": "review_source",
+                        "arguments": lookup}
+                _emit({"type": "item.started", "item": {**late, "status": "in_progress"}})
+                _emit({"type": "item.completed", "item": {**late, **failed}})
     _emit({"type": "item.completed", "item": {"id": "final", "type": "agent_message", "text": "Assignment complete."}})
     # A native result field must never stand in for the host-accepted submission.
     _emit({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}, "result": {"native": True}})
-    _observe("terminal", mode=mode, host={
-        "overrides": {key: value for key, value in overrides.items() if key != "developer_instructions"},
-        "instructions": instructions, "output_schema": "--output-schema" in sys.argv,
-        "token_exposed": any(token in text for text in (*sys.argv, prompt)),
-        "no_proxy": [os.environ.get(name) for name in ("NO_PROXY", "no_proxy")],
-        "refused": refused, "tools": tools, "calls": calls})
+    _observe("terminal", mode=mode, host=host)
 
 
 def _run() -> int:
@@ -280,7 +285,15 @@ def _run() -> int:
     if "--cd" in sys.argv:
         os.chdir(sys.argv[sys.argv.index("--cd") + 1])
     prompt = sys.stdin.read()
-    overrides = _overrides()
+    # ``-c`` overrides as Codex reads them: TOML values, or the raw text when that does not parse.
+    overrides: dict[str, Any] = {}
+    for flag, override in zip(sys.argv, sys.argv[1:]):
+        if flag == "-c":
+            key, _, raw = override.partition("=")
+            try:
+                overrides[key] = tomllib.loads("value = " + raw)["value"]
+            except tomllib.TOMLDecodeError:
+                overrides[key] = raw
     if "mcp_servers.daydream.url" in overrides:
         asyncio.run(_host_tools(overrides, prompt, _FIXTURE_CONFIG["mode"]))
         return 7 if _FIXTURE_CONFIG["mode"] == "nonzero_exit" else 0

@@ -7,6 +7,7 @@ writes the prompt to stdin, and reads JSONL events from stdout.
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import logging
@@ -61,7 +62,14 @@ from daydream.backends.lifecycle import (
     current_backend_lifecycle,
     lifecycle_failure_diagnostic,
 )
-from daydream.host_tools import NATIVE_SUBMIT, HostToolBinding, HostToolEndpoint, HostToolFatal, HostToolRejected
+from daydream.host_tools import (
+    NATIVE_SUBMIT,
+    HostToolBinding,
+    HostToolCallBudgetExceeded,
+    HostToolEndpoint,
+    HostToolFatal,
+    HostToolRejected,
+)
 from daydream.pricing import ModelPrice, compute_cost_from_totals, load_user_prices, resolve_prices
 from daydream.trajectory import redact_structured_text
 
@@ -575,8 +583,9 @@ class _CodexHostEndpoint(HostToolEndpoint):
         listener = socket.socket()
         listener.bind(("127.0.0.1", 0))
         self.url = f"http://127.0.0.1:{listener.getsockname()[1]}/mcp"
-        # Nothing process-wide changes: no logging configuration here, and startup()/shutdown()
-        # rather than serve(), which replaces the process signal handlers.
+        # No logging configuration is installed: uvicorn registers its TRACE level name and logs
+        # through the standard logging tree. startup()/shutdown() rather than serve(), which
+        # replaces the process signal handlers.
         config = uvicorn.Config(app, lifespan="off", ws="none", log_config=None)
         config.load()
         http = uvicorn.Server(config)
@@ -621,9 +630,18 @@ class _CodexHostEndpoint(HostToolEndpoint):
             return True, [str(exc)]
 
     def observe_native_start(self, item_id: str, name: str) -> None:
-        """Count once a start Codex ran itself; it cannot be denied before it runs."""
-        with suppress(HostToolFatal):  # retained; the event loop stops the invocation
-            self.binding.observe_start(item_id, name)
+        """Count once a start Codex ran itself; it cannot be denied before it runs.
+
+        Acceptance closes host authority, not Codex's own tools, so the ledger keeps
+        charging them: one past the allowance fails the binding, accepted or not.
+        """
+        binding = self.binding
+        if not binding.accepted:
+            with suppress(HostToolFatal):  # retained; the event loop stops the invocation
+                binding.observe_start(item_id, name)
+        elif not binding.budget.charge():
+            binding.fail(HostToolCallBudgetExceeded(
+                "Tool-call allocation exhausted by Codex-owned tools after acceptance", preacceptance=False))
 
     async def close(self) -> None:
         await super().close()
@@ -989,9 +1007,11 @@ class CodexBackend:
                     args.extend(["-c", override])
                 child_env = dict(child_env) if child_env is not None else os.environ.copy()
                 child_env[_HOST_TOKEN_ENV] = host.token
-                for name in ("NO_PROXY", "no_proxy"):
-                    # A proxy must never receive the loopback callback or its secret.
-                    child_env[name] = ",".join(filter(None, (child_env.get(name), "127.0.0.1")))
+                # A proxy must never receive the loopback callback or its secret. Each name keeps the
+                # user's exemptions, from whichever name carries them: clients read either first.
+                exemptions = child_env.get("NO_PROXY"), child_env.get("no_proxy")
+                for name, own, other in zip(("NO_PROXY", "no_proxy"), exemptions, reversed(exemptions)):
+                    child_env[name] = ",".join(filter(None, (own or other, "127.0.0.1")))
 
             # P18 Task 1: closed typed effective-config admission from the
             # exact argv built above. persist_session is accepted-but-not-passed
@@ -1039,7 +1059,14 @@ class CodexBackend:
                 process_exited=lifecycle.process_exited if lifecycle is not None else None,
             )
             self._transports.append(transport)
-            await transport.start()
+            try:
+                await transport.start()
+            except OSError as exc:
+                if host is None or exc.errno != errno.E2BIG:
+                    raise
+                # Developer instructions travel in one argument; only the platform knows its bound.
+                raise CodexError("Codex could not start: the review instructions exceed this platform's "
+                                 "single-argument size", category="TRANSPORT", retryable=False) from exc
 
             async for raw_line in transport.lines(_line_timeout, drain_ready_on_expiry=True):
                 try:
@@ -1208,6 +1235,8 @@ class CodexBackend:
 
                     elif item_type == "file_change":
                         for patch_event in _file_change_events(item, execution_cwd):
+                            if host is not None and isinstance(patch_event, ToolStartEvent):
+                                host.observe_native_start(patch_event.id, patch_event.name)
                             yield patch_event
 
                     elif item_type == "mcp_tool_call":
@@ -1234,10 +1263,12 @@ class CodexBackend:
                         )
                         if (host is not None and error and item.get("server") == _HOST_SERVER
                                 and not host.binding.possibly_accepted):
-                            # Codex failed the call itself, so no correction can reach the host.
+                            # The host never saw this call. Usually nothing the model resubmits can
+                            # fix that (a refused approval, an unreachable server), so stop here.
                             detail = error.get("message") if isinstance(error, dict) else error
-                            raise host.fatal(f"Codex failed a host tool call before acceptance: {detail}",
-                                             code="native_readiness")
+                            raise CodexError("Codex failed a host tool call itself before acceptance and the "
+                                             f"invocation was stopped: {_bounded_process_excerpt(str(detail))}",
+                                             category="TRANSPORT", retryable=False)
 
                     elif item_type == "error":
                         error_sentinel_count += 1
@@ -1313,11 +1344,8 @@ class CodexBackend:
                         cost_source="estimated",
                     )
 
-                    if host is not None:
-                        # Host acceptance is the result; native completion settles it separately.
-                        structured_result = host.binding.accepted_result
                     # Genuine structured fields from the transport; the host resolves assistant text.
-                    elif output_schema:
+                    if output_schema:
                         for key in ("result", "output"):
                             raw = event.get(key)
                             if raw is not None:
@@ -1426,6 +1454,9 @@ class CodexBackend:
             if lifecycle is not None:
                 lifecycle.teardown_completed()
             if host is not None:
+                # Host acceptance is the only result, whatever the turn carried natively; this
+                # completed turn, zero exit and cleanup settle it.
+                _pending_result.structured_output = host.binding.accepted_result
                 host.binding.native_settled = host.binding.accepted
             if _pending_result is not None:
                 yield _pending_result
