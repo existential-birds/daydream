@@ -127,6 +127,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `timing` replaces `compute_timing_summary(write_snapshot)`
   ([#1714](https://github.com/existential-birds/daydream/issues/1714),
   [#1785](https://github.com/existential-birds/daydream/pull/1785)).
+- **Breaking (0.y.z):** A review ends with findings unless fixing is selected.
+  `daydream <target>` is now the report-only review that `--review` selects, and
+  `RunConfig.output_mode` defaults to `"review"`. `daydream .` and `daydream --yes .` no
+  longer apply fixes. To migrate, add `--fix` (`daydream --fix .`, or
+  `daydream --fix --yes .` for an unattended run); embedded callers pass
+  `output_mode="loop"`. `--yes` only answers gates: on a review it is a usage error that
+  names `--fix`, and custom `--flow` runs keep it. `--start-at` resumes a fixing run and
+  needs `--fix`; `--shallow` only narrows one. A fixing request that could only end as a
+  review used to exit 0 and is now refused: `--fix --non-interactive` without `--yes`,
+  `--fix` with `--findings-out` and `--flow` with `--fix` are usage errors, and the
+  runner returns 1 before any work for `output_mode="loop"` whose fix gate cannot be
+  confirmed (no terminal, `CI` set or `non_interactive` without `assume="yes"`, or
+  `assume="no"`) or that also sets `flow_name="review"` or `findings_out`. `--flow deep`
+  and `--flow shallow` are reviews, and a custom flow reads `output_mode` as `"review"`
+  unless its embedder passes `"loop"`. A selected fixing run, `--comment`,
+  `--diagram-only`, `--findings-out` exports (now also accepted with `--shallow`),
+  Improve and the packaged workflows behave as before; see
+  [fixing selection](docs/runtime.md#validation-and-repair)
+  ([#1641](https://github.com/existential-birds/daydream/issues/1641)).
 - **Breaking (0.y.z):** Time and tool-call budgets live on one host ledger per
   budget owner: an absolute deadline plus one charged tool-call count
   (`daydream.review_budget.BudgetLedger`, which replaces `ReviewInvestigationBudget`).

@@ -39,9 +39,10 @@ identity, diff, and recorder work precedes every extension step.
 
 Read [registration](../daydream/extensions/builtins.py) and
 [deep assembly](../daydream/deep/orchestrator.py) for ordered names/config keys.
-Review/comment stop before fixes. Fix verification preserves retained fixes,
-stops regressions, records unresolved outcomes, and repeats after tests alter
-the tree. Models cannot authorize commits through completion prose.
+Review and comment runs stop before fixes: `deep` runs its fix steps only when
+[fixing is selected](runtime.md#validation-and-repair). Fix verification preserves
+retained fixes, stops regressions, records unresolved outcomes, and repeats after tests
+alter the tree. Models cannot authorize commits through completion prose.
 
 ### Diagram
 

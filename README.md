@@ -30,14 +30,16 @@ uv tool install --editable .
 ## Review code
 
 ```bash
-daydream --review /path/to/project           # report only
+daydream /path/to/project                    # report only (same as --review)
 daydream --comment /path/to/project          # post inline PR comments
-daydream /path/to/project                    # review, offer fixes, test, commit and push
+daydream --fix /path/to/project              # review, offer fixes, test, commit and push
 daydream --review --backend codex --base main /path/to/project
 ```
 
-Deep multi-stack review is the default. Use `--shallow` for a single pass,
-`--help` for common options, and `--help-all` for configuration and advanced flags.
+A review ends with findings; only `--fix` [selects fixing](docs/runtime.md#validation-and-repair),
+and `--yes` answers its gates. Review is deep and multi-stack; `--fix --shallow` runs a
+single-stack pass. Use `--help` for common options and `--help-all` for configuration
+and advanced flags.
 Reports land in `.review-output.md`; trajectories in `.daydream/runs/<id>/`.
 Report-only local review uses the captured net base-to-final-working change,
 including nonignored untracked files. PR comments exclude local edits and use a
