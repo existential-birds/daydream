@@ -136,7 +136,7 @@ def _scenario(forks: int, body_kb: int, turns: int, root_invocations: int) -> di
         write.__exit__()
 
     with tempfile.TemporaryDirectory() as raw:
-        tmp = Path(raw)
+        tmp = Path(raw).resolve()  # macOS temp dirs sit under the /var symlink
         frozen = tmp / "run" / "frozen"  # the dataset store must not overlap the frozen tree's parent
         tracemalloc.start()
         anyio.run(record, frozen)
