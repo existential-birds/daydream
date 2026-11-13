@@ -13,6 +13,8 @@ base branch. Show me the findings and where the trajectory was saved.
 Daydream reviews code changes, can fix findings and run tests, and records
 [ATIF](https://www.harborframework.com/docs/agents/trajectory-format) trajectories
 for research toward an open-weight code-review model.
+Its review quality is measured in public on AACR-Bench and ReviewBench in
+[code-review-benchmarks](https://github.com/existential-birds/code-review-benchmarks).
 
 ## Quick start
 
@@ -52,5 +54,4 @@ records contain raw evidence. Upload requires an explicitly selected private
 Hugging Face dataset and the `hub` extra. The training pipeline prepares reward,
 SFT and adapter-handoff artifacts; production training has not completed.
 For agents working on data or experiments: [dataset workflow](docs/runbooks/record-dataset.md),
-[training](docs/training-launch.md). Benchmarks run from
-[code-review-benchmarks](https://github.com/existential-birds/code-review-benchmarks).
+[training](docs/training-launch.md).
