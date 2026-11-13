@@ -798,6 +798,17 @@ _KIND_INSTRUCTIONS = {
 }
 
 
+def _instruction_json(value: Any) -> str:
+    """Canonical JSON for system instructions, with DEL and the Unicode line separators escaped.
+
+    Text inside it cannot draw a line break, and a native argument's second escaping adds no unmeasured bytes.
+    """
+    text = canonical_json(value)
+    for raw in "\x7f\x85\u2028\u2029":
+        text = text.replace(raw, f"\\u{ord(raw):04x}")
+    return text
+
+
 async def run_committed_review(request: CommittedReviewRequest) -> CommittedReviewResult:
     """Review selected local/committed source or a validated trusted immutable envelope."""
     started = clock.monotonic()
@@ -865,6 +876,11 @@ async def _run_committed_review(
         raise ValueError(
             "committed review uses its run-owned bundle; external export routes belong to entry integration"
         )
+    author = config.frozen_author_description
+    # Measured as the larger native delivery: the assignment's JSON inside one JSON-escaped argument.
+    if author is not None and len(canonical_json(_instruction_json(author.description)).encode()) > (
+            HISTORICAL_CONTEXT_MAX_BYTES["context"]):
+        raise ValueError("frozen author description exceeds its encoded UTF-8 bound")
     profile = config.review_profile = config.review_profile or resolve_from_runconfig(config)
     pipeline = profile.profile.pipeline
     investigation_s, wall_s = pipeline.reviewer_investigation_budget_s, pipeline.review_wall_budget_s
@@ -948,12 +964,9 @@ async def _run_committed_review(
             ))
             captured_root = operational_worktree_root(owner) / run_id
             assert original.head_sha is not None and original.base_sha is not None
-            if config.frozen_author_description is not None:
+            if author is not None and author.for_head(original.head_sha).strip():
                 # Opaque author text: one context value, with no title/body split invented for it.
-                description = config.frozen_author_description.for_head(original.head_sha)
-                if len(description.encode()) > HISTORICAL_CONTEXT_MAX_BYTES["context"]:
-                    raise ValueError("frozen author description exceeds its UTF-8 bound")
-                settings["historical_context"] = {"context": description}
+                settings["historical_context"] = {"context": author.description}
             captured = capture_source(source, captured_root, base_sha=original.base_sha,
                                       head_sha=original.head_sha, local=request.local, exclude=config.ignore_paths)
             lifetime.callback(_remove_capture, captured)
@@ -1292,7 +1305,7 @@ class _Schedule:
             + profile["strategies"][strategy]
             + "\nCatalog status and decided markers below are a dispatch-time snapshot."
             + "\nCommitted review assignment:\n"
-            + canonical_json(assignment)
+            + _instruction_json(assignment)
             + "\nEnd committed review assignment.\n"
         )
         prompt = (f"Begin the committed review {kind} assignment described in the system instructions. "

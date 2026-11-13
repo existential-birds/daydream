@@ -385,7 +385,8 @@ async def run_agent(
                 review_instructions = review_instructions.replace(REPOSITORY_SEARCH_GUIDANCE, search_guidance)
         if search_guidance not in prompt:
             prompt += "\n\n" + search_guidance
-        if review_instructions and search_guidance not in review_instructions:
+        # Instructions can quote untrusted text that repeats the guidance; only the host's own copy ends them.
+        if review_instructions and not review_instructions.endswith(search_guidance):
             review_instructions += "\n\n" + search_guidance
     if sanctioned_inputs is not None:
         prompt = sanctioned_inputs.render_prompt(prompt)
