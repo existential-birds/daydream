@@ -93,8 +93,18 @@ def test_signal_handler_flushes_before_backend_registry_snapshot(monkeypatch: py
                 "extra_copy": [Path("a.env"), Path("b.env")],
             },
         ),
+        (
+            ["--non-interactive", "--pr-number", "42", "--approved-head-sha", "a" * 40,
+             "--findings-out", "findings/findings.json", "--base", "origin/main", "/tmp/project"],
+            {"output_mode": "review", "findings_out": "findings/findings.json", "assume": None},
+        ),
+        (["--fix", "--yes", "--shallow", "/tmp/project"], {"output_mode": "loop", "assume": "yes", "shallow": True}),
+        (
+            ["--flow", "x", "--yes", "--start-at", "fix", "/tmp/project"],
+            {"output_mode": "review", "assume": "yes", "flow_name": "x", "start_at": "fix"},
+        ),
     ],
-    ids=["configured-review", ],
+    ids=["configured-review", "packaged-single-workflow-export", "selected-fixing", "custom-flow-gates"],
 )
 def test_compatible_cli_vectors_resolve_coherent_configuration(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
@@ -131,7 +141,12 @@ def test_incompatible_cli_flags_are_rejected_with_the_offending_flag(
     rejected = [
         (["--flow", "x", "--review", "/tmp/project"], ""),
         (["--flow", "x", "--shallow", "/tmp/project"], ""),
-        (["--shallow", "--findings-out", "f.json", "/tmp/repo"], "--findings-out"),
+        (["--flow", "x", "--fix", "/tmp/project"], "--flow cannot be combined"),
+        (["--yes", "/tmp/repo"], "--yes only answers the gates of a fixing run; add --fix"),
+        (["--flow", "deep", "--yes", "/tmp/repo"], "--yes only answers the gates of a fixing run; add --fix"),
+        (["--start-at", "fix", "/tmp/repo"], "--start-at fix resumes a fixing run; add --fix"),
+        (["--fix", "--non-interactive", "/tmp/repo"], "cannot confirm the fix gate; add --yes"),
+        (["--fix", "--yes", "--findings-out", "f.json", "/tmp/repo"], "--findings-out exports"),
         (["--diagram", "both", "--diagram-only", "sequence", "/tmp/repo"], "--diagram-only"),
         (["--diagram-only", "sequence", "--start-at", "merge", "/tmp/repo"], "--start-at merge"),
         (["--diagram-only", "sequence", "--yes", "/tmp/repo"], "--yes"),

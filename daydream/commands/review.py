@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.commands import common
-from daydream.run_config import RunConfig
+from daydream.run_config import DEEP_FLOW_ALIASES, RunConfig
 
 
 class _HelpAllAction(argparse.Action):
@@ -52,8 +52,13 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         help="Target directory (default: prompt interactively).",
     )
 
-    # Output mode (mutually exclusive; default = fix-loop)
+    # Output mode (mutually exclusive; default = report-only review)
     output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument(
+        "--fix",
+        action="store_true",
+        help="Review, then offer fixes, test, commit and push.",
+    )
     output_group.add_argument(
         "--comment",
         action="store_true",
@@ -62,7 +67,7 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
     output_group.add_argument(
         "--review",
         action="store_true",
-        help="Review and write a report to terminal/markdown, then exit.",
+        help="Review and write a report to terminal/markdown, then exit (the default).",
     )
     # Require the diagram kind so an optional value cannot consume the positional target path.
     output_group.add_argument(
@@ -101,7 +106,7 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
     parser.add_argument(
         "--shallow",
         action="store_true",
-        help="Single-stack review (skip multi-stack auto-detection).",
+        help="With --fix: single-stack review (skip multi-stack auto-detection).",
     )
     parser.add_argument(
         "--flow",
@@ -271,11 +276,11 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     _reject_removed_phase_flags(parser, raw_argv)
     args = parser.parse_args(raw_argv)
 
-    output_mode: str = "loop"
-    if args.comment:
+    output_mode: str = "review"
+    if args.fix:
+        output_mode = "loop"
+    elif args.comment:
         output_mode = "comment"
-    elif args.review:
-        output_mode = "review"
     elif args.diagram_only is not None:
         output_mode = "diagram"
 
@@ -283,27 +288,19 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     if args.diagram is not None and args.diagram_only is not None:
         parser.error("--diagram cannot be combined with --diagram-only")
 
-    # ``--yes`` answers the fix/commit gates, which --review/--comment/
-    # --diagram-only don't run; reject rather than silently ignore.
-    if args.assume == "yes" and output_mode != "loop":
-        parser.error(
-            "--yes has no effect with --review/--comment/--diagram-only "
-            "(no fix phase to auto-apply)"
-        )
+    # ``--yes`` and ``--start-at`` act on a fixing run or a custom flow; neither selects fixing.
+    fixing_or_custom = args.fix or (args.flow_name is not None and args.flow_name not in DEEP_FLOW_ALIASES)
+    if args.assume == "yes" and not fixing_or_custom:
+        parser.error("--yes only answers the gates of a fixing run; add --fix to apply fixes")
+    if args.start_at != "review" and not fixing_or_custom:
+        parser.error(f"--start-at {args.start_at} resumes a fixing run; add --fix")
 
-    findings_out_allowed = (
-        output_mode in ("review", "diagram")
-        or (output_mode == "loop" and not args.shallow)
-    )
-    if args.findings_out is not None and not findings_out_allowed:
-        parser.error(
-            "--findings-out requires --review, --diagram-only, or the default deep "
-            "review flow (not --comment/--shallow)"
-        )
+    # Unattended, the fix gate declines: a requested fix would end as a successful review.
+    if args.fix and args.non_interactive and args.assume != "yes":
+        parser.error("--fix --non-interactive cannot confirm the fix gate; add --yes")
 
-    # Diagram-only produces none of the artifacts needed by resume stages.
-    if args.diagram_only is not None and args.start_at != "review":
-        parser.error(f"--start-at {args.start_at} is not valid with --diagram-only")
+    if args.findings_out is not None and output_mode not in ("review", "diagram"):
+        parser.error("--findings-out exports review or --diagram-only findings; it cannot follow --comment or --fix")
 
     # ttt/per-stack/merge are deep-pipeline resume stages; not valid for shallow.
     if args.shallow and args.start_at in ("ttt", "per-stack", "merge"):
@@ -319,8 +316,8 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         )
 
     if args.flow_name is not None:
-        if args.comment or args.review or args.diagram_only is not None:
-            parser.error("--flow cannot be combined with --review/--comment/--diagram-only")
+        if args.fix or args.comment or args.review or args.diagram_only is not None:
+            parser.error("--flow cannot be combined with --fix/--review/--comment/--diagram-only")
         if args.shallow:
             parser.error("--flow cannot be combined with --shallow")
 

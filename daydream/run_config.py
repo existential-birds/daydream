@@ -72,7 +72,7 @@ class RunConfig:
 
     branch: str | None = None
     base: str | None = None
-    output_mode: OutputMode = "loop"
+    output_mode: OutputMode = "review"
     findings_out: str | None = None
     dump_artifacts: str | None = None
     trajectory_hub_repo: str | None = None

@@ -322,15 +322,15 @@ def _resolve_mode(config: RunConfig) -> str:
     ``review`` / ``comment`` replace the review flow (stop after post-review);
     ``shallow`` replaces the shallow flow (single-stack deep); ``diagram``
     (issue #1113) reuses the spine's preamble but runs the two-step ``diagram``
-    flow. ``loop`` is the unchanged default.
+    flow. Only ``output_mode="loop"`` selects the fixing modes ``loop`` and ``shallow``.
     """
-    if config.flow_name in ("review", "shallow"):
-        return config.flow_name
+    if config.flow_name == "review":
+        return "review"
     # Issue #1113: checked before ``shallow`` so ``--diagram-only`` is never
     # reinterpreted as a shallow review by an unrelated flag combination.
     if config.output_mode in ("diagram", "review", "comment"):
         return config.output_mode
-    if config.shallow:
+    if config.shallow or config.flow_name == "shallow":
         return "shallow"
     return "loop"
 

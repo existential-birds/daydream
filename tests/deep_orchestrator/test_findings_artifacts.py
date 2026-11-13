@@ -47,8 +47,13 @@ async def test_test_verdict_persists_actual_suite_outcome_and_operator_override(
 ) -> None:
     _silence(monkeypatch, prompts=False)
     _force_interactive(monkeypatch)
-    monkeypatch.setattr("daydream.run_context._prompt_user",
-                        lambda _console, message, *args, **kwargs: "3" if ignored and "Choice" in message else "y")
+    asked: list[str] = []
+
+    def answer(_console: object, message: str, *_args: object, **_kwargs: object) -> str:
+        asked.append(message)
+        return "3" if ignored and "Choice" in message else "y"
+
+    monkeypatch.setattr("daydream.run_context._prompt_user", answer)
     host = {"system": "Darwin", "release": "25.1.0", "machine": "arm64",
             "python_implementation": "CPython", "python_version": "3.13.7"}
     for name, value in host.items():
@@ -60,8 +65,25 @@ async def test_test_verdict_persists_actual_suite_outcome_and_operator_override(
         _add_bare_remote(tiny_diff_target)
     mute_side_effects(heal=False, commit=not ignored)
     head_before = _git(tiny_diff_target, "rev-parse", "HEAD")
-    config = make_config(tiny_diff_target, assume=None if ignored else "yes", non_interactive=False,
-                         test_command=command)
+    # A fixing request that could only end as a review is refused before any work.
+    refusals: list[str] = []
+    with monkeypatch.context() as patch:
+        patch.setattr("daydream.runner.print_error", lambda _console, title, _message: refusals.append(title))
+        codes = [
+            await run(make_config(tiny_diff_target, output_mode="loop", test_command=command, **unfixable))
+            for unfixable in ({}, {"assume": "no", "non_interactive": False}, {"assume": "yes", "flow_name": "review"},
+                              {"assume": "yes", "findings_out": str(suite_dir / "findings.json")})
+        ]
+    assert (codes, refusals, stub.calls) == ([1] * 4, ["Fix Not Possible"] * 4, [])
+    # The default request ends with findings: this operator would accept a fix gate, and none is offered.
+    code = await run(make_config(tiny_diff_target, non_interactive=False, test_command=command))
+    assert (
+        code, "## Issues" in (tiny_diff_target / REVIEW_OUTPUT_FILE).read_text(),
+        [question for question in asked if "Apply fixes" in question], (suite_dir / "suite-count.txt").exists(),
+        _git(tiny_diff_target, "status", "--porcelain", "--untracked-files=no"),
+    ) == (0, True, [], False, "")
+    config = make_config(tiny_diff_target, output_mode="loop", assume=None if ignored else "yes",
+                         non_interactive=False, test_command=command)
     assert await run(config) == exit_code
     path = tiny_diff_target / ".daydream" / "deep" / "test-verdict.json"
     assert path.is_file(), "suite verdict must survive both successful completion and an early failure return"
@@ -93,6 +115,7 @@ async def test_test_verdict_persists_actual_suite_outcome_and_operator_override(
 async def test_intent_artifact_survives_wonder_failure(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _silence(monkeypatch)
+    _force_interactive(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.fail_alternatives = True
     with pytest.raises(RuntimeError, match="alternatives blew up"):

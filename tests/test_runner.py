@@ -790,7 +790,8 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
     monkeypatch.setattr("daydream.ui.print_phase_hero", _hero_spy)
     monkeypatch.setattr("daydream.ui.print_dim", _dim_spy)
     exit_code, test_backend, repair_backend, commit_calls = await _drive_fix_cycle_failing(
-        monkeypatch, feature_branch_repo, make_config(feature_branch_repo, start_at="fix", shallow=True, assume="yes"),
+        monkeypatch, feature_branch_repo,
+        make_config(feature_branch_repo, output_mode="loop", start_at="fix", shallow=True, assume="yes"),
         # Suite executions are host processes; reject a second TEST backend turn after the handoff.
         script=[_handoff_turn("# Handoff\n\n--yes bounded fix failure")],
         repair_turn=_FIX_TURN,

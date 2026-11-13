@@ -16,7 +16,7 @@ from tests.deep_orchestrator.empty_synthesis_support import empty_review_config
 from tests.deep_orchestrator.precision_overlap_support import PrecisionOverlapBackend
 from tests.deep_orchestrator.support import _arbiter_stacks
 from tests.harness.review_profile import independent_alternatives_profile
-from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
+from tests.harness.stub_backend import StubBackend, force_interactive, install_stub_backend, silence
 from tests.test_deep_orchestrator import MakeConfig, Mute
 
 
@@ -33,7 +33,9 @@ async def _run_profile(
     stub.parse_by_stack = parse_by_stack
     stub.merge_echo_records = merge_echo_records
     mute_side_effects()
-    config = make_config(target, latency_profile=latency_profile, diagram=diagram,
+    force_interactive(monkeypatch)
+    config = make_config(
+        target, output_mode="loop", non_interactive=False, latency_profile=latency_profile, diagram=diagram,
         review_profile=review_profile if review_profile is not None else independent_alternatives_profile(),
     )
     with anyio.fail_after(timeout):
@@ -60,8 +62,8 @@ async def test_failed_group_fails_open_and_is_retried_on_resume(
     stub.calls.clear()
 
     failing_run = make_config(
-        multi_stack_target, latency_profile="balanced", review_profile=independent_alternatives_profile(),
-        start_at="merge",
+        multi_stack_target, output_mode="loop", non_interactive=False, latency_profile="balanced",
+        review_profile=independent_alternatives_profile(), start_at="merge",
     )
     with anyio.fail_after(90):
         assert await run(failing_run) in (0, 1)
@@ -74,8 +76,8 @@ async def test_failed_group_fails_open_and_is_retried_on_resume(
     stub.arbiter_fail_group = None
     stub.calls.clear()
     retry_run = make_config(
-        multi_stack_target, latency_profile="balanced", review_profile=independent_alternatives_profile(),
-        start_at="merge",
+        multi_stack_target, output_mode="loop", non_interactive=False, latency_profile="balanced",
+        review_profile=independent_alternatives_profile(), start_at="merge",
     )
     with anyio.fail_after(90):
         assert await run(retry_run) in (0, 1)

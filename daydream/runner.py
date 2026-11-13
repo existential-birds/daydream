@@ -94,7 +94,7 @@ from daydream.run_config import (
     _resolved_model,
     _resolved_reasoning_effort,
 )
-from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
+from daydream.run_context import InteractionPolicy, RunContext, bind_run_context, resolve_gate
 from daydream.trajectory import DaydreamRunFlow
 from daydream.ui import (
     NEON_THEME,
@@ -288,15 +288,25 @@ def _load_selected_adapters(config: RunConfig) -> None:
 
 def _run_posts_to_github(config: RunConfig) -> bool:
     """Return whether this run posts to GitHub."""
-    if config.flow_name is not None:
-        if config.flow_name == "improve":
-            return _file_config_or_empty(config).improve_github_publish_issues
-        return config.flow_name == "deep"
+    if config.flow_name not in (None, "deep"):
+        return config.flow_name == "improve" and _file_config_or_empty(config).improve_github_publish_issues
 
     if config.output_mode in ("comment", "diagram"):
         return True
 
     return config.output_mode == "loop" and not config.shallow
+
+
+def _fix_request_refusal(config: RunConfig) -> str | None:
+    """Explain why a requested fix would end as a successful review, or return None."""
+    if config.output_mode != "loop" or config.flow_name not in (None, *DEEP_FLOW_ALIASES):
+        return None
+    if config.flow_name == "review" or config.findings_out is not None:
+        return 'The "review" flow and a findings export end with findings; drop them or the fixing request.'
+    if resolve_gate(assume=config.assume, interactive=_resolve_interactive(config), safe_default=False) is False:
+        return ('The fix gate cannot be confirmed: the run is unattended or assumes "no". '
+                'Pass --yes (assume="yes"), or drop --fix (output_mode="loop") to review only.')
+    return None
 
 
 # Public entry points
@@ -311,6 +321,10 @@ async def run(
     Missing delivery is unavailable analysis; callback errors fail the flow. Return the workflow exit code."""
     if config is None:
         config = RunConfig()
+    refusal = _fix_request_refusal(config)
+    if refusal is not None:
+        print_error(console, "Fix Not Possible", refusal)
+        return 1
     if config.dataset_capture_disabled:
         config = replace(config, dataset_capture=False)
     else:
@@ -500,8 +514,10 @@ async def _run_with_context(
             config.identity = session.identity.login
             run_context.github_identity = session.identity
 
-            # Report-only flows skip the test phase and its .env copy.
-            skip_tests = config.output_mode != "loop" or config.flow_name in ("review", "improve")
+            # Report-only flows skip the test phase and its .env copy; custom flows keep both.
+            skip_tests = config.flow_name == "improve" or (
+                config.flow_name in (None, *DEEP_FLOW_ALIASES) and config.output_mode != "loop"
+            )
             result = await _run_workspace(
                 config, target_dir, skip_tests=skip_tests, private_owner=private_owner,
                 run_context=run_context, github_execution=session.execution,
