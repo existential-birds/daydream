@@ -31,6 +31,7 @@ class ProfileError(Exception):
 # Severity is lowercase; confidence follows the uppercase finding schema.
 _SEVERITY_LEVELS: frozenset[str] = frozenset(severity.CANONICAL_LEVELS)
 _CONFIDENCE_LEVELS: frozenset[str] = frozenset(("HIGH", "MEDIUM", "LOW"))
+_ASSIGNMENT_POLICIES: frozenset[str] = frozenset(("broad", "adaptive"))
 
 
 # Profiles tune strategy and bounded pipeline fields, never the host evaluator,
@@ -101,6 +102,9 @@ class Pipeline:
     review_wall_budget_s: int = 4500
     reviewer_investigation_budget_s: int = 2400
     reviewer_tool_call_budget: int = REVIEWER_TOOL_CALL_BUDGET
+    # Committed review only. "broad": one investigation plus fresh challenge. "adaptive": the host
+    # partitions captured work into bounded assignments with required cross-assignment investigation.
+    assignment_policy: str = "broad"
 
 
 @dataclass(frozen=True)
@@ -486,6 +490,7 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
             "review_wall_budget_s",
             "reviewer_investigation_budget_s",
             "reviewer_tool_call_budget",
+            "assignment_policy",
             "structural_enabled",
             "arbitration_enabled",
             "arbitration_min_severity",
@@ -561,6 +566,11 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
             "pipeline.suppression: enabled but empty confidence class selection",
             source,
         )
+    assignment_policy = data.get("assignment_policy", defaults.assignment_policy)
+    if not isinstance(assignment_policy, str) or assignment_policy not in _ASSIGNMENT_POLICIES:
+        raise ProfileError(
+            f"pipeline.assignment_policy must be one of {sorted(_ASSIGNMENT_POLICIES)}", source
+        )
 
     return Pipeline(
         review_wall_budget_s=_int("review_wall_budget_s", defaults.review_wall_budget_s),
@@ -568,6 +578,7 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
             "reviewer_investigation_budget_s", defaults.reviewer_investigation_budget_s
         ),
         reviewer_tool_call_budget=_int("reviewer_tool_call_budget", defaults.reviewer_tool_call_budget),
+        assignment_policy=assignment_policy,
         structural_enabled=_bool("structural_enabled", defaults.structural_enabled),
         arbitration=arbitration,
         suppression=suppression,

@@ -26,6 +26,8 @@ def test_invalid_profiles_fail_closed_naming_field_and_source() -> None:
                for value in ("-1", "true")]
     invalid += [("bogus = 1", "bogus"),
                 ("[pipeline]\nreviewer_investigation_budget_seconds = 480", "reviewer_investigation_budget_seconds")]
+    invalid += [(f"[pipeline]\nassignment_policy = {value}", "pipeline.assignment_policy")
+                for value in ('"hierarchical"', '["adaptive"]')]
     for body, named in invalid:
         with pytest.raises(rp.ProfileError) as error:
             _profile(body, source=source)

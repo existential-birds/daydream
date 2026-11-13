@@ -30,7 +30,6 @@ from daydream.artifacts.ownership import operational_worktree_root
 from daydream.backends import Backend, BackendExecutionInput, effective_fanout_concurrency
 from daydream.committed_review_model import (
     ADMIT_TOOL,
-    ASSIGNMENT_POLICIES,
     CATALOG_PAGE_MAX_BYTES,
     COMMITTED_BATCH_OUTPUT_BYTES,
     COMMITTED_SUBMISSION_MAX_BYTES,
@@ -104,9 +103,6 @@ class CommittedReviewRequest:
     immutable_input: ImmutableReviewInput | None = None
     immutable_bundle: Path | None = None
     local: bool = False
-    # "broad": one investigation plus fresh challenge (default). "adaptive": the host partitions
-    # captured work into bounded assignments with required cross-assignment investigation.
-    assignment_policy: str = "broad"
 
 
 _UNDECIDED_REASON = "unsubmitted: no admitted decision before this review ended; unfinished"
@@ -869,8 +865,6 @@ async def _run_committed_review(
         raise ValueError(
             "committed review uses its run-owned bundle; external export routes belong to entry integration"
         )
-    if request.assignment_policy not in ASSIGNMENT_POLICIES:
-        raise ValueError(f"assignment_policy must be one of {sorted(ASSIGNMENT_POLICIES)}")
     profile = config.review_profile = config.review_profile or resolve_from_runconfig(config)
     pipeline = profile.profile.pipeline
     investigation_s, wall_s = pipeline.reviewer_investigation_budget_s, pipeline.review_wall_budget_s
@@ -1031,7 +1025,7 @@ async def _run_committed_review(
             inputs, run_id, allowed_tools=None if hosted is None else HOSTED_PI_TOOLS,
         ))
         schedule = _Schedule(review, backends, tool_calls, settings, started=started, deadline=finish - _FINALIZATION_S,
-                             adaptive=request.assignment_policy == "adaptive")
+                             adaptive=pipeline.assignment_policy == "adaptive")
         recorder = _open_recorder(
             config=config, target_dir=captured_root, work=work,
             flow_kind=DaydreamRunFlow.CUSTOM, run_artifacts=artifacts,

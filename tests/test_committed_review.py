@@ -1839,9 +1839,9 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
     monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=execute, console=agent.console))
     calls = 8 if scenario == "undecomposed" else 40
     with anyio.fail_after(60):
-        result = await run_committed_review(CommittedReviewRequest(repo, base, assignment_policy="adaptive",
+        result = await run_committed_review(CommittedReviewRequest(repo, base,
             config=RunConfig(backend="pi", output_mode="review", review_profile=_profile_with_pipeline(
-                reviewer_investigation_budget_s=90, reviewer_tool_call_budget=calls))))
+                reviewer_investigation_budget_s=90, reviewer_tool_call_budget=calls, assignment_policy="adaptive"))))
     value = result.to_dict()
     validate_committed_result(value)
     work = {record["work_id"]: record for record in value["work"]}
@@ -1855,8 +1855,6 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
                                                          "planned_assignments": 1,
                                                          "cross_assignment": "not_applicable"}
         assert allocations == [("work:1", "discovery", 4)] and value["claims"] == []
-        with pytest.raises(ValueError, match="assignment_policy"):
-            await run_committed_review(CommittedReviewRequest(repo, base, assignment_policy="hierarchical"))
         return
     assert value["settings"]["assignment_policy"] == {"name": "adaptive", "decomposed": True,
                                                      "planned_assignments": 2, "cross_assignment": "required"}

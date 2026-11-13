@@ -112,7 +112,6 @@ def shard_scope_id(index: int) -> str:
 # Work records, attribution, per-execution capacity evidence and the cross_assignment phase (#1628).
 RESULT_VERSIONS = {"committed": 7, "immutable": 8, "local": 9}
 REQUIRED_PHASES = ["challenge", "cross_assignment"]
-ASSIGNMENT_POLICIES = frozenset({"broad", "adaptive"})
 # Investigation kinds decide owned targets and propose new concerns; challenge judges claim revisions.
 INVESTIGATION_KINDS = frozenset({"discovery", "follow_up", "cross_assignment"})
 WORK_KINDS = [*sorted(INVESTIGATION_KINDS), "challenge"]
