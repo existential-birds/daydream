@@ -18,6 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [Claude host tools](docs/runtime.md#claude-host-tools). Hosted and immutable inputs stay
   Pi-only. `mcp` is now a direct dependency
   ([#1647](https://github.com/existential-birds/daydream/issues/1647)).
+- Committed review (`run_committed_review`) now also runs on native Codex: select
+  `RunConfig(backend="codex")`. For these invocations the adapter serves `review_source`,
+  `review_admit` and the terminal `structured_output` from a fresh MCP server on loopback,
+  bound to the same host authority and registered only through additive `-c` overrides
+  on `codex exec`, so a rejected submission is corrected in the same conversation.
+  Daydream writes nothing to the Codex home. `daydream --backend codex` and every other
+  Codex invocation are unchanged. Codex shows the model a schema without length, range,
+  pattern and item-count limits, replaces the user's developer instructions for the
+  invocation and cannot deny its own tools before they run; see
+  [Codex host tools](docs/runtime.md#codex-host-tools) for these and the versions
+  exercised. `uvicorn` is now a direct dependency
+  ([#1646](https://github.com/existential-birds/daydream/issues/1646)).
 - `--trace-to local` (or `DAYDREAM_TRACE_TO=local`) records a run's spans as OTLP/JSON
   lines in `otel-trace.jsonl` in its private run directory, with no network or credentials,
   alone or beside remote destinations. Like all tracing it is off by default and follows
