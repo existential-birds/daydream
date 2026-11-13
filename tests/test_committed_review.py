@@ -40,7 +40,7 @@ from daydream.observability.config import ObservabilityConfig
 from daydream.observability.runtime import trace_run
 from daydream.pr_review import post_findings_from_artifact
 from daydream.review_budget import BudgetLedger, BudgetStop
-from daydream.review_profile import ResolvedProfile, build_default_profile
+from daydream.review_profile import Pipeline, ResolvedProfile, build_default_profile
 from daydream.review_result import validate_terminal_result
 from daydream.review_source_refs import source_options
 from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
@@ -1857,8 +1857,7 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
                                                          "cross_assignment": "not_applicable"}
         assert allocations == [("work:1", "discovery", 4)] and value["claims"] == []
         # A profile built in code bypasses the parser; an unknown policy must not run as broad.
-        unknown = build_default_profile()
-        unknown = replace(unknown, pipeline=replace(unknown.pipeline, assignment_policy="hierarchical"))
+        unknown = replace(build_default_profile(), pipeline=Pipeline(assignment_policy="hierarchical"))
         with pytest.raises(ValueError, match="assignment_policy"):
             await run_committed_review(CommittedReviewRequest(repo, base, config=RunConfig(
                 backend="pi", output_mode="review", review_profile=ResolvedProfile(unknown, "test"))))

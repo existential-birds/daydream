@@ -69,12 +69,7 @@ from daydream.json_utils import canonical_json, validate_json_schema
 from daydream.observability.spans import record_budget_stop
 from daydream.prompt_budget import SanctionedInputUnavailable
 from daydream.review_budget import BudgetDimension, BudgetLedger
-from daydream.review_profile import (
-    ASSIGNMENT_POLICIES,
-    ResolvedProfile,
-    build_default_profile,
-    resolve_from_runconfig,
-)
+from daydream.review_profile import ASSIGNMENT_POLICIES, ResolvedProfile, build_default_profile, resolve_from_runconfig
 from daydream.review_result import (
     AnalyzedRevision,
     PlannedScope,
