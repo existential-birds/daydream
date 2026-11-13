@@ -21,6 +21,12 @@ class FrozenAuthorDescription:
     head_sha: str
     description: str
 
+    def for_head(self, head_sha: str | None) -> str:
+        """Return the description, refusing an analyzed revision other than the one it was frozen for."""
+        if self.head_sha != head_sha:
+            raise ValueError("frozen author description does not match analyzed HEAD")
+        return self.description
+
 
 @dataclass
 class RunConfig:

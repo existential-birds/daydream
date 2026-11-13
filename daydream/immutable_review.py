@@ -17,15 +17,15 @@ from daydream.output_schema import strict_object
 
 _SHA = {"type": "string", "pattern": "^[0-9a-f]{40}$|^[0-9a-f]{64}$"}
 _DIGEST = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+# Captured author text is bounded in UTF-8 bytes before any of it reaches a model assignment.
+HISTORICAL_CONTEXT_MAX_BYTES = {"title": 512, "body": 8192, "context": 65536}
 IMMUTABLE_REVIEW_INPUT_SCHEMA = strict_object({
     "schema_version": {"const": 1},
     "provenance": strict_object({
         "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", "maxLength": 256},
         "pr_number": {"type": "integer", "minimum": 1},
         **{key: _SHA for key in ("head_sha", "requested_base_sha", "comparison_base_sha")},
-        "title": {"type": "string", "maxLength": 512},
-        "body": {"type": "string", "maxLength": 8192},
-        "context": {"type": "string", "maxLength": 65536},
+        **{key: {"type": "string", "maxLength": limit} for key, limit in HISTORICAL_CONTEXT_MAX_BYTES.items()},
     }),
     "materialization": strict_object({
         "kind": {"enum": ["exact", "synthetic"]},
@@ -51,7 +51,7 @@ def validate_immutable_input(value: dict[str, Any]) -> None:
         raise ValueError("immutable repository identity is malformed")
     if type(original["pr_number"]) is not int:
         raise ValueError("immutable PR number must be an exact positive integer")
-    if any(len(original[key].encode()) > limit for key, limit in (("title", 512), ("body", 8192), ("context", 65536))):
+    if any(len(original[key].encode()) > limit for key, limit in HISTORICAL_CONTEXT_MAX_BYTES.items()):
         raise ValueError("immutable historical context exceeds its UTF-8 bound")
     if local["kind"] == "exact":
         if any(original[key] != local[key] for key in ("head_sha", "requested_base_sha", "comparison_base_sha")):

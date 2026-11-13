@@ -33,6 +33,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [Codex host tools](docs/runtime.md#codex-host-tools) for these and the versions
   exercised. `uvicorn` is now a direct dependency
   ([#1646](https://github.com/existential-birds/daydream/issues/1646)).
+- Committed review (`run_committed_review`) no longer ignores
+  `RunConfig.frozen_author_description` on a request without hosted policy, so an embedder
+  that already sets the field for the default reviewer now supplies it on this route too.
+  The reviewer receives non-blank text as captured untrusted context
+  (`historical_context`), which the sealed result's `settings` record. Unlike the default
+  reviewer's intent step, it is context with no authority: nothing gives a stated intent
+  precedence over a finding. A description bound to a `head_sha` other than the analyzed
+  head is refused, and so is one whose encoded size (JSON-escaped twice, as a native
+  argument carries it) exceeds 65536 UTF-8 bytes; both refusals precede any model work,
+  and the default reviewer applies no size bound. An accepted description beside a large
+  catalog and many challenge claims can still exceed a platform's single-argument size on
+  Claude or Codex, and that assignment fails to start with the adapter's own error.
+  Assignment JSON now escapes DEL, U+0085, U+2028 and U+2029, and quoted text that repeats
+  the host's search guidance no longer displaces the host's own copy. See
+  [committed review](docs/runtime.md#committed-review-requestresult)
+  ([#1641](https://github.com/existential-birds/daydream/issues/1641)).
 - `--trace-to local` (or `DAYDREAM_TRACE_TO=local`) records a run's spans as OTLP/JSON
   lines in `otel-trace.jsonl` in its private run directory, with no network or credentials,
   alone or beside remote destinations. Like all tracing it is off by default and follows

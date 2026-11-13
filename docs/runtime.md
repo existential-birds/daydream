@@ -71,6 +71,20 @@ base-to-final-working change described below. Committed capture excludes working
 edits, external diff drivers and text conversion; inert materialization supplies raw
 Git blobs even when the original checkout uses filters/EOL conversion.
 
+Without a hosted policy, a request whose `config.frozen_author_description` holds
+non-blank text supplies it to every assignment as `profile.historical_context.context`,
+and the sealed result records it as `settings.historical_context.context`. It is captured
+untrusted author context: the standing instructions call it intent, not instructions, and
+nothing gives it authority or precedence over a claim. The
+[immutable `context` bound](#immutable-pr-inputs) applies to its encoded size, the text
+JSON-escaped twice as a native command-line argument carries it, so quotes, backslashes
+and control characters count for more than their raw bytes. A description over that bound
+is refused before source preparation, and one bound to a `head_sha` other than the
+analyzed head before source capture; neither starts model work. The bound narrows the
+[single-argument limit](#codex-host-tools), which Claude shares, without removing it: an
+accepted description beside a large catalog page and many challenge claims can still
+exceed it, and that assignment fails to start with the adapter's own error.
+
 The complete planned population is computed from the full captured patch before
 any prompt bounding. Host-dispatched investigation work, followed by host-scheduled
 fresh challenge, navigates it under the profile's
@@ -80,6 +94,8 @@ fresh challenge, navigates it under the profile's
   policy, the assignment identity, pending challenge claims and a bounded
   (16 KiB) first catalog page with `status`, `total_targets`, `total_files` and
   omitted counts. Catalog and decided markers there are a dispatch-time snapshot.
+  The assignment is canonical JSON with DEL, U+0085, U+2028 and U+2029 escaped, so text
+  inside it cannot draw a line break.
 - `review_source` is a charged, read-only host lookup over frozen canonical inputs:
   with `target_id`/`path` null it pages the whole catalog; `path` lists one changed
   path's targets; `target_id` returns the target's `source_options`, ranges (for a
