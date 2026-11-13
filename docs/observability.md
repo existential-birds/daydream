@@ -124,6 +124,16 @@ assignment instructions are recorded as supplied system instructions. A
 terminal model usage with `preflight: unavailable`; absent values stay absent. See
 [Claude host tools](runtime.md#claude-host-tools).
 
+## Codex host-tool lifecycle evidence
+
+Codex host-tool attempts add the same host facts to the Codex lifecycle record:
+authority closure, native settlement, cleanup (the loopback server stopped after the
+process was reaped) and host call/rejection counts, on every exit path. Host calls keep
+their bare tool names in the trajectory, as Codex reports them; a rejected call is a
+failed tool result, and the request event carries the assignment instructions as its
+system prompt. No native capacity diagnostic exists. See
+[Codex host tools](runtime.md#codex-host-tools).
+
 ## Committed-review evidence
 
 [Committed reviews](runtime.md#committed-review-requestresult) record each

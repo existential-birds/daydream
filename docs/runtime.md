@@ -64,7 +64,7 @@ because a failed replacement may preserve an older complete artifact.
 ## Committed-review request/result
 
 `daydream.committed_review.run_committed_review(CommittedReviewRequest(source, base))`
-reviews a captured committed diff through a native host-tool backend, Pi or Claude
+reviews a captured committed diff through a native host-tool backend, Pi, Claude or Codex
 ([capabilities](extensions.md#invocation-scoped-host-tools)); discovery and challenge
 backends without host tools are refused before source preparation. `local=True` selects the net
 base-to-final-working change described below. Committed capture excludes working-tree
@@ -146,7 +146,8 @@ configuration context; stock read/search tools, model-visible cwd and AGENTS con
 use captured source. Daydream forwards explicit phase/environment overrides and
 rejects drift in opaque configuration identities, while credentials remain live.
 Claude's SDK resolves its own authentication and user settings live; its opaque identity
-covers only the selected model, effort and pinned SDK.
+covers only the selected model, effort and pinned SDK. Codex likewise keeps its own
+authentication and configuration live; its identity covers the selected model and effort.
 Profile discovery/arbitration strategies cannot disable host obligations.
 
 The run's artifact session stages the report then atomically writes the
@@ -594,7 +595,9 @@ correctable `capacity_protected` without charging or closing authority; a bounde
 number of denials then fails closed. `capacity()` reports both counts; the ledger
 observes denied starts without charging them. Pi and Claude deny prospectively at admission,
 so a denied start is still observed and reported as [overshoot](observability.md#committed-review-evidence)
-that never reduces later reserves. Codex and Osprey serve no host tools and only observe starts.
+that never reduces later reserves. Codex denies its host calls the same way, but the tools
+it runs itself have already run when they are observed
+([Codex host tools](#codex-host-tools)). Osprey serves no host tools and only observes starts.
 
 A binding may also declare charged nonterminal host tools (`HostTool`). Pi registers
 them in the existing extension; `/admit` charges each start, and `/call` serves
@@ -660,6 +663,92 @@ assignment's system instructions become Claude's system prompt.
 - Capacity: no output limit is available before work, so no capacity preflight runs.
   The terminal context window and output limit are recorded, never estimated
   ([evidence](observability.md#claude-host-tool-lifecycle-evidence)).
+
+### Codex host tools
+
+Codex serves the same binding through the native `codex exec --experimental-json`
+command. Each attempt gets a fresh MCP server named `daydream` on loopback (streamable
+HTTP with JSON responses, `POST` only) offering `review_source`, `review_admit` and
+`structured_output` at their exact bound schemas. The adapter registers it with additive
+`-c` overrides on that one command; Daydream writes nothing to the Codex home and no
+credential file. The native `--output-schema` is not used: the accepted host submission
+is the only result. Finalization, continuation, agents and writable invocations are
+refused before any process or server starts, and the disposable read-only checkout is kept.
+
+- Registration: the server URL, a bearer token read from the child environment,
+  `required=true`, `default_tools_approval_mode="approve"` for this server only (`codex
+  exec` otherwise refuses its calls), and the assignment's instructions as
+  `developer_instructions`, encoded as an exact TOML string. That replaces the user's own
+  developer instructions for the invocation; nothing is persisted. The user's other MCP
+  servers keep their own configuration and approval policy. A user configuration that
+  defines its own `mcp_servers.daydream` entry is merged with these overrides and can
+  alter the invocation-local server: `enabled = false` and a stdio server of that name
+  fail before model work, but a tool filter does not, and model work then starts without
+  the host tools.
+- Instruction size: the instructions travel in one command-line argument, whose size the
+  platform bounds (Linux allows 131072 bytes, counted after TOML escaping). An assignment
+  over it cannot start: the adapter reports that the review instructions exceed the
+  platform's single-argument size and the work stays unfinished. A challenge embeds
+  every unresolved claim, so one whose claims exceed the bound cannot complete on Codex.
+- Secret: a per-attempt token travels only in the child environment, never in argv, a
+  prompt or request evidence, and it authorizes nothing once the attempt ends. The
+  variable is blanked inside model shell commands. Codex 0.139.0 and 0.153.4 also write
+  the session environment to a shell-snapshot file under the Codex home that a model
+  shell command can read, so on those versions the model can obtain the secret, and it
+  can then reach the provider as tool output and Codex's own session files; 0.163.0 and
+  0.169.0 do not expose it. The impact is bounded: the token serves one attempt's three
+  host tools, every call is charged and validated by the same binding, and the sandboxed
+  shell could not open a loopback connection on those two versions. A process of the same
+  user can also read the Codex process environment while it runs.
+- Proxies: loopback is appended to `NO_PROXY` and `no_proxy` so no proxy receives the
+  callback. Each name keeps the user's exemptions, taken from whichever name carries them.
+- Readiness: Codex initializes a required server before any model request and exits
+  non-zero when it cannot, which surfaces as its process failure. The host also requires
+  that this exact server served `tools/list` before the first turn starts, else
+  `native_readiness`. Codex exposes no view of the schema it registered, so there is
+  nothing to compare before model work.
+- Schemas: Codex removes `maxLength`, `minLength`, `pattern`, `minimum`, `maximum`,
+  `maxItems` and `uniqueItems` from the schema it shows the model; 0.139.0 also removes
+  `minItems`, which the later versions keep. It passes object arguments through without
+  validating them, so the host enforces the full bound schema on every such call and
+  explains each rejection. Codex itself rejects non-object arguments (see Failure) and
+  answers unparseable ones without reporting a tool call.
+- Accounting: Codex has no hook before a tool runs. A host call is charged by the MCP
+  handler under a host-assigned identity and served synchronously, so it can be denied
+  before any effect. Shell commands, patches and other servers' MCP calls cannot: each is
+  counted once when Codex reports it and has already run. They are charged against the
+  tool allowance before and after acceptance, and the first one past the allowance stops
+  the invocation. With a protected submission the last start is reserved, so
+  Codex-owned starts that would take it are not charged: they run, are recorded as
+  denied starts and overshoot, and stop the invocation only at the shared denial bound.
+  Host calls refused after acceptance are observed, never charged, and are bounded only
+  by the deadline. Other Codex item types are not counted.
+- Terminal rule: acceptance closes authority at once; a later host call is refused
+  without charge or failure. Codex may still generate output and run its own tools before
+  it stops, so there is no sole-terminal-call rule. A Codex-owned start past the
+  allowance after acceptance stops the invocation with the submission accepted but not
+  settled and the tool-budget reason.
+- Failure: a call the host rejects returns to the model as that call's failed result and
+  can be corrected in the same conversation. When Codex fails a host call itself before
+  acceptance (a refused approval, non-object arguments), the adapter stops the
+  invocation and reports Codex's own error text; it does not judge whether the model
+  could have corrected it. After acceptance such a failure changes
+  nothing. A host fatal stops the process.
+- Settlement: only the completed latest turn, stdout EOF, an observed zero exit and
+  cleanup settle an accepted submission, and the result is read at that point
+  ([lifecycle evidence](observability.md#codex-lifecycle-evidence)). A later native
+  failure keeps the admission and is not retried; Codex reports usage only with a
+  completed turn. Authority closes before the process is torn down, and the server is
+  released after it.
+- Not offered: resuming a native conversation with host tools, a capacity preflight, or
+  suppression of Codex's own session history, which it writes under its home as for
+  every run.
+
+Exercised offline with a scripted local provider and no login, on Linux, against Codex
+CLI 0.139.0, 0.153.4, 0.163.0 and 0.169.0. On 0.139.0 a tool result reaches the model as
+one JSON-encoded content array, so captured bytes are JSON-escaped there; later versions
+pass each block as its own text. A real provider and model, both authentication modes
+and macOS are not yet exercised.
 
 ## Validation and repair
 

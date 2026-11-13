@@ -53,6 +53,8 @@ assert not any(name == "daydream" or name.startswith("daydream.") for name in sy
 # Ordinary Pi runs need no host admission endpoint; only the selected adapter may load an SDK.
 sys.modules["daydream.host_tools_server"] = None
 sys.modules["claude_agent_sdk"] = None
+# Codex serves host tools over MCP only for an invocation that carries them.
+sys.modules["mcp"] = sys.modules["uvicorn"] = None
 ADAPTERS = {f"daydream.backends.{name}" for name in ("claude", "codex", "pi", "osprey")}
 
 def loaded():
@@ -103,7 +105,7 @@ async def run_pi():
 asyncio.run(run_pi())
 assert sys.modules["daydream.host_tools_server"] is None
 
-del sys.modules["claude_agent_sdk"]
+del sys.modules["claude_agent_sdk"], sys.modules["mcp"], sys.modules["uvicorn"]
 assert type(_resolve_backend(RunConfig(target=str(target)), "review")).__name__ == "ClaudeBackend"
 assert "claude_agent_sdk" in sys.modules
 """

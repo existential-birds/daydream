@@ -190,6 +190,13 @@ and the relevant contracts below.
   ([Claude host tools](docs/runtime.md#claude-host-tools)).
   Background Bash cannot report after the host stops consuming the completed turn.
   Keep the SDK pin at least `0.2.111` for cancellation-safe subprocess teardown.
+- Codex host tools change only an invocation that carries a binding: additive `-c`
+  overrides and child environment, never the Codex home. Keep the loopback server
+  required, authenticated and approved for its own tools only, its secret out of argv and
+  prompts and blanked in the shell environment, and the user's proxy exemptions intact.
+  On Codex 0.139.0 and 0.153.4 a model shell command can still read the secret from
+  Codex's shell-snapshot file. Codex-owned tools cannot be denied before they run; keep
+  charging them after acceptance ([Codex host tools](docs/runtime.md#codex-host-tools)).
 - No turn limits; bound invocations with the host ledger's absolute deadline and tool
   limit ([budget ledger](docs/runtime.md#budget-ledger)). Read defaults from
   `config.py` and `retry_policy_from_environment` in `backends/__init__.py`.

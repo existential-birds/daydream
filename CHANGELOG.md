@@ -18,6 +18,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [Claude host tools](docs/runtime.md#claude-host-tools). Hosted and immutable inputs stay
   Pi-only. `mcp` is now a direct dependency
   ([#1647](https://github.com/existential-birds/daydream/issues/1647)).
+- Committed review (`run_committed_review`) now also runs on native Codex: select
+  `RunConfig(backend="codex")`. For these invocations the adapter serves `review_source`,
+  `review_admit` and the terminal `structured_output` from a fresh MCP server on loopback,
+  bound to the same host authority and registered only through additive `-c` overrides
+  on `codex exec`, so a rejected submission is corrected in the same conversation.
+  Daydream writes nothing to the Codex home. `daydream --backend codex` and every other
+  Codex invocation keep their command line and environment; their one change is the
+  failed-tool-result fix listed under Fixed. Codex shows the model a schema without most
+  length, range and pattern limits, replaces the user's developer instructions for the
+  invocation, cannot deny its own tools before they run, cannot start an assignment whose
+  instructions exceed the platform's single-argument size, and on 0.139.0 and 0.153.4
+  lets a model shell command read the per-attempt callback secret; see
+  [Codex host tools](docs/runtime.md#codex-host-tools) for these and the versions
+  exercised. `uvicorn` is now a direct dependency
+  ([#1646](https://github.com/existential-birds/daydream/issues/1646)).
 - `--trace-to local` (or `DAYDREAM_TRACE_TO=local`) records a run's spans as OTLP/JSON
   lines in `otel-trace.jsonl` in its private run directory, with no network or credentials,
   alone or beside remote destinations. Like all tracing it is off by default and follows
@@ -275,6 +290,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A Codex MCP tool call whose server marked the result as an error is now recorded as a
+  failed tool result. Codex reports such a result only through a `failed` status, which
+  was recorded as a success. This applies to every Codex invocation, including
+  `daydream --backend codex`, and changes the recorded tool-result evidence for such calls
+  ([#1646](https://github.com/existential-birds/daydream/issues/1646)).
 - A retry after a retryable provider failure refunds the failed attempt's tool calls,
   so a stage whose stream drops late can still finish within its original allowance.
   Before, the retry restarted from scratch on the already spent budget and usually

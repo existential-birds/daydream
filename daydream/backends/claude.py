@@ -803,11 +803,8 @@ def _host_read_only_guard(host_tools: frozenset[str]) -> HookCallback:
 
 
 def _host_tool_result(value: dict[str, Any]) -> mcp_types.CallToolResult:
-    """Host metadata as JSON; frozen captured bytes stay their own unescaped text block."""
-    content = value.pop("content", None)
-    blocks = [json.dumps(value, ensure_ascii=False, separators=(",", ":")),
-              *([content] if isinstance(content, str) else [])]
-    return mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=text) for text in blocks])
+    return mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=text)
+                                             for text in HostToolEndpoint.result_blocks(value)])
 
 
 class _ClaudeHostEndpoint(HostToolEndpoint):
@@ -824,7 +821,7 @@ class _ClaudeHostEndpoint(HostToolEndpoint):
         self._listed = False
         self._sessions = 0
         tools = [mcp_types.Tool.model_validate({
-            "name": name, "description": self._description(name), "inputSchema": schema, "_meta": _HOST_TOOL_META,
+            "name": name, "description": self.description(name), "inputSchema": schema, "_meta": _HOST_TOOL_META,
         }) for name, schema in self.schemas().items()]
 
         @asynccontextmanager
@@ -846,15 +843,6 @@ class _ClaudeHostEndpoint(HostToolEndpoint):
         self.server: McpServer[Any, Any] = McpServer(_HOST_SERVER, lifespan=serving)
         self.server.request_handlers[mcp_types.ListToolsRequest] = list_tools
         self.server.request_handlers[mcp_types.CallToolRequest] = call_tool
-
-    def _description(self, name: str) -> str:
-        tool = self.binding.host_tools.get(name)
-        if tool is None:
-            return "Submit the final result. Call this tool alone as your final action."
-        if tool.mutating:
-            return ("Charged host admission of one bounded batch without ending the assignment; "
-                    "see the system instructions.")
-        return "Charged read-only host lookup; see the system instructions for its arguments and paging."
 
     async def confirm_ready(self, client: ClaudeSDKClient) -> None:
         """Before any provider request, require this server's tools/list and its connected registration."""

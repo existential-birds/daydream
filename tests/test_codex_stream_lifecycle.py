@@ -1,20 +1,33 @@
 """Synthetic public JSONL through real Codex executables and production transports."""
 
 import asyncio
+import errno
 import json
 import os
+import socket
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 import pytest
 
 from daydream.agent import run_agent
-from daydream.backends import AgentEvent, BackendExecutionInput, CostEvent, MetricsEvent, ResultEvent, TextEvent
+from daydream.backends import (
+    AgentEvent,
+    BackendExecutionInput,
+    CostEvent,
+    MetricsEvent,
+    RequestEvent,
+    ResultEvent,
+    TextEvent,
+)
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.codex import CodexBackend, CodexError
 from daydream.backends.lifecycle import BackendLifecycleCollector
+from daydream.host_tools import HostToolBinding, HostToolFatal
+from daydream.review_budget import BudgetLedger
 from daydream.trajectory import DaydreamPhase
 from tests.harness.codex_lifecycle_cli import CodexLifecycleCli, LifecycleMode, install_codex_lifecycle_cli
 from tests.harness.codex_replay import make_mock_process
@@ -139,6 +152,10 @@ async def test_codex_process_outcomes_require_completion_and_zero_exit(
 
     A completed public turn followed by a nonzero exit is a process failure with no result,
     and a real silent child cannot turn its initial commentary into a completed result.
+    A submission the host accepted over MCP survives that exit unsettled, a callback after the
+    attempt was revoked changes nothing, and Codex-owned starts stay bounded after acceptance.
+    Unlisted host tools, a host call Codex failed itself, a Codex-owned start past the allowance
+    and instructions too large to pass stop the invocation with what happened.
     """
     completed = [json.dumps(row) for row in (
         {"type": "thread.started", "thread_id": "exit-check"}, {"type": "turn.started"},
@@ -167,6 +184,88 @@ async def test_codex_process_outcomes_require_completion_and_zero_exit(
     assert any(isinstance(event, TextEvent) and "initial commentary" in event.text for event in seen)
     for observation in fixture.observations():
         await wait_for_process_group_gone(observation["pid"], timeout_s=5)
+
+    def binding(limit: int) -> HostToolBinding:
+        ledger = BudgetLedger("host", deadline=asyncio.get_running_loop().time() + 30, limit=limit, start_floor=1)
+        return HostToolBinding(budget=ledger, accept=lambda value: {"final": value})
+
+    # Codex reads the instructions as a TOML string; every character must survive that reading.
+    instructions = 'policy "quoted" back\\slash\ttab\r\nline \x01\x7f \u00e9 \U0001f600 \'\'\' # ${HOME}'
+    monkeypatch.delenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S")
+    environment = dict(os.environ)
+    outcomes = {}
+    rows: tuple[tuple[str, LifecycleMode, str, int], ...] = (
+        ("settled", "healthy", '{"ok": true}', 4), ("failed exit", "nonzero_exit", '{"ok": true}', 4),
+        ("revoked", "healthy", '{"ok": true}', 4), ("overrun", "healthy", '{"ok": true, "shells": 2}', 2))
+    for name, mode, prompt, limit in rows:
+        served = install_codex_lifecycle_cli(tmp_path / mode / name, mode=mode)
+        monkeypatch.setenv("PATH", f"{served.bin_dir}{os.pathsep}{environment['PATH']}")
+        bound, events, stop = binding(limit), [], None
+        async with asyncio.timeout(15):
+            try:
+                async for event in CodexBackend(model="fixture-model").execute(
+                    tmp_path, prompt, {"type": "object"}, read_only=True,
+                    review_instructions=instructions, host_tools=bound,
+                ):
+                    events.append(event)
+                    if name == "revoked" and isinstance(event, RequestEvent):
+                        bound.close_attempt()  # as a consumer that stops reading does
+            except (CodexError, HostToolFatal) as exc:
+                stop = getattr(exc, "code", None) or getattr(exc, "category", None)
+        (observation,) = served.observations()
+        await wait_for_process_group_gone(observation["pid"], timeout_s=5)
+        # The request carries exactly the instructions, the child decoded exactly them, the host
+        # environment kept neither the secret nor a changed exemption, and the endpoint is gone.
+        assert [event.system_prompt for event in events if isinstance(event, RequestEvent)] == [instructions]
+        assert observation["host"]["instructions"] == instructions
+        monkeypatch.setenv("PATH", environment["PATH"])
+        assert dict(os.environ) == environment
+        with pytest.raises(ConnectionRefusedError):
+            socket.create_connection(
+                ("127.0.0.1", urlsplit(observation["host"]["overrides"]["mcp_servers.daydream.url"]).port))
+        outcomes[name] = (bound.accepted_result, bound.native_settled, bound.cleanup_complete, bound.closed, stop,
+                          [event.structured_output for event in events if isinstance(event, ResultEvent)],
+                          (bound.budget.charged, bound.budget.observed))
+    accepted = {"final": {"ok": True}}
+    assert outcomes == {
+        # The accepted submission, not the turn's native result field, is the settled result.
+        "settled": (accepted, True, True, True, None, [accepted], (1, 1)),
+        # The failed exit keeps its accepted submission unsettled.
+        "failed exit": (accepted, False, True, True, "PROCESS_EXIT", [], (1, 1)),
+        # A callback after the attempt was revoked changes nothing: no acceptance, no failure, no
+        # result, and the binding may open another attempt.
+        "revoked": (None, False, True, False, None, [None], (0, 0)),
+        # Codex-owned starts after acceptance stay charged; one past the allowance stops the invocation.
+        "overrun": ({"final": {"ok": True, "shells": 2}}, False, True, True, "capacity_exhausted", [], (2, 3)),
+    }
+    native_failure = {"type": "item.completed", "item": {
+        "id": "item_1", "type": "mcp_tool_call", "server": "daydream", "tool": "structured_output", "arguments": {},
+        "result": None, "error": {"message": "tool call requires approval"}, "status": "failed"}}
+    shell = {"type": "item.started", "item": {"type": "command_execution", "id": "shell", "command": "ls"}}
+    patched = {"type": "item.completed", "item": {"type": "file_change", "id": "patch", "file_path": "a.py"}}
+    stops: tuple[tuple[list[dict[str, Any]] | OSError, str | None, str], ...] = (
+        # Codex's own error text is reported as what happened, and the binding stays retryable.
+        ([native_failure], None, "Codex failed a host tool call itself before acceptance.*requires approval"),
+        ([{"type": "turn.started"}], "native_readiness", "did not list"),
+        # Codex-owned starts cannot be denied, so one past the allowance stops the invocation.
+        ([shell, patched], "capacity_exhausted", "allocation exhausted"),
+        # The instructions travel in one argument, whose size the platform bounds.
+        (OSError(errno.E2BIG, "Argument list too long"), None, "exceed this platform's single-argument size"),
+    )
+    for lines, code, reason in stops:
+        bound = binding(1)
+        spawn = {"side_effect": lines} if isinstance(lines, OSError) else {"return_value": make_mock_process(
+            [json.dumps(row) for row in ({"type": "thread.started", "thread_id": "t"}, *lines)])}
+        with patch("daydream.backends._transport.asyncio.create_subprocess_exec", **spawn):
+            with pytest.raises((CodexError, HostToolFatal), match=reason) as stopped:
+                async for _ in CodexBackend(model="fixture-model").execute(
+                    tmp_path, "stopped", {"type": "object"}, read_only=True, review_instructions="policy",
+                    host_tools=bound,
+                ):
+                    pass
+        assert (getattr(stopped.value, "code", None), bound.fatal_error) == (
+            code, stopped.value if code else None)
+        assert bound.closed is (code is not None) and bound.cleanup_complete and not bound.possibly_accepted
 
 
 async def test_codex_cleanup_expiry_preserves_primary_drain_error_and_recorded_evidence(

@@ -1,7 +1,7 @@
 """Synchronous admission for one live native review assignment.
 
-The native agent (Pi, or Claude through the Agent SDK) owns ordinary reads and
-tool execution. This binding owns one domain callback and charges the
+The native agent (Pi, Claude through the Agent SDK, or the Codex CLI) owns ordinary
+reads and tool execution. This binding owns one domain callback and charges the
 invocation's budget ledger (its absolute deadline and tool-call count) across
 short-lived per-attempt endpoints. Acceptance runs on the event-loop thread
 without an await, so authority closure and state installation have an
@@ -639,6 +639,23 @@ class HostToolEndpoint:
     def schemas(self) -> dict[str, Any]:
         """Exact model-visible schemas: nonterminal host tools, then the terminal submission."""
         return {**self.host_schemas(), NATIVE_SUBMIT: self.binding.schema}
+
+    def description(self, name: str) -> str:
+        """Model-facing summary of one served tool; the instructions carry its contract."""
+        tool = self.binding.host_tools.get(name)
+        if tool is None:
+            return "Submit the final result. Call this tool alone as your final action."
+        if tool.mutating:
+            return ("Charged host admission of one bounded batch without ending the assignment; "
+                    "see the system instructions.")
+        return "Charged read-only host lookup; see the system instructions for its arguments and paging."
+
+    @staticmethod
+    def result_blocks(value: dict[str, Any]) -> list[str]:
+        """Host metadata as JSON; frozen captured bytes stay their own unescaped text block."""
+        content = value.pop("content", None)
+        return [json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+                *([content] if isinstance(content, str) else [])]
 
     def current(self) -> bool:
         """Whether a callback may reach the binding; revoked, unfailed and unaccepted authority changes nothing."""

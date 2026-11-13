@@ -39,6 +39,7 @@ from daydream.backends.codex import (
     CodexError,
 )
 from daydream.extensions import Registry, ToolDecision, set_registry
+from daydream.host_tools import HostToolBinding
 from daydream.phases.schemas import review_stage_schema, review_stage_submission_schema
 from daydream.retry_policy import FailureClass, classify_failure
 from daydream.review_budget import BudgetLedger, ReviewLimits
@@ -453,10 +454,23 @@ async def test_codex_read_only_resume_is_refused(linked_worktree: tuple[Path, Pa
     backend = CodexBackend(model="fixture-model")
     token = ContinuationToken(backend="codex", data={"thread_id": "th_prev"})
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as spawn:
         with pytest.raises(CodexError, match="cannot be resumed"):
             async for _ in backend.execute(source, "Continue", continuation=token, read_only=True):
                 pass
+        # Host tools relax none of this: anything but a fresh read-only invocation starts no attempt,
+        # and their instructions are never dropped silently without them.
+        binding = HostToolBinding(deadline=asyncio.get_running_loop().time() + 30, accept=lambda value: value)
+        unsupported: tuple[dict[str, Any], ...] = (
+            {"host_tools": binding}, {"host_tools": binding, "read_only": True, "finalization": True},
+            {"host_tools": binding, "read_only": True, "continuation": token},
+            {"host_tools": binding, "read_only": True, "agents": {"explorer": {}}},
+            {"host_tools": binding, "read_only": True, "output_schema": None}, {"review_instructions": "policy"})
+        for arguments in unsupported:
+            with pytest.raises(ValueError, match="fresh read-only invocation|only with host tools"):
+                async for _ in backend.execute(source, "Review", **{"output_schema": {"type": "object"}, **arguments}):
+                    pass
+    assert spawn.call_count == 0 and binding.schema is None
 
 
 def _write_model_prices(path: Path, *, model: str, input_price: float, output_price: float) -> Path:
@@ -906,6 +920,13 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
                 "error": "permission denied",
             },
         },
+        {"type": "item.started", "item": {"type": "mcp_tool_call", "id": "refused", "tool": "Write", "arguments": {}}},
+        {  # The CLI reports a result its MCP server marked as an error only through the status.
+            "type": "item.completed",
+            "item": {"type": "mcp_tool_call", "id": "refused", "server": "user", "tool": "Write", "error": None,
+                     "status": "failed", "result": {"content": [{"type": "text", "text": "refused"}],
+                                                    "structured_content": None}},
+        },
         {
             "type": "item.completed",
             "item": {
@@ -971,6 +992,7 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
         ("patch", "patch"),
         ("read", "Read"),
         ("write", "Write"),
+        ("refused", "Write"),
     ]
     results = {event.id: event for event in events if isinstance(event, ToolResultEvent)}
     assert results["shell"].output == "file.py\ntest.py" and not results["shell"].is_error
@@ -978,6 +1000,7 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
     assert patch_start.input == {"file": "main.py", "action": "modified"}
     assert results["patch"].output == "modified: main.py" and not results["patch"].is_error
     assert results["read"].output == "file contents" and results["write"].is_error
+    assert results["refused"].is_error and results["refused"].status == "failed"
     terminal = [event for event in events if isinstance(event, ResultEvent)]
     assert len(terminal) == 1 and terminal[0].structured_output == {"issues": []}
     assert (terminal[0].session_id, terminal[0].model_name, terminal[0].provider_name) == (
@@ -1005,7 +1028,7 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
     assert [json.loads(step["message"]) for step in steps[:-1]] == [json.loads(text) for text in expected_text[:-1]]
     assert steps[-1]["message"] == "Verified"
     assert steps[0]["reasoning_content"] == "I will inspect"
-    assert [call["tool_call_id"] for call in steps[0]["tool_calls"]] == ["shell", "patch", "read", "write"]
+    assert [call["tool_call_id"] for call in steps[0]["tool_calls"]] == ["shell", "patch", "read", "write", "refused"]
     assert {result["source_call_id"] for result in steps[0]["observation"]["results"]} == set(results)
     assert process.returncode == 0 and backend._transports == []
     process.wait.assert_awaited()
