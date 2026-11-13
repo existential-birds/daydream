@@ -73,7 +73,7 @@ Git blobs even when the original checkout uses filters/EOL conversion.
 
 The complete planned population is computed from the full captured patch before
 any prompt bounding. Host-dispatched investigation work, followed by host-scheduled
-fresh challenge, navigates it under the request's
+fresh challenge, navigates it under the profile's
 [assignment policy](#assignment-policy-and-work):
 
 - System instructions, which native compaction never summarizes, carry the stable
@@ -161,14 +161,18 @@ and external delivery remain separate integration work.
 
 ### Assignment policy and work
 
-`CommittedReviewRequest.assignment_policy="broad"` (the default) dispatches one
+The run's resolved review profile selects the policy with `[pipeline] assignment_policy`,
+whichever source supplied the profile. `"broad"` (the default) dispatches one
 discovery work over every target. `"adaptive"` partitions the inventory with
 `StageInputFactory.assignment_batches` (whole parts, at most four files within the
 transport's assignment byte allowance, inventory order) into concurrent local discovery work under
 `anyio.CapacityLimiter(effective_fanout_concurrency(10, backend))`, each in a forked
 trajectory. It decomposes only when every batch keeps a usable two-start allocation
-after the cross-assignment floor; otherwise it runs one broad assignment. There is no
-numeric threshold, CLI route (#1679) or default change (#1641). `settings.assignment_policy`
+after the cross-assignment floor; otherwise it runs one broad assignment. Any other value
+fails the profile, and committed review refuses a profile built in code with one before
+dispatching work. No CLI route reaches committed review until #1641. Other review routes do not
+act on the key, but it still changes the profile digest, so their cached reviews miss.
+There is no numeric threshold or default change (#1641). `settings.assignment_policy`
 records `name`, `decomposed`, `planned_assignments` and `cross_assignment`
 (`required` or `not_applicable`).
 
@@ -472,8 +476,8 @@ authorize a successful candidate or delivery.
 This is an additive minor feature under the current `0.y.z` policy. Immutable
 request 1, committed result 2 and findings 3 must be consumed together; ordinary
 result 1/findings 2 retain their existing contracts. The bounded
-Harbor adapter consumes this API; ordinary CLI/bot migration (#1679), broader
-Harbor/native migration (#1639), and supported-default cutover (#1641) remain
+Harbor adapter consumes this API; broader Harbor/native migration (#1639), and
+ordinary CLI/bot migration with supported-default cutover (#1641), remain
 separately owned. This contract does not claim other-backend or large-plan parity.
 
 ## Budget ledger

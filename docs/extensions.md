@@ -160,10 +160,10 @@ batch ratio are defined in [configuration](../daydream/config.py).
 
 The [committed-review API](runtime.md#committed-review-requestresult) owns review
 independently of extension flow steps/builders. Captured local and committed subjects
-follow the [captured-source contract](runtime.md#captured-local-source). Its
-[assignment policy and work records](runtime.md#assignment-policy-and-work) are host-owned;
-profile strategy text cannot change work authority or drop host-appended assignment
-context. Broader route integration is #1679; default cutover is #1641 after #1686
+follow the [captured-source contract](runtime.md#captured-local-source). The review profile
+selects its [assignment policy](runtime.md#assignment-policy-and-work) and its work records are
+host-owned; profile strategy text cannot change work authority or drop host-appended assignment
+context. Broader route integration and default cutover are #1641 after #1686
 comparison/owner acceptance; final retirement is #1687.
 
 ### Plan-writer
