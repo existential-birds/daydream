@@ -924,7 +924,7 @@ async def _run_committed_review(
         }
     for kind, phase in [("discovery", "review"), ("challenge", "arbiter")]:
         name = _resolved_backend_name(config, phase)
-        refusal = (f"committed review {kind} requires a backend with native host tools (pi or claude); "
+        refusal = (f"committed review {kind} requires a backend with native host tools (pi, claude or codex); "
                    f"{name!r} does not serve them")
         try:
             inputs_by_kind[kind] = (hosted_input if hosted_input is not None

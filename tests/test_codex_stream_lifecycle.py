@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,8 @@ from daydream.backends import AgentEvent, BackendExecutionInput, CostEvent, Metr
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.codex import CodexBackend, CodexError
 from daydream.backends.lifecycle import BackendLifecycleCollector
+from daydream.host_tools import HostToolBinding, HostToolFatal, HostToolRejected
+from daydream.review_budget import BudgetLedger
 from daydream.trajectory import DaydreamPhase
 from tests.harness.codex_lifecycle_cli import CodexLifecycleCli, LifecycleMode, install_codex_lifecycle_cli
 from tests.harness.codex_replay import make_mock_process
@@ -139,6 +142,9 @@ async def test_codex_process_outcomes_require_completion_and_zero_exit(
 
     A completed public turn followed by a nonzero exit is a process failure with no result,
     and a real silent child cannot turn its initial commentary into a completed result.
+    A submission the host accepted over MCP survives that exit unsettled, while a clean exit
+    without acceptance settles nothing. Host tools that were not listed or that Codex failed
+    natively, and a Codex-owned start past the allowance, stop the invocation.
     """
     completed = [json.dumps(row) for row in (
         {"type": "thread.started", "thread_id": "exit-check"}, {"type": "turn.started"},
@@ -167,6 +173,61 @@ async def test_codex_process_outcomes_require_completion_and_zero_exit(
     assert any(isinstance(event, TextEvent) and "initial commentary" in event.text for event in seen)
     for observation in fixture.observations():
         await wait_for_process_group_gone(observation["pid"], timeout_s=5)
+
+    def binding(limit: int) -> HostToolBinding:
+        def accept(value: dict[str, Any]) -> dict[str, Any]:
+            if not value["ok"]:
+                raise HostToolRejected("set ok to true")
+            return {"final": value}
+
+        ledger = BudgetLedger("host", deadline=asyncio.get_running_loop().time() + 30, limit=limit, start_floor=1)
+        return HostToolBinding(budget=ledger, accept=accept)
+
+    # Codex reads the instructions as a TOML string; every character must survive that reading.
+    instructions = 'policy "quoted" back\\slash\ttab\r\nline \x01\x7f \u00e9 \U0001f600 \'\'\' # ${HOME}'
+    outcomes = {}
+    modes: tuple[tuple[LifecycleMode, str], ...] = (("nonzero_exit", '{"ok": true}'), ("healthy", '{"ok": false}'))
+    for mode, prompt in modes:
+        served = install_codex_lifecycle_cli(tmp_path / mode, mode=mode)
+        monkeypatch.setenv("PATH", f"{served.bin_dir}{os.pathsep}{os.environ['PATH']}")
+        bound, events = binding(4), []
+        async with asyncio.timeout(15):
+            with pytest.raises(CodexError, match="return code 7") if mode == "nonzero_exit" else nullcontext():
+                async for event in CodexBackend(model="fixture-model").execute(
+                    tmp_path, prompt, {"type": "object"}, read_only=True,
+                    review_instructions=instructions, host_tools=bound,
+                ):
+                    events.append(event)
+        (observation,) = served.observations()
+        assert observation["host"]["instructions"] == instructions
+        await wait_for_process_group_gone(observation["pid"], timeout_s=5)
+        outcomes[mode] = (bound.accepted_result, bound.native_settled, bound.cleanup_complete,
+                          [event.structured_output for event in events if isinstance(event, ResultEvent)])
+    # The failed exit keeps its accepted submission unsettled; the clean exit settles nothing that was
+    # not accepted, and the turn's native result field never stands in for a host acceptance.
+    assert outcomes == {"nonzero_exit": ({"final": {"ok": True}}, False, True, []),
+                        "healthy": (None, False, True, [None])}
+    native_failure = {"type": "item.completed", "item": {
+        "id": "item_1", "type": "mcp_tool_call", "server": "daydream", "tool": "structured_output", "arguments": {},
+        "result": None, "error": {"message": "tool call requires approval"}, "status": "failed"}}
+    shells = [{"type": "item.started", "item": {"type": "command_execution", "id": name, "command": "ls"}}
+              for name in ("first", "second")]
+    for rows, code, reason in (
+        ([native_failure], "native_readiness", "tool call requires approval"),
+        ([{"type": "turn.started"}], "native_readiness", "did not list"),
+        # Codex-owned starts cannot be denied, so one past the allowance stops the invocation.
+        (shells, "capacity_exhausted", "allocation exhausted"),
+    ):
+        bound = binding(1)
+        process = make_mock_process([json.dumps(row) for row in ({"type": "thread.started", "thread_id": "t"}, *rows)])
+        with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=process):
+            with pytest.raises(HostToolFatal, match=reason) as fatal:
+                async for _ in CodexBackend(model="fixture-model").execute(
+                    tmp_path, "stopped", {"type": "object"}, read_only=True, host_tools=bound,
+                ):
+                    pass
+        assert fatal.value.code == code and bound.fatal_error is fatal.value
+        assert bound.closed and bound.cleanup_complete and not bound.possibly_accepted
 
 
 async def test_codex_cleanup_expiry_preserves_primary_drain_error_and_recorded_evidence(

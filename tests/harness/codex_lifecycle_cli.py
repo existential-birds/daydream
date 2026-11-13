@@ -1,7 +1,9 @@
 """Synthetic public Codex JSONL from a real, controllable external process.
 
 Fixture observations and FIFOs stay outside the repository and are never lifecycle
-diagnostics. No native session or private rollout content is used.
+diagnostics. No native session or private rollout content is used. When its argv
+registers the invocation's ``daydream`` MCP server, the process is a real MCP client
+of that server and prints the public shapes the Codex CLI prints for those calls.
 """
 
 import asyncio
@@ -12,6 +14,9 @@ import signal
 import subprocess
 import sys
 import time
+import tomllib
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -76,11 +81,12 @@ def _emit(event: dict[str, Any]) -> None:
     print(json.dumps(event), flush=True)
 
 
-def _observe(stage: str, *, mode: str, file: str | None = None, descendant: int | None = None) -> None:
+def _observe(stage: str, *, mode: str, file: str | None = None, descendant: int | None = None,
+             host: dict[str, Any] | None = None) -> None:
     path = Path(_FIXTURE_CONFIG["root"]) / "observations" / f"{os.getpid()}.json"
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps({"pid": os.getpid(), "ppid": os.getppid(), "stage": stage, "mode": mode,
-                                   "file": file, "cwd": str(Path.cwd()), "descendant": descendant}))
+                                   "file": file, "cwd": str(Path.cwd()), "descendant": descendant, "host": host}))
     os.replace(temporary, path)
 
 
@@ -165,6 +171,108 @@ def _response(prompt: str) -> tuple[str, str | None]:
     return "Synthetic lifecycle response", None
 
 
+def _overrides() -> dict[str, Any]:
+    """``-c`` overrides as Codex reads them: TOML values, or the raw text when that does not parse."""
+    values: dict[str, Any] = {}
+    for flag, text in zip(sys.argv, sys.argv[1:]):
+        if flag == "-c":
+            key, _, raw = text.partition("=")
+            try:
+                values[key] = tomllib.loads("value = " + raw)["value"]
+            except tomllib.TOMLDecodeError:
+                values[key] = raw
+    return values
+
+
+async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None:
+    """Drive the invocation's host tools over MCP, as a scripted model would.
+
+    A committed-review assignment in the developer instructions is reviewed (lookup, two
+    Codex-owned starts, a rejected then corrected submission, a call after acceptance)
+    or challenged; otherwise the user prompt is the JSON submission.
+    """
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.types import TextContent
+
+    url = overrides["mcp_servers.daydream.url"]
+    token = os.environ[overrides["mcp_servers.daydream.bearer_token_env_var"]]
+    instructions = overrides.get("developer_instructions", "")
+
+    def status(**request: Any) -> int:
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, **request)) as response:
+                return int(response.status)
+        except urllib.error.HTTPError as exc:
+            return exc.code
+
+    # A request without the secret, then an authenticated request for a server-initiated stream.
+    refused = [status(data=b"{}", method="POST"), status(headers={"Authorization": "Bearer " + token})]
+    calls: list[list[Any]] = []
+    async with streamablehttp_client(url, headers={"Authorization": "Bearer " + token}) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            tools = sorted(tool.name for tool in (await session.list_tools()).tools)
+            _emit({"type": "thread.started", "thread_id": f"synthetic-{os.getpid()}"})
+            _emit({"type": "turn.started"})
+
+            async def call(name: str, arguments: dict[str, Any]) -> list[str]:
+                item = {"id": f"item_{len(calls)}", "type": "mcp_tool_call", "server": "daydream", "tool": name,
+                        "arguments": arguments, "result": None, "error": None, "status": "in_progress"}
+                _emit({"type": "item.started", "item": item})
+                result = await session.call_tool(name, arguments)
+                texts = [block.text for block in result.content if isinstance(block, TextContent)]
+                _emit({"type": "item.completed", "item": {
+                    **item, "status": "failed" if result.isError else "completed",
+                    "result": {"content": [{"type": "text", "text": text} for text in texts],
+                               "structured_content": None}}})
+                calls.append([name, result.isError, [text[:160] for text in texts]])
+                return texts
+
+            _, marker, assignment = instructions.partition("\nCommitted review assignment:\n")
+            if not marker:
+                await call("structured_output", json.loads(prompt))
+            elif (work := json.JSONDecoder().raw_decode(assignment)[0])["kind"] == "challenge":
+                claim = work["claims"][0]
+                await call("structured_output", {"verdicts": [{
+                    "uid": claim["uid"], "revision": claim["revision"], "verdict": "confirmed",
+                    "grounds": "The caller divides by the changed value.", "evidence_refs": []}], "claims": []})
+            else:
+                targets = work["work"]["targets"]["ids"]
+                decisions = [{"target_id": target, "status": "reviewed", "reason": "Captured change inspected.",
+                              "evidence_refs": []} for target in targets]
+                lookup = {"target_id": targets[0], "path": None, "cursor": None}
+                texts = await call("review_source", lookup)
+                option = next(item for item in json.loads(texts[0])["target"]["source_options"]
+                              if item["side"] == "new")
+                command = {"type": "command_execution", "id": "command", "command": "git diff --check"}
+                _emit({"type": "item.started", "item": {**command, "status": "in_progress"}})
+                _emit({"type": "item.completed", "item": {**command, "status": "completed",
+                                                            "aggregated_output": "", "exit_code": 0}})
+                other = {"type": "mcp_tool_call", "id": "other", "server": "user", "tool": "search", "arguments": {}}
+                _emit({"type": "item.started", "item": {**other, "status": "in_progress"}})
+                _emit({"type": "item.completed", "item": {**other, "status": "completed", "error": None,
+                                                            "result": {"content": [], "structured_content": None}}})
+                await call("structured_output", {"targets": [{**decisions[0], "target_id": "unplanned"}],
+                                                 "claims": []})
+                await call("structured_output", {"targets": decisions, "claims": [{
+                    "uid": "", "revision": 0, "source_uids": [], "title": "Zero divides the caller", "payload": {
+                        "claim": "VALUE becomes zero.", "trigger": "The caller divides by it.",
+                        "consequence": "Requests fail.", "grounds": "The captured change sets zero.",
+                        "file": option["path"], "line": 1, "evidence_refs": [
+                            {key: option[key] for key in ("source_id", "basis", "source_range")}]}}]})
+                await call("review_source", lookup)
+    _emit({"type": "item.completed", "item": {"id": "final", "type": "agent_message", "text": "Assignment complete."}})
+    # A native result field must never stand in for the host-accepted submission.
+    _emit({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}, "result": {"native": True}})
+    _observe("terminal", mode=mode, host={
+        "overrides": {key: value for key, value in overrides.items() if key != "developer_instructions"},
+        "instructions": instructions, "output_schema": "--output-schema" in sys.argv,
+        "token_exposed": any(token in text for text in (*sys.argv, prompt)),
+        "no_proxy": [os.environ.get(name) for name in ("NO_PROXY", "no_proxy")],
+        "refused": refused, "tools": tools, "calls": calls})
+
+
 def _run() -> int:
     if "--fixture-descendant" in sys.argv:
         _block("descendant_ready", mode="descendant_stdout")
@@ -172,6 +280,10 @@ def _run() -> int:
     if "--cd" in sys.argv:
         os.chdir(sys.argv[sys.argv.index("--cd") + 1])
     prompt = sys.stdin.read()
+    overrides = _overrides()
+    if "mcp_servers.daydream.url" in overrides:
+        asyncio.run(_host_tools(overrides, prompt, _FIXTURE_CONFIG["mode"]))
+        return 7 if _FIXTURE_CONFIG["mode"] == "nonzero_exit" else 0
     text, file = _response(prompt)
     mode = _FIXTURE_CONFIG["fix_modes"].get(file, _FIXTURE_CONFIG["mode"])
     if "you are the structural reviewer" in prompt.lower() and _FIXTURE_CONFIG["structure_mode"]:

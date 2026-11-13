@@ -7,12 +7,15 @@ writes the prompt to stdin, and reads JSONL events from stdout.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
+import secrets
 import shlex
 import shutil
+import socket
 import subprocess as subprocess
 import sys as sys
 import tempfile
@@ -20,7 +23,7 @@ import threading
 import uuid
 from collections import Counter
 from collections.abc import AsyncGenerator, Iterator, Mapping
-from contextlib import aclosing
+from contextlib import AsyncExitStack, aclosing, suppress
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +61,7 @@ from daydream.backends.lifecycle import (
     current_backend_lifecycle,
     lifecycle_failure_diagnostic,
 )
+from daydream.host_tools import NATIVE_SUBMIT, HostToolBinding, HostToolEndpoint, HostToolFatal, HostToolRejected
 from daydream.pricing import ModelPrice, compute_cost_from_totals, load_user_prices, resolve_prices
 from daydream.trajectory import redact_structured_text
 
@@ -70,6 +74,9 @@ _NON_JSON_EXCERPT_MAX_CHARS_PER_LINE = 256
 # justify invented tool events or invocation-wide coverage claims.
 # External contract: this literal identifies Codex CLI release/wire mode.
 _TRANSPORT_COVERAGE_CONTRACT = "codex-cli-0.153.4-json-code-mode"
+_HOST_SERVER = "daydream"
+# The child reads this attempt's callback secret from its environment, never from argv or a prompt.
+_HOST_TOKEN_ENV = "DAYDREAM_HOST_TOOLS_TOKEN"
 
 _logger = logging.getLogger(__name__)
 
@@ -513,6 +520,121 @@ def _file_change_events(
     )
 
 
+class _CodexHostEndpoint(HostToolEndpoint):
+    """One attempt's loopback MCP server for a binding, served on the host event loop.
+
+    Codex offers no hook before its tools run, so the MCP handler is both admission and
+    service for a host call: it charges the start under a host-assigned identity, then
+    serves it without an await. Rejections and host failures become tool errors the model
+    reads. ``ready`` means this exact server answered ``tools/list``.
+    """
+
+    def __init__(self, binding: HostToolBinding) -> None:
+        super().__init__(binding)
+        self.token = secrets.token_urlsafe(32)
+        self.url = ""
+        self._calls = 0
+        self._stop = asyncio.Event()
+        self._serving: asyncio.Task[None] | None = None
+
+    async def start(self) -> None:
+        # Loaded only by an invocation that carries host tools.
+        import uvicorn
+        from mcp import types
+        from mcp.server.lowlevel import Server
+        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+        tools = [types.Tool(name=name, description=self.description(name), inputSchema=schema)
+                 for name, schema in self.schemas().items()]
+
+        async def list_tools(_request: types.ListToolsRequest) -> types.ServerResult:
+            self.ready = True
+            return types.ServerResult(types.ListToolsResult(tools=tools))
+
+        async def call_tool(request: types.CallToolRequest) -> types.ServerResult:
+            failed, blocks = self._call(request.params.name, request.params.arguments or {})
+            return types.ServerResult(types.CallToolResult(
+                content=[types.TextContent(type="text", text=text) for text in blocks], isError=failed))
+
+        server: Server[Any, Any] = Server(_HOST_SERVER)
+        server.request_handlers[types.ListToolsRequest] = list_tools
+        server.request_handlers[types.CallToolRequest] = call_tool
+        manager = StreamableHTTPSessionManager(app=server, json_response=True)
+        authorization = b"Bearer " + self.token.encode()
+
+        async def app(scope: Any, receive: Any, send: Any) -> None:
+            authorized = secrets.compare_digest(dict(scope["headers"]).get(b"authorization", b""), authorization)
+            if authorized and scope["method"] == "POST":
+                await manager.handle_request(scope, receive, send)
+                return
+            # Only this attempt's JSON requests are served; the server never opens a stream of its own.
+            await send({"type": "http.response.start", "status": 405 if authorized else 403,
+                        "headers": [(b"content-length", b"0")]})
+            await send({"type": "http.response.body", "body": b""})
+
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        self.url = f"http://127.0.0.1:{listener.getsockname()[1]}/mcp"
+        # Nothing process-wide changes: no logging configuration here, and startup()/shutdown()
+        # rather than serve(), which replaces the process signal handlers.
+        config = uvicorn.Config(app, lifespan="off", ws="none", log_config=None)
+        config.load()
+        http = uvicorn.Server(config)
+        http.lifespan = config.lifespan_class(config)
+        started: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+        async def serve() -> None:
+            # The session manager's task group lives in this task, never in a suspended event generator.
+            async with manager.run():
+                await http.startup(sockets=[listener])
+                started.set_result(None)
+                await self._stop.wait()
+                await http.shutdown(sockets=[listener])
+
+        self._serving = asyncio.create_task(serve())
+        await asyncio.wait({self._serving, started}, return_when=asyncio.FIRST_COMPLETED)
+        if not started.done():
+            await self._serving  # raises the startup failure
+
+    def _call(self, name: str, arguments: dict[str, Any]) -> tuple[bool, list[str]]:
+        """Admit and serve one host call synchronously, returning its error flag and text blocks."""
+        binding = self.binding
+        self._calls += 1
+        call_id = f"codex-mcp-{self._calls}"
+        try:
+            if not self.current():
+                raise HostToolRejected("This attempt's host-tool authority is closed; the call was not served",
+                                       code="authority_closed")
+            if binding.accepted:
+                # Acceptance ended the assignment: observe overshoot without charging or failing it.
+                binding.observe_start(call_id, name)
+                raise HostToolRejected("structured_output was accepted and this assignment has ended; "
+                                       "the call was not served", code="authority_closed")
+            binding.admit(call_id, name, arguments, terminal=name == NATIVE_SUBMIT)
+            if name != NATIVE_SUBMIT:
+                return False, self.result_blocks(binding.call(call_id, name, arguments))
+            result = binding.submit(call_id, arguments)
+            # Acceptance closes authority at once: later starts become observed overshoot.
+            binding.close_authority()
+            return False, self.result_blocks(dict(result))
+        except (HostToolRejected, HostToolFatal) as exc:
+            return True, [str(exc)]
+
+    def observe_native_start(self, item_id: str, name: str) -> None:
+        """Count once a start Codex ran itself; it cannot be denied before it runs."""
+        with suppress(HostToolFatal):  # retained; the event loop stops the invocation
+            self.binding.observe_start(item_id, name)
+
+    async def close(self) -> None:
+        await super().close()
+        self._stop.set()
+        if self._serving is not None:
+            self.closed = False
+            with suppress(Exception):  # a server that failed to start already failed start()
+                await self._serving
+                self.closed = True
+
+
 class CodexBackend:
     """Backend that wraps the Codex CLI subprocess.
 
@@ -520,6 +642,7 @@ class CodexBackend:
     """
 
     supports_finalization = True
+    supports_host_tools = True
 
     # Codex operates in a disposable read-only clone of the workspace, so it
     # can safely have over-budget diffs inlined (truncated) and exploration
@@ -551,16 +674,49 @@ class CodexBackend:
         self._checkout_lock = asyncio.Lock()
         self._checkouts: dict[Path, _SharedCheckout] = {}
 
+    def bind_review_context(self, original_source: Path) -> dict[str, object]:
+        """Opaque identity of this adapter's native selection, without credentials or environment.
+
+        Codex's native authentication and user configuration stay live; only the
+        selected model and effort are identified.
+        """
+        del original_source
+        selection = json.dumps([self.model, self.reasoning_effort]).encode()
+        return {"configuration_identity": hashlib.sha256(selection).hexdigest()}
+
     async def execute(
         self, cwd: Path, prompt: str, output_schema: dict[str, Any] | None = None,
         continuation: ContinuationToken | None = None, agents: dict[str, Any] | None = None,
         read_only: bool = False, persist_session: bool = True, finalization: bool = False,
+        review_instructions: str | None = None, host_tools: HostToolBinding | None = None,
     ) -> AsyncGenerator[AgentEvent, None]:
-        """Observe the adapter delivery boundary while preserving invocation-local cleanup."""
+        """Observe the adapter delivery boundary while preserving invocation-local cleanup.
+
+        host_tools serves the binding's tools and terminal ``structured_output`` from a
+        fresh loopback MCP server for this attempt; ``review_instructions`` become Codex
+        developer instructions. Its result is the host-accepted submission, never prose.
+        """
         lifecycle = current_backend_lifecycle()
-        stream = self._execute(cwd, prompt, output_schema, continuation, agents,
-                               read_only, persist_session, finalization)
-        async with aclosing(stream):
+        async with AsyncExitStack() as attempt:
+            host: _CodexHostEndpoint | None = None
+            if host_tools is not None:
+                if finalization or continuation is not None or agents or not read_only or output_schema is None:
+                    raise ValueError("Codex host tools require a fresh read-only invocation with a terminal "
+                                     "schema, without finalization, continuation or agents")
+                host_tools.configure_schema(output_schema)
+                if lifecycle is not None:
+                    binding, collector = host_tools, lifecycle
+                    # Recorded after the attempt's endpoint closes, on every exit path.
+                    attempt.callback(lambda: collector.host_tools_closed(
+                        native_settled=binding.native_settled, cleanup_complete=binding.cleanup_complete,
+                        calls=binding.calls, rejections=binding.rejections))
+                host = await attempt.enter_async_context(host_tools.attempt(_CodexHostEndpoint))
+            elif review_instructions is not None:
+                raise ValueError("Codex review instructions are served only with host tools")
+            # The process is reaped before its endpoint's transport is released.
+            stream = await attempt.enter_async_context(aclosing(self._execute(
+                cwd, prompt, output_schema, continuation, agents, read_only, persist_session, finalization,
+                review_instructions, host)))
             async for event in stream:
                 if lifecycle is not None:
                     lifecycle.adapter_yield()
@@ -576,6 +732,8 @@ class CodexBackend:
         read_only: bool = False,
         persist_session: bool = True,
         finalization: bool = False,
+        review_instructions: str | None = None,
+        host: _CodexHostEndpoint | None = None,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Yield Codex events, rejecting unsupported agents with NotImplementedError.
 
@@ -592,6 +750,12 @@ class CodexBackend:
         disable control, so callers retain the host zero-tool guard. persist_session
         is accepted but ignored. Turn failures raise CodexError; stdout silence raises
         retryable StreamStalledError and run_agent retries with a fresh subprocess.
+
+        host registers this attempt's MCP server through additive ``-c`` overrides and
+        the child environment only. Its calls are charged by the endpoint; starts Codex
+        runs itself are counted when their public item arrives. The native output
+        schema is not used: the terminal result is the host-accepted submission, and
+        it settles only after the completed turn, observed zero exit and cleanup.
         """
         if agents:
             raise NotImplementedError(
@@ -601,7 +765,7 @@ class CodexBackend:
         sandbox_mode = "read-only" if read_only else "danger-full-access"
 
         schema_path: str | None = None
-        if output_schema:
+        if output_schema and host is None:
             schema_path = write_temp_json_schema(output_schema, prefix="daydream-schema-")
 
         thread_id: str | None = None
@@ -801,6 +965,33 @@ class CodexBackend:
                 # Rebind the prompt so no rendering of the caller's source
                 # path appears in the bytes written to the isolated subprocess.
                 prompt = _rebind_source_paths(prompt, cwd, execution_cwd)
+                if review_instructions:
+                    review_instructions = _rebind_source_paths(review_instructions, cwd, execution_cwd)
+
+            if host is not None:
+                server = f"mcp_servers.{_HOST_SERVER}"
+                overrides = [
+                    f'{server}.url="{host.url}"',
+                    f'{server}.bearer_token_env_var="{_HOST_TOKEN_ENV}"',
+                    # Without it Codex runs the model with no host tools.
+                    f"{server}.required=true",
+                    # codex exec refuses unapproved MCP calls; this approves only this server's tools.
+                    f'{server}.default_tools_approval_mode="approve"',
+                    # Model shell commands must not inherit the callback secret.
+                    f'shell_environment_policy.set.{_HOST_TOKEN_ENV}=""',
+                ]
+                if review_instructions:
+                    # A TOML basic string: JSON escaping plus DEL, which TOML forbids raw. Codex
+                    # would otherwise take the unparsed argument text as the instructions.
+                    overrides.append("developer_instructions="
+                                     + json.dumps(review_instructions, ensure_ascii=False).replace("\x7f", "\\u007f"))
+                for override in overrides:
+                    args.extend(["-c", override])
+                child_env = dict(child_env) if child_env is not None else os.environ.copy()
+                child_env[_HOST_TOKEN_ENV] = host.token
+                for name in ("NO_PROXY", "no_proxy"):
+                    # A proxy must never receive the loopback callback or its secret.
+                    child_env[name] = ",".join(filter(None, (child_env.get(name), "127.0.0.1")))
 
             # P18 Task 1: closed typed effective-config admission from the
             # exact argv built above. persist_session is accepted-but-not-passed
@@ -816,7 +1007,7 @@ class CodexBackend:
             if lifecycle is not None:
                 lifecycle.request_prepared()
             yield RequestEvent(
-                prompt=prompt, model_name=model_name, output_schema=output_schema,
+                prompt=prompt, system_prompt=review_instructions, model_name=model_name, output_schema=output_schema,
                 reasoning_effort=effort,
                 session_id=codex_resume_thread,
                 config=CodexRequestConfig(
@@ -917,6 +1108,8 @@ class CodexBackend:
                             raw_cmd = ""
                             for diagnostic in _take_early_diagnostics():
                                 yield diagnostic
+                        if host is not None:
+                            host.observe_native_start(item_id, "shell")
                         yield ToolStartEvent(
                             id=item_id,
                             name="shell",
@@ -935,6 +1128,9 @@ class CodexBackend:
                             arguments = {}
                             for diagnostic in _take_early_diagnostics():
                                 yield diagnostic
+                        if host is not None and item.get("server") != _HOST_SERVER:
+                            # The endpoint already charged this attempt's own host calls.
+                            host.observe_native_start(item_id, tool_name)
                         yield ToolStartEvent(
                             id=item_id,
                             name=tool_name,
@@ -1036,6 +1232,12 @@ class CodexBackend:
                             is_error=bool(error) or result_error or status == "failed",
                             status=status if isinstance(status, str) else None,
                         )
+                        if (host is not None and error and item.get("server") == _HOST_SERVER
+                                and not host.binding.possibly_accepted):
+                            # Codex failed the call itself, so no correction can reach the host.
+                            detail = error.get("message") if isinstance(error, dict) else error
+                            raise host.fatal(f"Codex failed a host tool call before acceptance: {detail}",
+                                             code="native_readiness")
 
                     elif item_type == "error":
                         error_sentinel_count += 1
@@ -1111,8 +1313,11 @@ class CodexBackend:
                         cost_source="estimated",
                     )
 
+                    if host is not None:
+                        # Host acceptance is the result; native completion settles it separately.
+                        structured_result = host.binding.accepted_result
                     # Genuine structured fields from the transport; the host resolves assistant text.
-                    if output_schema:
+                    elif output_schema:
                         for key in ("result", "output"):
                             raw = event.get(key)
                             if raw is not None:
@@ -1162,6 +1367,9 @@ class CodexBackend:
 
                 elif event_type == "turn.started":
                     current_turn_completed = False
+                    if host is not None and not host.ready:
+                        raise host.fatal("Codex did not list the host tools before model work",
+                                         code="native_readiness")
 
                 else:
                     _record_unknown(
@@ -1172,6 +1380,9 @@ class CodexBackend:
 
                 for diagnostic in _take_early_diagnostics():
                     yield diagnostic
+                if host is not None and host.binding.fatal_error is not None:
+                    # A terminal host failure stops this conversation; the process is reaped below.
+                    raise host.binding.fatal_error
 
             # Reap the child, then surface its final diagnostics before the
             # shared exit check formats the backend-specific message from the
@@ -1214,6 +1425,8 @@ class CodexBackend:
                 cleaned_up = True
             if lifecycle is not None:
                 lifecycle.teardown_completed()
+            if host is not None:
+                host.binding.native_settled = host.binding.accepted
             if _pending_result is not None:
                 yield _pending_result
 
@@ -1227,6 +1440,9 @@ class CodexBackend:
         finally:
             primary = sys.exception()
             cleanup_error: CodexError | None = None
+            if host is not None:
+                # Closure first: no callback is served while the process is torn down.
+                host.binding.close_attempt()
             if transport is not None and not cleaned_up:
                 if lifecycle is not None:
                     lifecycle.teardown_started()

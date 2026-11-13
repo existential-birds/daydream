@@ -39,6 +39,7 @@ from daydream.backends.codex import (
     CodexError,
 )
 from daydream.extensions import Registry, ToolDecision, set_registry
+from daydream.host_tools import HostToolBinding
 from daydream.phases.schemas import review_stage_schema, review_stage_submission_schema
 from daydream.retry_policy import FailureClass, classify_failure
 from daydream.review_budget import BudgetLedger, ReviewLimits
@@ -453,10 +454,21 @@ async def test_codex_read_only_resume_is_refused(linked_worktree: tuple[Path, Pa
     backend = CodexBackend(model="fixture-model")
     token = ContinuationToken(backend="codex", data={"thread_id": "th_prev"})
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as spawn:
         with pytest.raises(CodexError, match="cannot be resumed"):
             async for _ in backend.execute(source, "Continue", continuation=token, read_only=True):
                 pass
+        # Host tools relax none of this: anything but a fresh read-only invocation starts no attempt,
+        # and their instructions are never dropped silently without them.
+        binding = HostToolBinding(deadline=asyncio.get_running_loop().time() + 30, accept=lambda value: value)
+        unsupported: tuple[dict[str, Any], ...] = (
+            {"host_tools": binding}, {"host_tools": binding, "read_only": True, "finalization": True},
+            {"host_tools": binding, "read_only": True, "continuation": token}, {"review_instructions": "policy"})
+        for arguments in unsupported:
+            with pytest.raises(ValueError, match="fresh read-only invocation|only with host tools"):
+                async for _ in backend.execute(source, "Review", {"type": "object"}, **arguments):
+                    pass
+    assert spawn.call_count == 0 and binding.schema is None
 
 
 def _write_model_prices(path: Path, *, model: str, input_price: float, output_price: float) -> Path:

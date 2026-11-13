@@ -580,6 +580,7 @@ dependencies = [
     { name = "tree-sitter-python" },
     { name = "tree-sitter-rust" },
     { name = "tree-sitter-typescript" },
+    { name = "uvicorn" },
 ]
 
 [package.optional-dependencies]
@@ -633,6 +634,7 @@ requires-dist = [
     { name = "tree-sitter-python", specifier = "==0.25.0" },
     { name = "tree-sitter-rust", specifier = "==0.24.2" },
     { name = "tree-sitter-typescript", specifier = "==0.23.2" },
+    { name = "uvicorn", specifier = ">=0.31.1,<1" },
 ]
 provides-extras = ["hub"]
 

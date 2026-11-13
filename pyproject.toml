@@ -7,6 +7,8 @@ dependencies = [
     "claude-agent-sdk==0.2.174",
     # Claude host tools serve a lowlevel SDK MCP server that reads per-call _meta (1.x request handlers).
     "mcp>=1.23,<2",
+    # Codex host tools serve that SDK's streamable HTTP transport on loopback; the floor is the SDK's own.
+    "uvicorn>=0.31.1,<1",
     "anyio>=4.15.1",
     "rich>=15.0.0",
     "pyfiglet>=1.0",

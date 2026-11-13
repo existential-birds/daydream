@@ -11,7 +11,7 @@ import tempfile
 import tracemalloc
 import zlib
 from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -47,6 +47,7 @@ from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
 from daydream.run_config import RunConfig
 from daydream.trajectory import get_current_recorder
 from tests.harness.claude_provider import LoopbackProvider, Turn, claude_cli_env, tool
+from tests.harness.codex_lifecycle_cli import install_codex_lifecycle_cli
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import (
     commit,
@@ -680,11 +681,10 @@ async def test_backends_without_host_tools_are_refused_before_source_preparation
     repo = review_inputs.work.source
     monkeypatch.setattr(committed_review, "open_workspace", lambda *_args, **_kwargs: pytest.fail("source prepared"))
     before = git(repo, "worktree", "list", "--porcelain")
-    for name in ("codex", "osprey"):
-        with pytest.raises(ValueError, match=f"requires a backend with native host tools.*'{name}'"):
-            await run_committed_review(CommittedReviewRequest(
-                repo, review_inputs.revision["merge_base_sha"], config=RunConfig(backend=name, output_mode="review"),
-            ))
+    with pytest.raises(ValueError, match=r"native host tools \(pi, claude or codex\); 'osprey' does not"):
+        await run_committed_review(CommittedReviewRequest(
+            repo, review_inputs.revision["merge_base_sha"], config=RunConfig(backend="osprey", output_mode="review"),
+        ))
     assert git(repo, "worktree", "list", "--porcelain") == before
     assert not (repo / ".daydream").exists()
 
@@ -2024,14 +2024,17 @@ async def test_failed_revising_challenge_is_superseded_by_the_challenge_that_jud
     assert sealed["findings"][0]["revised_by"] == "work:2" and sealed["terminal_result"]["analysis_state"] == "complete"
 
 
-async def test_claude_committed_review_completes_through_the_run_local_sdk_route(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+async def test_committed_review_completes_through_native_host_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    """The real bundled CLI reviews captured source and challenges in a distinct conversation.
+    """A native CLI reviews captured source and challenges in a distinct conversation.
 
     Discovery reads exact captured bytes through review_source, corrects a domain rejection and
     submits; the fresh challenge confirms the claim. Outputs, trajectory, native contexts and
-    execution entries come from the production program, not a substituted dispatcher.
+    execution entries come from the production program, not a substituted dispatcher. Claude is
+    its real bundled CLI on the run-local SDK route; Codex is an external process that is a real
+    MCP client of the invocation's loopback server, since the gate has no Codex binary.
     """
     repo = tmp_path / "subject"
     base = {"api.py": "VALUE = 1\n", "caller.py": "TOTAL = 10 / 1\n"}
@@ -2083,13 +2086,21 @@ async def test_claude_committed_review_completes_through_the_run_local_sdk_route
         return Turn(text="Discovery complete.")
 
     provider = LoopbackProvider(respond)
-    claude_cli_env(monkeypatch, provider, tmp_path / "home")
+    if backend == "claude":
+        claude_cli_env(monkeypatch, provider, tmp_path / "home")
+        # Committed review must take the run-local SDK route; the ordinary client is unavailable.
+        monkeypatch.setattr(claude_backend, "ClaudeSDKClient", None)
+    else:
+        codex = install_codex_lifecycle_cli(tmp_path / "codex")
+        monkeypatch.setenv("PATH", f"{codex.bin_dir}{os.pathsep}{os.environ['PATH']}")
+        # A proxy that refuses everything: only a loopback exemption lets the callback connect.
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+        monkeypatch.setenv("NO_PROXY", "proxied.invalid")
+        monkeypatch.delenv("no_proxy", raising=False)
     request = CommittedReviewRequest(repo, git(repo, "rev-parse", "main"), config=RunConfig(
-        backend="claude", output_mode="review",
+        backend=backend, output_mode="review",
         review_profile=_profile_with_pipeline(reviewer_investigation_budget_s=90, reviewer_tool_call_budget=10)))
-    # Committed review must take the run-local SDK route; the ordinary client is unavailable.
-    monkeypatch.setattr(claude_backend, "ClaudeSDKClient", None)
-    with provider.serving():
+    with provider.serving() if backend == "claude" else nullcontext():
         result = await run_committed_review(request)
     value = result.to_dict()
     assert result.output_installed and result.capture_state == "complete"
@@ -2099,19 +2110,53 @@ async def test_claude_committed_review_completes_through_the_run_local_sdk_route
     assert value["terminal_result"]["analysis_state"] == "complete"
     contexts = value["settings"]["native_contexts"]
     assert {kind: (context["backend"], context["phase"]) for kind, context in contexts.items()} == {
-        "discovery": ("claude", "review"), "challenge": ("claude", "arbiter")}
+        "discovery": (backend, "review"), "challenge": (backend, "arbiter")}
     assert all(len(context["configuration_identity"]) == 64 for context in contexts.values())
     assert [{key: entry[key] for key in ("assignment", "accepted", "settled", "cleanup_complete", "reason",
                                          "observed_starts", "overshoot")} for entry in value["execution"]] == [
+        # Codex also starts two tools of its own, each counted once, and calls once more after acceptance.
         {"assignment": "discovery", "accepted": True, "settled": True, "cleanup_complete": True, "reason": None,
-         "observed_starts": 3, "overshoot": 0},
+         "observed_starts": 3 if backend == "claude" else 6, "overshoot": 0 if backend == "claude" else 1},
         {"assignment": "challenge", "accepted": True, "settled": True, "cleanup_complete": True, "reason": None,
          "observed_starts": 1, "overshoot": 0}]
-    # The challenge is a distinct native conversation: it starts without discovery history.
-    challenge = next(body for body in provider.requests if assignment(body)["kind"] == "challenge")
-    assert not any(message["role"] == "assistant" for message in challenge["messages"])
-    assert "discovery assignment" not in json.dumps(challenge["messages"])
     trajectory = root_trajectory(repo)
     assert trajectory["session_id"] == value["run_id"]
     calls = [call["function_name"] for step in trajectory["steps"] for call in step.get("tool_calls") or []]
-    assert calls.count("mcp__daydream__structured_output") == 3
+    assert calls.count("mcp__daydream__structured_output" if backend == "claude" else "structured_output") == 3
+    if backend == "claude":
+        # The challenge is a distinct native conversation: it starts without discovery history.
+        challenge = next(body for body in provider.requests if assignment(body)["kind"] == "challenge")
+        assert not any(message["role"] == "assistant" for message in challenge["messages"])
+        assert "discovery assignment" not in json.dumps(challenge["messages"])
+        return
+    # One process per assignment, each registered with this attempt's server and nothing weaker.
+    hosts = {_assignment({"review_system_instructions": row["host"]["instructions"]})["kind"]: row
+             for row in codex.observations()}
+    assert sorted(hosts) == ["challenge", "discovery"]
+    for row in hosts.values():
+        host = row["host"]
+        registration = {key: text for key, text in host["overrides"].items() if key != "model_reasoning_effort"}
+        assert registration.pop("mcp_servers.daydream.url").startswith("http://127.0.0.1:")
+        assert registration == {
+            "mcp_servers.daydream.bearer_token_env_var": "DAYDREAM_HOST_TOOLS_TOKEN",
+            "mcp_servers.daydream.required": True,
+            "mcp_servers.daydream.default_tools_approval_mode": "approve",
+            "shell_environment_policy.set.DAYDREAM_HOST_TOOLS_TOKEN": ""}
+        assert (host["output_schema"], host["token_exposed"], host["refused"]) == (False, False, [403, 405])
+        assert host["no_proxy"] == ["proxied.invalid,127.0.0.1", "127.0.0.1"]
+        assert host["tools"] == ["review_admit", "review_source", "structured_output"]
+        # The instructions name the checkout the process runs in, never the source it was copied from.
+        work = _assignment({"review_system_instructions": host["instructions"]})
+        assert Path(work["captured_root"]).resolve() == Path(row["cwd"])
+    served = hosts["discovery"]["host"]["calls"]
+    assert [(name, failed) for name, failed, _ in served] == [
+        ("review_source", False), ("structured_output", True), ("structured_output", False), ("review_source", True)]
+    lookup, rejected, _, late = (texts for _, _, texts in served)
+    assert lookup[1].startswith("diff --git") and "choose a planned target" in rejected[0]
+    assert "structured_output was accepted" in late[0]
+    # Each attempt's host facts join its Codex lifecycle record; the late call was never admitted.
+    assert [[attempt["backend_lifecycle"][key] for key in (
+        "backend", "host_authority_closed", "host_native_settled", "host_cleanup_complete",
+        "host_tool_call_count", "host_tool_rejection_count")]
+            for attempt in trajectory["extra"]["subtrajectories"]] == [
+        ["codex", True, True, True, 5, 1], ["codex", True, True, True, 1, 0]]
