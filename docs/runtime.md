@@ -161,14 +161,16 @@ and external delivery remain separate integration work.
 
 ### Assignment policy and work
 
-`CommittedReviewRequest.assignment_policy="broad"` (the default) dispatches one
+The run's resolved review profile selects the policy with `[pipeline] assignment_policy`,
+whichever source supplied the profile. `"broad"` (the default) dispatches one
 discovery work over every target. `"adaptive"` partitions the inventory with
 `StageInputFactory.assignment_batches` (whole parts, at most four files within the
 transport's assignment byte allowance, inventory order) into concurrent local discovery work under
 `anyio.CapacityLimiter(effective_fanout_concurrency(10, backend))`, each in a forked
 trajectory. It decomposes only when every batch keeps a usable two-start allocation
-after the cross-assignment floor; otherwise it runs one broad assignment. There is no
-numeric threshold, CLI route (#1679) or default change (#1641). `settings.assignment_policy`
+after the cross-assignment floor; otherwise it runs one broad assignment. Any other value
+fails the profile, and review routes other than committed review accept and ignore the key.
+There is no numeric threshold or default change (#1641). `settings.assignment_policy`
 records `name`, `decomposed`, `planned_assignments` and `cross_assignment`
 (`required` or `not_applicable`).
 

@@ -115,6 +115,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CommittedReviewRequest.limits` and `HostedReviewPolicy.limits` are removed. With the
   default profile the committed review window grows from about 600 s to about 2520 s
   ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
+- **Breaking (0.y.z):** Committed review's assignment policy is selected by the review
+  profile: `[pipeline] assignment_policy`, `"broad"` (the default) or `"adaptive"`, from
+  any profile source (`--review-profile`, `DAYDREAM_REVIEW_PROFILE`, a repository
+  `review_profile`, `RunConfig.review_profile` or a hosted operator profile). Any other
+  value fails the profile. `CommittedReviewRequest.assignment_policy` is removed (no known
+  caller); set the profile key instead. The key applies to committed review only: other
+  review routes accept and ignore it. The profile digest covers the key, so every
+  profile's digest changes once, the default included, and review cache entries keyed on
+  it miss once after upgrade
+  ([#1686](https://github.com/existential-birds/daydream/issues/1686)).
 - **Breaking (0.y.z):** `DAYDREAM_FANOUT_CONCURRENCY` now sets the fan-out limit for
   every backend. Unset, each backend keeps its default: Pi 10, Claude and Codex 8,
   Osprey 4 ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
