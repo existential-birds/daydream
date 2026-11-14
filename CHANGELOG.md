@@ -382,6 +382,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Committed review on Pi no longer aborts when one model generation issues more than
+  three host-tool calls, or when a host callback outlasts the three-second transport
+  allowance of a call waiting behind it. Before, the unanswered calls ended the review as
+  `backend_failure` with "This operation was aborted". Pi now runs every tool call of a
+  generation that calls `review_source` or `review_admit` in order, so each is answered;
+  the stock reads in such a generation no longer run concurrently
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+- A final `structured_output` batch that committed review rejects on its reserved last
+  tool start can now be corrected. Before, that rejection was fatal ("no calls remain
+  for correction") and every decision in the batch was lost. The start is kept: its
+  charge is refunded and the rejection stays correctable, up to the existing bound of 32
+  denied starts, which these rejections now share, and the assignment deadline. A
+  reviewer that keeps resubmitting a rejected batch is paid for until that bound, and an
+  execution entry's `observed_starts` can exceed its `allocation` while `overshoot` stays
+  0. Bindings without a reserved start keep the fatal outcome
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+- A committed-review assignment that ends on a rejected final batch no longer loses the
+  whole batch. When its work closes without an accepted final submission and that batch
+  was the last one it submitted, the target decisions, verdicts and claims in it that are
+  valid on their own are retained as partial evidence. The review is then sealed
+  `incomplete`, unless later work finishes the rest. Batches submitted while the
+  assignment is live stay atomic. Nothing is kept that the batch as submitted would not
+  have done:
+  - no item whose target or claim another item of the batch was refused for;
+  - no `reviewed` decision and no verdict when a claim or claim revision of the batch was
+    refused. Those targets stay for later work, and such a challenge batch keeps nothing
+    of its judgments: its claims are judged again or reported unresolved;
+  - nothing when an item of the batch cannot be checked at all, or when the reviewer
+    replaced the batch with any later submission.
+
+  The sealed result does not mark such items; their work is recorded as not accepted. If
+  the retained items together exceed retained capacity, nothing of the batch is kept
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+- One committed-review rejection now names every distinct violation in the batch instead
+  of the first one only. Each states how many targets, verdicts or claims broke it and
+  the first three of them: quoted ids cut to 160 characters, or the selector itself (a
+  supporting path or a source id, with the allowed lines when a range was refused), so
+  several unknown source ids or out-of-range selections are one violation. Ids are
+  dropped before a violation when the 1,024-byte rejection bound is tight. A schema
+  rejection still names its first fault. The rule that references need an assigned
+  `source_id` no longer calls a claim or verdict "a reviewed target"
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+- A supporting `{path, side, source_range, basis}` selector is no longer refused because
+  its whole file exceeds 65,536 bytes, a rule nothing stated to the reviewer. The existing
+  8 MiB source retrieval limit still applies, and the retained reference is unchanged: the
+  whole file's digest and the cited range
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+- The committed-review instructions now state the limits a reviewer is held to (batch and
+  text sizes, part ids as target ids, the assigned and supporting selector rules, and what
+  follows a rejected final submission) and ask it to admit decisions as it reaches them.
+  Before, a reviewer learned several of them only from rejections, on Codex without a
+  schema that shows them. Each assignment's instructions grow by about 1.6 KB. The Pi
+  `review_source` description no longer tells the reviewer to omit arguments its schema
+  requires ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+- When a committed review ends unfinished because current work ran out of tool calls or
+  time, its report now says so in one sentence under "Unfinished work" and names the
+  `[pipeline]` profile keys that raise the allowance: `reviewer_tool_call_budget`, or
+  `reviewer_investigation_budget_s` with `review_wall_budget_s`, which caps the review
+  window ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
 - Committed review no longer rejects a reviewed target submitted with empty
   `evidence_refs` when the target has more than four sources. The host expanded `[]` to
   every source of the target and then refused its own expansion ("supply at most four

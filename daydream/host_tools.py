@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 _MAX_FRAME_BYTES = 256 * 1024
 _MAX_ARGUMENT_BYTES = 128 * 1024
 _MAX_RESULT_BYTES = 128 * 1024
+_MAX_REJECTION_BYTES = 1024
 _MAX_ITEMS = 32768
 _MAX_DEPTH = 64
 _CALLBACK_TIMEOUT_S = 3.0
@@ -41,7 +42,7 @@ NATIVE_SUBMIT = "structured_output"
 BYTES_PER_TOKEN_ESTIMATE = 3
 # Pi 1.4.0 compaction defaults (dist/core/compaction) when native settings omit them.
 PI_DEFAULT_COMPACTION = {"reserve_tokens": 16384, "keep_recent_tokens": 20000}
-# Correctable denials of the protected submission start before the binding fails closed.
+# Correctable denials and rejected submissions of the protected start before the binding fails closed.
 PROTECTED_DENIAL_LIMIT = 32
 
 
@@ -82,7 +83,7 @@ class NativeCapacityRequirement:
     submission_bytes: int
 
 
-def _bounded_message(message: str, *, limit: int = 1024) -> str:
+def _bounded_message(message: str, *, limit: int = _MAX_REJECTION_BYTES) -> str:
     return redact_structured_text(message).encode("utf-8", errors="replace")[:limit].decode("utf-8", errors="ignore")
 
 
@@ -197,9 +198,10 @@ class HostToolBinding:
         if not callable(accept):
             raise TypeError("host tools require a synchronous acceptance callback")
         self.budget = budget
-        # ``calls`` records every admitted native start identity once; ``denied_starts``
-        # are the subset refused because they would consume the protected submission start.
-        self.calls = self.rejections = self.denied_starts = 0
+        # ``calls`` records every admitted native start identity once; ``denied_starts`` are the
+        # subset refused to keep the protected submission start, or refunded as its rejected submission.
+        # ``submissions`` are the starts of structured_output or a mutating host tool, whatever their outcome.
+        self.calls = self.rejections = self.denied_starts = self.submissions = 0
         self.protected_submission = protected_submission
         # A slow check an endpoint may run off its loop before a mutating callback; ``validated``
         # is true only inside the callback that directly follows a successful run.
@@ -210,7 +212,7 @@ class HostToolBinding:
         self._accept = accept
         self._allowed_tools = frozenset(allowed_tools) if allowed_tools is not None else None
         self._schema: dict[str, Any] | None = None
-        self._session_active = self._cleanup_failed = self._acceptance_started = False
+        self._session_active = self._cleanup_failed = self._acceptance_started = self._final_charged = False
         self._accepted_result: dict[str, Any] | None = None
         self._accepted_identity: tuple[str, str] | None = None
         self._admitted: set[str] = set()
@@ -299,6 +301,13 @@ class HostToolBinding:
                                           code="native_correlation", preacceptance=False))
         rejection = HostToolRejected(message, code=code)
         if self.budget.remaining_tool_calls == 0:
+            if self.protected_submission and self._final_charged:
+                # The reserved start was charged for the submission being judged: refund it so the
+                # rejection stays correctable, within the bound on denied starts.
+                self.denied_starts += 1
+                if self.denied_starts <= PROTECTED_DENIAL_LIMIT:
+                    self.budget.refund(self.budget.charged - 1)
+                    return rejection
             fatal = HostToolCallBudgetExceeded(
                 "Tool-call allocation exhausted; no calls remain for correction. "
                 f"Rejected submission: {rejection}", preacceptance=not self.possibly_accepted)
@@ -336,6 +345,7 @@ class HostToolBinding:
                               code="native_correlation")
         self.calls += 1
         self._admitted.add(call_id)
+        self.submissions += name == NATIVE_SUBMIT or name in self.host_tools and self.host_tools[name].mutating
         remaining = self.budget.remaining_tool_calls
         if (remaining is not None and self.protected_submission and remaining <= 1
                 and not self.possibly_accepted and not (name == NATIVE_SUBMIT and terminal is True)):
@@ -358,6 +368,7 @@ class HostToolBinding:
             raise self.fail(HostToolCallBudgetExceeded(
                 "Tool-call allocation exhausted; no further native calls are authorized",
                 preacceptance=not self.possibly_accepted))
+        self._final_charged = name == NATIVE_SUBMIT
         if self._allowed_tools is not None and name not in self._allowed_tools:
             raise self._reject("This tool is not granted by the operator's read-only policy; use only granted tools",
                                code="permission_denied")
@@ -394,6 +405,8 @@ class HostToolBinding:
         """Synchronously accept once, immediately after the final authority/deadline check."""
         if self._accepted_identity is None:
             self._check_open()
+        # Until it matches an admitted final call, a submission has charged no start of its own.
+        self._final_charged = False
         key = self._arguments_key(arguments)
         if self._accepted_identity == (call_id, key):
             assert self._accepted_result is not None
@@ -403,6 +416,7 @@ class HostToolBinding:
             raise self._fatal("This invocation has already entered terminal acceptance", code="native_correlation")
         if not isinstance(call_id, str) or self._pending.pop(call_id, None) != key:
             raise self._fatal("Host callback has no matching completed native terminal call", code="native_correlation")
+        self._final_charged = True
         if schema_error := _submission_schema_error(arguments, self._schema):
             raise self._reject(schema_error)
         # All payload/identity checks precede this final synchronous boundary.
@@ -453,6 +467,7 @@ class HostToolBinding:
     def call(self, call_id: Any, name: Any, arguments: Any) -> dict[str, Any]:
         """Serve one charged nonterminal host tool exactly once for its admitted start."""
         self._check_open()
+        self._final_charged = False
         if self.possibly_accepted:
             raise self._fatal("This invocation has already entered terminal acceptance", code="native_correlation")
         if (not isinstance(call_id, str) or not isinstance(name, str)

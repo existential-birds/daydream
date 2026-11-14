@@ -37,7 +37,7 @@ export default function (pi: ExtensionAPI) {
   const texts: Record<string, { snippet: string, description: string }> = {
     review_source: {
       snippet: "Look up the frozen captured review's targets and exact change bytes",
-      description: "Read-only host lookup of the frozen captured review: omit target_id/path for the paged target "
+      description: "Read-only host lookup of the frozen captured review: target_id=null and path=null page the target "
         + "catalog; target_id returns exact captured change bytes with its source_options; path lists that changed "
         + "path's targets. Pass the returned cursor for the next page. Every call is charged and reports current "
         + "host capacity.",
@@ -59,6 +59,9 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool({
       name, label: name, description: text.description, promptSnippet: text.snippet,
       parameters: schema,
+      // Pi then runs any batch holding this tool in order: the endpoint serves three connections at a
+      // time, and a request waiting behind a slow host callback outlives its control timeout.
+      executionMode: "sequential",
       async execute(toolCallId, params, _signal, _onUpdate, ctx) {
         try {
           if (!ready || failed) throw new Error("Host authority unavailable");
