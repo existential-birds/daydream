@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import itertools
 import json
 import os
 import shutil
@@ -20,6 +22,7 @@ from daydream import git_ops, json_utils, review_reporting, runner
 from daydream.dataset import LocalRecordStore
 from daydream.deep import review_terminal
 from daydream.findings import FindingsValidationError, load_findings_artifact
+from daydream.host_tools import HostToolRejected
 from daydream.pr_review import post_findings_from_artifact
 from daydream.review_result import ReviewCoverage
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
@@ -192,21 +195,45 @@ async def test_snapshot_boundaries(
         assert (posted.payload['event'], posted.payload['commit_id']) == ('COMMENT', review.pr.head_sha)
         assert [(comment['path'], comment['line']) for comment in posted.payload['comments']] == [('api.py', 2)]
         # An incomplete review still exports its admitted finding with truthful coverage, and never approves.
+        # Discovery admits its claim and all but one decision, then calls tools until its allowance is spent.
         review.backend.review_undecided = 1
+        scripted = review.backend._scripted_review
+
+        def exhaust(instructions: str, binding: Any) -> dict[str, Any]:
+            value = scripted(instructions, binding)
+            if 'verdicts' in value:
+                return value
+            binding.admit('admit', 'review_admit', value)
+            binding.call('admit', 'review_admit', value)
+            for number in itertools.count():
+                with contextlib.suppress(HostToolRejected):
+                    binding.admit(f'read-{number}', 'read', {})
+            raise AssertionError('unreachable')
+
+        review.patch.setattr(review.backend, '_scripted_review', exhaust)
         live, partial = review.pr, review.tmp / 'incomplete.json'
         capsys.readouterr()
         assert await review.run(findings_out=str(partial)) == 0
-        # The console says the review is unfinished, with what was left, though the run exits 0.
+        # The console says the review is unfinished, with what was left and the profile key that raises the
+        # spent allowance, though the run exits 0; the report and the pull request notice say it once.
+        allowance = ('The review used up its allowance before it finished; raise {0}reviewer_tool_call_budget{1} '
+                     'under {0}[pipeline]{1} in the review profile. The review multiplies '
+                     '{0}reviewer_tool_call_budget{1} and {0}reviewer_investigation_budget_s{1} by the '
+                     '{0}scale{1} its {0}settings.limits{1} record.')
         assert collapse_panel_text(capsys).count(
             'Review incomplete: 1 confirmed finding. Not finished: challenge: evidence_incomplete; '
-            'committed:00000: evidence_incomplete.') == 1
+            'committed:00000: evidence_incomplete, host_tool_budget_exhaustion. '
+            + allowance.format('', '')) == 1
+        assert (review.repo / '.review-output.md').read_text().count(allowance.format('<code>', '</code>')) == 1
         exported = json.loads(partial.read_text())
         assert exported['terminal_result']['analysis_state'] == 'incomplete'
         assert [finding['title'] for finding in exported['findings']] == ['Grounded defect']
         assert post(partial) == 0
         notice = fake_gh.calls('POST', 'repos/o/r/pulls/7/reviews')[-1].payload
         assert notice['event'] == 'COMMENT' and len(notice['comments']) == 1
-        assert '**Review incomplete.**\n\n- committed:00000: evidence_incomplete' in notice['body']
+        body = notice['body']
+        assert '**Review incomplete.**\n\n- committed:00000: evidence_incomplete, host_tool_budget_exhaustion' in body
+        assert body.count(allowance.format('<code>', '</code>')) == 1
         # A delivery GitHub does not confirm is reported as unconfirmed, never as posted.
         fake_gh.set_response('POST', 'repos/o/r/pulls/7/reviews', {'__error__': 'HTTP 422: unprocessable'})
         assert post() == 1 and 'Could not confirm the PR review was posted' in ' '.join(printed.getvalue().split())

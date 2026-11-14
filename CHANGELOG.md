@@ -576,10 +576,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `review_source` description no longer tells the reviewer to omit arguments its schema
   requires ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
 - When a committed review ends unfinished because current work ran out of tool calls or
-  time, its report now says so in one sentence under "Unfinished work" and names the
-  `[pipeline]` profile keys that raise the allowance: `reviewer_tool_call_budget`, or
-  `reviewer_investigation_budget_s` with `review_wall_budget_s`, which caps the review
-  window ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+  time, it now says so in one sentence and names the `[pipeline]` profile keys that raise
+  the allowance: `reviewer_tool_call_budget`, or `reviewer_investigation_budget_s` with
+  `review_wall_budget_s`, which caps the review window. The sentence appears once under
+  "Unfinished work" in `run_committed_review`'s report, and once each in the console
+  outcome line, the report's "Review outcome" and the pull request notice of every
+  other review route ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
 - Committed review no longer rejects a reviewed target submitted with empty
   `evidence_refs` when the target has more than four sources. The host expanded `[]` to
   every source of the target and then refused its own expansion ("supply at most four

@@ -172,7 +172,7 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
     A failed pipeline is retained as run-wide unfinished evidence. Extension steps may
     have rewritten the canonical items; an unusable projection fails the analysis.
     """
-    from daydream.committed_review_output import write_committed_review_output
+    from daydream.committed_review_output import allowance_sentence, write_committed_review_output
     from daydream.runner import _write_findings_for_parsed
 
     state = DeepState(ctx.data)
@@ -214,7 +214,8 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
         print_info(console, outcome)
     else:
         unfinished = "; ".join(review_warnings(state.dd)) or ", ".join(result["reason_codes"])
-        print_warning(console, f"{outcome} Not finished: {unfinished}.")
+        allowance = allowance_sentence(result["reason_codes"], str)
+        print_warning(console, f"{outcome} Not finished: {unfinished}." + (f" {allowance}" if allowance else ""))
     # Under ``deep/``, a registered public directory: a top-level file would be an unknown public
     # name that refuses the next run, on this build and on an earlier one, once its private proof is gone.
     write_committed_review_output(ctx.artifacts, sealed, report_path=DeepArtifact.MERGED_REPORT.at(state.dd),

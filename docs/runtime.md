@@ -338,12 +338,14 @@ responsible for them; required phases are `challenge` and `cross_assignment`.
 Superseded failed work whose responsibilities were transferred and accepted elsewhere
 remains evidence but does not make the review incomplete. When the sealed reason codes
 hold `host_tool_budget_exhaustion` or `host_wall_budget_exhaustion`, which only current
-work contributes, the report adds one sentence under "Unfinished work" naming the
-`[pipeline]` profile keys that raise that allowance: `reviewer_tool_call_budget`, or
-`reviewer_investigation_budget_s` with `review_wall_budget_s`, which caps the review
-window. A second sentence says that the review multiplies the first two by the `scale`
-recorded in `settings.limits` and, for spent time, that `review_wall_budget_s` grows
-with the diff in the default profile only.
+work contributes, one sentence names the `[pipeline]` profile keys that raise that
+allowance: `reviewer_tool_call_budget`, or `reviewer_investigation_budget_s` with
+`review_wall_budget_s`, which caps the review window. A second sentence says that the
+review multiplies the first two by the `scale` recorded in `settings.limits` and, for
+spent time, that `review_wall_budget_s` grows with the diff in the default profile only.
+They appear once in each place that reports the outcome: under "Unfinished work" in
+`run_committed_review`'s report, and on the `deep` flow in the console outcome line,
+the report's "Review outcome" and the pull request notice.
 
 The reviewer's assignments come from one canonical change: the full diff and its hunk
 index are captured once with their identities, revalidated before every admission,

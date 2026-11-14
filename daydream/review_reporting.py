@@ -6,6 +6,7 @@ import json
 import re
 from typing import Any
 
+from daydream.committed_review_output import allowance_sentence
 from daydream.output_schema import strict_object
 from daydream.redaction import redact_structured_text
 from daydream.review_rationale import SOURCE_RATIONALE_SCHEMA
@@ -65,6 +66,8 @@ def render_github_review_context(
         lines.append(f'- {len(diagnostics) - 8} additional notices; see run artifacts.')
     if state not in {None, 'complete'} and not unfinished:
         lines.append('Review did not finish; see run artifacts.')
+    if terminal_result is not None and (sentence := allowance_sentence(terminal_result['reason_codes'], _code)):
+        lines.append(sentence)
     return '\n\n'.join(lines)
 
 
@@ -135,6 +138,8 @@ def _render_review_context(
                          + ', '.join(_code(reason) for reason in scope['reason_codes']) + '.')
         if len(unfinished) > 64:
             lines.append(f'{len(unfinished) - 64} additional unfinished scopes omitted.')
+        if sentence := allowance_sentence(terminal_result['reason_codes'], _code):
+            lines.append(sentence)
     lines.append('Completion records admitted assignment decisions; it does not independently prove semantic coverage.')
     lines.extend(['', '<details><summary>Reviewer source rationale</summary>', '',
                   'Reviewer assertions and source inspection are not executable verification.'])
