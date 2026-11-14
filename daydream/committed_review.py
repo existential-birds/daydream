@@ -985,7 +985,7 @@ async def plan_review(
     # Full captured-source checks run off-loop so host-tool timers are never starved.
     inputs = await anyio.to_thread.run_sync(lambda: StageInputFactory(
         backends["discovery"], work, StackAssignment("committed", files),
-        change=CanonicalChange.capture(diff_path, index_path, work.captured_source), shared_paths={},
+        change=CanonicalChange.capture(diff_path, index_path, work.captured_source),
         revision=revision,
         artifact_session=artifact_session, allow_standalone=allow_standalone, read_only=True,
     ))

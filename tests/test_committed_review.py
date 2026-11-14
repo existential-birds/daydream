@@ -109,7 +109,7 @@ def _inputs(repo: Path, root: Path, files: list[str], patch: str | None = None) 
     revision = {"head_sha": head, "merge_base_sha": base, "diff_key": hashlib.sha256(patch.encode()).hexdigest()}
     return StageInputFactory(PiBackend(model="unexecuted-domain-test"), work_context(repo, run_id="domain"),
         StackAssignment("committed", files),
-        change=CanonicalChange.capture(diff_path, write_hunk_index(root, patch)), shared_paths={},
+        change=CanonicalChange.capture(diff_path, write_hunk_index(root, patch)),
         revision=revision, artifact_session=None, allow_standalone=True, read_only=True)
 
 

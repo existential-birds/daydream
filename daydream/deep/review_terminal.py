@@ -37,7 +37,6 @@ def refresh_review_report(ctx: FlowContext, *, no_diff: bool = False) -> dict[st
     result = ctx.data['terminal_review_result']
     items = ctx.data['terminal_review_items']
     context = collect_report_context(state.dd, result,
-                                     unavailable_scopes=ctx.data.get('unavailable_report_scopes'),
                                      author_unavailable=ctx.data.get('author_report_context_unavailable', False))
     atomic_write_json(state.dd / REPORT_CONTEXT, context)
     deep_report = DeepArtifact.MERGED_REPORT.at(state.dd)

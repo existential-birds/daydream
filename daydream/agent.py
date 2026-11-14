@@ -281,8 +281,6 @@ async def run_agent(
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext | None = None,
     review_limits: ReviewLimits | None = None,
-    advisory_tool_call_target: int | None = None,
-    review_evidence: ReviewEvidence | None = None, schema_rejection_guard: Callable[[Any], bool] | None = None,
     finalization_context: FinalizationContext | None = None,
     tools_disabled: bool = False,
     review_system_instructions: str | None = None,
@@ -328,7 +326,7 @@ async def run_agent(
     context = resolve_run_context(run_context)
     if investigation and review_limits is not None:
         raise ValueError("staged investigation uses its ledger instead of review_limits")
-    evidence = review_evidence or (ReviewEvidence(output_schema) if review_limits is not None else None)
+    evidence = ReviewEvidence(output_schema) if review_limits is not None else None
     review_instructions = review_system_instructions
     turn = budget
     hard_deadline = budget.deadline
@@ -339,9 +337,6 @@ async def run_agent(
             f"{budget.remaining_s() or 0.0:g} seconds until the absolute deadline; "
             f"current invocation allocation: {budget.remaining_tool_calls} tool calls. "
             "Future-stage reserves are already excluded from this allocation; do not subtract them again. "
-            + ("The advisory stage call target is a planning hint, not a ceiling. "
-               "Useful assigned work may continue within the invocation allocation and deadline. "
-               if advisory_tool_call_target is not None else "")
             + ("\n\n" + review_budget.STAGED_REVIEW_GUIDANCE if not review_system_instructions else "")
         )
     if review_limits is not None:
@@ -404,7 +399,6 @@ async def run_agent(
                 sanctioned_inputs=sanctioned_inputs,
                 run_context=context,
                 review_evidence=evidence,
-                schema_rejection_guard=schema_rejection_guard,
                 review_instructions=review_instructions,
                 tools_disabled=tools_disabled,
                 review_stage_scope_id=review_stage_scope_id,
@@ -516,7 +510,6 @@ async def _run_agent(
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext,
     review_evidence: ReviewEvidence | None = None,
-    schema_rejection_guard: Callable[[Any], bool] | None = None,
     review_instructions: str | None = None,
     finalization: bool = False,
     tools_disabled: bool = False,
@@ -1096,6 +1089,5 @@ async def _run_agent(
                        review_evidence.schema if investigation and review_evidence is not None
                        else output_schema), validate_structured_output=validate_structured_output,
         require_full_schema=require_full_schema, staged=investigation,
-        schema_rejection_guard=schema_rejection_guard,
     )
     return output, result_continuation, aborted_reason

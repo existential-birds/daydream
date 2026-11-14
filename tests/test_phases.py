@@ -136,32 +136,6 @@ def _inline_or_exact_backend(repo: Path, *, inline: bool, events: tuple[AgentEve
     return ScriptedBackend(script=script, events=events)
 
 
-@asynccontextmanager
-async def _intent_inline_fixture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext], *, session_id: str,
-    exploration_files: dict[str, str], events: tuple[AgentEvent, ...] | None = None,
-    script: list[list[AgentEvent]] | None = None, prompt_user: Callable[..., str] | None = None,
-) -> AsyncIterator[tuple[ScriptedBackend, WorkContext, Path, str, Path]]:
-    """Hold a real private INLINE session open with backend, work, diff, and exploration."""
-    monkeypatch.setattr(
-        "daydream.run_context._prompt_user", prompt_user if prompt_user is not None else (lambda *a, **kw: "y"),
-    )
-    repo = tmp_path / "repo"
-    init_repo(repo)
-    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git_commit(repo, "base")
-    work = make_work(repo)
-    async with _private_session(tmp_path, work, session_id):
-        exploration = artifact_dir_for(repo, allow_standalone=True) / "exploration"
-        exploration.mkdir(parents=True)
-        for name, text in exploration_files.items():
-            (exploration / name).write_text(text, encoding="utf-8")
-        backend = _inline_or_exact_backend(repo, inline=True, events=events, script=script)
-        diff_text = "diff --git a/login.py b/login.py\n+def login(): ...\n"
-        diff_file = tmp_path / "diff.patch"
-        diff_file.write_text(diff_text, encoding="utf-8")
-        yield backend, work, diff_file, diff_text, exploration
 
 
 def _unconfined_finding_file(tmp_path: Path, path_kind: str) -> str:
@@ -695,7 +669,7 @@ async def test_grouped_fix_delivers_scopes_verdicts_evidence_and_test_map_then_r
 async def test_bound_phase_fix_transports_only_named_private_inputs(
     tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None,
 ) -> None:
-    """A production fix gets intent/index bytes inline without an artifact-dir grant."""
+    """A production fix gets the exploration index bytes inline without an artifact-dir grant."""
 
     repo = tmp_path / "repo"
     init_repo(repo)
@@ -709,29 +683,25 @@ async def test_bound_phase_fix_transports_only_named_private_inputs(
 
     async with _private_session(tmp_path, work, "phase-fix-inline"):
         deep = artifact_dir_for(repo, allow_standalone=True) / "deep"
-        intent = deep / "intent.md"
         affected = deep / "exploration" / "affected_files.md"
         affected.parent.mkdir(parents=True)
-        intent.write_text("deliberate intent", encoding="utf-8")
         affected.write_text("src/app.py -> tests/test_app.py", encoding="utf-8")
 
         await phases.phase_fix(backend, work, {"id": 1, "description": "repair", "file": "src/app.py", "line": 1}, 1, 1,
-            intent_path=intent, exploration_dir=affected.parent,
+            exploration_dir=affected.parent,
             edit_scope=frozenset({"src/app.py"}), read_scope=frozenset({"src/app.py"}),
         )
 
         prompt = backend.last_prompt
-        pointer_free = prompt.replace(str(affected), "").replace(str(intent), "")
+        pointer_free = prompt.replace(str(affected), "")
         assert str(affected.parent) not in pointer_free
-        assert "deliberate intent" in prompt
         assert "src/app.py -> tests/test_app.py" in prompt
-        assert str(intent) not in prompt
         assert str(affected) not in prompt
 
         # An exploration dir without its index must not reach the fix prompt.
         affected.unlink()
         await phases.phase_fix(backend, work, {"id": 1, "description": "repair", "file": "src/app.py", "line": 1}, 1, 1,
-            intent_path=intent, exploration_dir=affected.parent,
+            exploration_dir=affected.parent,
             edit_scope=frozenset({"src/app.py"}), read_scope=frozenset({"src/app.py"}),
         )
         assert "affected_files.md" not in backend.last_prompt
@@ -1239,10 +1209,6 @@ async def test_failure_summarizer_falls_back_for_non_live_private_runtime_paths(
 
 
 # The host renders review-output.md from validated merge items.
-_MERGE_ITEMS = merge_result([{
-    "id": 1, "lens": "per-stack", "file": "a.py", "line": 1, "severity": "low", "description": "bug",
-    "confidence": "HIGH", "rationale": "r", "evidence": "a.py:1",
-}])
 
 
 

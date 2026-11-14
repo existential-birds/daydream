@@ -198,7 +198,7 @@ def test_stage_inputs_isolate_scopes_and_refuse_changed_canonical_bytes(tmp_path
 
     def scope_inputs() -> StageInputFactory:
         return StageInputFactory(PiBackend(model='unexecuted'), work_context(repo, run_id='inputs'),
-            StackAssignment('python', ['api.py']), change=change, shared_paths={},
+            StackAssignment('python', ['api.py']), change=change,
             revision=revision, artifact_session=None, allow_standalone=True, read_only=True)
 
     factory, sibling = scope_inputs(), scope_inputs()
@@ -251,7 +251,7 @@ def test_type_changed_path_keeps_old_side_refs_under_each_block_header(
     revision = {'head_sha': head, 'merge_base_sha': base, 'diff_key': hashlib.sha256(patch.encode()).hexdigest()}
     factory = StageInputFactory(PiBackend(model='unexecuted'), work_context(repo, run_id='type-change'),
         StackAssignment('python', ['x']), change=CanonicalChange.capture(diff_path, write_hunk_index(root, patch)),
-        shared_paths={}, revision=revision, artifact_session=None, allow_standalone=True, read_only=True)
+        revision=revision, artifact_session=None, allow_standalone=True, read_only=True)
     refs = [{(ref['side'], ref['path']) for ref in part.assignment['source_refs']} for part in factory.parts]
     if lines == 3:
         assert refs == [{('old', 'x'), ('new', 'x')}]

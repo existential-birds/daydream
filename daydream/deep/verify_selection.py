@@ -1,13 +1,10 @@
-"""Pure recommendation-verifier selection and prior-verdict reuse.
+"""Pure recommendation-verifier selection.
 
-Selection returns one decision per canonical item, in order, including exempt
-structural and wonder findings. Missing or unreadable evidence selects an item;
-only a confirmed, unrevised, strongly evidenced routine finding may be skipped.
-Configuration can widen selection.
+Selection returns one decision per canonical item, in order, with the reason it
+was selected. Only items of a verdict-exempt lens stay out of the verifier.
 
 Changed-text evidence comes from added lines in the cited hunk, without
-reapplying location snapping. Reuse requires the same rule version, durable item
-identity, verifier-relevant digest, and a resolved prior verdict.
+reapplying location snapping.
 """
 
 from __future__ import annotations
@@ -17,18 +14,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from daydream.deep.adjudication_provenance import RecordProvenance
-from daydream.deep.records import item_source_uids, item_uid
+from daydream.deep.records import item_uid
 from daydream.deep.risk_categories import categories_in
 from daydream.hunk_index import parse_hunks
 from daydream.json_utils import canonical_json
 
-#: On-disk selection-rule version. Bump whenever the predicate's semantics
-#: change; a prior verify artifact carrying another value is never reused (SH3).
+#: On-disk selection-rule version, stored in the verdicts artifact.
 SELECTION_RULE_VERSION: int = 1
 
 #: The verifier-relevant components of one canonical item, and only those.
-#: Renumbering ``id`` or attaching a verdict must never invalidate a reuse.
 _DIGEST_FIELDS: tuple[str, ...] = (
     "item_uid",
     "lens",
@@ -46,14 +40,6 @@ _EXEMPT_LENSES: dict[str, str] = {
     "structural": "exempt:structural",
     "wonder": "exempt:wonder",
 }
-
-#: The single skip reason: reached only for a strongly evidenced, confirmed,
-#: unrevised, non-cross-stack, non-risk item.
-SKIP_REASON_CODE = "strongly_evidenced_adjudicated_routine"
-
-#: Verdict values that always force re-verification on resume (MH9).
-_UNRESOLVED_VERDICTS: frozenset[str] = frozenset({"contradicts", "uncertain"})
-
 
 def changed_text_at(diff_text: str, file: str, line: object) -> str:
     """Return all added text in the cited line's hunk, or "" without a signal.
@@ -114,76 +100,8 @@ class SelectionDecision:
         }
 
 
-def plan_reuse(
-    prior_payload: Mapping[str, Any] | None,
-    decisions: Sequence[SelectionDecision],
-) -> tuple[dict[str, dict[str, Any]], list[SelectionDecision]]:
-    """Reuse resolved verdicts with matching rule version, item UID, and content digest.
-
-    Only selected decisions with a matching prior verdict qualify. Contradicts and
-    uncertain verdicts always re-verify. Missing or malformed input produces misses.
-    Return reused verdicts keyed by UID and remapped to current item IDs, plus the
-    remaining decisions in input order.
-    """
-    if not isinstance(prior_payload, Mapping):
-        return {}, list(decisions)
-    if prior_payload.get("rule_version") != SELECTION_RULE_VERSION:
-        return {}, list(decisions)
-    prior_decisions = prior_payload.get("decisions")
-    if not isinstance(prior_decisions, list):
-        return {}, list(decisions)
-    verdicts = prior_payload.get("verdicts")
-    verdict_by_id: dict[int, Mapping[str, Any]] = {}
-    if isinstance(verdicts, list):
-        for verdict in verdicts:
-            if not isinstance(verdict, Mapping):
-                continue
-            issue_id = verdict.get("issue_id")
-            if isinstance(issue_id, int) and not isinstance(issue_id, bool):
-                verdict_by_id[issue_id] = verdict
-    prior_by_uid: dict[str, Mapping[str, Any]] = {}
-    for prior in prior_decisions:
-        if isinstance(prior, Mapping) and isinstance(prior.get("item_uid"), str):
-            prior_by_uid[prior["item_uid"]] = prior
-
-    reused: dict[str, dict[str, Any]] = {}
-    to_verify: list[SelectionDecision] = []
-    for decision in decisions:
-        prior = prior_by_uid.get(decision.item_uid)
-        if (
-            not decision.selected
-            or prior is None
-            or prior.get("content_digest") != decision.content_digest
-        ):
-            to_verify.append(decision)
-            continue
-        prior_id = prior.get("item_id")
-        issue_id = (
-            prior_id
-            if isinstance(prior_id, int) and not isinstance(prior_id, bool)
-            else decision.item_id
-        )
-        verdict = verdict_by_id.get(issue_id) if issue_id is not None else None
-        if verdict is None or verdict.get("verdict") in _UNRESOLVED_VERDICTS:
-            to_verify.append(decision)
-            continue
-        body = dict(verdict)
-        # Re-key the reused body to the current decision's id: the verdict was
-        # matched on durable uid plus the id-invariant content digest (MH14), so
-        # its prior ``issue_id`` is stale whenever a resume renumbers merged
-        # item ids. ``_attach_verdicts`` binds verdicts by the current
-        # ``id`` -> ``issue_id`` join; a stale id would misattribute the verdict
-        # to whatever item now holds the old number (or leave it unmatched).
-        body["issue_id"] = decision.item_id
-        reused[decision.item_uid] = body
-    return reused, to_verify
-
-
 def item_content_digest(item: Mapping[str, Any]) -> str:
-    """Hash verifier-relevant fields, excluding positional IDs and attached verdicts.
-
-    Missing fields hash as None; renumbering alone does not invalidate reuse.
-    """
+    """Hash verifier-relevant fields, excluding positional IDs and attached verdicts; missing fields hash as None."""
     payload = {field: item.get(field) for field in _DIGEST_FIELDS}
     return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
@@ -191,7 +109,6 @@ def item_content_digest(item: Mapping[str, Any]) -> str:
 def select_items(
     items: Sequence[Mapping[str, Any]],
     *,
-    provenance: Mapping[str, RecordProvenance] | None,
     diff_text: str,
     config: SelectionConfig,
 ) -> list[SelectionDecision]:
@@ -201,11 +118,9 @@ def select_items(
     wonder-lens items. The classifier grounds on the diff text, never on index
     ranges (see :func:`changed_text_at`).
     """
-    ledger = provenance if isinstance(provenance, Mapping) else None
     return [
         _decide(
             dict(item) if isinstance(item, Mapping) else {},
-            ledger=ledger,
             diff_text=diff_text,
             config=config,
         )
@@ -216,7 +131,6 @@ def select_items(
 def _decide(
     data: Mapping[str, Any],
     *,
-    ledger: Mapping[str, RecordProvenance] | None,
     diff_text: str,
     config: SelectionConfig,
 ) -> SelectionDecision:
@@ -224,7 +138,6 @@ def _decide(
     uid = item_uid(dict(data))
     item_id = data.get("id")
     lens = str(data.get("lens", ""))
-    evidence, present, unadjudicated = _item_provenance(_attributed_uids(data), ledger)
 
     def decision(selected: bool, reason_code: str, reason: str) -> SelectionDecision:
         return SelectionDecision(
@@ -233,7 +146,7 @@ def _decide(
             selected=selected,
             reason_code=reason_code,
             reason=reason,
-            provenance=evidence,
+            provenance={},
             content_digest=item_content_digest(data),
         )
 
@@ -252,59 +165,8 @@ def _decide(
     weak = _weak_evidence_reason(data)
     if weak:
         return decision(True, weak, _weak_reason_text(weak))
-    if any(record.materially_revised for record in present):
-        return decision(True, "materially_revised", "adjudication materially rewrote the finding")
-    if unadjudicated:
-        return decision(True, unadjudicated, _unadjudicated_reason_text(unadjudicated))
-    prior = _prior_verdict(data)
-    if prior in _UNRESOLVED_VERDICTS:
-        return decision(True, f"prior_verdict:{prior}", f"prior verifier verdict {prior!r}")
-    if not diff_text:
-        # An unreadable or absent diff.patch is an absent input (``_read_diff_text``
-        # degrades to ""): the changed lines a finding cites cannot be read, so a
-        # mandatory risk category grounded on changed text cannot be ruled out.
-        # Absent inputs select, never skip (uniform failure direction).
-        return decision(True, "unreadable_diff", "diff.patch is missing or unreadable; cannot certify routine strength")
-    return decision(False, SKIP_REASON_CODE, "strongly evidenced, confirmed, unrevised routine finding")
-
-
-def _attributed_uids(item: Mapping[str, Any]) -> list[str]:
-    """Use source_uids, falling back to item_uid; neither means unadjudicated."""
-    data = dict(item)
-    attributed = item_source_uids(data)
-    if attributed:
-        return attributed
-    own = item_uid(data)
-    return [own] if own else []
-
-
-def _item_provenance(
-    uids: Sequence[str], ledger: Mapping[str, RecordProvenance] | None
-) -> tuple[dict[str, Any], list[RecordProvenance], str | None]:
-    """Return ledger evidence, parsed records, and the first unadjudicated reason.
-
-    Every attributed UID must be present, targeted, bound, and kept to clear the
-    check. Missing evidence selects the item.
-    """
-    evidence: dict[str, Any] = {}
-    present: list[RecordProvenance] = []
-    if not uids or not ledger:
-        return evidence, present, "unadjudicated:no_provenance"
-    for uid in uids:
-        record = ledger.get(uid)
-        if record is None:
-            continue
-        evidence[uid] = record.as_dict()
-    if len(evidence) != len(uids):
-        return evidence, present, "unadjudicated:missing_provenance"
-    present = [ledger[uid] for uid in uids]
-    if any(not record.targeted for record in present):
-        return evidence, present, "unadjudicated:not_targeted"
-    if any(not record.verdict_bound for record in present):
-        return evidence, present, "unadjudicated:verdict_unbound"
-    if any(not record.kept for record in present):
-        return evidence, present, "unadjudicated:not_kept"
-    return evidence, present, None
+    # No reviewer records an adjudication ledger, so no finding is certified as routine.
+    return decision(True, "unadjudicated:no_provenance", "no adjudication provenance for the item's records")
 
 
 def _risk_category(data: Mapping[str, Any], diff_text: str) -> str | None:
@@ -334,12 +196,6 @@ def _weak_evidence_reason(data: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _prior_verdict(data: Mapping[str, Any]) -> str:
-    """Return a prior verifier verdict attached to *data*, or ``""``."""
-    value = data.get("verifier_verdict")
-    return value if isinstance(value, str) else ""
-
-
 def _placeholder_evidence() -> frozenset[str]:
     """Read the approval gate's vocabulary lazily to avoid the phase import cycle."""
     from daydream.phases.findings import (
@@ -358,24 +214,11 @@ def _weak_reason_text(reason_code: str) -> str:
     }.get(suffix, "weak evidence")
 
 
-def _unadjudicated_reason_text(reason_code: str) -> str:
-    suffix = reason_code.partition(":")[2]
-    return {
-        "no_provenance": "no adjudication provenance for the item's records",
-        "missing_provenance": "an attributed record is missing from the provenance ledger",
-        "not_targeted": "no adjudication pass targeted the item's records",
-        "verdict_unbound": "an adjudication verdict could not be bound to the record",
-        "not_kept": "adjudication did not keep the record",
-    }.get(suffix, "no confirmed independent adjudication")
-
-
 __all__ = [
     "SELECTION_RULE_VERSION",
-    "SKIP_REASON_CODE",
     "SelectionConfig",
     "SelectionDecision",
     "changed_text_at",
     "item_content_digest",
-    "plan_reuse",
     "select_items",
 ]

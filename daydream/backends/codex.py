@@ -450,13 +450,6 @@ class CodexLifecycleError(CodexError):
                          retryable=not failure.terminal_received if failure.stage == "process_reap" else False)
 
 
-def codex_lifecycle_diagnostic(error: BaseException) -> str | None:
-    """Project only this adapter's exact host error; reject polymorphic payloads.
-
-    The projection admits only an exact ``BackendLifecycleFailure`` and never raises."""
-    if type(error) is not CodexLifecycleError:
-        return None
-    return lifecycle_failure_diagnostic(getattr(error, "lifecycle_failure", None))
 
 
 def _file_change_events(

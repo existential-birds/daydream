@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
 from daydream.json_utils import (
@@ -85,7 +84,7 @@ def _salvageable(value: Any, schema: dict[str, Any]) -> bool:
 def resolve_output(
     structured_result: Any, raw: str, *, native_output: bool, text_overflow: bool,
     output_schema: dict[str, Any] | None, validate_structured_output: bool, require_full_schema: bool,
-    staged: bool, schema_rejection_guard: Callable[[Any], bool] | None,
+    staged: bool,
 ) -> Any:
     """Resolve native authority or final text using the caller's existing validation policy."""
     def _usable(value: Any) -> bool:
@@ -124,7 +123,7 @@ def resolve_output(
             selected: Any = None
             if validate_structured_output:
                 selection = (extract_json_by_schema(raw, schema=output_schema, accept=validates_schema,
-                                                    require_complete_root=True, rejection_guard=schema_rejection_guard)
+                                                    require_complete_root=True)
                              if staged else
                              _select_by_schema(raw, output_schema, require_full_schema=require_full_schema))
                 selected = selection.value
@@ -149,7 +148,7 @@ def resolve_output(
             reject_detail = (f"schema {rejection.category} at {rejection.schema_path}; "
                              f"{rejection.error_count} error(s); {rejection.candidate_count} candidate(s)")
         eligible = not native_output and (
-            rejection is not None and (schema_rejection_guard is None or schema_rejection_guard(structured_result))
+            rejection is not None
             if structured_result is not None else selection.schema_retry_eligible if selection is not None else False
         )
         # Preserve the domain guard's rejection diagnostics even when a selected native payload cannot retry.

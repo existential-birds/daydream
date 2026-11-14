@@ -15,7 +15,6 @@ from daydream.artifact_visibility import ArtifactSession, artifact_dir_for
 from daydream.backends import Backend
 from daydream.deep.detection import StackAssignment
 from daydream.deep.diff import _DIFF_MINUS_HEADER, _DIFF_PLUS_HEADER, iter_diff_blocks
-from daydream.deep.sharding import file_change_bytes
 from daydream.git_ops.models import GitError
 from daydream.hunk_index import _HUNK_HEADER, _unquote_git_path
 from daydream.json_utils import atomic_write_bytes, canonical_json as _json
@@ -93,8 +92,6 @@ class CanonicalChange:
     canonical: tuple[inputs.PreparedSanctionedInput, ...]
     text: str
     diff_paths: Mapping[str, tuple[str, str]]
-    deleted_files: frozenset[str]
-    change_bytes: Mapping[str, int]
     index_entries: Mapping[str, str]
 
     @classmethod
@@ -124,9 +121,6 @@ class CanonicalChange:
         diff_paths = {path: _block_paths(path, firsts[path], lasts[path]) for path in firsts}
         return cls(
             canonical=canonical, text=text, diff_paths=MappingProxyType(diff_paths),
-            deleted_files=frozenset(path for path, (old, new) in diff_paths.items()
-                                    if new == "/dev/null" and old != "/dev/null"),
-            change_bytes=MappingProxyType(file_change_bytes(text)),
             index_entries=MappingProxyType({path: _json(entry) for path, entry in index.items()}))
 
     def paths(self, file: str) -> tuple[str, str]:
@@ -141,15 +135,12 @@ class StageInputFactory:
     """Project scoped first-pass assignments with required-work priority; see the assignment limits in this module."""
 
     def __init__(self, backend: Backend, work: WorkContext, stack: StackAssignment, *,
-        change: CanonicalChange, shared_paths: dict[str, Path | None],
-        revision: dict[str, Any], artifact_session: ArtifactSession | None, allow_standalone: bool, read_only: bool,
-        bundle_capable: bool = False) -> None:
+        change: CanonicalChange, revision: dict[str, Any], artifact_session: ArtifactSession | None,
+        allow_standalone: bool, read_only: bool) -> None:
         self.backend, self.work, self.stack = backend, work, stack
         self.captured_source = work.captured_source
         self.revision = revision
         self.session, self.allow_standalone, self.read_only = artifact_session, allow_standalone, read_only
-        self.shared_paths = shared_paths
-        self.bundle_capable = bundle_capable
         self.transport = inputs.sanctioned_transport_for(backend, work.repo, read_only=read_only)
         self.change = change
         # Identities stay host-only on both transports.
@@ -158,7 +149,6 @@ class StageInputFactory:
         self.index = change.index_slice(stack.files)
         self.binding = {"analyzed_revision": revision,
                         "canonical_inputs": {item.label: item.sha256 for item in self.canonical}}
-        self.scope_name = hashlib.sha256(stack.stack_name.encode()).hexdigest()[:20]
         self.parts = self._parts()
         # Scope-local handles stay fixed when later projections select only some parts.
         self._source_aliases: dict[str, str] = {}
@@ -171,7 +161,6 @@ class StageInputFactory:
                 part.assignment['source_refs'], source_aliases=self._source_aliases)
         self.by_id = {part.assignment["target_id"]: part for part in self.parts}
         self.assignment_batches = self._batches()
-        self.current_paths: dict[str, Path] = {}
 
 
     def _mapped(self, part: _Part, *, body: str | bytes | None = None) -> _Part:
@@ -235,14 +224,7 @@ class StageInputFactory:
         return {"diff": "".join(part.diff for part in parts), "hunk-index": _json(index),
                 "input-binding": _json(self.binding)}
 
-    def _bundled(self, contents: dict[str, str]) -> dict[str, str]:
-        if not self.bundle_capable or not contents:
-            return contents
-        return {'review-assignment': '\n\n'.join(f'### {label} (supporting)\n{text}'
-                                                 for label, text in contents.items())}
-
     def _remaining_bytes(self, contents: dict[str, str], *, dispatch: bool = False) -> int:
-        contents = self._bundled(contents)
         cap = (_EXACT_PATH_ASSIGNMENT_MAX_BYTES if self.transport is inputs.SanctionedInputTransport.EXACT_PATHS
                else inputs.STAGED_REVIEW_INLINE_MAX_BYTES if dispatch
                else inputs.SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES)
