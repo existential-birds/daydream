@@ -5,6 +5,8 @@ import errno
 import json
 import os
 import socket
+import threading
+from contextlib import aclosing
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,7 @@ from daydream.backends import (
     RequestEvent,
     ResultEvent,
     TextEvent,
+    ToolStartEvent,
 )
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.codex import CodexBackend, CodexError
@@ -155,7 +158,9 @@ async def test_codex_process_outcomes_require_completion_and_zero_exit(
     A submission the host accepted over MCP survives that exit unsettled, a turn that completes
     with nothing accepted is a retryable truncation, and Codex-owned starts stay bounded after acceptance.
     Unlisted host tools, a host call Codex failed itself, a Codex-owned start past the allowance
-    and instructions too large to pass stop the invocation with what happened.
+    and instructions too large to pass stop the invocation with what happened. An attempt that
+    ends while the binding's slow check for a submission is still running closes its endpoint
+    at once and completely: waiting for the check left the cleanup incomplete.
     """
     completed = [json.dumps(row) for row in (
         {"type": "thread.started", "thread_id": "exit-check"}, {"type": "turn.started"},
@@ -185,9 +190,15 @@ async def test_codex_process_outcomes_require_completion_and_zero_exit(
     for observation in fixture.observations():
         await wait_for_process_group_gone(observation["pid"], timeout_s=5)
 
-    def binding(limit: int) -> HostToolBinding:
+    checking, checked = threading.Event(), threading.Event()
+
+    def check() -> None:
+        checking.set()
+        checked.wait(10)
+
+    def binding(limit: int, **check: Any) -> HostToolBinding:
         ledger = BudgetLedger("host", deadline=asyncio.get_running_loop().time() + 30, limit=limit, start_floor=1)
-        return HostToolBinding(budget=ledger, accept=lambda value: {"final": value})
+        return HostToolBinding(budget=ledger, accept=lambda value: {"final": value}, **check)
 
     # Codex reads the instructions as a TOML string; every character must survive that reading.
     instructions = 'policy "quoted" back\\slash\ttab\r\nline \x01\x7f \u00e9 \U0001f600 \'\'\' # ${HOME}'
@@ -196,20 +207,27 @@ async def test_codex_process_outcomes_require_completion_and_zero_exit(
     outcomes = {}
     rows: tuple[tuple[str, LifecycleMode, str, int], ...] = (
         ("settled", "healthy", '{"ok": true}', 4), ("failed exit", "nonzero_exit", '{"ok": true}', 4),
-        ("revoked", "healthy", '{"ok": true}', 4), ("overrun", "healthy", '{"ok": true, "shells": 2}', 2))
+        ("revoked", "healthy", '{"ok": true}', 4), ("overrun", "healthy", '{"ok": true, "shells": 2}', 2),
+        ("ended during a check", "healthy", '{"ok": true}', 4))
     for name, mode, prompt, limit in rows:
         served = install_codex_lifecycle_cli(tmp_path / mode / name, mode=mode)
         monkeypatch.setenv("PATH", f"{served.bin_dir}{os.pathsep}{environment['PATH']}")
-        bound, events, stop = binding(limit), [], None
+        ending = name == "ended during a check"
+        bound, events, stop = binding(limit, **({"validate": check} if ending else {})), [], None
         async with asyncio.timeout(15):
             try:
-                async for event in CodexBackend(model="fixture-model").execute(
+                async with aclosing(CodexBackend(model="fixture-model").execute(
                     tmp_path, prompt, {"type": "object"}, read_only=True,
                     review_instructions=instructions, host_tools=bound,
-                ):
-                    events.append(event)
-                    if name == "revoked" and isinstance(event, RequestEvent):
-                        bound.close_attempt()  # as a consumer that stops reading does
+                )) as stream:
+                    async for event in stream:
+                        events.append(event)
+                        if name == "revoked" and isinstance(event, RequestEvent):
+                            bound.close_attempt()  # as a consumer that stops reading does
+                        if ending and isinstance(event, ToolStartEvent):
+                            # The consumer leaves while the submission's check is on a worker thread.
+                            assert await asyncio.to_thread(checking.wait, 5)
+                            break
             except (CodexError, HostToolFatal) as exc:
                 stop = getattr(exc, "code", None) or getattr(exc, "category", None)
         (observation,) = served.observations()
@@ -237,7 +255,10 @@ async def test_codex_process_outcomes_require_completion_and_zero_exit(
         "revoked": (None, False, True, False, "STREAM_TRUNCATION", [None], (0, 0)),
         # Codex-owned starts after acceptance stay charged; one past the allowance stops the invocation.
         "overrun": ({"final": {"ok": True, "shells": 2}}, False, True, True, "capacity_exhausted", [], (2, 3)),
+        # Nothing was submitted or charged, and the endpoint's cleanup did not wait for the check.
+        "ended during a check": (None, False, True, False, None, [], (0, 0)),
     }
+    checked.set()
     native_failure = {"type": "item.completed", "item": {
         "id": "item_1", "type": "mcp_tool_call", "server": "daydream", "tool": "structured_output", "arguments": {},
         "result": None, "error": {"message": "tool call requires approval"}, "status": "failed"}}

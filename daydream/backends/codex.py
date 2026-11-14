@@ -607,7 +607,8 @@ class _CodexHostEndpoint(HostToolEndpoint):
                 await http.startup(sockets=[listener])
                 started.set_result(None)
                 await self._stop.wait()
-                await http.shutdown(sockets=[listener])
+            # The manager has cancelled its handlers, one of which may await a slow check; nothing is left to drain.
+            await http.shutdown(sockets=[listener])
 
         self._serving = asyncio.create_task(serve())
         await asyncio.wait({self._serving, started}, return_when=asyncio.FIRST_COMPLETED)
