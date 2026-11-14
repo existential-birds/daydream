@@ -95,7 +95,11 @@ fresh challenge, navigates it under the profile's
   (16 KiB) first catalog page with `status`, `total_targets`, `total_files` and
   omitted counts. Catalog and decided markers there are a dispatch-time snapshot.
   The assignment is canonical JSON with DEL, U+0085, U+2028 and U+2029 escaped, so text
-  inside it cannot draw a line break.
+  inside it cannot draw a line break. One `Limits:` paragraph of the policy states what a
+  reviewer is held to and a tool schema may not show ([Codex](#codex-host-tools)): batch
+  and text sizes, part ids as target ids, the assigned and supporting selector rules and
+  what follows a rejected final submission. The policy also asks the reviewer to admit
+  decisions as it reaches them.
 - `review_source` is a charged, read-only host lookup over frozen canonical inputs:
   with `target_id`/`path` null it pages the whole catalog; `path` lists one changed
   path's targets; `target_id` returns the target's `source_options`, ranges (for a

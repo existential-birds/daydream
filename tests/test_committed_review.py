@@ -2330,6 +2330,10 @@ async def test_committed_review_completes_through_native_host_tools(
     assert len(systems) >= 2
     for system in systems:
         assert "at most four selectors, and evidence_refs=[] records up to four of a target's sources." in system
+        # Limits a schema does not show on every backend, and what a rejected final batch leads to.
+        assert "Admit decisions as you reach them" in system
+        assert "Limits: a batch holds at most 128 targets or verdicts and 128 claims" in system
+        assert "structured_output keeps its reserved start: correct it and submit again." in system
         # The natively delivered instructions decode to the exact description with its separators escaped,
         # and the host's own search guidance still follows the assignment that repeats it.
         assert _assignment({"review_system_instructions": system})["profile"]["historical_context"] == {

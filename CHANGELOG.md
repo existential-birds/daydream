@@ -380,6 +380,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   8 MiB source retrieval limit still applies, and the retained reference is unchanged: the
   whole file's digest and the cited range
   ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+- The committed-review instructions now state the limits a reviewer is held to (batch and
+  text sizes, part ids as target ids, the assigned and supporting selector rules, and what
+  follows a rejected final submission) and ask it to admit decisions as it reaches them.
+  Before, a reviewer learned several of them only from rejections, on Codex without a
+  schema that shows them. Each assignment's instructions grow by about 1.2 KB. The Pi
+  `review_source` description no longer tells the reviewer to omit arguments its schema
+  requires ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
 - Committed review no longer rejects a reviewed target submitted with empty
   `evidence_refs` when the target has more than four sources. The host expanded `[]` to
   every source of the target and then refused its own expansion ("supply at most four

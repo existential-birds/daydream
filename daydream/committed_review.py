@@ -810,10 +810,22 @@ of relying on summaries. Its page sha256 values identify exact frozen bytes. A c
 cited source_range or, for exact continuation fragments, inside that fragment's summarized line span.
 Submission: keep each batch under 32 KiB of arguments. review_admit admits one bounded batch now
 and returns a receipt; admitted decisions and claims are retained even if later work fails, and each
-target is decided at most once. structured_output submits the
+target is decided at most once. Admit decisions as you reach them; the final batch may be small or empty.
+structured_output submits the
 final batch and ends this assignment; call it alone in a completed generation. Every batch is atomic: a
 rejected batch changes nothing and may be corrected within the original cumulative allowance. Undecided
 targets remain typed unfinished work. Empty findings are legitimate.
+Limits: a batch holds at most 128 targets or verdicts and 128 claims in 131072 bytes of arguments; the review
+retains at most 128 claims. reason holds at most 1024 characters, any other text 1 to 4096; a not_reviewed
+reason and verdict grounds are never blank. target_id is a catalog id: a file split into parts is decided by
+its part ids, never by its path. Non-empty evidence_refs of a reviewed target include one of its own
+source_ids; a claim's are never empty and, like a verdict's, include an assigned source_id. An assigned
+source_range only narrows the offered range. A supporting selector names a regular UTF-8 file of at most
+8 MiB inside the repository at the captured revision, with source_range inside its lines. review_source
+takes target_id or path, never both. A rejection names each distinct violation in its batch. A rejected final
+structured_output keeps its reserved start: correct it and submit again. Past 32 denied starts and such
+rejections the assignment closes; if it ends on a rejected final batch, the host keeps that batch's items
+that are valid alone and the rest stay unfinished.
 Capacity: instruction allowances are dispatch-time snapshots. review_source and review_admit results report
 current host capacity after charging that call, including protected reserves you cannot spend.
 Discovery must decide every target explicitly. Challenge must seek counterevidence for each assigned claim
