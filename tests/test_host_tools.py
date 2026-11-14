@@ -863,7 +863,8 @@ async def test_http_parallel_batch_cannot_consume_the_protected_submission_start
             # Denied starts and rejected final submissions share the one bound, whichever event passes it.
             for index in range(policy.PROTECTED_DENIAL_LIMIT - 2):
                 with pytest.raises(HostToolRejected):
-                    if index % 2:
+                    # The last event inside the bound is of the kind that then passes it.
+                    if index % 2 == (case == "denial-bound"):
                         binding.admit(f"retry-{index}", "read", None)
                     else:
                         binding.admit(f"final-{index}", NATIVE_SUBMIT, invalid, terminal=True)

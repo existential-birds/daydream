@@ -369,14 +369,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was the last one it submitted, the target decisions, verdicts and claims in it that are
   valid on their own are retained, so the review is sealed `incomplete` with partial
   evidence instead of losing them. Batches submitted while the assignment is live stay
-  atomic. The sealed result does not mark such items; their work is recorded as not
-  accepted. If the retained items together exceed retained capacity, nothing of the batch
-  is kept ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+  atomic. Nothing is kept that the batch as submitted would not have done: no item whose
+  target or claim another item of the batch was refused for, no `reviewed` decision when a
+  claim of the batch was refused (those targets stay for later work), and nothing of a
+  batch the reviewer replaced with any later submission. The sealed result does not mark
+  such items; their work is recorded as not accepted. If the retained items together
+  exceed retained capacity, nothing of the batch is kept
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
 - One committed-review rejection now names every distinct violation in the batch instead
   of the first one only. Each states how many targets, verdicts or claims broke it and
-  the first three of them, with ids dropped before a violation when the 1,024-byte
-  rejection bound is tight. The rule that references need an assigned `source_id` no
-  longer calls a claim or verdict "a reviewed target"
+  the first three of them (ids, or paths for a supporting selector, cut to 160
+  characters), with ids dropped before a violation when the 1,024-byte rejection bound is
+  tight. A schema rejection still names its first fault. The rule that references need an
+  assigned `source_id` no longer calls a claim or verdict "a reviewed target"
   ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
 - A supporting `{path, side, source_range, basis}` selector is no longer refused because
   its whole file exceeds 65,536 bytes, a rule nothing stated to the reviewer. The existing

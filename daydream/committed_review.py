@@ -9,7 +9,7 @@ import os
 import re
 import uuid
 from collections.abc import Callable
-from contextlib import AsyncExitStack, suppress
+from contextlib import AsyncExitStack
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -69,6 +69,7 @@ from daydream.immutable_review import HISTORICAL_CONTEXT_MAX_BYTES, ImmutableRev
 from daydream.json_utils import canonical_json, validate_json_schema
 from daydream.observability.spans import record_budget_stop
 from daydream.prompt_budget import SanctionedInputUnavailable
+from daydream.redaction import redact_text
 from daydream.review_budget import BudgetDimension, BudgetLedger
 from daydream.review_profile import ASSIGNMENT_POLICIES, ResolvedProfile, build_default_profile, resolve_from_runconfig
 from daydream.review_result import (
@@ -80,7 +81,12 @@ from daydream.review_result import (
     reason_for_budget,
     reason_for_exception,
 )
-from daydream.review_source_refs import SOURCE_SELECTORS_SCHEMA, _SubmissionSources, source_id
+from daydream.review_source_refs import (
+    SOURCE_SELECTORS_SCHEMA,
+    SupportingSourceRejected,
+    _SubmissionSources,
+    source_id,
+)
 from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
 from daydream.run_config import RunConfig, _resolved_backend_name
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
@@ -137,7 +143,7 @@ class _Work:
     admitted_claims: list[dict[str, Any]] = field(default_factory=list)
     verdicts: list[dict[str, Any]] = field(default_factory=list)
     resolved: int = 0
-    # Installs the valid items of a rejected final batch while that batch is this work's latest submission.
+    # Installs what can be kept of a rejected final batch, while no later submission has started.
     salvage: Callable[[], Any] | None = None
 
     @property
@@ -489,7 +495,6 @@ class Review:
         def admit(value: dict[str, Any], *, final: bool, salvage: bool = False) -> dict[str, Any]:
             if not salvage:
                 binding.ensure_open()
-            work.salvage = None
             if len(canonical_json(value).encode()) > COMMITTED_SUBMISSION_MAX_BYTES:
                 raise HostToolRejected(
                     f"submission exceeds {COMMITTED_SUBMISSION_MAX_BYTES} UTF-8 bytes; split it into smaller "
@@ -500,15 +505,24 @@ class Review:
                 decisions: dict[str, dict[str, Any]] = {}
                 verdicts: dict[str, dict[str, Any]] = {}
                 refused: dict[tuple[str, str], list[str]] = {}
+                withdrawn: set[str] = set()
 
                 def each(check: Callable[[dict[str, Any]], None], name: str) -> None:
                     """Check every item alone: a rejection names each violation, and salvage keeps the rest."""
                     for index, item in enumerate(canonical[name]):
+                        identity = item.get("target_id") or item.get("uid") or f"{name}[{index}]"
                         try:
                             check(item)
                         except HostToolRejected as exc:
-                            label = item.get("target_id") or item.get("uid") or f"{name}[{index}]"
-                            refused.setdefault((name, str(exc)), []).append(label)
+                            message, label = exc.group if isinstance(exc, SupportingSourceRejected) else (
+                                str(exc), redact_text(identity)[:160])
+                            refused.setdefault((name, message), []).append(label)
+                            withdrawn.add(identity)
+                        except HostToolFatal:
+                            # A batch with an item already refused is reported as refused, as it was
+                            # when checking stopped at the first refusal.
+                            if not refused:
+                                raise
 
                 if kind in INVESTIGATION_KINDS:
                     def decide(target: dict[str, Any]) -> None:
@@ -572,6 +586,14 @@ class Review:
                     # Each violation counts its items and names the first three; ids go before a violation does.
                     text = violations(3)
                     raise HostToolRejected(text if len(text.encode()) <= _MAX_REJECTION_BYTES else violations(0))
+                # Salvage never does what the batch as submitted would not: it keeps no item whose target or
+                # claim another item was refused for, and no reviewed decision of a batch that lost a claim,
+                # so that target stays for later work.
+                lost_claim = any(name == "claims" for name, _ in refused)
+                decisions = {identifier: decision for identifier, decision in decisions.items()
+                             if identifier not in withdrawn and not (lost_claim and decision["status"] == "reviewed")}
+                verdicts = {uid: verdict for uid, verdict in verdicts.items() if uid not in withdrawn}
+                changes = [kept for kept in changes if kept["uid"] not in withdrawn]
 
                 def install() -> dict[str, Any]:
                     # No await, I/O, or model decision between final checks and installation.
@@ -660,7 +682,9 @@ class Review:
                 return self.inputs.admit_submission(prepare)
             except HostToolRejected:
                 if final and not salvage:
-                    work.salvage = lambda: admit(value, final=True, salvage=True)
+                    # Forgotten once the reviewer starts another submission, even one the binding refuses.
+                    starts = binding.submissions
+                    work.salvage = lambda: binding.submissions == starts and admit(value, final=True, salvage=True)
                 raise
             except SanctionedInputUnavailable as exc:
                 raise HostToolFatal('Captured review input is unavailable', code='input_unavailable') from exc
@@ -679,15 +703,24 @@ class Review:
     def close(self, work_id: str) -> None:
         """Close one work's authority for good.
 
-        If the last batch the work submitted was a rejected final one, its items that are valid alone are
+        If the last submission the work started was a rejected final batch, what can be kept of it is
         installed together under the unchanged installation checks. The work stays not accepted.
         """
         work = self.work[work_id]
         assert work.binding is not None
         work.binding.close_authority()
-        if work.salvage is not None:
-            with suppress(HostToolRejected, HostToolFatal):
-                work.salvage()
+        salvage, work.salvage = work.salvage, None
+        try:
+            if salvage is not None:
+                salvage()
+        except (HostToolRejected, HostToolFatal):
+            pass
+        except Exception as exc:
+            # Recorded as a live acceptance callback's unexpected failure is; the caller still writes its row.
+            failure = HostToolFatal("Host acceptance callback failed unexpectedly", code="callback_failed",
+                                    preacceptance=False)
+            failure.__cause__ = exc
+            work.binding.fail(failure)
 
     def pending(self) -> list[dict[str, Any]]:
         """An immutable projection; a model cannot clear required work by declaring completion."""

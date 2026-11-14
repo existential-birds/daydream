@@ -200,7 +200,8 @@ class HostToolBinding:
         self.budget = budget
         # ``calls`` records every admitted native start identity once; ``denied_starts`` are the
         # subset refused to keep the protected submission start, or refunded as its rejected submission.
-        self.calls = self.rejections = self.denied_starts = 0
+        # ``submissions`` are the starts of structured_output or a mutating host tool, whatever their outcome.
+        self.calls = self.rejections = self.denied_starts = self.submissions = 0
         self.protected_submission = protected_submission
         self.authority_open = self.native_settled = self.cleanup_complete = False
         self.closed = False
@@ -341,6 +342,7 @@ class HostToolBinding:
                               code="native_correlation")
         self.calls += 1
         self._admitted.add(call_id)
+        self.submissions += name == NATIVE_SUBMIT or name in self.host_tools and self.host_tools[name].mutating
         remaining = self.budget.remaining_tool_calls
         if (remaining is not None and self.protected_submission and remaining <= 1
                 and not self.possibly_accepted and not (name == NATIVE_SUBMIT and terminal is True)):

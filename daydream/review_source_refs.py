@@ -97,6 +97,14 @@ def _supporting_facts(root: Path, revision: Mapping[str, Any], side: str, path: 
         contents.count(b'\n') + int(bool(contents) and not contents.endswith(b'\n')), utf8)
 
 
+class SupportingSourceRejected(HostToolRejected):
+    """A supporting-selector violation; ``group`` holds its rule apart from its path so a batch can count paths."""
+
+    def __init__(self, field: str, source: str, rule: str) -> None:
+        super().__init__(f'{field}{rule}')
+        self.group = (f'evidence_refs supporting path{rule}', source)
+
+
 class _SubmissionSources:
     """Callback-local host facts, revoked before the factory validates and installs."""
 
@@ -205,28 +213,29 @@ def canonicalize_source_selectors(
                 reference.update(basis=selector['basis'], role='assigned')
             else:
                 path, side, bounds = selector['path'], selector['side'], selector['source_range']
-                field += f' supporting path {redact_text(path)[:160]!r} ({side})'
+                source = f'{redact_text(path)[:160]!r} ({side})'
+                field += f' supporting path {source}'
                 if not git_observed_path_is_confined(source_root, path):
-                    raise HostToolRejected(
-                        f'{field}: path must remain inside the repository; choose a confined repository path '
-                        'or remove this optional supporting selector.')
+                    raise SupportingSourceRejected(
+                        field, source, ': path must remain inside the repository; choose a confined repository '
+                        'path or remove this optional supporting selector.')
                 pinned_revision = source_revision(revision, side)
                 try:
                     facts = (_submission._supporting(side, path) if _submission is not None else
                              _supporting_facts(source_root, revision, side, path, captured_source))
                 except (FrozenSourceRejected, PathAbsentError) as exc:
-                    raise HostToolRejected(
-                        f'{field}: no available regular blob at the pinned revision; choose a regular file '
+                    raise SupportingSourceRejected(
+                        field, source, ': no available regular blob at the pinned revision; choose a regular file '
                         'on this side within the captured-source retrieval limit, '
                         'use an assigned source_id, or remove this optional supporting selector.') from exc
                 if not facts.utf8:
-                    raise HostToolRejected(
-                        f'{field}: the whole pinned blob is not UTF-8 text; choose a UTF-8 regular file '
+                    raise SupportingSourceRejected(
+                        field, source, ': the whole pinned blob is not UTF-8 text; choose a UTF-8 regular file '
                         'or remove this optional supporting selector.')
                 line_count = facts.lines
                 if not 1 <= bounds['start'] <= bounds['end'] <= line_count:
-                    raise HostToolRejected(
-                        f'{field}.source_range: allowed 1..{line_count} with start <= end; '
+                    raise SupportingSourceRejected(
+                        field, source, f'.source_range: allowed 1..{line_count} with start <= end; '
                         'choose a contained range or remove this optional supporting selector.')
                 reference = {
                     'artifact_sha256': facts.digest, 'part_sha256': None, 'revision': pinned_revision,
