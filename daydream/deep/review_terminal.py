@@ -15,6 +15,7 @@ from daydream.agent import console
 from daydream.artifact_visibility import ArtifactSourceUnavailableError
 from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.state import DeepState
+from daydream.extensions.api import ExtensionError
 from daydream.flows.engine import FlowContext
 from daydream.json_utils import atomic_write_bytes, atomic_write_json, validate_json_schema
 from daydream.phases.schemas import MERGED_ITEMS_SCHEMA
@@ -139,7 +140,10 @@ async def _step_committed_review(ctx: FlowContext) -> None:
     """Dispatch the planned review; its confirmed findings become the canonical items, even when it ends early."""
     from daydream.findings import committed_finding_item
 
-    program = ctx.data["committed_review"]
+    program = ctx.data.get("committed_review")
+    if program is None:
+        raise ExtensionError("the review phase runs only in the deep flow, which plans the review before its "
+                             "steps; insert steps into 'deep' with set_flow instead of borrowing 'review'")
 
     def publish_items() -> None:
         # Every consumer reads the line as a head line, so a location only the old side has carries none.

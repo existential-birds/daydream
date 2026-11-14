@@ -8,10 +8,12 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import replace
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.console import Console
 
 from daydream import git_ops, json_utils, runner
 from daydream.backends import ResultEvent, ToolStartEvent
@@ -19,12 +21,14 @@ from daydream.dataset import LocalRecordStore
 from daydream.deep import review_terminal
 from daydream.findings import FindingsValidationError, load_findings_artifact
 from daydream.phases.review import ReviewOutputError
+from daydream.pr_review import post_findings_from_artifact
 from daydream.review_result import ReviewCoverage
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.console import collapse_panel_text
 from tests.harness.dataset import read_records
 from tests.harness.fake_clock import FakeClock
+from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote, git, init_repo
 from tests.test_artifact_visibility import _Entry, _walk_entry
 from tests.test_deep_orchestrator import _pin_findings_pr, _record
@@ -133,11 +137,11 @@ async def test_comment_pins_pr_head_independently_and_excludes_local_edits(
 
 
 @pytest.mark.parametrize('case', ['dirty-no-diff', 'live'])
-async def test_snapshot_boundaries(review: ReviewRun, case: str) -> None:
+async def test_snapshot_boundaries(review: ReviewRun, fake_gh: FakeGh, case: str) -> None:
     """Analysis stays bound to the captured snapshot: dirty edits and a mid-run PR head advance never rebind it.
 
     'live' is a runner row: only a real review whose PR head moves after capture proves the pinned
-    head is still analyzed and placed, with one lookup.
+    head is still analyzed and placed, with one lookup. Its produced artifact then meets the poster.
     """
     if case == 'live':
         live, calls = review.pr, []
@@ -161,6 +165,37 @@ async def test_snapshot_boundaries(review: ReviewRun, case: str) -> None:
         assert git_ops.show(review.repo, live.head_sha, 'api.py') and len(calls) == 1
         assert (data['findings'][0]['placement'], data['findings'][0]['line']) == ('inline', 2)
         assert result['analyzed_revision']['pr_base_sha'] == review.pr.base_sha
+        # The poster takes that produced artifact only for the event it was produced for: a moved head, another
+        # repository or another pull request is refused before any GitHub call.
+        printed = StringIO()
+
+        def post(artifact: Path = review.output, **facts: Any) -> int:
+            return post_findings_from_artifact(review.repo, artifact, console=Console(file=printed, width=200), **{
+                'pr_number': 7, 'head_sha': review.pr.head_sha, 'repo': 'o/r', 'approve_on_clean': True, **facts})
+
+        produced = len(fake_gh.process_calls())
+        for changed in ({'head_sha': live.head_sha}, {'repo': 'o/other'}, {'pr_number': 8}):
+            assert post(**changed) == 1, changed
+        assert len(fake_gh.process_calls()) == produced
+        assert post() == 0
+        (posted,) = fake_gh.calls('POST', 'repos/o/r/pulls/7/reviews')
+        # A finding without severity withholds the opted-in approval.
+        assert (posted.payload['event'], posted.payload['commit_id']) == ('COMMENT', review.pr.head_sha)
+        assert [(comment['path'], comment['line']) for comment in posted.payload['comments']] == [('api.py', 2)]
+        # An incomplete review still exports its admitted finding with truthful coverage, and never approves.
+        review.backend.review_undecided = 1
+        live, partial = review.pr, review.tmp / 'incomplete.json'
+        assert await review.run(findings_out=str(partial)) == 0
+        exported = json.loads(partial.read_text())
+        assert exported['terminal_result']['analysis_state'] == 'incomplete'
+        assert [finding['title'] for finding in exported['findings']] == ['Grounded defect']
+        assert post(partial) == 0
+        notice = fake_gh.calls('POST', 'repos/o/r/pulls/7/reviews')[-1].payload
+        assert notice['event'] == 'COMMENT' and len(notice['comments']) == 1
+        assert '**Review incomplete.**\n\n- committed:00000: evidence_incomplete' in notice['body']
+        # A delivery GitHub does not confirm is reported as unconfirmed, never as posted.
+        fake_gh.set_response('POST', 'repos/o/r/pulls/7/reviews', {'__error__': 'HTTP 422: unprocessable'})
+        assert post() == 1 and 'Could not confirm the PR review was posted' in ' '.join(printed.getvalue().split())
         return
     prior = {'.daydream/deep/history.json': '{"prior": true}\n',
              '.daydream/deep/merged-items.json': '{"items": [{"item_uid": "item:old"}]}\n',
