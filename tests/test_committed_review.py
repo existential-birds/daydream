@@ -1640,7 +1640,7 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
             judge.submit("final", judged)
         assert review.pending() == [claim]
     review.close("work:2")
-    _clean(review, "work:2", "missing_output")
+    _clean(review, "work:2", "host_wall_budget_exhaustion")
     value = review.seal({})
     # Neither work was accepted: its retained items are partial evidence of an incomplete review.
     assert [(work["state"], work["admitted_targets"], work["verdicts"]) for work in value["work"]] == [
@@ -1652,6 +1652,10 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
     assert reasons[:105] == ["No start was left to read it."] * 105
     assert all(reason.startswith("unsubmitted:") for reason in reasons[105:]) and len(reasons) == 125
     assert value["terminal_result"]["analysis_state"] == "incomplete"
+    # Work that ran out of its allowance tells the user which profile keys raise it.
+    assert review._coverage.diagnostics["phases"] == {"challenge": (
+        "The review used up its allowance before it finished; raise reviewer_investigation_budget_s and "
+        "reviewer_tool_call_budget under [pipeline] in the review profile.")}
 
 
 async def test_denied_over_limit_discovery_start_cannot_spend_protected_challenge_reserve(
