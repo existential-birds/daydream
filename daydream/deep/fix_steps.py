@@ -246,7 +246,7 @@ async def _step_verify(ctx: FlowContext) -> None:
     dd = deep_state.dd
     items: list[dict[str, Any]] = deep_state.items
 
-    # Accepted fresh and resumed fix gates verify recommendations; declined gates
+    # Accepted fix gates verify recommendations; declined gates
     # produce neither a verifier call nor its artifact.
     selection = SelectionConfig(verify_all=_resolve_config_value(ctx.config, "verify_all", DEFAULT_VERIFY_ALL))
     async with phase_scope(DaydreamPhase.VERIFY):

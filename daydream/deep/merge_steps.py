@@ -35,9 +35,7 @@ async def _step_load_items(ctx: FlowContext) -> Stop | None:
         allow_standalone=ctx.allow_standalone_artifacts,
     )
 
-    # merged-items.json is the canonical source of truth; review-output.md is
-    # render-only. The missing-input guard keys on the JSON so a --start-at fix
-    # resume with surviving JSON but absent markdown proceeds rather than bailing.
+    # merged-items.json is the canonical source of truth; review-output.md is render-only.
     items_file = DeepArtifact.MERGED_ITEMS.at(dd)
     if not items_file.is_file():
         print_error(
@@ -48,8 +46,7 @@ async def _step_load_items(ctx: FlowContext) -> Stop | None:
         return Stop(1)
 
     # Best-effort recover the render-only markdown from the deep-dir copy for
-    # the exit message when the canonical file is absent (e.g. a --start-at fix
-    # resume where the copy to the canonical path never ran). Non-fatal.
+    # the exit message when the canonical file is absent. Non-fatal.
     if not merged_report.exists():
         deep_copy = DeepArtifact.MERGED_REPORT.at(dd)
         if deep_copy.exists():

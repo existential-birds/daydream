@@ -159,7 +159,7 @@ def review_scale_for_scope() -> int:
 def review_deadline_scope(
     seconds: float, *, diff: str = "", scale_deadline: bool = False
 ) -> Iterator[None]:
-    """A fresh/resumed review shares one deadline, including queue and retry time.
+    """A review shares one deadline, including queue and retry time.
 
     Only review-limited calls consume this scope; fixing and publication do not.
     Context-local state isolates concurrent runs and is restored on cancellation.

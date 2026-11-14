@@ -116,7 +116,7 @@ _UNDECIDED_REASON = "unsubmitted: no admitted decision before this review ended;
 _CURSOR = re.compile(r"c1\.([0-9a-f]{12})\.([0-9]{1,12})")
 _CONTINUATION_NOTICE = "[Ordered continuation: this is a partial hunk; see assignment mapping.]\n"
 _RESPONSIBILITY_PAGE = 256
-# Same workflow fan-out ceiling as deep per-stack review; the backend hint may lower it.
+# Workflow fan-out ceiling; the backend hint may lower it.
 _FANOUT_CEILING = 10
 # One investigation start plus the protected structured_output start.
 _MIN_WORK_CALLS = 2

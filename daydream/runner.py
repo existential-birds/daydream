@@ -152,9 +152,8 @@ def _resolve_backend(
 ) -> Backend:
     """Resolve and optionally cache a phase backend.
 
-    ``effort_override`` is a per-group arbiter override, gated by the same backend
-    support as latency profiles. The resolved effort participates in the cache key,
-    so a tuned arbiter cannot reuse the default-effort instance.
+    ``effort_override`` serves ``FlowContext.backend_for_effort``. The resolved effort
+    participates in the cache key, so a tuned backend cannot reuse the default-effort instance.
     """
     backend_name = _resolved_backend_name(config, phase)
     resolved_model = _resolved_model(config, phase)

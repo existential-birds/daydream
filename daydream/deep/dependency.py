@@ -1,7 +1,7 @@
-"""Changed-file import graphs and deterministic undirected groups for sharding.
+"""Changed-file import graphs.
 
-Parsing/grammar failures and timeouts leave files available for singleton
-packing. Callers also guard unsafe tree-sitter installations.
+Parsing/grammar failures and timeouts leave a file without edges. Callers also
+guard unsafe tree-sitter installations.
 """
 
 from __future__ import annotations

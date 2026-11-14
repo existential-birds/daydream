@@ -2,9 +2,7 @@
 
 Leaf module: it declares the five categories that force conservative
 verification and the trigger words that identify each from changed text. The
-diff-surface classifier (:mod:`daydream.deep.latency`) and the per-item
-selection classifier both read this one declaration, so a trigger can never
-diverge between them.
+per-item verifier selection reads this one declaration.
 """
 
 from __future__ import annotations
@@ -34,10 +32,6 @@ CATEGORY_TRIGGERS: dict[str, tuple[str, ...]] = {
 }
 """Category id -> trigger words, matched as case-insensitive substrings."""
 
-"""The diff-surface signal names from :class:`daydream.deep.latency.DiffSignals`
-to the category ids they represent, so floors and per-item classification read
-one vocabulary.
-"""
 
 
 def category_matches(category: str, text: str) -> bool:
