@@ -469,14 +469,13 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     exploration_dir = exploration_dir if isinstance(exploration_dir, Path) else None
     test_map_path = exploration_dir / "test-map.json" if exploration_dir else None
     intent_p: Path = deep_state.intent_path
-    grounded = config.start_at not in ("per-stack", "merge", "fix")
     async with phase_scope(DaydreamPhase.FIX):
         try:
             failures = await phase_fix_parallel(
                 ctx.backend_for("fix"),
                 ctx.work,
                 items,
-                intent_path=intent_p if grounded and intent_p.exists() else None,
+                intent_path=intent_p if intent_p.exists() else None,
                 group_max_wall_s=_resolve_config_value(
                     config, "group_max_wall_s", DEFAULT_GROUP_MAX_WALL_S
                 ),

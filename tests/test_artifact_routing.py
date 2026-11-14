@@ -59,7 +59,7 @@ async def test_standalone_entry_rejects_borrowing_a_bound_artifact_session(
     )
     backend = ScriptedBackend(events=[ResultEvent(structured_output=None, continuation=None)])
     monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: backend)
-    config = make_config(repo, start_at="fix")
+    config = make_config(repo)
 
     async with open_artifact_session(work, session_id="bound-session", owner=owner) as session:
         live = session.daydream_dir

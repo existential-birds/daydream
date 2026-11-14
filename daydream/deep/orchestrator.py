@@ -24,10 +24,8 @@ from daydream.config import (
 from daydream.deep import review_steps
 from daydream.deep.artifacts import (
     DeepArtifact,
-    check_deep_artifacts,
     deep_dir,
     diff_key,
-    per_stack_records_path,
 )
 from daydream.deep.dependency import build_import_graph
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
@@ -277,13 +275,6 @@ def _fresh_ttt(ctx: FlowContext) -> bool:
     return fresh_ttt(ctx.config)
 
 
-def _before_fix_resume(ctx: FlowContext) -> bool:
-    # Verbatim resume gate: --start-at fix skips everything up to the fix gate.
-    # For post-review, this also keeps the non-idempotent GitHub write off the
-    # resume path (duplicate inline reviews on reruns).
-    return ctx.config.start_at != "fix"
-
-
 def _multi_stack_merge_enabled(ctx: FlowContext) -> bool:
     deep_state = DeepState(ctx.data)
     return ctx.config.start_at != "fix" and not deep_state.single_stack_mode
@@ -300,7 +291,7 @@ def _diagram_enabled(ctx: FlowContext) -> bool:
     No eligible diagram means zero agent calls, but the step still records why.
     Diagram-only flows always pass this gate.
     """
-    return _before_fix_resume(ctx) and _resolved_diagram_mode(ctx) != "off"
+    return _resolved_diagram_mode(ctx) != "off"
 
 
 def _findings_out_enabled(ctx: FlowContext) -> bool:
@@ -387,11 +378,11 @@ def _flow_name_for_mode(mode: str) -> str:
 # Cleanup follows every successful flow exit, including an early declined gate.
 # Failures retain evidence.
 STEPS: tuple[FlowStep, ...] = (
-    FlowStep(name="review", run=_step_committed_review, enabled=_before_fix_resume),
+    FlowStep(name="review", run=_step_committed_review),
     FlowStep(name="load-items", run=_step_load_items),
     FlowStep(name="diagram", run=_step_diagram, config_phase="diagram", enabled=_diagram_enabled),
     FlowStep(name="findings-out", run=_step_findings_out, enabled=_findings_out_enabled),
-    FlowStep(name="post-review", run=_step_post_review, enabled=_before_fix_resume),
+    FlowStep(name="post-review", run=_step_post_review),
     # Fix cycle: loop + shallow modes only (review/comment stop after post-review).
     FlowStep(name="fix-gate", run=_step_fix_gate, enabled=_fix_cycle_enabled),
     FlowStep(name="verify", run=_step_verify, enabled=_fix_cycle_enabled),
@@ -488,9 +479,7 @@ def _prepare_review_stacks(
     shard_this_run = sharding_enabled and not single_stack_mode
     # Build one import graph for sharding and diagram eligibility. The guard also
     # catches unsafe tree-sitter versions that can escape the fail-open builder.
-    diagram_needs_graph = (
-        config.start_at != "fix" and _diagram_mode_for(config, mode) != "off"
-    )
+    diagram_needs_graph = _diagram_mode_for(config, mode) != "off"
     if (shard_this_run and useful_shards) or diagram_needs_graph:
         try:
             import_graph = build_import_graph(changed_files, target_dir)
@@ -524,12 +513,10 @@ async def run_deep(
     backend_factory: BackendFactory | None = None,
     allow_standalone: bool = False,
 ) -> int:
-    """Prepare and execute the registered deep flow for review, comment, shallow or loop.
+    """Plan the review, then execute the registered deep flow for review, comment, fixing or diagram-only.
 
-    Resolve diff, stacks, routing and preflight before dispatch. start_at supports
-    TTT, per-stack, merge and fix resumes. Runner-managed calls supply run_artifacts;
-    standalone calls require explicit allow_standalone=True and no active session.
-    Return the pipeline exit code.
+    Every review starts fresh. Runner-managed calls supply run_artifacts; standalone calls
+    require explicit allow_standalone=True and no active session. Return the pipeline exit code.
     """
     started = clock.monotonic()
     run_context = resolve_run_context(run_context)
@@ -539,10 +526,6 @@ async def run_deep(
         raise ArtifactVisibilityError("standalone deep flow cannot run inside an active artifact session")
     artifact_session = None if run_artifacts is None else run_artifacts.session
     mode = _resolve_mode(config)
-    if work.captured_source is not None and config.start_at not in (None, "review"):
-        print_error(console, "Captured Review Restart",
-                    "Captured reviews cannot resume retained judgments; rerun without --start-at for a fresh review.")
-        return 1
     github_execution = github_execution or GitHubExecutionInput()
     # Late imports to avoid circular dependency with runner.
     from daydream.git_ops import GitError, GitTimeoutError
@@ -663,9 +646,7 @@ async def run_deep(
     current_diff_sha = diff_key(diff)
     # Diagram-only runs preserve prior deep-review artifacts and write no diff-key,
     # because they do not produce the review artifacts that key attests.
-    if mode != "diagram" and config.start_at not in ("per-stack", "merge", "fix"):
-        # Fresh run only: a resume must NOT rewrite the key it is checked
-        # against, or the staleness gate would self-heal and pass every time.
+    if mode != "diagram":
         shutil.rmtree(dd, ignore_errors=True)
         dd.mkdir(parents=True, exist_ok=True)
         DeepArtifact.DIFF_KEY.at(dd).write_text(current_diff_sha, encoding="utf-8")
@@ -693,23 +674,6 @@ async def run_deep(
             config, changed_files, diff, target_dir, mode
         )
 
-        # Resume gate (D-34, D-36, D-37) + diff-freshness gate.
-        if config.start_at in ("per-stack", "merge", "fix"):
-            try:
-                check_deep_artifacts(
-                    config.start_at, dd, current_diff_sha=current_diff_sha,
-                    record_paths=[per_stack_records_path(dd, stack.stack_name) for stack in stacks],
-                )
-                if _has_non_daydream_worktree_changes(git_ops.status_porcelain(target_dir)):
-                    raise FileNotFoundError(
-                        f"Cannot resume at stage '{config.start_at}' -- the worktree has changed "
-                        "since the review artifacts were generated.\n\n"
-                        "Resuming would review stale findings against changed code.\n"
-                        "Re-run without --start-at to regenerate them."
-                    )
-            except (FileNotFoundError, ValueError) as exc:
-                print_error(console, "Unusable Deep Artifacts", str(exc))
-                return 1
         registry = get_registry()
         # Risk describes the captured change, independently of prompt retention.
         latency_signals = diff_signals(

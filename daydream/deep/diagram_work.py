@@ -129,7 +129,6 @@ async def diagram_work_scope(ctx: FlowContext) -> AsyncIterator[None]:
     prefix = list(STEPS[:next(index for index, step in enumerate(STEPS) if step.name == "diagram") + 1])
     compatible = (
         _diagram_enabled(ctx)
-        and ctx.config.start_at not in ("merge", "fix")
         and entries[:len(prefix)] == [step.name for step in prefix]
         and all(ctx.registry.phase(step.name) == step for step in prefix)
     )

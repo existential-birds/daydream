@@ -732,9 +732,6 @@ async def _capture_review_workspace(
             or (mode not in {"review", "comment"} and config.findings_out is None)):
         yield work
         return
-    if config.start_at not in (None, "review"):
-        raise GitError("Captured reviews cannot resume retained judgments; "
-                       "rerun without --start-at for a fresh review.")
     assert work.head_sha is not None and work.base_sha is not None
     committed = mode == "comment" or config.findings_out is not None
     pinned_pr = None

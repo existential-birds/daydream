@@ -303,12 +303,11 @@ def capture_manifest_run_identity(
         runs_merge = True
     runs_per_stack_review = (
         (config.flow_name is None or config.flow_name in DEEP_FLOW_ALIASES)
-        and config.start_at not in ("merge", "fix")
         and flow_kind is not DaydreamRunFlow.DIAGRAM
     )
     phases = RunPhaseCapabilities(
         per_stack_review=runs_per_stack_review,
-        merge=runs_merge and config.start_at != "fix",
+        merge=runs_merge,
         fix=runs_fix,
         test=runs_test,
         push=flow_kind not in (DaydreamRunFlow.TTT, DaydreamRunFlow.PR) and "commit" in step_names,

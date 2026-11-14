@@ -220,7 +220,8 @@ def test_cli_requested_branch_ignores_current_checkout_pr(
     pipeline = build_default_profile().pipeline
     window = min(pipeline.reviewer_investigation_budget_s + 120, pipeline.review_wall_budget_s)
     limits = sealed["settings"]["limits"]
-    assert (limits["effective_investigation_s"], limits["protected_finalization_s"]) == (window - 120, 120)
+    assert limits["effective_investigation_s"] == pytest.approx(window - 120)
+    assert limits["protected_finalization_s"] == 120
     assert [(finding["title"], finding["payload"]["line"]) for finding in sealed["findings"]] == [
         ("Sample issue", 1), ("Removed return", 2)]
     reviews = transport.gh.calls("POST", "repos/acme/widgets/pulls/73/reviews")

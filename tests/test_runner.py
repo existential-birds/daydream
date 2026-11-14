@@ -591,17 +591,19 @@ async def test_owner_preflight_failure_never_reaches_identity_or_backend(
 # --- Per-phase model resolution tests --------------------------------------
 
 async def test_capture_review_workspace_refuses_resume_and_an_unpinned_comment_base(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Captured reviews never resume retained judgments, and comment mode requires a pinned PR base."""
+    """No review resumes retained judgments, and comment mode requires a pinned PR base."""
     work = WorkContext(repo=tmp_path, source=tmp_path, base_branch="main", base_sha="1" * 40, head_branch="feature",
                        head_sha="2" * 40, is_ephemeral=False, run_id="run-1")
     owner: Any = None
     execution: Any = SimpleNamespace(auth=git_ops.INHERIT_GITHUB_AUTH)
-    with pytest.raises(git_ops.GitError, match="cannot resume retained judgments"):
-        async with runner._capture_review_workspace(
-                work, RunConfig(findings_out="f.json", start_at="merge"), owner, execution):
-            pytest.fail("resume yielded a captured workspace")
+    # The resume request is refused before the target is even opened as a repository.
+    monkeypatch.setattr(runner, "open_workspace", lambda *_a, **_k: pytest.fail("a resume opened a workspace"))
+    for resumed in (RunConfig(findings_out="f.json", start_at="merge"), RunConfig(output_mode="loop", assume="yes",
+                                                                                 start_at="fix")):
+        assert await runner.run(replace(resumed, target=str(tmp_path))) == 1
+        assert "--start-at: every review starts fresh" in " ".join(capsys.readouterr().out.replace("║", " ").split())
     monkeypatch.setattr("daydream.pr_review.find_pr_by_number", lambda *_a, **_k: _ARTIFACT_PR)
     monkeypatch.setattr("daydream.pr_review.capture_pr_base_tip", lambda *_a, **_k: None)
     monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda *_a, **_k: _ARTIFACT_PR)
