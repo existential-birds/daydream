@@ -1629,6 +1629,7 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
             "split/0.py: choose a planned target", "split/2.py: choose a planned target")] == [1, 1, 1, 1]
         assert binding.authority_open and binding.remaining_tool_calls == 1
         assert review.catalog()["decided_targets"] == 0 and review.pending() == []
+    binding.close_authority()  # A binding that failed closed, or a stopped backend, revokes authority first.
     review.close(work_id)
     _clean(review, work_id, "host_tool_budget_exhaustion")
     claim, = review.pending()
