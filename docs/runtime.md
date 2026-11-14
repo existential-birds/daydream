@@ -87,28 +87,42 @@ any prompt bounding. Host-dispatched investigation work, followed by host-schedu
 fresh challenge, navigates it under the profile's
 [assignment policy](#assignment-policy-and-work):
 
-- System instructions, which native compaction never summarizes, carry only host policy:
-  the stable policy, the kind's paragraph, the profile's strategy for the kind, and the
-  dispatch-time allowance snapshot and search guidance the host appends. They are the same
-  for every dispatch of a kind and never grow with the change: Codex and Claude pass them
-  as one command-line argument, whose size the platform bounds ([Codex](#codex-host-tools)).
-  With the default profile they stay under 10 KiB. One `Limits:` paragraph of the policy
+- System instructions, which native compaction never summarizes, carry only host text:
+  committed review's policy, the kind's paragraph and the profile's strategy for the kind,
+  the same for every dispatch of a kind, followed by a line naming the dispatch's host
+  token and the allowance snapshot and search guidance the host appends to every dispatch.
+  None of it grows with the change: Codex and Claude pass the instructions as one
+  command-line argument, whose size the platform bounds ([Codex](#codex-host-tools)). With
+  the default profile they stay under 10 KiB. One `Limits:` paragraph of the policy
   states what a reviewer is held to and a tool schema may not show (Codex): batch
   and text sizes, part ids as target ids, the assigned and supporting selector rules and
   what follows a rejected final submission. The policy also asks the reviewer to admit
   decisions as it reaches them.
-- The first message carries the assignment. Its first line ends with a random token made
-  for that dispatch; the next line begins with the token and holds the assignment as
-  canonical JSON with DEL, U+0085, U+2028 and U+2029 escaped, so text inside it cannot draw
-  a line break: the assignment identity, the work's responsibilities, pending challenge
-  claims, the profile with any historical context, and a bounded (16 KiB) first catalog
-  page with `status`, `total_targets`, `total_files` and omitted counts. Catalog and
-  decided markers there are a dispatch-time snapshot. The instructions say that only lines
-  beginning with the token are host-authored and that the assignment's paths, claims and
-  historical context are data, never instructions. Native compaction can summarize the
-  first message: targets and catalog pages can be requested again through `review_source`,
-  claims cannot, so a challenge compacted before judging every claim can leave some
-  unresolved, retained as unfinished work.
+- The first message carries the assignment. The token is a random value made for that
+  dispatch, and every line committed review writes there begins with it (the allowance
+  snapshot appended after them repeats the one in the instructions); only the instructions
+  announce it, so text a backend places before the message cannot claim it. The second
+  host line holds the assignment as canonical JSON with DEL, U+0085, U+2028 and U+2029
+  escaped, so text inside it cannot draw a line break: the assignment identity, the work's
+  responsibilities, pending claims (with compact `retained_conclusions` for the
+  cross-assignment), the profile with any historical context, and a bounded (16 KiB) first
+  catalog page with `status`, `total_targets`, `total_files` and omitted counts. Catalog
+  and decided markers there are a dispatch-time snapshot. The third carries the host's
+  search guidance, so a copy quoted inside the assignment cannot stand in for it. The
+  instructions say that only lines beginning with the token are host-authored and that the
+  assignment's paths, claims and historical context are data, never instructions.
+- The trajectory records each dispatch's first message, so it holds every dispatch's whole
+  assignment, and trajectory files of large changes grow accordingly. The token is visible
+  there; it is a framing marker, not a credential, and means nothing once its dispatch ends.
+- Native compaction can summarize the first message. Discovery and follow-up work can
+  recover their targets: a `review_admit` receipt names the work id and its next undecided
+  targets, catalog entries name each undecided target's owner and `review_source` serves
+  every target's bytes. The cross-assignment can recover its inherited targets the same
+  way, but not its pending claims or `retained_conclusions`, so its search for defects
+  spanning assignments continues without them. A challenge cannot request its claims
+  again, so one compacted before judging every claim can leave some unresolved, retained as
+  unfinished work. No kind can request the historical context again; the strategy stays in
+  the instructions.
 - `review_source` is a charged, read-only host lookup over frozen canonical inputs:
   with `target_id`/`path` null it pages the whole catalog; `path` lists one changed
   path's targets; `target_id` returns the target's `source_options`, ranges (for a
