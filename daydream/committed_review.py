@@ -655,7 +655,8 @@ class Review:
                     except jsonschema.ValidationError as exc:
                         raise HostToolRejected(
                             "claims: canonical retention limit exceeded; reduce optional proposals") from exc
-                    if len(canonical_json(retained).encode()) > _MAX_RESULT_BYTES:
+                    if len(canonical_json([{**c, "challenge_evidence": []} for c in retained]).encode()) > (
+                            _MAX_RESULT_BYTES):
                         raise HostToolRejected("retained claims exceed shared byte capacity; reduce optional material")
                     merged = {**self._decisions, **decisions}
                     updates = {shard_scope_id(index): self._shard_decisions(index, merged)

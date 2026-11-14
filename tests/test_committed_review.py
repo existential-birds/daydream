@@ -432,6 +432,13 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
     value = review.seal({})
     assert value["terminal_result"]["analysis_state"] == "incomplete"
     assert value["findings"] == [] and len(value["claims"]) == 1
+    if fault == "shared-capacity":
+        # Verdicts do not count against the claims' capacity: every claim discovery kept can be confirmed at once.
+        review = Review(review_inputs, "verdicts")
+        await _submit(review, "discovery", {**_discovery(review_inputs), "claims": update["claims"][:30]})
+        verdicts = [_verdict(review_inputs, claim, grounds="g" * 3000) for claim in review.pending()]
+        await _submit(review, "challenge", {"verdicts": verdicts, "claims": []})
+        assert len(review.seal({})["findings"]) == 30
 
 
 @pytest.mark.parametrize("challenge", ["accepted-then-failed-bundle-stage", "cancelled", "hub-export"])
