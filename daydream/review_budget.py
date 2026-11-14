@@ -100,13 +100,6 @@ class BudgetStop:
     remaining_at_dispatch: float
     reserved: int
 
-    def diagnostic(self) -> str:
-        """Numbers first, so a bounded coverage diagnostic never truncates them."""
-        unit = "s" if self.dimension == "time" else " calls"
-        return (f"Budget stop ({self.dimension}): spent {self.spent:g} of {self.limit:g}{unit}, "
-                f"{self.remaining_at_dispatch:g}{unit} remaining at dispatch, {self.reserved} calls reserved "
-                f"for later work; owner {self.owner}.")
-
     def attributes(self) -> dict[str, Any]:
         """The ``daydream.budget.*`` trace attributes (agent span or ``daydream.budget.stop`` event)."""
         return {f"daydream.budget.{key}": value for key, value in asdict(self).items()}

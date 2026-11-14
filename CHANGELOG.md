@@ -34,15 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exercised. `uvicorn` is now a direct dependency
   ([#1646](https://github.com/existential-birds/daydream/issues/1646)).
 - Committed review (`run_committed_review`) no longer ignores
-  `RunConfig.frozen_author_description` on a request without hosted policy, so an embedder
-  that already sets the field for the default reviewer now supplies it on this route too.
+  `RunConfig.frozen_author_description` on a request without hosted policy.
   The reviewer receives non-blank text as captured untrusted context
-  (`historical_context`), which the sealed result's `settings` record. Unlike the default
-  reviewer's intent step, it is context with no authority: nothing gives a stated intent
-  precedence over a finding. A description bound to a `head_sha` other than the analyzed
+  (`historical_context`), which the sealed result's `settings` record. It is context
+  with no authority: nothing gives a stated intent precedence over a finding. A
+  description bound to a `head_sha` other than the analyzed
   head is refused, and so is one whose encoded size (JSON-escaped twice, as a native
-  argument carries it) exceeds 65536 UTF-8 bytes; both refusals precede any model work,
-  and the default reviewer applies no size bound. An accepted description beside a large
+  argument carries it) exceeds 65536 UTF-8 bytes; both refusals precede any model
+  work. An accepted description beside a large
   catalog and many challenge claims can still exceed a platform's single-argument size on
   Claude or Codex, and that assignment fails to start with the adapter's own error.
   Assignment JSON now escapes DEL, U+0085, U+2028 and U+2029, and quoted text that repeats
@@ -121,8 +120,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     approved one, is refused before any work.
   - A review whose review or arbiter backend serves no native host tools (Osprey) is
     refused before any work.
-  - Extension API 10: the staged review phases are no longer registered, so a flow that
-    names one fails before any work, and only the `deep` flow plans the `review` phase.
+  - Extension API 10: extensions must declare `DAYDREAM_EXT_API = 10`, and one that
+    declares an earlier version is rejected before any work. The staged review phases
+    are no longer registered, so a flow that names one fails before any work, and only
+    the `deep` flow plans the `review` phase.
     Insert steps into `deep` with `set_flow`; review profiles carry strategy text, budgets
     and the assignment policy.
   - The artifact dump and the archive no longer contain per-stack records, intent or
@@ -254,8 +255,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remaining amount at dispatch and reserved calls once on the trace: as
   `daydream.budget.*` attributes on the agent span it ends, or as a
   `daydream.budget.stop` span event for a review-finalization turn's stop and a
-  dispatch refused before any agent runs. Staged review's coverage diagnostic also
-  leads with those numbers. A Pi read cut
+  dispatch refused before any agent runs. A Pi read cut
   short by the deadline now stops as `wall_budget_exceeded` instead of a retryable
   idle stall that advised widening `DAYDREAM_STREAM_IDLE_TIMEOUT_S`
   ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
@@ -271,10 +271,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Claude SDK still fails before any work in runs that use Claude
   ([#1713](https://github.com/existential-birds/daydream/issues/1713),
   [#1762](https://github.com/existential-birds/daydream/pull/1762)).
-- Each staged reviewer's default tool-call budget rises from 48 to 120, still
-  scaled by diff size and batch count. The whole-change structure review spends
-  about 1.5 calls per changed file just reading its inputs, so reviews of about 15
-  or more files often ran out before submitting. `[pipeline]
+- The default reviewer tool-call budget rises from 48 to 120. `[pipeline]
   reviewer_tool_call_budget` in a review profile still overrides it
   ([#1762](https://github.com/existential-birds/daydream/pull/1762)).
 
@@ -318,6 +315,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `latency_route`, `risk_summary`, `reuse_cache`, `record_pool`, `intent_path`,
     `alts_path`, `intent_authoritative` and `intent_summary` are gone. Put review
     guidance in a review profile and rewrite findings in a flow step after `load-items`.
+    A `held` list that a step writes beside the canonical items is no longer rendered as
+    `## Held Findings` (an undocumented key, no known caller): keep a finding in `items`
+    to have it reported, or report what the step withholds from the step itself.
   - Artifacts no run writes any more: `deep/intent.md`, `deep/alternatives.json`,
     `deep/stack-*-records.json`, `deep/stack-*-review.md`, per-scope report context
     files, the arbiter, suppression, dedup and adjudication files,
@@ -329,7 +329,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     empty. `provenance.resolved_phases` lists the phases that run (`review`, `arbiter`,
     `verify`, `fix`, `test`); the rows for `intent`, `wonder`, `per_stack_review`, `parse`
     and `merge` are gone. The archive's `per_stack_review_backend` and
-    `per_stack_review_model` columns keep their names and record the `review` phase. Archive rows carry no latency profile and empty per-lens and stack metrics.
+    `per_stack_review_model` columns keep their names and record the `review` phase.
+    Archive rows carry no latency profile and empty per-lens and stack metrics.
     The recorded outcome follows the exit status. A provider failure after the reviewer
     accepted a submission now ends as an incomplete review that exits 0 and is recorded
     as `success` with incomplete coverage, where the staged reviewer raised and recorded
@@ -349,6 +350,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `review_limits_for_scope` no longer accepts `stages`;
     `daydream.phases.PER_STACK_RECORD_SCHEMA` and `review_budget.STAGED_REVIEW_GUIDANCE`
     are removed; and the modules of the staged phases are deleted.
+    `daydream.deep.detection.detect_stacks` no longer returns the `structure` meta-stack,
+    which repeated every changed file for the structural lens; take the union of the
+    returned stacks' files instead.
+  - Improve: the report no longer lists `structure` under `## Stacks`, and the closing
+    "Improve audit complete" line counts one stack fewer. No step audited that stack; the
+    files Improve partitions and audits are unchanged.
 
 - **Breaking (0.y.z):** Turn limits: `max_turns` on `run_agent`, the backend protocol,
   `EffectiveRequestConfig` and every adapter, `MaxTurnsError` and its salvage path.
@@ -377,8 +384,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Repository content can no longer turn a posted review into an approval. A leftover
   key is ignored without a warning
   ([#1680](https://github.com/existential-birds/daydream/issues/1680)).
-- **Breaking (0.y.z):** Extension API 9: extensions must declare `DAYDREAM_EXT_API = 9`,
-  and one that declares 8 is rejected before any work. Removed, with no known caller:
+- **Breaking (0.y.z):** Extension API 9, which API 10 above supersedes in this release.
+  Removed, with no known caller:
   `Registry.insert_before`, `insert_after` and `remove` (edit the list
   `registry.flow(name)` returns and pass it to `set_flow`); fork stack rules
   (`StackRule`, `Registry.add_stack`, `Registry.stack_rules` and the `registry`
@@ -391,9 +398,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   could only name categories that are always verified; `resolve_selection_config`,
   `UnknownRiskCategoryError` and `validate_extra_categories`;
   `SelectionConfig.extra_categories`; and `selection.extra_categories` in
-  `recommendation-verdicts.json`. No known caller. `verify_all` still works: set it in
-  `[tool.daydream]` or `.daydream.toml`, or pass
-  `file_config=DaydreamFileConfig(verify_all=True)`. A leftover `extra_risk_categories`
+  `recommendation-verdicts.json`. No known caller. A leftover `extra_risk_categories`
   key is ignored without a warning, so a misspelled category no longer stops a fix run
   ([#1631](https://github.com/existential-birds/daydream/issues/1631)).
 - **Breaking (0.y.z):** `RunConfig.test_required_suites`, which nothing set. No known
