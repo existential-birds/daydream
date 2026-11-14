@@ -1075,7 +1075,7 @@ async def plan_review(
         change=CanonicalChange.capture(diff_path, index_path, work.captured_source),
         revision=revision, read_only=True,
     ))
-    # Both allowances grow with the change by the staged reviewer's factor. Only the default profile's
+    # Both allowances grow with the change by the factor the staged reviewer used. Only the default profile's
     # wall grows, with the diff tier: any other profile's wall is the ceiling it states.
     tier = review_scale_for_diff(inputs.change.text)
     scale = max(tier, math.ceil(len(inputs.assignment_batches) / REVIEWER_BATCHES_PER_ALLOWANCE))

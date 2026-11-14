@@ -304,8 +304,8 @@ I      = T' // 2                                    discovery; challenge keeps T
 X      = max(2, I // 4)                             cross-assignment, when split
 ```
 
-`scale` is the staged reviewer's factor, computed once per review when it is planned, on
-every route. The profile keys are
+`scale` is the factor the staged reviewer of 0.34.0 used, computed once per review when
+it is planned, on every route. The profile keys are
 the bases it multiplies, so a review of a large change uses more tool calls, time and
 tokens than the keys state. `review_wall_budget_s` grows with the tier only in the
 default profile; in every other profile, whatever supplied it, it is a fixed ceiling on

@@ -280,9 +280,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
 - **Breaking (0.y.z):** Committed review reads its limits from the review profile
   only: `[pipeline] reviewer_investigation_budget_s`, `review_wall_budget_s` and
-  `reviewer_tool_call_budget`, plus a fixed 120 s finalization reserve.
+  `reviewer_tool_call_budget`, which the size of the change scales (see the changed
+  defaults above), plus a fixed 120 s finalization reserve.
   `CommittedReviewRequest.limits` and `HostedReviewPolicy.limits` are removed. With the
-  default profile the committed review window grows from about 600 s to about 2520 s
+  default profile the window of a review in the first diff tier, of at most four
+  batches, grows from about 600 s to about 2520 s
   ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
 - **Breaking (0.y.z):** Committed review no longer takes an assignment policy, and the
   `adaptive` policy is gone. `CommittedReviewRequest.assignment_policy` is removed (no
