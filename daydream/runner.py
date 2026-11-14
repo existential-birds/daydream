@@ -47,7 +47,6 @@ from daydream.backends import (
 )
 from daydream.config import (
     BUDGET_CLEANUP_GRACE_S,
-    DEEP_PHASE_DEFAULT_EFFORT,
     EFFORT_TIERS,
     REVIEW_OUTPUT_FILE,
 )
@@ -148,20 +147,11 @@ def _resolve_backend(
     cwd: Path | None = None,
     audit_workspace: AuditWorkspace | None = None,
     execution_input: BackendExecutionInput | None = None,
-    effort_override: str | None = None,
 ) -> Backend:
-    """Resolve and optionally cache a phase backend.
-
-    ``effort_override`` serves ``FlowContext.backend_for_effort``. The resolved effort
-    participates in the cache key, so a tuned backend cannot reuse the default-effort instance.
-    """
+    """Resolve and optionally cache a phase backend; the resolved effort participates in the cache key."""
     backend_name = _resolved_backend_name(config, phase)
     resolved_model = _resolved_model(config, phase)
-    resolved_effort = (
-        effort_override
-        if effort_override is not None and phase in DEEP_PHASE_DEFAULT_EFFORT.get(backend_name, {})
-        else _resolved_reasoning_effort(config, phase)
-    )
+    resolved_effort = _resolved_reasoning_effort(config, phase)
     audit_root = (
         audit_workspace.repo.resolve(strict=True)
         if audit_workspace is not None
@@ -378,12 +368,11 @@ async def run(
 
         def create_for_context(
             flow_config: RunConfig, phase: str, cache: BackendCache,
-            cwd: Path, audit: AuditWorkspace | None, effort_override: str | None,
+            cwd: Path, audit: AuditWorkspace | None,
         ) -> Backend:
             return _resolve_backend(
                 flow_config, phase, cache, cwd=cwd, audit_workspace=audit,
                 execution_input=execution.backends.get(_resolved_backend_name(flow_config, phase), backend_execution),
-                effort_override=effort_override,
             )
 
         backend_factory = create_for_context

@@ -242,7 +242,6 @@ def _recorder_backend_names(
     those fields; the representative phase for each built-in is listed below.
     """
     representative, runs_fix, runs_test = {
-        DaydreamRunFlow.NORMAL: ("review", True, True),
         DaydreamRunFlow.DEEP: ("review", True, True),
         DaydreamRunFlow.TTT: ("review", False, False),
         DaydreamRunFlow.IMPROVE: ("recon", False, False),
@@ -335,7 +334,7 @@ def capture_manifest_run_identity(
         per_stack_review_backend=per_stack_backend,
         per_stack_review_model=per_stack_model,
         review_only=flow_kind is DaydreamRunFlow.TTT and config.output_mode == "review",
-        deep=flow_kind is not DaydreamRunFlow.NORMAL,
+        deep=True,
         profile=None if profile is None else RunProfileIdentity(
             schema_version=profile.profile.schema_version,
             name=profile.name,

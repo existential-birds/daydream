@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -12,7 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from daydream import clock
-from daydream.config import REVIEWER_BATCHES_PER_ALLOWANCE, REVIEWER_TOOL_CALL_BUDGET
+from daydream.config import REVIEWER_TOOL_CALL_BUDGET
 
 
 @dataclass(frozen=True)
@@ -42,14 +41,9 @@ def review_scale_for_diff(diff: str) -> int:
     return 1
 
 
-def review_limits_for_scope(limits: ReviewLimits, *, stages: int = 1) -> ReviewLimits:
-    """Scale a role's time and call allowances together, once.
-
-    The scale is the larger, never the product, of the run's diff-size tier and
-    ``stages`` first-pass batches per REVIEWER_BATCHES_PER_ALLOWANCE, so a
-    many-batch scope can reach every part. A configured zero stays zero.
-    """
-    scale = max(_review_scale.get(), math.ceil(stages / REVIEWER_BATCHES_PER_ALLOWANCE))
+def review_limits_for_scope(limits: ReviewLimits) -> ReviewLimits:
+    """Scale a role's time and call allowances together, once, by the run's diff-size tier."""
+    scale = _review_scale.get()
     return replace(
         limits,
         investigation_s=limits.investigation_s * scale,

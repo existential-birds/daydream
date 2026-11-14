@@ -164,10 +164,6 @@ class DeepState:
 
     dd = _StateField[Path](Path)
 
-    log = _StateField[str](str)
-
-    branch = _StateField[str](str)
-
     merged_report = _StateField[Path](Path, writable=True)
 
     merged_report_or_none = _StateField[Path | None](

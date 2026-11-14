@@ -12,9 +12,6 @@ from daydream.training.reward import ScoringInputs
 _VERDICTS_FILE = "recommendation-verdicts.json"
 """Bronze artifact (under ``deep/``) carrying the ``verdicts`` list."""
 
-_RECORDS_GLOB = "stack-*-records.json"
-"""Bronze per-stack finding-record artifacts (under ``deep/``)."""
-
 _REVIEW_OUTPUT_FILE = "review-output.md"
 """Length-proxy artifact; at the run root for shallow runs, under ``deep/`` for deep runs."""
 
@@ -56,16 +53,6 @@ def assemble_scoring_inputs(run_dir: Path) -> ScoringInputs:
     except json.JSONDecodeError:
         # Present but malformed ⇒ format gate floors.
         format_valid = False
-
-    # A present-but-malformed records file also trips the format gate.
-    if deep_dir.is_dir():
-        for records_path in sorted(deep_dir.glob(_RECORDS_GLOB)):
-            try:
-                json.loads(records_path.read_text(encoding="utf-8"))
-            except FileNotFoundError:
-                continue
-            except json.JSONDecodeError:
-                format_valid = False
 
     review_text = _read_review_output(run_dir)
     return ScoringInputs(

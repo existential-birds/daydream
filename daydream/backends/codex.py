@@ -444,7 +444,6 @@ class CodexLifecycleError(CodexError):
     """Host lifecycle failure with a trusted closed-field review projection."""
 
     def __init__(self, failure: BackendLifecycleFailure):
-        self.lifecycle_failure = failure
         super().__init__(lifecycle_failure_diagnostic(failure) or "Codex lifecycle diagnostic unavailable",
                          category="TIMEOUT",
                          retryable=not failure.terminal_received if failure.stage == "process_reap" else False)

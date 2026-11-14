@@ -36,7 +36,9 @@ def source(tmp_path: Path) -> tuple[Path, str, str]:
     return repo, base, head
 
 
-def test_capture_uses_working_bytes_of_a_staged_addition(source: tuple[Path, str, str], tmp_path: Path) -> None:
+def test_capture_uses_working_bytes_of_a_staged_addition(
+    source: tuple[Path, str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A staged added file is captured from its working bytes and has no old side."""
     repo, base, head = source
     write_and_stage(repo, "added.py", b"value = 2\n")
@@ -46,8 +48,11 @@ def test_capture_uses_working_bytes_of_a_staged_addition(source: tuple[Path, str
     # A changed file over the retrieval limit is captured but never read back whole, by either source owner.
     with pytest.raises(FrozenSourceRejected, match="bounded retrieval limit"):
         captured.read("new", "oversized.bin")
-    with pytest.raises(FrozenSourceRejected, match="bounded retrieval limit"):
-        frozen_source(captured.root, git(captured.root, "rev-parse", "HEAD"), "oversized.bin")
+    with monkeypatch.context() as unbuffered:
+        # Its size alone refuses it: the blob is never read into memory first.
+        unbuffered.setattr("daydream.git_ops.source.queries.show", lambda *_a, **_k: pytest.fail("blob was read"))
+        with pytest.raises(FrozenSourceRejected, match="bounded retrieval limit"):
+            frozen_source(captured.root, git(captured.root, "rev-parse", "HEAD"), "oversized.bin")
     assert "+value = 2\n" in captured.diff
     with pytest.raises(PathAbsentError):
         captured.read("old", "added.py")

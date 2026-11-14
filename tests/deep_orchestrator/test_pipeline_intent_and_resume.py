@@ -60,7 +60,8 @@ async def test_pr_body_reaches_the_reviewer_as_bounded_untrusted_context(
 
     # A closed pull request, or one whose head moved off the analyzed commit, does not speak for this change.
     body = PR_SENTINEL
-    for view in ({"state": "CLOSED"}, {"state": "OPEN", "headRefOid": "0" * 40}):
+    stale: list[dict[str, object]] = [{"state": "CLOSED"}, {"state": "OPEN", "headRefOid": "0" * 40}]
+    for view in stale:
         context, instructions = await delivered()
         assert context is None and all(PR_SENTINEL not in text for text in instructions), view
         assert "is not open at the analyzed head" in " ".join(capsys.readouterr().out.replace("│", " ").split())

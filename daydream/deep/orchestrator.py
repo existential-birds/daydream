@@ -269,7 +269,6 @@ async def run_deep(
     from daydream.hunk_index import write_hunk_index
     from daydream.phases.inputs import (
         _git_branch,
-        _git_log,
     )
     from daydream.run_artifacts import _open_recorder, _resolve_review_profile
     from daydream.run_config import _default_backend_name
@@ -346,7 +345,6 @@ async def run_deep(
             )
         except Exception as exc:
             print_warning(console, f"Original run evidence could not be retained ({type(exc).__name__}).")
-    log = _git_log(target_dir)
     branch = work.head_branch or _git_branch(target_dir)
 
     if diff is None:
@@ -463,8 +461,6 @@ async def run_deep(
                 # diagram step's cross-module rule can read it. ``{}`` simply
                 # denies that rule; it never fails the run.
                 "import_graph": import_graph,
-                "log": log,
-                "branch": branch,
             },
             allow_standalone_artifacts=allow_standalone,
         )

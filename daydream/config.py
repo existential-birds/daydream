@@ -18,15 +18,8 @@ DEFAULT_PI_MODEL = "deepseek/deepseek-v4-flash-0731"
 DEFAULT_WALL_BUDGET_S = 1800.0
 
 
-# Base cumulative calls for one staged reviewer; scaling: docs/extensions.md.
-# The whole-change structure stage spends about 1.5 calls per changed file reading
-# its exact-path diff parts and catalog pages before investigating, so 48 left
-# 15-file reviews at the cap; 120 leaves room for its observed ~63 calls (#1762).
+# Base cumulative tool calls for one review: discovery and its challenge share them (#1762).
 REVIEWER_TOOL_CALL_BUDGET = 120
-
-# First-pass batches one base allowance covers: about 30 calls per batch at the
-# default, above the 7-12 calls per batch observed in #1746.
-REVIEWER_BATCHES_PER_ALLOWANCE = 4
 
 # Allow target test suites more wall time than ordinary turns while bounding hangs.
 TEST_WALL_BUDGET_S = 3600.0
@@ -84,8 +77,7 @@ VET_BATCH_MAX_FINDINGS: int = 20
 # PiBackend first honors Pi's own settings, then DEFAULT_PI_MODEL.
 _MODEL_PHASE_TIERS = (
     ("parse",),
-    ("fix", "test", "verify", "exploration", "per_stack_review", "suppression",
-     "supervise", "diagram", "intent", "recon", "audit"),
+    ("fix", "test", "verify", "exploration", "per_stack_review", "diagram", "intent", "recon", "audit"),
     ("review", "arbiter", "wonder", "merge", "vet", "plan_write"),
 )
 PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
@@ -115,8 +107,6 @@ DEEP_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
         "per_stack_review": "medium",
         "review": "medium",
         "arbiter": "high",
-        "suppression": "medium",
-        "supervise": "medium",
         "diagram": "medium",
         "wonder": "medium",
         "merge": "medium",
