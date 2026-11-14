@@ -84,12 +84,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assignments, a cross-assignment and the challenge within 40,380 s. The staged reviewer
   at v0.34.0 planned 7,344 tool calls in 138 first-pass invocations within 37,800 s for
   it. With the default profile `review_wall_budget_s` grows by the tier, to hours for a
-  very large change; in any explicit profile it stays a fixed ceiling, so an embedder
-  that relied on `reviewer_investigation_budget_s` as the ceiling of a review must set
-  `review_wall_budget_s` to the longest review it accepts. Every sealed result now
-  records `scale` and `effective_tool_calls` in `settings.limits` beside the profile's
-  own values, for small changes too, and the profile shown to the reviewer in each
-  assignment carries them; the profile digest does not change
+  very large change; in every other profile it stays a fixed ceiling, so an embedder
+  with a hard outer deadline must set `review_wall_budget_s` to it. Every sealed result
+  now records `scale` and `effective_tool_calls` in `settings.limits` beside the
+  profile's own values, for small changes too, and the profile shown to the reviewer in
+  each assignment carries them; the profile digest does not change
   ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 - A change of more than four batches is reviewed as one discovery assignment per batch
   under both `broad` and `adaptive`, followed by the cross-assignment and the challenge.
@@ -102,12 +101,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 - A split discovery or follow-up assignment receives each of its targets in its first
   message as `review_source` returns it, instead of fetching each with a charged call,
-  so its prompt and recorded trajectory are larger. A target larger than one 32 KiB
-  lookup page arrives as its first page with the cursor for the rest. Because those
-  bytes are untrusted and now sit in a message of the host's, each header and description
-  line of a supplied target begins with a random token that the message's first line
-  announces, and the instructions of such an assignment say that only those lines are
-  host-authored. This includes `adaptive` reviews of two to four batches
+  so its prompt and recorded trajectory are larger. Because those bytes are untrusted
+  and now sit in a message of the host's, each header and description line of a supplied
+  target begins with a random token that the message's first line announces, and the
+  instructions of such an assignment say that only those lines are host-authored. This
+  includes `adaptive` reviews of two to four batches
   ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 - Trace agent spans record each retry-ladder stop as a `daydream.retry.stop` event carrying
   the trajectory's `agent_budget_stop` fields as `daydream.retry.*`, with or without a
@@ -495,10 +493,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   20,000 on the measuring host), and with several Pi assignments running at once it made
   the others' three-second control requests time out, which aborted those assignments.
   The endpoint now performs the read on a worker thread when the request arrives, one
-  read at a time, and then runs the unchanged synchronous admission, which no longer
-  reads again after resolving the submission's references; a failed read is repeated and
-  reported by the admission as before. Claude's in-process admissions still read on the
-  loop ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
+  such read at a time, and then runs the synchronous admission; a failed read is
+  repeated and reported by the admission as before. What changes: the integrity check
+  for an admission on Pi and Codex now runs just before the callback rather than inside
+  it, so a change to the capture during that one callback's own resolution is not caught
+  at that admission; per-reference blob checks and the seal-time whole-capture check
+  still apply, and a persisting change still fails the review at sealing. A submission
+  that is then rejected for its content has paid for one read. Claude's in-process
+  admissions still read on the loop
+  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 
 ## [0.34.0] - 2026-11-03
 

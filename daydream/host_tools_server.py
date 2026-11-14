@@ -69,8 +69,9 @@ class PiHostToolServer(HostToolEndpoint):
         if len(self._tasks) >= 3 or self._closing:
             writer.close()
             return
-        # These tasks own transport I/O only. The submit dispatch remains fully
-        # synchronous on this loop, so cancellation cannot leave a late writer.
+        # These tasks own transport I/O and the worker-thread check before a mutating callback.
+        # The callback itself runs synchronously on this loop, so cancellation never leaves it
+        # half run; a cancelled check's thread finishes on its own and changes nothing.
         task = asyncio.create_task(self._request(reader, writer))
         self._tasks.add(task)
         self._writers.add(writer)
@@ -206,8 +207,8 @@ class PiHostToolServer(HostToolEndpoint):
                     return
                 if path == "/submit":
                     if not self.binding.accepted:
-                        # Frame/control I/O stays short; synchronous source
-                        # validation and admission use the assignment's deadline.
+                        # Frame/control I/O stays short; the source check and the
+                        # admission use the assignment's deadline.
                         request_timeout.reschedule(asyncio.get_running_loop().time()
                             + max(0.0, self.binding.deadline - clock.monotonic()))
                     result = await self.admitted(policy.NATIVE_SUBMIT, lambda: self.binding.submit(
@@ -216,7 +217,7 @@ class PiHostToolServer(HostToolEndpoint):
                     await self._reply(writer, 200, {"id": submission_id, "accepted": True, "result": result})
                     return
                 if path == "/call":
-                    # The callback is synchronous on this loop; bound its reply by
+                    # A mutating call's check and the synchronous callback are bounded by
                     # the assignment's deadline rather than the short control timeout.
                     request_timeout.reschedule(asyncio.get_running_loop().time()
                         + max(0.0, self.binding.deadline - clock.monotonic()))

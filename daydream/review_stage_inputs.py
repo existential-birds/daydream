@@ -241,12 +241,13 @@ class StageInputFactory:
 
     def admit_submission[T](self, prepare: Callable[[_SubmissionSources], Callable[[], T]], *,
                             validated: bool = False) -> T:
-        """Resolve a prospective payload, validate once, then synchronously install it.
+        """Resolve a prospective payload, then synchronously install it after one complete input check.
 
         The resolver retains bounded host facts, never bodies or success across
         callbacks. The Review owner's closure rechecks current authority after
-        all I/O and owns the only domain state transition. ``validated`` says the
-        caller's endpoint revalidated the canonical inputs for this submission.
+        all I/O and owns the only domain state transition. The check runs here,
+        after resolving, unless ``validated`` says the caller's endpoint ran it
+        for this submission just before this call.
         """
         sources = _SubmissionSources(self.revision, self.work.repo, self._source_aliases, self.captured_source)
         try:

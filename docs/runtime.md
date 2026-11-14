@@ -209,10 +209,10 @@ digest, so their cached reviews miss. `settings.assignment_policy` records `name
 
 Split discovery and follow-up work holds at most one batch, so its first message
 supplies each of its targets as a `review_source` call returns it: the target's
-description and `source_options` as JSON, then its captured change bytes. A target
-larger than one 32 KiB lookup page arrives as its first page with the `next_cursor`
-that fetches the rest. Its starts go to investigation instead of
-fetching its own targets. References to them keep `basis: "supplied_diff"`, and Pi's
+description and `source_options` as JSON, then its captured change bytes. A target is
+one part, at most 24 KiB of rendered change on Pi and Claude and 12,288 bytes on Codex,
+so each arrives whole. Its starts go to investigation instead of fetching its own
+targets. References to them keep `basis: "supplied_diff"`, and Pi's
 native capacity preflight counts them. They are not in the system instructions, which
 Codex and Claude deliver in [one argument](#codex-host-tools). One broad assignment,
 the cross-assignment and every challenge are supplied nothing and navigate with
@@ -270,8 +270,9 @@ X      = max(2, I // 4)                             cross-assignment, when split
 `scale` is the staged reviewer's factor, computed once per review. The profile keys are
 the bases it multiplies, so a review of a large change uses more tool calls, time and
 tokens than the keys state. `review_wall_budget_s` grows with the tier only in the
-default profile; in any explicit profile it is a fixed ceiling on the whole review, so
-set it to the longest review you accept. The 120 s are a fixed finalization reserve.
+default profile; in every other profile, whatever supplied it, it is a fixed ceiling on
+the whole review, so set it to the longest review you accept. An embedder with a hard
+outer deadline must set `review_wall_budget_s` to it. The 120 s are a fixed finalization reserve.
 `settings.limits` records the profile's `tool_calls` and `investigation_s` beside
 `scale`, `effective_tool_calls` (`T'`) and `effective_investigation_s` (`W`). For
 example, a change of 134 batches under the default profile (120 calls, 2,400 s, wall
@@ -366,12 +367,15 @@ differently:
    complete check on the loop, and the admission fails `input_unavailable` with
    nothing installed.
 
-So an admission is installed only after a complete check that began after its request
-arrived, where the paragraph above checks after resolving. The pass is good for that
-one callback only. Complete checks from all assignments run one at a time under one
-lock, because several at once take longer than the same number in a row. A lookup is
-not checked. Claude's in-process endpoint and direct callers keep the first order, on
-the loop.
+What changes: the integrity check for an admission on Pi and Codex now runs just before
+the callback rather than inside it, so a change to the capture during that one
+callback's own resolution is not caught at that admission; per-reference blob checks and
+the seal-time whole-capture check still apply, and a persisting change still fails the
+review at sealing. The pass is good for that one callback only. These worker-thread
+checks, and the one each dispatch starts with, run one at a time under one lock, because
+several at once take longer than the same number in a row. A lookup is not checked.
+Claude's in-process endpoint and direct callers keep the first order, on the loop, and
+wait for no lock.
 
 Full history still consumes private disk, up to the physical object-store limits
 in [Immutable PR inputs](#immutable-pr-inputs). Python payload buffers are
