@@ -318,7 +318,7 @@ def silence(monkeypatch: pytest.MonkeyPatch, *, prompts: bool = True) -> None:
     monkeypatch.setattr("daydream.deep.fix_steps.print_verification_summary", lambda *a, **kw: None)
     if prompts:
         def answer(_console: Any, message: str, default: str = "") -> str:
-            return "y" if "understanding correct" in message.lower() else "n"
+            return "n"
 
         monkeypatch.setattr("daydream.run_context._prompt_user", answer)
 
