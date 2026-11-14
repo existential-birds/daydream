@@ -98,6 +98,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `review_cache_*`, `verify_all` and the `intent`, `merge`, `parse`, `per_stack_review`,
     `supervise`, `suppression` and `wonder` phase tables) are
     named in one warning and ignored.
+  - The reviewer's model and reasoning effort now come from the `review` (discovery) and
+    `arbiter` (challenge) phase tables; the `per_stack_review` table no longer selects
+    anything. With defaults this changes what runs. On Claude the bulk of the review moves
+    from the middle model tier, which per-stack reviews used, to the top tier that
+    `review` and `arbiter` default to. On Codex the model is unchanged and the challenge
+    runs at `high` effort. On Pi the model still comes from Pi's own settings, but the
+    `medium` effort that per-stack reviews pinned is gone and Pi's own default applies. To
+    keep the earlier tier, set `model` or `reasoning_effort` under `[phases.review]`
+    (and `[phases.arbiter]` for the challenge) to what your `per_stack_review` table or
+    its default used.
   - The findings supervisor (`supervisor = "rules"` or `"llm"`) is refused before any work
     until the setting is removed; an extension step in the `deep` flow can rewrite the
     canonical items instead.
