@@ -403,6 +403,18 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
     review.backend = EmptyReviewBackend(review.repo, responder=fail_fix)
     review.backend.review_claims = [{'title': 'Grounded defect', 'file': 'api.py', 'line': 2}]
     review.backend.review_after_acceptance = after_acceptance
+    if fault == 'projection':
+        # The challenge calls tools until its allowance is spent, so the review is also unfinished.
+        scripted = review.backend._scripted_review
+
+        def exhaust_challenge(instructions: str, binding: Any) -> dict[str, Any]:
+            value = scripted(instructions, binding)
+            while 'verdicts' in value:
+                with contextlib.suppress(HostToolRejected):
+                    binding.admit(f'read-{binding.calls}', 'read', {})
+            return value
+
+        review.patch.setattr(review.backend, '_scripted_review', exhaust_challenge)
     if fault == 'fix':
         assert await review.run(output_mode='loop', findings_out=None, test_command=f'{sys.executable} -c pass') == 1
         saved_path = review.repo / '.daydream/deep/review-coverage.json'
@@ -450,14 +462,19 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
     if fault == 'projection':
         data = review.load()
         result = data['terminal_result']
-        assert data['findings'] == [] and result['reason_codes'] == ['malformed_artifact']
+        assert data['findings'] == [] and result['reason_codes'] == [
+            'evidence_incomplete', 'host_tool_budget_exhaustion', 'malformed_artifact']
+        # The spent challenge fails the pipeline and alone leaves the analysis incomplete; the unreadable
+        # findings make it failed.
         assert (result['pipeline_state'], result['analysis_state'], result['projection_valid']) == (
-            'completed', 'failed', False)
+            'failed', 'failed', False)
         assert all(s['status'] == 'complete' for s in scopes(data).values())
         # The report states the failure; it never calls a review with a sealed finding clean.
         report = (review.repo / '.review-output.md').read_text()
         assert 'No confirmed findings.' not in report
         assert 'The findings could not be read after the review; the sealed result keeps them.' in report
+        assert report.count('The review used up its allowance before it finished; raise '
+                            '<code>reviewer_tool_call_budget</code>') == 1
         return
     assert not review.output.exists() and state['export'] is not None
     private_path, private_bytes = state['export']
