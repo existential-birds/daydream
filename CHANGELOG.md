@@ -88,7 +88,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a hard outer deadline must set `review_wall_budget_s` to it. Every sealed result
   now records `scale` and `effective_tool_calls` in `settings.limits` beside the
   profile's own values, for small changes too, and the profile shown to the reviewer in
-  each assignment carries them; the profile digest does not change
+  each assignment carries them; the profile digest does not change. A report that names
+  the profile keys raising a spent allowance now also says that the review multiplies
+  `reviewer_tool_call_budget` and `reviewer_investigation_budget_s` by that `scale` and,
+  for spent time, that `review_wall_budget_s` grows with the diff in the default profile
+  only
   ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 - A change of more than four batches is reviewed as one discovery assignment per batch
   under both `broad` and `adaptive`, followed by the cross-assignment and the challenge.
@@ -558,8 +562,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it, so a change to the capture during that one callback's own resolution is not caught
   at that admission; per-reference blob checks and the seal-time whole-capture check
   still apply, and a persisting change still fails the review at sealing. A submission
-  that is then rejected for its content has paid for one read. Claude's in-process
-  admissions still read on the loop
+  that is then rejected for its content has paid for one read, including a rejected
+  final submission whose reserved start is refunded: up to 32 such reads per assignment
+  beyond its charged starts. Claude's in-process admissions, and keeping a rejected final
+  batch when its work closes, still read on the loop
   ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 
 ## [0.34.0] - 2026-11-03

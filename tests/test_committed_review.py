@@ -1851,10 +1851,14 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
     assert reasons[1:105] == ["No start was left to read it."] * 104
     assert all(reason.startswith("unsubmitted:") for reason in [reasons[0], *reasons[105:]]) and len(reasons) == 125
     assert value["terminal_result"]["analysis_state"] == "incomplete"
-    # The report tells the user which profile keys raise a spent allowance; the wall caps the time.
+    # The report tells the user which profile keys raise a spent allowance, that the review multiplies
+    # them by its scale, and that only the default profile's wall grows.
     assert ("\nThe review used up its allowance before it finished; raise <code>reviewer_investigation_budget_s</code> "
             "and <code>review_wall_budget_s</code> and <code>reviewer_tool_call_budget</code> under "
-            "<code>[pipeline]</code> in the review profile.\n") in render_committed_review(value)
+            "<code>[pipeline]</code> in the review profile. The review multiplies "
+            "<code>reviewer_tool_call_budget</code> and <code>reviewer_investigation_budget_s</code> by the "
+            "<code>scale</code> its <code>settings.limits</code> record; <code>review_wall_budget_s</code> caps the "
+            "whole review and grows with the diff in the default profile only.\n") in render_committed_review(value)
 
 
 async def test_denied_over_limit_discovery_start_cannot_spend_protected_challenge_reserve(
@@ -1916,7 +1920,9 @@ async def test_denied_over_limit_discovery_start_cannot_spend_protected_challeng
     assert allocations == [("discovery", 5), ("challenge", 5)] and result.output_installed
     # The report names the one profile key that raises the allowance discovery ran out of.
     assert ("\nThe review used up its allowance before it finished; raise <code>reviewer_tool_call_budget</code> "
-            "under <code>[pipeline]</code> in the review profile.\n"
+            "under <code>[pipeline]</code> in the review profile. The review multiplies "
+            "<code>reviewer_tool_call_budget</code> and <code>reviewer_investigation_budget_s</code> by the "
+            "<code>scale</code> its <code>settings.limits</code> record.\n"
             ) in (review_inputs.work.source / ".review-output.md").read_text()
     discovery = result.to_dict()["execution"][0]
     assert (discovery["allocation"], discovery["observed_starts"], discovery["overshoot"]) == (5, 6, 1)

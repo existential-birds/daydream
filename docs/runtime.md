@@ -337,7 +337,9 @@ hold `host_tool_budget_exhaustion` or `host_wall_budget_exhaustion`, which only 
 work contributes, the report adds one sentence under "Unfinished work" naming the
 `[pipeline]` profile keys that raise that allowance: `reviewer_tool_call_budget`, or
 `reviewer_investigation_budget_s` with `review_wall_budget_s`, which caps the review
-window. The staged deep path keeps
+window. A second sentence says that the review multiplies the first two by the `scale`
+recorded in `settings.limits` and, for spent time, that `review_wall_budget_s` grows
+with the diff in the default profile only. The staged deep path keeps
 its own rule ([stage-aware builders](extensions.md#stage-aware-review-builders)).
 
 ### Captured local source
@@ -417,9 +419,12 @@ callback's own resolution is not caught at that admission; per-reference blob ch
 the seal-time whole-capture check still apply, and a persisting change still fails the
 review at sealing. The pass is good for that one callback only. These worker-thread
 checks, and the one each dispatch starts with, run one at a time under one lock, because
-several at once take longer than the same number in a row. A lookup is not checked.
+several at once take longer than the same number in a row. A lookup is not checked. A
+final submission rejected on its reserved start and refunded has still paid for one
+such check, so an assignment can pay for up to 32 of them beyond its charged starts.
 Claude's in-process endpoint and direct callers keep the first order, on the loop, and
-wait for no lock.
+wait for no lock; so does keeping a rejected final batch when its work closes, one
+check on the loop per closing work that remembers such a batch.
 
 Full history still consumes private disk, up to the physical object-store limits
 in [Immutable PR inputs](#immutable-pr-inputs). Python payload buffers are
