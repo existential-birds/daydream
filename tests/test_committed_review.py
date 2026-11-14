@@ -2081,10 +2081,12 @@ async def test_committed_review_completes_through_native_host_tools(
     """A native CLI reviews captured source and challenges in a distinct conversation.
 
     Discovery reads exact captured bytes through review_source, corrects a domain rejection and
-    submits; the fresh challenge confirms the claim. Outputs, trajectory, native contexts and
-    execution entries come from the production program, not a substituted dispatcher. Claude is
-    its real bundled CLI on the run-local SDK route; Codex is an external process that is a real
-    MCP client of the invocation's loopback server, since the gate has no Codex binary.
+    submits; the fresh challenge confirms the claim. Codex's first discovery turn ends unsubmitted
+    and is retried once, and its unsubmitted turns that cannot be recovered stay missing output.
+    Outputs, trajectory, native contexts and execution entries come from the production program,
+    not a substituted dispatcher. Claude is its real bundled CLI on the run-local SDK route; Codex
+    is an external process that is a real MCP client of the invocation's loopback server, since
+    the gate has no Codex binary.
     """
     repo = tmp_path / "subject"
     base = {"api.py": "VALUE = 1\n", "caller.py": "TOTAL = 10 / 1\n"}
@@ -2159,6 +2161,7 @@ async def test_committed_review_completes_through_native_host_tools(
         monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
         monkeypatch.setenv("no_proxy", "proxied.invalid")
         monkeypatch.delenv("NO_PROXY", raising=False)
+        monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: 0.0)
         result = await run_committed_review(request)
     value = result.to_dict()
     assert result.output_installed and result.capture_state == "complete"
@@ -2173,25 +2176,29 @@ async def test_committed_review_completes_through_native_host_tools(
     assert [{key: entry[key] for key in ("assignment", "accepted", "settled", "cleanup_complete", "reason",
                                          "observed_starts", "overshoot")} for entry in value["execution"]] == [
         # Codex also starts two tools of its own and admits a batch, each counted once, and its one
-        # host call after acceptance is observed without being charged.
+        # host call after acceptance is observed without being charged. Its first attempt ended unsubmitted
+        # after five starts, which the retry's dispatch refunded.
         {"assignment": "discovery", "accepted": True, "settled": True, "cleanup_complete": True, "reason": None,
-         "observed_starts": 3 if backend == "claude" else 7, "overshoot": 0 if backend == "claude" else 1},
+         "observed_starts": 3 if backend == "claude" else 12, "overshoot": 0 if backend == "claude" else 1},
         {"assignment": "challenge", "accepted": True, "settled": True, "cleanup_complete": True, "reason": None,
          "observed_starts": 1, "overshoot": 0}]
     trajectory = root_trajectory(repo)
     assert trajectory["session_id"] == value["run_id"]
     calls = [call["function_name"] for step in trajectory["steps"] for call in step.get("tool_calls") or []]
-    assert calls.count("mcp__daydream__structured_output" if backend == "claude" else "structured_output") == 3
+    assert calls.count("mcp__daydream__structured_output" if backend == "claude" else "structured_output") == (
+        3 if backend == "claude" else 4)
     if backend == "claude":
         # The challenge is a distinct native conversation: it starts without discovery history.
         challenge = next(body for body in provider.requests if assignment(body)["kind"] == "challenge")
         assert not any(message["role"] == "assistant" for message in challenge["messages"])
         assert "discovery assignment" not in json.dumps(challenge["messages"])
     else:
-        # One process per assignment, each registered with this attempt's server and nothing weaker.
-        hosts = {_assignment({"review_system_instructions": row["host"]["instructions"]})["kind"]: row
+        # One process per attempt, each registered with this attempt's server and nothing weaker. The
+        # first discovery process ended its turn unsubmitted, so the host retried it once in a fresh one.
+        hosts = {("retry" if "Retry dispatch-time snapshot" in row["host"]["instructions"] else
+                  _assignment({"review_system_instructions": row["host"]["instructions"]})["kind"]): row
                  for row in codex.observations()}
-        assert sorted(hosts) == ["challenge", "discovery"]
+        assert sorted(hosts) == ["challenge", "discovery", "retry"] and len(codex.observations()) == 3
         systems.extend(row["host"]["instructions"] for row in hosts.values())
         for row in hosts.values():
             host = row["host"]
@@ -2213,21 +2220,38 @@ async def test_committed_review_completes_through_native_host_tools(
             assert not any(host["token"].encode() in path.read_bytes()
                            for path in (repo / ".daydream").rglob("*") if path.is_file())
         # Each attempt has its own secret, and the bound identity follows the phase's native selection.
-        assert hosts["discovery"]["host"]["token"] != hosts["challenge"]["host"]["token"]
+        assert len({row["host"]["token"] for row in hosts.values()}) == 3
         assert contexts["discovery"]["configuration_identity"] != contexts["challenge"]["configuration_identity"]
-        served = hosts["discovery"]["host"]["calls"]
+        # The unsubmitted attempt's admitted decisions are retained: the retry admits only the claim.
+        unsubmitted, served = hosts["discovery"]["host"]["calls"], hosts["retry"]["host"]["calls"]
+        assert [(name, failed) for name, failed, _ in unsubmitted] == [
+            ("review_source", False), ("structured_output", True), ("review_admit", False)]
+        assert '"admitted":{"decisions":2,"claims":[]}' in unsubmitted[2][2][0]
         assert [(name, failed) for name, failed, _ in served] == [
             ("review_source", False), ("structured_output", True), ("review_admit", False),
             ("structured_output", False), ("review_source", True)]
-        lookup, rejected, _, _, late = (texts for _, _, texts in served)
+        lookup, rejected, admitted, _, late = (texts for _, _, texts in served)
         assert lookup[1].startswith("diff --git") and "choose a planned target" in rejected[0]
+        assert '"admitted":{"decisions":0,"claims":[{' in admitted[0]
         assert "structured_output was accepted" in late[0]
         # Each attempt's host facts join its Codex lifecycle record; the late call was never admitted.
         assert [[attempt["backend_lifecycle"][key] for key in (
             "backend", "host_authority_closed", "host_native_settled", "host_cleanup_complete",
             "host_tool_call_count", "host_tool_rejection_count")]
                 for attempt in trajectory["extra"]["subtrajectories"]] == [
-            ["codex", True, True, True, 6, 1], ["codex", True, True, True, 1, 0]]
+            ["codex", True, False, True, 5, 1], ["codex", True, True, True, 11, 2], ["codex", True, True, True, 1, 0]]
+        # Unsubmitted turns that are not recovered. A discovery that admitted a claim is not replayed: its
+        # one process leaves the claim to be challenged. A challenge that judged nothing gets one fresh
+        # attempt and stays missing output, and the challenge that supersedes it confirms the finding.
+        silent = install_codex_lifecycle_cli(tmp_path / "silent", mode="unsubmitted")
+        monkeypatch.setenv("PATH", f"{silent.bin_dir}{os.pathsep}{os.environ['PATH']}")
+        incomplete = (await run_committed_review(request)).to_dict()
+        assert sorted(_assignment({"review_system_instructions": row["host"]["instructions"]})["kind"]
+                      for row in silent.observations()) == ["challenge", "challenge", "challenge", "discovery"]
+        assert [(entry["assignment"], entry["accepted"], entry["reason"]) for entry in incomplete["execution"]] == [
+            ("discovery", False, "missing_output"), ("challenge", False, "missing_output"), ("challenge", True, None)]
+        assert [finding["title"] for finding in incomplete["findings"]] == ["Zero divides the caller"]
+        assert incomplete["terminal_result"]["analysis_state"] == "incomplete"
     assert len(systems) >= 2
     for system in systems:
         assert "at most four selectors" in system

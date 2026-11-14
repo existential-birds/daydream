@@ -24,7 +24,7 @@ from typing import Any, Literal
 LifecycleMode = Literal[
     "healthy", "terminal_open_stdout", "terminal_eof_live_child", "descendant_stdout",
     "nonzero_exit", "preterminal_silence", "repeated_terminal", "unfinished_next_turn",
-    "completed_next_turn", "delayed_shutdown", "completed_chatter",
+    "completed_next_turn", "delayed_shutdown", "completed_chatter", "unsubmitted",
 ]
 _FIXTURE_CONFIG: dict[str, Any] = globals().get("_FIXTURE_CONFIG", {})
 FIX_MARKER = "\n# synthetic lifecycle fix\n"
@@ -176,8 +176,11 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
 
     A committed-review assignment in the developer instructions is reviewed (lookup, two
     Codex-owned starts, a rejected submission, an admitted batch, the terminal submission
-    and two host calls after acceptance) or challenged. Otherwise the user prompt is the
-    JSON submission, followed by as many Codex-owned shell starts as its ``shells`` asks.
+    and two host calls after acceptance) or challenged. The first review attempt admits its
+    targets and ends its turn unsubmitted; the host's retry admits the claim and submits.
+    Mode ``unsubmitted`` admits targets and claim at once and never submits its review, and
+    judges nothing until a challenge supersedes the unsubmitted one. Otherwise the user prompt
+    is the JSON submission, followed by as many Codex-owned shell starts as its ``shells`` asks.
     """
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
@@ -240,9 +243,10 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
                     shell(f"shell_{index}")
             elif (work := json.JSONDecoder().raw_decode(assignment)[0])["kind"] == "challenge":
                 claim = work["claims"][0]
-                await call("structured_output", {"verdicts": [{
-                    "uid": claim["uid"], "revision": claim["revision"], "verdict": "confirmed",
-                    "grounds": "The caller divides by the changed value.", "evidence_refs": []}], "claims": []})
+                if mode != "unsubmitted" or work["work"]["parents"]:
+                    await call("structured_output", {"verdicts": [{
+                        "uid": claim["uid"], "revision": claim["revision"], "verdict": "confirmed",
+                        "grounds": "The caller divides by the changed value.", "evidence_refs": []}], "claims": []})
             else:
                 targets = work["work"]["targets"]["ids"]
                 decisions = [{"target_id": target, "status": "reviewed", "reason": "Captured change inspected.",
@@ -259,19 +263,22 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
                 _emit({"type": "item.completed", "item": {**other, **failed}})
                 await call("structured_output", {"targets": [{**decisions[0], "target_id": "unplanned"}],
                                                  "claims": []})
-                await call("review_admit", {"targets": decisions, "claims": [{
-                    "uid": "", "revision": 0, "source_uids": [], "title": "Zero divides the caller", "payload": {
-                        "claim": "VALUE becomes zero.", "trigger": "The caller divides by it.",
-                        "consequence": "Requests fail.", "grounds": "The captured change sets zero.",
-                        "file": option["path"], "line": 1, "evidence_refs": [
-                            {key: option[key] for key in ("source_id", "basis", "source_range")}]}}]})
-                await call("structured_output", {"targets": [], "claims": []})
-                # After acceptance: one host call the host refuses, one Codex fails itself.
-                await call("review_source", lookup)
-                late = {"type": "mcp_tool_call", "id": "late", "server": "daydream", "tool": "review_source",
-                        "arguments": lookup}
-                _emit({"type": "item.started", "item": {**late, "status": "in_progress"}})
-                _emit({"type": "item.completed", "item": {**late, **failed}})
+                claim = {"uid": "", "revision": 0, "source_uids": [], "title": "Zero divides the caller", "payload": {
+                    "claim": "VALUE becomes zero.", "trigger": "The caller divides by it.",
+                    "consequence": "Requests fail.", "grounds": "The captured change sets zero.",
+                    "file": option["path"], "line": 1, "evidence_refs": [
+                        {key: option[key] for key in ("source_id", "basis", "source_range")}]}}
+                retry = "Retry dispatch-time snapshot" in prompt
+                await call("review_admit", {"targets": [] if retry else decisions,
+                                            "claims": [claim] if retry or mode == "unsubmitted" else []})
+                if retry:
+                    await call("structured_output", {"targets": [], "claims": []})
+                    # After acceptance: one host call the host refuses, one Codex fails itself.
+                    await call("review_source", lookup)
+                    late = {"type": "mcp_tool_call", "id": "late", "server": "daydream", "tool": "review_source",
+                            "arguments": lookup}
+                    _emit({"type": "item.started", "item": {**late, "status": "in_progress"}})
+                    _emit({"type": "item.completed", "item": {**late, **failed}})
     _emit({"type": "item.completed", "item": {"id": "final", "type": "agent_message", "text": "Assignment complete."}})
     # A native result field must never stand in for the host-accepted submission.
     _emit({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}, "result": {"native": True}})

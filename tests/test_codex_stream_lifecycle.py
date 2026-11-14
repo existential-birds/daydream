@@ -152,8 +152,8 @@ async def test_codex_process_outcomes_require_completion_and_zero_exit(
 
     A completed public turn followed by a nonzero exit is a process failure with no result,
     and a real silent child cannot turn its initial commentary into a completed result.
-    A submission the host accepted over MCP survives that exit unsettled, a callback after the
-    attempt was revoked changes nothing, and Codex-owned starts stay bounded after acceptance.
+    A submission the host accepted over MCP survives that exit unsettled, a turn that completes
+    with nothing accepted is a retryable truncation, and Codex-owned starts stay bounded after acceptance.
     Unlisted host tools, a host call Codex failed itself, a Codex-owned start past the allowance
     and instructions too large to pass stop the invocation with what happened.
     """
@@ -232,9 +232,9 @@ async def test_codex_process_outcomes_require_completion_and_zero_exit(
         "settled": (accepted, True, True, True, None, [accepted], (1, 1)),
         # The failed exit keeps its accepted submission unsettled.
         "failed exit": (accepted, False, True, True, "PROCESS_EXIT", [], (1, 1)),
-        # A callback after the attempt was revoked changes nothing: no acceptance, no failure, no
-        # result, and the binding may open another attempt.
-        "revoked": (None, False, True, False, None, [None], (0, 0)),
+        # A callback after the attempt was revoked changes nothing, so the completed turn submitted
+        # nothing: a retryable truncation, and the binding may open another attempt.
+        "revoked": (None, False, True, False, "STREAM_TRUNCATION", [None], (0, 0)),
         # Codex-owned starts after acceptance stay charged; one past the allowance stops the invocation.
         "overrun": ({"final": {"ok": True, "shells": 2}}, False, True, True, "capacity_exhausted", [], (2, 3)),
     }

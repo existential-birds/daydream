@@ -521,7 +521,9 @@ provider failure leads to a retry, the failed attempt's tool calls are refunded 
 the retry dispatches, because it is a fresh native conversation that must redo the
 lost work; a retry stopped before dispatch refunds nothing. Elapsed time is never refunded. Retries stay bounded by the
 attempt count, the absolute deadline and the outage circuit; a failure after possible
-host acceptance still permits no retry. Paths that do not retry are never refunded,
+host acceptance still permits no retry. A Codex turn that completes with nothing accepted
+is retried once under this rule ([Codex host tools](#codex-host-tools)).
+Paths that do not retry are never refunded,
 including a staged schema re-dispatch and a committed challenge re-dispatch. Committed
 batches admitted before a provider failure stay installed while that attempt's starts
 are refunded with the rest of the attempt.
@@ -757,7 +759,12 @@ refused before any process or server starts, and the disposable read-only checko
   ([lifecycle evidence](observability.md#codex-lifecycle-evidence)). A later native
   failure keeps the admission and is not retried; Codex reports usage only with a
   completed turn. Authority closes before the process is torn down, and the server is
-  released after it.
+  released after it. A turn that completes and exits zero with no accepted submission
+  is a retryable truncation that gets one fresh attempt under the
+  [renewal rule](#budget-ledger): admitted target decisions stay installed and the
+  attempt's starts are refunded. A turn that admitted a claim is not retried, because
+  a fresh conversation is not told what the earlier one admitted. An assignment that
+  ends unsubmitted, retried or not, keeps the reason `missing_output`.
 - Not offered: resuming a native conversation with host tools, a capacity preflight, or
   suppression of Codex's own session history, which it writes under its home as for
   every run.

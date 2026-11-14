@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `review_admit` and the terminal `structured_output` from a fresh MCP server on loopback,
   bound to the same host authority and registered only through additive `-c` overrides
   on `codex exec`, so a rejected submission is corrected in the same conversation.
+  A turn that completes without an accepted submission is retried once as a fresh
+  conversation under the [renewal rule](docs/runtime.md#budget-ledger), keeping the
+  target decisions it admitted. A turn that admitted a claim is not retried, and an
+  assignment that ends unsubmitted is still reported as `missing_output`
+  ([#1829](https://github.com/existential-birds/daydream/issues/1829)).
   Daydream writes nothing to the Codex home. `daydream --backend codex` and every other
   Codex invocation keep their command line and environment; their one change is the
   failed-tool-result fix listed under Fixed. Codex shows the model a schema without most
