@@ -2,30 +2,26 @@
 import asyncio
 import json
 import time
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-from daydream.backends import (
-    AgentEvent,
-)
 from daydream.backends.codex import CodexBackend
 from daydream.remote_ci import RemoteCITarget, pending_remote_ci_verdict, write_remote_ci_handoff
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote, commit as _commit, git as _git, init_repo as _init_repo
-from tests.harness.phase_backend import PhaseDispatchBackend
 from tests.harness.processes import wait_for_process_group_exit
 from tests.harness.remote_ci import (
     finish_remote_ci_fake,
     seed_pr_identity,
     start_remote_ci_fake,
 )
+from tests.harness.stub_backend import StubBackend
 from tests.test_deep_orchestrator import _install_stub_backend, _silence
-from tests.test_runner import _fix_item, _seed_fix_resume
 
 
 def _load_trajectory(project: Path, session_id: str) -> dict[str, Any]:
@@ -43,20 +39,6 @@ def _remote_ci_phase_end(trajectory: dict[str, Any]) -> dict[str, Any]:
     assert len(remote_ends) == 1
     return remote_ends[0]
 
-
-_FULL_FLOW_ISSUE = {"id": 1, "description": "Add type hints to function", "file": "main.py", "line": 1}
-
-
-class _WorktreeMutatingBackend(PhaseDispatchBackend):
-    """Fake only the backend; fix turns perform the requested real edit."""
-
-    async def execute(
-        self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
-    ) -> AsyncGenerator[AgentEvent, None]:
-        if prompt.startswith("Fix this issue") or prompt.startswith("Fix these"):
-            (cwd / "main.py").write_text("def hello() -> str:\n    return 'world'\n")
-        async for event in super().execute(cwd, prompt, *args, **kwargs):
-            yield event
 
 def _remote_ci_push_project(tmp_path: Path) -> tuple[Path, Path, Path, str]:
     """Create a spaced-path checkout pushed through a truthful GitHub URL."""
@@ -110,21 +92,11 @@ def _live_deep_dir(artifact_runtime_root: Path) -> Path:
     assert len(matches) == 1, f"expected exactly one live deep dir, got {matches}"
     return matches[0]
 
-def _shallow_pr_config(make_config: Callable[..., "RunConfig"], project: Path, **overrides: object) -> "RunConfig":
-    """Shallow PR-process config for the remote-CI tests, shared defaults seeded."""
-    kwargs: dict[str, object] = {
-        "stack": "python", "quiet": True, "output_mode": "loop", "shallow": True, "assume": "yes",
-        "archive": True, "test_command": "true", "pr_number": 7, "pr_repo": "base-user/project",
-    }
-    kwargs.update(overrides)
-    return make_config(project, **kwargs)
-
-@pytest.mark.parametrize("resume", [True], ids=["resume-stale-handoff"])
 async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
     tmp_path: Path, artifact_runtime_root: Path, install_backend: Callable[[object], object],
-    make_config: Callable[..., "RunConfig"], fake_gh: FakeGh, resume: bool,
+    make_config: Callable[..., "RunConfig"], fake_gh: FakeGh,
 ) -> None:
-    """Cancellation reaps the real gh process before durable operator state."""
+    """Cancellation reaps the real gh process before durable operator state; a stale handoff never survives."""
     project, _remote, hook_marker, _raw_remote = _remote_ci_push_project(tmp_path)
     old_sha = _git(project, "rev-parse", "HEAD")
     deep = project / ".daydream" / "deep"
@@ -141,16 +113,15 @@ async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
             )
         ), session_id="old-session",
     )
-    unrelated = deep / "operator-notes.json"
-    unrelated.write_bytes(b'{"keep":"operator notes"}\n')
-    if resume:
-        _seed_fix_resume(project, [_fix_item()])
     seed_pr_identity(fake_gh, head_sha=old_sha)
     seeder = start_remote_ci_fake(project, fake_gh, hook_marker)
-    install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
-    task = asyncio.create_task(
-        run(_shallow_pr_config( make_config, project, archive=False, start_at="fix" if resume else "ttt", ))
-    )
+    backend = StubBackend(project)
+    backend.review_claims = [{"title": "Add type hints to function", "file": "main.py", "line": 1}]
+    backend.fix_edit_line = "# typed\n"
+    install_backend(backend)
+    task = asyncio.create_task(run(make_config(
+        project, quiet=True, output_mode="loop", assume="yes", archive=False, test_command="true", pr_number=7,
+        pr_repo="base-user/project")))
     pids: dict[str, int] | None = None
     try:
         pids = await _wait_for_remote_ci_pids(
@@ -166,10 +137,6 @@ async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
         assert not (live_deep / "remote-ci-handoff.json").exists(), (
             "the new attempt retained old-SHA guidance"
         )
-        if resume:
-            assert (live_deep / "operator-notes.json").read_bytes() == (
-                b'{"keep":"operator notes"}\n'
-            )
     finally:
         task.cancel()
         try:

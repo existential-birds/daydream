@@ -151,8 +151,8 @@ async def test_snapshot_boundaries(review: ReviewRun, case: str) -> None:
             live = replace(review.pr, head_sha=review.pr.base_sha)
 
         review.patch.setattr('daydream.pr_review.find_pr_by_number', lookup)
-        review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False,
-                                            review_by_stack={'structure': [record()]}, responder=advance)
+        review.backend = EmptyReviewBackend(review.repo, responder=advance)
+        review.backend.review_claims = [{'title': 'Grounded defect', 'file': 'api.py', 'line': 2}]
         assert await review.run() == 0
         data = review.load()
         result = data['terminal_result']

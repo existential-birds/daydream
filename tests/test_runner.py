@@ -27,10 +27,6 @@ from daydream.backends import (
     TextEvent,
 )
 from daydream.dataset import LocalRecordStore
-from daydream.deep.artifacts import (
-    DeepArtifact,
-    diff_key,
-)
 from daydream.extensions.loader import build_registry
 from daydream.flows.engine import BackendFactory, FlowContext
 from daydream.github_app import GitHubExecutionInput
@@ -50,11 +46,12 @@ from daydream.trajectory import (
     TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
 )
-from daydream.workspace import AuditWorkspace, WorkContext, _resolve_base
+from daydream.workspace import AuditWorkspace, WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.dataset import read_records
 from tests.harness.git_helpers import bare_remote, commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.otlp import attributes, kind_of
+from tests.harness.stub_backend import StubBackend
 from tests.harness.trajectory import make_recorder
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
@@ -646,39 +643,6 @@ def test_improve_backend_preflight_fails_closed(tmp_path: Path, monkeypatch: pyt
 
 # --- Deep fix-cycle hero is followed by Model: dim line --------------------
 
-def _seed_fix_resume(target: Path, items: list[dict[str, Any]]) -> Path:
-    """Seed identity-bound completed shallow review evidence for fix-only tests."""
-    from daydream.deep.artifacts import persist_review_coverage
-    from daydream.deep.diff import _diff_changed_files
-    from daydream.deep.orchestrator import _prepare_review_stacks
-    from daydream.deep.records import stamp_item_uids
-    from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
-    from tests.harness.review_result import frozen_target_decisions
-
-    deep = target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    base = _resolve_base(target, None, None)
-    diff = git_ops.diff(target, base) or ""
-    head = git_ops.head_sha(target)
-    merge_base = git_ops.resolve_diff_merge_base(target, base, head)
-    config = RunConfig(target=str(target), shallow=True)
-    stacks, _, _ = _prepare_review_stacks(config, _diff_changed_files(diff), diff, target, "deep")
-    coverage = ReviewCoverage("fix-resume-fixture", AnalyzedRevision(head, merge_base, diff_key(diff)),
-                              [PlannedScope(stack.stack_name, stack.stack_name.split("#", 1)[0],
-                                            files=tuple(sorted(stack.files))) for stack in stacks],
-                              ("intent", "alternatives", "merge"))
-    for stack in stacks:
-        coverage.record_scope(stack.stack_name, "complete", target_decisions=frozen_target_decisions(
-            target, stack, coverage.revision, diff))
-    coverage.record_phase("intent", "complete")
-    coverage.record_phase("alternatives", "complete", noop=True)
-    coverage.record_phase("merge", "complete")
-    DeepArtifact.DIFF_KEY.at(deep).write_text(diff_key(diff), encoding="utf-8")
-    stamp_item_uids(items)
-    DeepArtifact.MERGED_ITEMS.at(deep).write_text(json.dumps({"items": items}))
-    persist_review_coverage(deep, coverage)
-    return deep
-
 def _fix_item(item_id: int = 1, *, severity: str = "medium") -> dict[str, Any]:
     """Build a validated merged item targeting the fixture's tracked file."""
     return {
@@ -715,14 +679,15 @@ async def _drive_fix_cycle_failing(
     stdin_guard_message: str | None = None, stdin_answers: list[str] | None = None,
     clipboard_is_available: bool = False,
 ) -> tuple[int, ScriptedBackend, ScriptedBackend, list[bool]]:
-    """Drive real test-and-heal with seeded resume artifacts. Stub verify/fix, spy on commits, control gate
+    """Drive real test-and-heal after a scripted review. Stub verify/fix, spy on commits, control gate
     answers, and reject excess healing via _BEYOND_SCRIPT. Return exit code, backends, and commit calls.
 
     Test execution runs as a real host process; the read-only summarizer runs on the
     TEST phase's backend. The heal turn runs on the FIX phase's backend (issue #1210) and
     is scripted through ``repair_turn`` rather than through ``script``.
     """
-    _seed_fix_resume(target, [_fix_item()])
+    reviewer = StubBackend(target)
+    reviewer.review_claims = [{"title": _fix_item()["description"], "file": "main.py", "line": 1}]
     config.test_command = "false"
     # The backend script observes phases; mute only terminal output.
     monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", lambda *a, **k: None)
@@ -737,7 +702,7 @@ async def _drive_fix_cycle_failing(
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
         lambda _config, phase, cache=None, **_kwargs: (
-            test_backend if phase == "test" else repair_backend
+            reviewer if phase in ("review", "arbiter") else test_backend if phase == "test" else repair_backend
         ),
     )
     monkeypatch.setattr("daydream.deep.fix_steps.phase_verify_recommendations", _stub_verify)
@@ -790,7 +755,7 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
     monkeypatch.setattr("daydream.ui.print_dim", _dim_spy)
     exit_code, test_backend, repair_backend, commit_calls = await _drive_fix_cycle_failing(
         monkeypatch, feature_branch_repo,
-        make_config(feature_branch_repo, output_mode="loop", start_at="fix", shallow=True, assume="yes"),
+        make_config(feature_branch_repo, output_mode="loop", assume="yes"),
         # Suite executions are host processes; reject a second TEST backend turn after the handoff.
         script=[_handoff_turn("# Handoff\n\n--yes bounded fix failure")],
         repair_turn=_FIX_TURN,

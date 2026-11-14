@@ -91,7 +91,7 @@ from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
 from daydream.run_config import FrozenAuthorDescription, RunConfig, _resolved_backend_name
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 from daydream.runner import _resolve_backend
-from daydream.trajectory import DaydreamPhase, DaydreamRunFlow
+from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, phase_scope
 from daydream.trajectory.lifecycle import maybe_fork
 from daydream.workspace import WorkContext, open_workspace
 
@@ -1436,20 +1436,23 @@ class _Schedule:
         settled = False
         try:
             await anyio.to_thread.run_sync(review.inputs._revalidate_canonical)
-            _, _, stopped = await agent.run_agent(
-                backend,
-                repo,
-                prompt,
-                phase=DaydreamPhase.VERIFY if kind == "challenge" else DaydreamPhase.REVIEW,
-                output_schema=schema,
-                result_schema=receipt_schema(kind),
-                read_only=True,
-                persist_session=False,
-                budget=budget,
-                review_system_instructions=instructions,
-                review_stage_scope_id=work_id,
-                host_tools=binding,
-            )
+            phase = DaydreamPhase.VERIFY if kind == "challenge" else DaydreamPhase.REVIEW
+            # Each work item is its own phase interval, so its invocation's time is attributed to its phase.
+            async with phase_scope(phase, stage=f"committed-{kind}"):
+                _, _, stopped = await agent.run_agent(
+                    backend,
+                    repo,
+                    prompt,
+                    phase=phase,
+                    output_schema=schema,
+                    result_schema=receipt_schema(kind),
+                    read_only=True,
+                    persist_session=False,
+                    budget=budget,
+                    review_system_instructions=instructions,
+                    review_stage_scope_id=work_id,
+                    host_tools=binding,
+                )
             settled = stopped is None and binding.native_settled
             if stopped is not None:
                 try:

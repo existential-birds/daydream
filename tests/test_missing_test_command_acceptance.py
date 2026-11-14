@@ -75,7 +75,7 @@ async def test_runner_rejects_missing_canonical_before_fix_or_test(
     candidate.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
     trajectory = tmp_path / "trajectory.json"
-    config = make_config(target, stack="python", output_mode="loop", assume="yes", test_command=None,
+    config = make_config(target, output_mode="loop", assume="yes", test_command=None,
                          file_config=load_file_config(target), trajectory_path=trajectory)
     rc = await run(config)
     assert rc != 0, "unconfigured validation cannot authorize a successful fix flow"

@@ -78,7 +78,7 @@ async def test_test_verdict_persists_actual_suite_outcome_and_operator_override(
     # The default request ends with findings: this operator would accept a fix gate, and none is offered.
     code = await run(make_config(tiny_diff_target, non_interactive=False, test_command=command))
     assert (
-        code, "## Issues" in (tiny_diff_target / REVIEW_OUTPUT_FILE).read_text(),
+        code, "### 1. Sample issue" in (tiny_diff_target / REVIEW_OUTPUT_FILE).read_text(),
         [question for question in asked if "Apply fixes" in question], (suite_dir / "suite-count.txt").exists(),
         _git(tiny_diff_target, "status", "--porcelain", "--untracked-files=no"),
     ) == (0, True, [], False, "")
