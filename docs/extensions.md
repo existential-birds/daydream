@@ -96,8 +96,9 @@ preserve host schemas. The seeded prompt names are `fix`, `verify`, `fix-verify`
 `diagram_sequence`, `diagram_flowchart`, `audit`, `vet` and `plan-writer`. The review
 itself has no prompt seam: the nine names of the replaced staged reviewer (`intent`,
 `alternatives`, `per-stack`, `structural`, `generic-fallback`, `arbiter`, `supervise`,
-`suppression`, `merge`) are removed. `override_prompt` accepts any name, as it always
-has, so an override of one of them still registers; nothing calls it.
+`suppression`, `merge`) are removed, and overriding one fails registration and
+`daydream ext validate` with a message naming it. An extension's own prompt names
+still register.
 Review behavior is configured through the review profile.
 
 ### Committed-review program
