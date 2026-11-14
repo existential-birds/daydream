@@ -1580,10 +1580,11 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
             with pytest.raises(HostToolRejected, match=message):
                 _charged(binding, "review_admit", batch)
         final = {"targets": [decision(second, evidence_refs=[])], "claims": []}
-        lost = {"targets": [*final["targets"], decision(second, target_id="unplanned")],
-                "claims": [_proposal(review_inputs)]}
+        lost = {"targets": [*final["targets"], *(decision(second, target_id=f"{index}/" + "unplanned" * 50)
+                                                 for index in range(3))], "claims": [_proposal(review_inputs)]}
         binding.admit("lost", "structured_output", lost, terminal=True)
-        with pytest.raises(HostToolRejected, match="unplanned"):
+        # Ids too long for the rejection bound are dropped before the violation and its count are.
+        with pytest.raises(HostToolRejected, match=r"decided by its part ids \(3 targets\)$"):
             binding.submit("lost", lost)
         binding.admit("final", "structured_output", final, terminal=True)
         # Rejected batches installed nothing: one claim and exactly the two admitted decisions remain.
@@ -1623,10 +1624,13 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
         binding.admit("final", "structured_output", final, terminal=True)
         with pytest.raises(HostToolRejected) as rejected:
             binding.submit("final", final)
-        # One rejection names each distinct violation once, and its reserved start is kept for the correction.
+        # One rejection names each distinct violation once, with how many items broke it and the first
+        # three of them, and its reserved start is kept for the correction.
         assert [str(rejected.value).count(violation) for violation in (
-            "requires at least one assigned source_id", "'gone.py' (new): no available regular blob",
-            "split/0.py: choose a planned target", "split/2.py: choose a planned target")] == [1, 1, 1, 1]
+            "'gone.py' (new): no available regular blob", f"supporting selector. (1 target: {targets[105]}); ",
+            f"assigned source_id from source_options is required; supply that selector. Supporting paths alone "
+            f"cannot identify assigned work. (19 targets: {', '.join(targets[106:109])}); ",
+            "decided by its part ids (3 targets: split/0.py, split/1.py, split/2.py)")] == [1, 1, 1, 1]
         assert binding.authority_open and binding.remaining_tool_calls == 1
         assert review.catalog()["decided_targets"] == 0 and review.pending() == []
     binding.close_authority()  # A binding that failed closed, or a stopped backend, revokes authority first.
@@ -1634,10 +1638,13 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
     _clean(review, work_id, "host_tool_budget_exhaustion")
     claim, = review.pending()
     judge = _assign(review, "challenge")
-    judged = {"verdicts": [_verdict(inputs, claim)], "claims": [{**_proposal(inputs), "source_uids": ["unretained"]}]}
+    unassigned = {**_proposal(inputs), "payload": {**_proposal(inputs)["payload"], "evidence_refs": [support]}}
+    judged = {"verdicts": [_verdict(inputs, claim)], "claims": [unassigned]}
     async with judge.session():
         judge.admit("final", "structured_output", judged, terminal=True)
-        with pytest.raises(HostToolRejected, match="retained predecessor UIDs"):
+        # The same rule broken by a claim is reported for the claim, not for a reviewed target.
+        with pytest.raises(HostToolRejected, match=r"source_id from source_options is required.* \(1 claim: "
+                                                   r"claims\[0\]\)$"):
             judge.submit("final", judged)
         assert review.pending() == [claim]
     review.close("work:2")

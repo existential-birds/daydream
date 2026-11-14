@@ -236,8 +236,8 @@ def canonicalize_source_selectors(
             resolved.append(reference)
         if require_assigned and not any(reference['role'] == 'assigned' for reference in resolved):
             raise HostToolRejected(
-                'evidence_refs: a reviewed target requires at least one assigned source_id from its '
-                'source_options; supply that selector. Supporting paths alone cannot identify assigned work.')
+                'evidence_refs: at least one assigned source_id from source_options is required; '
+                'supply that selector. Supporting paths alone cannot identify assigned work.')
         # Canonical evidence has its own retained bounds and contract, independent
         # of the smaller model-facing selector schema.
         if not validate_source_refs(resolved, assigned.values(), revision=revision, source_root=source_root,

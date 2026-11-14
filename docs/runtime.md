@@ -122,8 +122,10 @@ fresh challenge, navigates it under the profile's
   labelled as distinct from dispatch-time snapshots.
 
 Every item of a batch is checked on its own, so one rejection names each distinct
-violation in the batch, within the 1,024-byte rejection bound, and an unknown `target_id`
-by name. When a work's authority closes without an accepted final submission and the
+violation in the batch once, with how many targets, verdicts or claims broke it and the
+first three of them (a target id, a claim uid, or `claims[N]` for a new claim). When
+that text would exceed the 1,024-byte rejection bound, the ids are dropped before any
+violation is. When a work's authority closes without an accepted final submission and the
 last batch the review processed for it was a rejected final batch, the host installs the
 target decisions, verdicts and claims of that batch that passed their own checks,
 together and under the unchanged installation checks; if they fail those together,

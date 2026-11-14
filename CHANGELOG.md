@@ -372,9 +372,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   atomic. The sealed result does not mark such items; their work is recorded as not
   accepted. If the retained items together exceed retained capacity, nothing of the batch
   is kept ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
-- One committed-review rejection now names every distinct violation in the batch, within
-  the 1,024-byte rejection bound, instead of the first one only, and names an unknown
-  `target_id` ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+- One committed-review rejection now names every distinct violation in the batch instead
+  of the first one only. Each states how many targets, verdicts or claims broke it and
+  the first three of them, with ids dropped before a violation when the 1,024-byte
+  rejection bound is tight. The rule that references need an assigned `source_id` no
+  longer calls a claim or verdict "a reviewed target"
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
 - A supporting `{path, side, source_range, basis}` selector is no longer refused because
   its whole file exceeds 65,536 bytes, a rule nothing stated to the reviewer. The existing
   8 MiB source retrieval limit still applies, and the retained reference is unchanged: the

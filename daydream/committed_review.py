@@ -54,6 +54,7 @@ from daydream.committed_review_output import write_committed_review_output
 from daydream.deep.detection import StackAssignment
 from daydream.git_ops.captured_source import CapturedSource, capture_source
 from daydream.host_tools import (
+    _MAX_REJECTION_BYTES,
     _MAX_RESULT_BYTES,
     HostTool,
     HostToolBinding,
@@ -498,31 +499,31 @@ class Review:
                 canonical = deepcopy(value)
                 decisions: dict[str, dict[str, Any]] = {}
                 verdicts: dict[str, dict[str, Any]] = {}
-                refused: list[str] = []
+                refused: dict[tuple[str, str], list[str]] = {}
 
-                def each(check: Callable[[dict[str, Any]], None], items: list[dict[str, Any]]) -> None:
+                def each(check: Callable[[dict[str, Any]], None], name: str) -> None:
                     """Check every item alone: a rejection names each violation, and salvage keeps the rest."""
-                    for item in items:
+                    for index, item in enumerate(canonical[name]):
                         try:
                             check(item)
                         except HostToolRejected as exc:
-                            refused.append(str(exc))
+                            label = item.get("target_id") or item.get("uid") or f"{name}[{index}]"
+                            refused.setdefault((name, str(exc)), []).append(label)
 
                 if kind in INVESTIGATION_KINDS:
                     def decide(target: dict[str, Any]) -> None:
                         identifier = target["target_id"]
                         if identifier not in self._index:
                             raise HostToolRejected(
-                                f"targets.target_id {identifier}: choose a planned target from review_source's "
-                                "catalog; a file split into parts is decided by its part ids")
+                                "targets.target_id: choose a planned target from review_source's catalog; "
+                                "a file split into parts is decided by its part ids")
                         if identifier in decisions:
                             raise HostToolRejected("targets: submit each target_id at most once per batch")
                         if identifier in self._decisions:
-                            raise HostToolRejected(
-                                f"targets.target_id {identifier}: already admitted; earlier decisions are final")
+                            raise HostToolRejected("targets.target_id: already admitted; earlier decisions are final")
                         if identifier not in work.targets:
                             raise HostToolRejected(
-                                f"targets.target_id {identifier}: not assigned to this work; decide only "
+                                "targets.target_id: not assigned to this work; decide only "
                                 "targets listed in this assignment's responsibilities")
                         if target["status"] == "not_reviewed" and not target["reason"].strip():
                             raise HostToolRejected("targets.reason: explain unfinished work")
@@ -536,7 +537,7 @@ class Review:
                         target["evidence_refs"] = self._refs(sources, selectors, target=identifier,
                                                              required=reviewed)
                         decisions[identifier] = target
-                    each(decide, canonical["targets"])
+                    each(decide, "targets")
                 else:
                     def judge(verdict: dict[str, Any]) -> None:
                         uid = verdict["uid"]
@@ -552,7 +553,7 @@ class Review:
                                                     if verdict["evidence_refs"]
                                                     else deepcopy(self._claims[uid]["payload"]["evidence_refs"]))
                         verdicts[uid] = {**verdict, "work_id": work_id}
-                    each(judge, canonical["verdicts"])
+                    each(judge, "verdicts")
                 changes: list[dict[str, Any]] = []
 
                 def change(submitted: dict[str, Any]) -> None:
@@ -560,9 +561,17 @@ class Review:
                         raise HostToolRejected("claims: update a retained uid at most once per submission")
                     changes.append(self._claim_change(sources, submitted, work.claims, work_id))
 
-                each(change, canonical["claims"])
+                each(change, "claims")
                 if refused and not salvage:
-                    raise HostToolRejected("; ".join(dict.fromkeys(refused)))
+                    def violations(ids: int) -> str:
+                        return "; ".join(
+                            f"{message} ({len(items)} {name[:len(name) - (len(items) == 1)]}"
+                            f"{': ' + ', '.join(items[:ids]) if ids else ''})"
+                            for (name, message), items in refused.items())
+
+                    # Each violation counts its items and names the first three; ids go before a violation does.
+                    text = violations(3)
+                    raise HostToolRejected(text if len(text.encode()) <= _MAX_REJECTION_BYTES else violations(0))
 
                 def install() -> dict[str, Any]:
                     # No await, I/O, or model decision between final checks and installation.
@@ -829,7 +838,8 @@ its part ids, never by its path. Non-empty evidence_refs of a reviewed target in
 source_ids; a claim's are never empty and, like a verdict's, include an assigned source_id. An assigned
 source_range only narrows the offered range. A supporting selector names a regular UTF-8 file of at most
 8 MiB inside the repository at the captured revision, with source_range inside its lines. review_source
-takes target_id or path, never both. A rejection names each distinct violation in its batch. A rejected final
+takes target_id or path, never both. A rejection names each distinct violation in its batch, how many items
+broke it and the first three of them. A rejected final
 structured_output keeps its reserved start: correct it and submit again. Past 32 denied starts and such
 rejections the assignment closes; if it ends on a rejected final batch, the host keeps that batch's items
 that are valid alone and the rest stay unfinished.

@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 _MAX_FRAME_BYTES = 256 * 1024
 _MAX_ARGUMENT_BYTES = 128 * 1024
 _MAX_RESULT_BYTES = 128 * 1024
+_MAX_REJECTION_BYTES = 1024
 _MAX_ITEMS = 32768
 _MAX_DEPTH = 64
 _CALLBACK_TIMEOUT_S = 3.0
@@ -82,7 +83,7 @@ class NativeCapacityRequirement:
     submission_bytes: int
 
 
-def _bounded_message(message: str, *, limit: int = 1024) -> str:
+def _bounded_message(message: str, *, limit: int = _MAX_REJECTION_BYTES) -> str:
     return redact_structured_text(message).encode("utf-8", errors="replace")[:limit].decode("utf-8", errors="ignore")
 
 

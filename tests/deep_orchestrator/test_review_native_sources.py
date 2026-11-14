@@ -242,7 +242,7 @@ def test_source_selectors_construct_supporting_evidence_from_the_pinned_git_blob
         [contained[0], {**contained[1], 'path': 'oversized.py', 'source_range': {'start': 1, 'end': 1}}],
         [assigned], revision=revision, source_root=repo) == [canonical[0], large]
     for fault, expected in (('assigned-range', ('1..3', 'null')), ('supporting-range', ('1..2', 'start <= end')),
-                            ('supporting-only', ('reviewed', 'source_id')), ('forged-hash', ()),
+                            ('supporting-only', ('assigned source_id', 'is required')), ('forged-hash', ()),
                             ('traversal', ()), ('binary', ()), ('symlink', ('retrieval limit',))):
         choices = selectors()
         if fault == 'assigned-range':
