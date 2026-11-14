@@ -2135,6 +2135,10 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
         # The failed work's row is written whatever went wrong while its rejected final batch was kept.
         row = next(entry for entry in value["execution"] if entry["work_id"] == "work:1")
         assert (row["accepted"], row["reason"]) == (False, "backend_failure")
+        if scenario == "salvage-fails":
+            # A late call on that handle is answered with the recorded failure, as after a live callback's.
+            with pytest.raises(HostToolFatal, match="failed unexpectedly Acceptance may already have occurred"):
+                stale[0].admit("after", "review_admit", {"targets": [], "claims": []})
     elif scenario != "contention":
         assert cross["targets"] == [] and cross["parents"] == []
     finding, = value["findings"]
