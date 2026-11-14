@@ -58,13 +58,11 @@ def render_committed_review(payload: Mapping[str, Any]) -> str:
 
 
 def write_committed_review_output(
-    session: ArtifactSession, payload: dict[str, Any], *,
-    report_path: Path | None = None, result_path: Path | None = None,
+    session: ArtifactSession | None, payload: dict[str, Any], *, report_path: Path, result_path: Path,
 ) -> None:
-    """Stage the report first; the session owns conflict-safe final publication."""
+    """Stage the report first; an owning session supplies conflict-safe final publication."""
     validate_committed_result(payload)
-    if payload['run_id'] != session.layout.session_id:
+    if session is not None and payload['run_id'] != session.layout.session_id:
         raise ValueError('committed review output differs from its artifact run')
-    report = render_committed_review(payload).encode('utf-8')
-    atomic_write_bytes(report_path or session.review_output, report)
-    atomic_write_json(result_path or session.daydream_dir / 'committed-review.json', payload, trailing_newline=True)
+    atomic_write_bytes(report_path, render_committed_review(payload).encode('utf-8'))
+    atomic_write_json(result_path, payload, trailing_newline=True)

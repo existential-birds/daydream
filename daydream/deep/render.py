@@ -20,7 +20,8 @@ _REVIEW_HEADING = "# Review"
 
 def _finding_line(item: dict[str, Any], *, prefix: str = "") -> str:
     """Render the canonical id and location as an unbolded numbered finding line."""
-    return f"{item['id']}. {prefix}[{item['file']}:{item['line']}] {item['description']}"
+    location = item['file'] if item.get('line') is None else f"{item['file']}:{item['line']}"
+    return f"{item['id']}. {prefix}[{location}] {item['description']}"
 
 
 def _is_heading(line: str) -> bool:
@@ -120,7 +121,8 @@ def render_report(
     ]
 
     for lens, title, prefix in lens_sections:
-        rows = [i for i in items if i.get("lens") == lens]
+        # A finding that asserts no lens is listed with the plain issues.
+        rows = [i for i in items if (i.get("lens") or "per-stack") == lens]
         if rows:
             body = "\n".join(_finding_line(i, prefix=prefix) for i in rows)
             sections.append(f"{title}\n{body}")

@@ -826,7 +826,7 @@ def _instruction_json(value: Any) -> str:
     return text
 
 
-def _bounded_author_description(config: RunConfig) -> FrozenAuthorDescription | None:
+def bounded_author_description(config: RunConfig) -> FrozenAuthorDescription | None:
     """Refuse embedder-supplied author text over its encoded bound before any source preparation."""
     author = config.frozen_author_description
     # Measured as the larger native delivery: the assignment's JSON inside one JSON-escaped argument.
@@ -836,7 +836,7 @@ def _bounded_author_description(config: RunConfig) -> FrozenAuthorDescription | 
     return author
 
 
-def _review_settings(config: RunConfig) -> tuple[dict[str, Any], float]:
+def review_settings(config: RunConfig) -> tuple[dict[str, Any], float]:
     """Validate the resolved profile's allowances; return the recorded settings and the review window."""
     profile = config.review_profile = config.review_profile or resolve_from_runconfig(config)
     pipeline = profile.profile.pipeline
@@ -890,7 +890,7 @@ def host_tools_refusal(kind: str, name: str) -> str:
             f"{name!r} does not serve them")
 
 
-def _bind_native_context(settings: dict[str, Any], kind: str, phase: str, name: str, backend: Any,
+def bind_native_context(settings: dict[str, Any], kind: str, phase: str, name: str, backend: Any,
                          source: Path) -> None:
     """Refuse a backend without host tools, else record its opaque native configuration identity."""
     if not getattr(backend, "supports_host_tools", False):
@@ -922,6 +922,10 @@ class ReviewProgram:
                     self.review.execution.append(_host_entry("cleanup", ReasonCode.BACKEND_FAILURE.value,
                                                              cleanup_complete=False))
 
+    def fail(self, assignment: str, reason: ReasonCode) -> None:
+        """Retain a run-wide host failure; every scope it could affect stays unfinished."""
+        self.review.execution.append(_host_entry(assignment, reason.value))
+
     def seal(self, *, immutable_input: ImmutableReviewInput | None = None,
              projection_valid: bool = True) -> dict[str, Any]:
         """Freeze coverage once; a captured source that changed makes every scope unfinished."""
@@ -930,7 +934,7 @@ class ReviewProgram:
             try:
                 captured.validate()
             except (git_ops.GitError, OSError):
-                self.review.execution.append(_host_entry("source_integrity", ReasonCode.EVIDENCE_INCOMPLETE.value))
+                self.fail("source_integrity", ReasonCode.EVIDENCE_INCOMPLETE)
         return self.review.seal(self.settings, immutable_input=immutable_input, projection_valid=projection_valid)
 
 
@@ -1023,8 +1027,8 @@ async def _run_committed_review(
         raise ValueError(
             "committed review uses its run-owned bundle; external export routes belong to entry integration"
         )
-    author = _bounded_author_description(config)
-    settings, window = _review_settings(config)
+    author = bounded_author_description(config)
+    settings, window = review_settings(config)
     backends: dict[str, Any] = {}
     inputs_by_kind: dict[str, BackendExecutionInput] = {}
     if hosted is not None:
@@ -1045,7 +1049,7 @@ async def _run_committed_review(
         except ValueError:
             raise ValueError(host_tools_refusal(kind, name)) from None
         backend: Any = _resolve_backend(config, phase, cwd=source, execution_input=inputs_by_kind[kind])
-        _bind_native_context(settings, kind, phase, name, backend, source)
+        bind_native_context(settings, kind, phase, name, backend, source)
         backends[kind] = backend
         if hosted is not None:
             await backend.validate_hosted_policy()

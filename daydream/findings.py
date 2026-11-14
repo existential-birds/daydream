@@ -266,6 +266,21 @@ def build_findings_artifact(
     return artifact
 
 
+def committed_finding_item(finding: dict[str, Any]) -> dict[str, Any]:
+    """Project one confirmed committed claim onto a canonical item, inventing no severity, confidence or lens."""
+    semantic = finding['payload']
+    rationale = '\n\n'.join([semantic['claim'], *(
+        f'**{label}:** {semantic[key]}'
+        for key, label in (('trigger', 'Trigger'), ('consequence', 'Consequence'),
+                           ('grounds', 'Supporting grounds'))
+    )])
+    return {
+        'id': finding['id'], 'uid': finding['uid'], 'item_uid': finding['item_uid'],
+        'source_uids': list(finding['source_uids']), 'file': semantic['file'], 'line': semantic['line'],
+        'description': finding['title'], 'rationale': rationale,
+    }
+
+
 def build_committed_findings_artifact(
     target_dir: Path, payload: dict[str, Any], *, snapshot_diff: str,
 ) -> dict[str, Any]:
@@ -288,17 +303,11 @@ def build_committed_findings_artifact(
     pr = PRInfo(original['pr_number'], original['head_sha'], original['comparison_base_sha'],
                 '', '', owner, repo, '')
     issues = []
-    for finding in payload['findings']:
-        semantic = finding['payload']
-        body = '\n\n'.join([semantic['claim'], *(
-            f'**{label}:** {semantic[key]}'
-            for key, label in (('trigger', 'Trigger'), ('consequence', 'Consequence'),
-                               ('grounds', 'Supporting grounds'))
-        )])
+    for item in map(committed_finding_item, payload['findings']):
         issues.append(ParsedIssue(
-            path=semantic['file'], line=semantic['line'], title=finding['title'], body=body,
+            path=item['file'], line=item['line'], title=item['description'], body=item['rationale'],
             severity=None, confidence=None, is_cross_stack=False,
-            fingerprint=pr_review.compute_fingerprint(semantic['file'], finding['title'], body),
+            fingerprint=pr_review.compute_fingerprint(item['file'], item['description'], item['rationale']),
         ))
     return build_findings_artifact(
         target_dir, pr, issues, run_info=f"Committed review {payload['run_id']}",

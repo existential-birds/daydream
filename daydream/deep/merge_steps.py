@@ -449,8 +449,10 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
 
         if not deep_state.review_coverage.is_finalized:
             finalize_review(ctx, "completed")
+    # A review without usable evidence still publishes its truthful notice, then fails the run.
+    failed = (ctx.data.get("terminal_review_result") or {}).get("analysis_state") == "failed"
     if deep_state.mode == "review":
-        return None
+        return Stop(1) if failed else None
 
     from daydream.pr_review import PostStatus, post_review_to_pr_from_report, resolve_review_renderers
     from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
@@ -510,6 +512,6 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
         auth=ctx.github_execution.auth,
         **pr_kwargs,
     )
-    if deep_state.mode == "comment" and outcome in (PostStatus.NO_PR, PostStatus.FAILED):
+    if failed or deep_state.mode == "comment" and outcome in (PostStatus.NO_PR, PostStatus.FAILED):
         return Stop(1)
     return None
