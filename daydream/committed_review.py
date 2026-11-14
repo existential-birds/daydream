@@ -7,6 +7,7 @@ import hashlib
 import math
 import os
 import re
+import threading
 import uuid
 from collections.abc import Callable
 from contextlib import AsyncExitStack
@@ -216,6 +217,12 @@ class Review:
         except ValueError as exc:
             raise ValueError("captured plan exceeds retained per-target coverage capacity before review; "
                              "narrow the review base or exclusions and rerun") from exc
+        self._checking = threading.Lock()
+
+    def check(self) -> None:
+        """The complete input check for worker threads, one at a time: several at once take longer than in a row."""
+        with self._checking:
+            self.inputs._revalidate_canonical()
 
     def _shard_decisions(self, index: int, decisions: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         return preserved_target_decisions([
@@ -630,7 +637,7 @@ class Review:
         binding = HostToolBinding(
             budget=budget, accept=lambda value: admit(value, final=True),
             allowed_tools=self._allowed_tools, reserves=reserves, protected_submission=True,
-            validate=self.inputs._revalidate_canonical,
+            validate=self.check,
             host_tools={LOOKUP_TOOL: HostTool(LOOKUP_SCHEMA, self.lookup),
                         ADMIT_TOOL: HostTool(schema, lambda value: admit(value, final=False), mutating=True)},
             native_requirement=NativeCapacityRequirement(LARGEST_TOOL_RESULT_BYTES, COMMITTED_BATCH_OUTPUT_BYTES),
@@ -1327,7 +1334,7 @@ class _Schedule:
         reason: str | None = None
         settled = False
         try:
-            await anyio.to_thread.run_sync(review.inputs._revalidate_canonical)
+            await anyio.to_thread.run_sync(review.check)
             if self.decompose and kind in {"discovery", "follow_up"}:
                 # Split local work holds at most one batch: its targets fit the first message, in the
                 # blocks a review_source result has, so its share of starts goes to investigation.

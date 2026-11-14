@@ -285,10 +285,12 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
     Every admission re-reads the whole capture. Held on the host loop, that read made
     concurrent assignments miss the endpoint's three-second control requests, so the
     capture row goes through the endpoint and asks it for a sibling's status meanwhile.
-    Reads run one at a time: a submission that arrives during another's read waits for
-    its own, and is refused when the capture has become unreadable by then.
+    Those worker-thread reads run one at a time: a submission that arrives during
+    another's read waits for its own, and is refused when the capture has become
+    unreadable by then. A direct caller's read on the loop waits for none of them.
     """
     answered: list[int] = []
+    order: list[str] = []
     sibling: Any = None
     injected = unreadable = False
     reading, release = threading.Event(), threading.Event()
@@ -297,16 +299,18 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
     def close_during_source_read(path: Any, *args: Any, **kwargs: Any) -> int:
         nonlocal injected, unreadable
         if fault == "capture-integrity":
-            if path == "caller.py":
-                if not injected:
-                    # Blocks this thread: only a free host loop can answer it.
-                    with urllib.request.urlopen(sibling, timeout=2) as response:
-                        answered.append(response.status)
-                if unreadable:
-                    injected = True
-                    raise OSError("final native integrity read failed")
+            worker = threading.current_thread() is not threading.main_thread()
+            if path == "caller.py" and worker and not injected:
+                # Blocks this thread: only a free host loop can answer it.
+                with urllib.request.urlopen(sibling, timeout=2) as response:
+                    answered.append(response.status)
+            if path == "caller.py" and unreadable:
+                injected = True
+                raise OSError("final native integrity read failed")
+            if path == "caller.py" and worker:
                 reading.set()
                 release.wait(5)
+                order.append("worker")
                 unreadable = True
             return real_open(path, *args, **kwargs)
         fd = real_open(path, *args, **kwargs)
@@ -354,6 +358,7 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
                 admitted = asyncio.create_task(client.post("/call", json={
                     "id": "batch", "name": "review_admit", "arguments": {"verdicts": [], "claims": []}}))
                 await asyncio.to_thread(reading.wait, 5)
+                review_inputs.admit_submission(lambda sources: lambda: order.append("loop"))
                 # The final submission arrives while the admission's read is still in progress.
                 submitted = asyncio.create_task(client.post("/submit", json={"id": "terminal", "arguments": update}))
                 await asyncio.sleep(0.1)
@@ -364,6 +369,7 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
         # for it. The synchronous admission repeats the failed read, reports it and installs nothing.
         assert injected and (reply["outcome"], reply["code"]) == ("fatal", "input_unavailable")
         assert answered == [200, 200]  # Each read ran once while the endpoint answered the sibling.
+        assert order == ["loop", "worker"]  # The direct caller finished during the admission's read.
     else:
         async with binding.session():
             binding.admit("terminal", "structured_output", update, terminal=True)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -160,9 +159,6 @@ class StageInputFactory:
         self.change = change
         # Identities stay host-only on both transports.
         self.canonical = change.canonical
-        # Whole-capture reads from worker threads run one at a time: together they take several times
-        # longer. Reentrant, because a read on the host loop can admit a sibling's submission in turn.
-        self._revalidating = threading.RLock()
         self._revalidate_canonical()
         self.index = change.index_slice(stack.files)
         self.binding = {"analyzed_revision": revision,
@@ -233,8 +229,7 @@ class StageInputFactory:
         return part
 
     def _revalidate_canonical(self) -> None:
-        with self._revalidating:
-            _revalidate(self.canonical, self.captured_source)
+        _revalidate(self.canonical, self.captured_source)
 
     def canonicalize_source_selectors(self, selectors: Any, expected_refs: Iterable[dict[str, Any]], *,
                                       require_assigned: bool = True) -> list[dict[str, Any]]:
