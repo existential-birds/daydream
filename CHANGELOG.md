@@ -279,9 +279,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking (0.y.z):** The staged reviewer is removed; the committed-review program
   above is the only reviewer. This is a breaking change released as the next minor
-  version under the `0.y.z` policy. Nothing an earlier build wrote is deleted or
-  converted: an existing `.daydream/review-cache/` is kept and never read, and archive
-  indexes and dataset stores keep their schemas. What ends, and what to do instead
+  version under the `0.y.z` policy. No stored format is converted. A fresh review
+  rebuilds its own `.daydream/deep/` working directory, as every fresh run did, so the
+  previous run's files there are replaced, including the staged reviewer's. Everything
+  else an earlier build wrote is left as it is: the review cache
+  (`.daydream/review-cache/`, never read again), exploration output and earlier runs'
+  records; archive indexes and dataset stores keep their schemas. An older build run
+  after this one does the same to this build's `deep/` files. What ends, and what to do
+  instead
   ([#1687](https://github.com/existential-birds/daydream/issues/1687),
   [#1641](https://github.com/existential-birds/daydream/issues/1641)):
   - Passes: intent (and its interactive confirmation), design alternatives, per-language

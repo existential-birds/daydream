@@ -792,10 +792,13 @@ the options and settings of the staged reviewer it replaced select nothing.
 - **Refused:** a review or challenge backend without native host tools. Pi, Claude and
   Codex serve them; Osprey does not and cannot run a review.
 
-Nothing an earlier build wrote is deleted or converted. An existing
-`.daydream/review-cache/` is preserved and never read; a fresh review rebuilds its own
-`.daydream/deep/` working directory as every fresh run did; archive indexes, dataset
-stores, findings artifacts and repair checkpoints keep their own
+No stored format is converted. A fresh review rebuilds its own `.daydream/deep/`
+working directory, as every fresh run did, so the previous run's files there are
+replaced, including the staged reviewer's; an older build run after this one does the
+same to this build's `deep/` files. Everything else an earlier build wrote is left as it
+is: an existing `.daydream/review-cache/` is preserved and never read, and exploration
+output and earlier runs' records stay. Archive indexes, dataset stores, findings
+artifacts and repair checkpoints keep their own
 [refuse-or-read rules](#artifacts-and-recovery).
 
 Findings carry head-side lines only. A finding whose location exists only on the old
