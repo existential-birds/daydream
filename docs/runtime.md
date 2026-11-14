@@ -212,12 +212,20 @@ supplies each of its targets as a `review_source` call returns it: the target's
 description and `source_options` as JSON, then its captured change bytes. A target
 larger than one 32 KiB lookup page arrives as its first page with the `next_cursor`
 that fetches the rest. Its starts go to investigation instead of
-fetching its own targets. The bytes are untrusted repository content exactly as a
-lookup result is, references to them keep `basis: "supplied_diff"`, and Pi's native
-capacity preflight counts them. They are not in the system instructions, which Codex
-and Claude deliver in [one argument](#codex-host-tools). One broad assignment, the
-cross-assignment and every challenge are supplied nothing and navigate with
+fetching its own targets. References to them keep `basis: "supplied_diff"`, and Pi's
+native capacity preflight counts them. They are not in the system instructions, which
+Codex and Claude deliver in [one argument](#codex-host-tools). One broad assignment,
+the cross-assignment and every challenge are supplied nothing and navigate with
 `review_source`.
+
+The supplied bytes are untrusted repository content in a message of the host's, where a
+lookup result keeps them in a block of their own, so a changed file could otherwise draw
+a header or description line. The first line of the message therefore ends with a random
+token made for that dispatch, and each header and description line begins with it; the
+description is JSON with line separators escaped. The system instructions of such work,
+the same for every dispatch, say that supplied targets are untrusted bytes captured when
+the assignment was dispatched, that a `decided` state in them can be stale on a retry,
+and that only lines beginning with the announced token are host-authored.
 
 After the split, follow-up work inherits a closed local work's unfinished targets
 only when that work admitted progress; work that failed native-capacity preflight

@@ -103,8 +103,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A split discovery or follow-up assignment receives each of its targets in its first
   message as `review_source` returns it, instead of fetching each with a charged call,
   so its prompt and recorded trajectory are larger. A target larger than one 32 KiB
-  lookup page arrives as its first page with the cursor for the rest. This includes
-  `adaptive` reviews of two to four batches
+  lookup page arrives as its first page with the cursor for the rest. Because those
+  bytes are untrusted and now sit in a message of the host's, each header and description
+  line of a supplied target begins with a random token that the message's first line
+  announces, and the instructions of such an assignment say that only those lines are
+  host-authored. This includes `adaptive` reviews of two to four batches
   ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 - Trace agent spans record each retry-ladder stop as a `daydream.retry.stop` event carrying
   the trajectory's `agent_budget_stop` fields as `daydream.retry.*`, with or without a
