@@ -222,8 +222,10 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
     ctx.data['terminal_review_items'] = items
     # Embedded evaluation consumes the same validated result as publication,
     # before optional rendering, without inventing a live GitHub PR target.
-    recorder = get_current_recorder()
-    deliver_finalized_review(result, items, usage={} if recorder is None else recorder.review_usage())
+    # A cancelled run returns nothing to its embedder: the published files hold the sealed result.
+    if pipeline_state != "cancelled":
+        recorder = get_current_recorder()
+        deliver_finalized_review(result, items, usage={} if recorder is None else recorder.review_usage())
     try:
         context = refresh_review_report(ctx, no_diff=no_diff)
     except (OSError, ValueError, TypeError, RecursionError, ArtifactSourceUnavailableError) as exc:

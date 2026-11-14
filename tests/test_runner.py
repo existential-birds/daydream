@@ -555,17 +555,27 @@ async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
     assert json.loads((archived_run / "manifest.json").read_text())["archive_status"] == "partial"
 
     # A review cancelled on the ordinary route seals what it admitted before the cancellation escapes:
-    # its claim and its unfinished coverage are published, and nothing is delivered beyond that.
+    # its claim and its unfinished coverage are published, and the embedder's result handler is not called.
     reviewed = _feature_repo(tmp_path / "reviewed")
     reviewer = StubBackend(reviewed)
     reviewer.review_claims = [{"title": "Admitted before cancellation", "file": "app.py", "line": 1}]
     monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: reviewer)
     caught.clear()
     config = RunConfig(target=str(reviewed), base="main", archive=False, run_eval=False, non_interactive=True)
+    handled: list[Any] = []
+
+    async def review() -> None:
+        try:
+            await runner.run(config, private_roots=private_root_locations(base=tmp_path / "private"),
+                             review_result_handler=handled.append)
+        except BaseException as exc:
+            caught.append(exc)
+            raise
     async with anyio.create_task_group() as group:
         reviewer.review_after_acceptance = lambda kind: group.cancel_scope.cancel() if kind == "discovery" else None
-        group.start_soon(invoke)
+        group.start_soon(review)
     assert len(caught) == 1 and isinstance(caught[0], anyio.get_cancelled_exc_class())
+    assert handled == []
     sealed = json.loads((reviewed / ".daydream/deep/committed-review.json").read_text())
     assert [claim["title"] for claim in sealed["claims"]] == ["Admitted before cancellation"]
     assert sealed["findings"] == [] and sealed["terminal_result"]["analysis_state"] == "incomplete"

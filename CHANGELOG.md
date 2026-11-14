@@ -88,7 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     before any fix gate: complete, incomplete or failed, the number of confirmed findings
     and, when unfinished, the scopes or phases left with their reason codes.
     A cancelled review seals and publishes the claims and coverage it had before the
-    cancellation propagates; an embedded result callback receives that unfinished result.
+    cancellation propagates; an embedded result callback is not called for it.
   - `--shallow`, `--stack`, `--precision`, `--latency-profile`, `--no-review-cache` and
     `--start-at` are usage errors that say what replaces them; the same values on an
     embedded `RunConfig` are refused before any work, and `--shallow`,

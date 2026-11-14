@@ -227,7 +227,12 @@ plus a fixed 120 s finalization reserve. Investigation receives half of the
 tool allowance and challenge the remainder. Under decomposition, cross-assignment keeps
 `max(2, half // 4)` starts; local work runs until 3/8 of the review window,
 cross-assignment until 1/2 and challenge for the rest. Otherwise discovery runs until
-1/2. `finalization_s` is always reserved. Earlier work cannot spend later reserves;
+1/2. `finalization_s` is always reserved: review work stops that long before the
+window closes, on every route. `run_committed_review` also refuses to stage or
+install output once its window has closed. The `deep` flow reserves the allowance
+when it plans the review and applies no such refusal: the steps that follow the
+review (diagrams, extension steps, sealing, the fix cycle) are not bounded by the
+review window. Earlier work cannot spend later reserves;
 unspent capacity carries forward. Challenge takes every pending revision not held by
 live work in a fresh context. It is re-dispatched for new revisions, after a round
 that resolved a verdict or changed a claim, or once after an evidence-free failure; an
