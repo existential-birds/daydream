@@ -78,14 +78,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `reviewer_investigation_budget_s` are multiplied by the larger of the diff tier (3, 6
   or 9 above 64 KiB or 1,000 lines, 256 KiB or 5,000, 512 KiB or 10,000) and one per
   four planned batches. A review of a large change therefore uses far more tool calls,
-  time and tokens by default than before, in proportion to its size. With the default
-  profile `review_wall_budget_s` grows by the tier, to hours for a very large change; in
-  any explicit profile it stays a fixed ceiling, so an embedder that relied on
-  `reviewer_investigation_budget_s` as the ceiling of a review must set
+  time and tokens by default than before, in proportion to its size: a 237-file change
+  of 1.47 MB that plans 134 batches on Pi had 120 tool calls and a 2,400 s window with
+  one discovery conversation, and now has 4,080 tool calls across 134 discovery
+  assignments, a cross-assignment and the challenge within 40,380 s. The staged reviewer
+  at v0.34.0 planned 7,344 tool calls in 138 first-pass invocations within 37,800 s for
+  it. With the default profile `review_wall_budget_s` grows by the tier, to hours for a
+  very large change; in any explicit profile it stays a fixed ceiling, so an embedder
+  that relied on `reviewer_investigation_budget_s` as the ceiling of a review must set
   `review_wall_budget_s` to the longest review it accepts. `settings.limits` records
   `scale` and `effective_tool_calls` beside the profile's own values; the profile digest
-  does not change
-  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
+  does not change ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 - A change of more than four batches is reviewed as one discovery assignment per batch
   under both `broad` and `adaptive`, followed by the cross-assignment and the challenge.
   It can no longer be reviewed in one conversation under `broad`, and

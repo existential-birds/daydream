@@ -262,7 +262,10 @@ tokens than the keys state. `review_wall_budget_s` grows with the tier only in t
 default profile; in any explicit profile it is a fixed ceiling on the whole review, so
 set it to the longest review you accept. The 120 s are a fixed finalization reserve.
 `settings.limits` records the profile's `tool_calls` and `investigation_s` beside
-`scale`, `effective_tool_calls` (`T'`) and `effective_investigation_s` (`W`).
+`scale`, `effective_tool_calls` (`T'`) and `effective_investigation_s` (`W`). For
+example, a change of 134 batches under the default profile (120 calls, 2,400 s, wall
+4,500 s) in the highest tier has scale 34: 4,080 tool calls, 134 assignments of 11 or
+12 starts, 510 kept for cross-assignment, 2,040 for challenge and a 40,380 s window.
 
 When split, each batch's work receives an equal share of `I - X` (earlier work takes
 the remainder) and runs until 3/8 of the review window, cross-assignment until 1/2 and
