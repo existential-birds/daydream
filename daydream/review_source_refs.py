@@ -97,12 +97,12 @@ def _supporting_facts(root: Path, revision: Mapping[str, Any], side: str, path: 
         contents.count(b'\n') + int(bool(contents) and not contents.endswith(b'\n')), utf8)
 
 
-class SupportingSourceRejected(HostToolRejected):
-    """A supporting-selector violation; ``group`` holds its rule apart from its path so a batch can count paths."""
+class SourceSelectorRejected(HostToolRejected):
+    """A selector violation; ``group`` holds its rule apart from the selector it names, so a batch can count them."""
 
-    def __init__(self, field: str, source: str, rule: str) -> None:
-        super().__init__(f'{field}{rule}')
-        self.group = (f'evidence_refs supporting path{rule}', source)
+    def __init__(self, message: str, rule: str, subject: str) -> None:
+        super().__init__(message)
+        self.group = (rule, subject)
 
 
 class _SubmissionSources:
@@ -190,9 +190,10 @@ def canonicalize_source_selectors(
         if requested != assigned.keys():
             unknown = next(selector['source_id'] for selector in selectors
                            if 'source_id' in selector and selector['source_id'] not in assigned)
-            raise HostToolRejected(
-                f'evidence_refs source_id {unknown}: outside this target\'s assigned inventory; '
-                'choose a source_id from this target\'s source_options, including its assigned deferred parts.')
+            rule = (': outside this target\'s assigned inventory; '
+                    'choose a source_id from this target\'s source_options, including its assigned deferred parts.')
+            raise SourceSelectorRejected(f'evidence_refs source_id {unknown}{rule}',
+                                         f'evidence_refs source_id{rule}', unknown)
         resolved: list[dict[str, Any]] = []
         for index, selector in enumerate(selectors):
             field = f'evidence_refs[{index}]'
@@ -205,38 +206,42 @@ def canonicalize_source_selectors(
                             or not original['start'] <= bounds['start'] <= bounds['end'] <= original['end']):
                         allowed = (f'{original["start"]}..{original["end"]}' if isinstance(original, dict)
                                    else 'no line range (this is an exact fragment)')
-                        raise HostToolRejected(
-                            f'{field}.source_range for {selector["source_id"]}: '
-                            f'allowed {allowed}; use null to retain the exact assigned identity '
-                            'or choose a contained range with start <= end.')
+                        rule = ('; use null to retain the exact assigned identity '
+                                'or choose a contained range with start <= end.')
+                        raise SourceSelectorRejected(
+                            f'{field}.source_range for {selector["source_id"]}: allowed {allowed}{rule}',
+                            f'evidence_refs.source_range: outside the offered range{rule}',
+                            f'{selector["source_id"]} {allowed}')
                     reference['source_range'] = deepcopy(bounds)
                 reference.update(basis=selector['basis'], role='assigned')
             else:
                 path, side, bounds = selector['path'], selector['side'], selector['source_range']
                 source = f'{redact_text(path)[:160]!r} ({side})'
                 field += f' supporting path {source}'
+                generic = 'evidence_refs supporting path'
                 if not git_observed_path_is_confined(source_root, path):
-                    raise SupportingSourceRejected(
-                        field, source, ': path must remain inside the repository; choose a confined repository '
-                        'path or remove this optional supporting selector.')
+                    rule = (': path must remain inside the repository; choose a confined repository path '
+                            'or remove this optional supporting selector.')
+                    raise SourceSelectorRejected(f'{field}{rule}', f'{generic}{rule}', source)
                 pinned_revision = source_revision(revision, side)
                 try:
                     facts = (_submission._supporting(side, path) if _submission is not None else
                              _supporting_facts(source_root, revision, side, path, captured_source))
                 except (FrozenSourceRejected, PathAbsentError) as exc:
-                    raise SupportingSourceRejected(
-                        field, source, ': no available regular blob at the pinned revision; choose a regular file '
-                        'on this side within the captured-source retrieval limit, '
-                        'use an assigned source_id, or remove this optional supporting selector.') from exc
+                    rule = (': no available regular blob at the pinned revision; choose a regular file '
+                            'on this side within the captured-source retrieval limit, '
+                            'use an assigned source_id, or remove this optional supporting selector.')
+                    raise SourceSelectorRejected(f'{field}{rule}', f'{generic}{rule}', source) from exc
                 if not facts.utf8:
-                    raise SupportingSourceRejected(
-                        field, source, ': the whole pinned blob is not UTF-8 text; choose a UTF-8 regular file '
-                        'or remove this optional supporting selector.')
+                    rule = (': the whole pinned blob is not UTF-8 text; choose a UTF-8 regular file '
+                            'or remove this optional supporting selector.')
+                    raise SourceSelectorRejected(f'{field}{rule}', f'{generic}{rule}', source)
                 line_count = facts.lines
                 if not 1 <= bounds['start'] <= bounds['end'] <= line_count:
-                    raise SupportingSourceRejected(
-                        field, source, f'.source_range: allowed 1..{line_count} with start <= end; '
-                        'choose a contained range or remove this optional supporting selector.')
+                    rule = ' with start <= end; choose a contained range or remove this optional supporting selector.'
+                    raise SourceSelectorRejected(
+                        f'{field}.source_range: allowed 1..{line_count}{rule}',
+                        f'{generic}.source_range: outside the file\'s lines{rule}', f'{source} 1..{line_count}')
                 reference = {
                     'artifact_sha256': facts.digest, 'part_sha256': None, 'revision': pinned_revision,
                     'path': path, 'side': side, 'source_range': deepcopy(bounds), 'fragment': None,

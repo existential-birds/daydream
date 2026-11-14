@@ -1613,6 +1613,12 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
         def unreadable(path: str) -> dict[str, Any]:
             return decision(second, evidence_refs=[*decision(second)["evidence_refs"], {
                 "path": path, "side": "new", "source_range": {"start": 1, "end": 1}, "basis": "source_inspection"}])
+
+        def cited(**selector: Any) -> dict[str, Any]:
+            claim = _proposal(review_inputs)
+            claim["payload"]["evidence_refs"] = [*claim["payload"]["evidence_refs"], selector] if (
+                "path" in selector) else [{**claim["payload"]["evidence_refs"][0], **selector}]
+            return claim
         for batch, message in [
             ({"targets": [bad], "claims": [_proposal(review_inputs)]}, "outside this target"),
             ({"targets": [decision(first)], "claims": []}, "already admitted"),
@@ -1620,18 +1626,28 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
             # A path Git refuses, after an item that was already refused, is not a fatal storage failure.
             ({"targets": [decision(second, target_id="unplanned"), unreadable(":(glob)*.py")], "claims": []},
              "choose a planned target"),
+            # Unknown source ids, ranges outside different offered ranges, and ranges outside files of
+            # different lengths are one violation each, whichever ids and lines they involve.
+            ({"targets": [], "claims": [cited(source_id="source:" + digit * 64) for digit in "fe"] + [
+                cited(source_id=_selectors(review_inputs, file)[0]["source_id"], source_range={"start": 50, "end": 60})
+                for file in ("api.py", "caller.py")] + [
+                cited(path=path, side="new", source_range={"start": 50, "end": 60}, basis="source_inspection")
+                for path in ("caller.py", "support/helper.py")]},
+             r"assigned inventory; .* \(2 claims: source:f{64}, source:e{64}\); .*outside the offered range; .* "
+             r"\(2 claims: source:\S+ \d+\.\.\d+, source:\S+ \d+\.\.\d+\); .*supporting path\.source_range: .* "
+             r"\(2 claims: 'caller.py' \(new\) 1\.\.2, 'support/helper.py' \(new\) 1\.\.1\)$"),
             ({"targets": [decision(second, status="not_reviewed", reason="x" * 1024)], "claims": [
                 {**_proposal(review_inputs), "title": "t" * 4096} for _ in range(33)]}, "exceeds 131072 UTF-8 bytes"),
         ]:
             with pytest.raises(HostToolRejected, match=message):
                 _charged(binding, "review_admit", batch)
         final = {"targets": [decision(second, evidence_refs=[])], "claims": []}
-        lost = {"targets": [unreadable("gone/" + "x" * 200), *(
-            decision(second, target_id=f"{index}/" + "unplanned" * 50) for index in range(3))],
+        lost = {"targets": [unreadable("gone.py"), *(
+            decision(second, target_id=f"{index}/" + "\u00e9" * 200) for index in range(3))],
             "claims": [_proposal(review_inputs)]}
         binding.admit("lost", "structured_output", lost, terminal=True)
-        # Echoed ids and paths are cut to 160 characters; when they still do not fit the rejection bound,
-        # they are dropped before any violation or its count is.
+        # Echoed ids are cut to 160 characters; when they still do not fit the rejection bound, which counts
+        # bytes (these fit in characters), they are dropped before any violation or its count is.
         with pytest.raises(HostToolRejected, match=r"supporting selector\. \(1 target\); .*decided by its part "
                                                    r"ids \(3 targets\)$"):
             binding.submit("lost", lost)
@@ -1661,7 +1677,7 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
     support = {"path": "api.py", "side": "new", "source_range": {"start": 1, "end": 1}, "basis": "source_inspection"}
     # Supporting selectors alone, two of them unavailable, three paths that are not target ids (one over the
     # echo bound), and a claim on an unchanged file beside a valid one.
-    unplanned = ["split/0.py", "split/1/" + "x" * 160, "split/2.py"]
+    unplanned = ["split/0.py", "split/1/" + "x" * 129 + "/ghp_" + "A1b2C3d4" * 5 + "/" + "y" * 40, "split/2.py"]
     refused = [*({"target_id": target, "status": "reviewed", "reason": "", "evidence_refs": [support]}
                  for target in targets[105:]),
                *({"target_id": target, "status": "reviewed", "reason": "", "evidence_refs": []}
@@ -1680,14 +1696,16 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
             binding.submit("final", final)
         # One rejection names each distinct violation once, with how many items broke it and the first
         # three of them (a path for a supporting selector), and its reserved start is kept for the correction.
-        assert [str(rejected.value).count(violation) for violation in (
+        text = str(rejected.value)
+        assert [text.count(violation) for violation in (
             "evidence_refs supporting path: no available regular blob",
             "supporting selector. (2 targets: 'gone0.py' (new), 'gone1.py' (new)); ",
             f"assigned source_id from source_options is required; supply that selector. Supporting paths alone "
-            f"cannot identify assigned work. (18 targets: {', '.join(targets[107:110])}); ",
-            f"decided by its part ids (3 targets: split/0.py, {unplanned[1][:160]}, split/2.py); ",
-            "complete changed-target inventory (1 claim: claims[1])")] == [1, 1, 1, 1, 1]
-        assert str(rejected.value).endswith("claims[1])") and unplanned[1] not in str(rejected.value)
+            f"cannot identify assigned work. (18 targets: {', '.join(map(repr, targets[107:110]))}); ",
+            "decided by its part ids (3 targets: 'split/0.py', 'split/1/x", "/yyy', 'split/2.py'); ",
+            "complete changed-target inventory (1 claim: 'claims[1]')")] == [1, 1, 1, 1, 1, 1]
+        # An echoed id is quoted, redacted and then cut to 160 characters, so no part of a token survives the cut.
+        assert text.endswith("'claims[1]')") and "ghp_" not in text and "y" * 4 not in text
         assert binding.authority_open and binding.remaining_tool_calls == 1
         assert review.catalog()["decided_targets"] == 0 and review.pending() == []
     binding.close_authority()  # A binding that failed closed, or a stopped backend, revokes authority first.
@@ -1696,14 +1714,12 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
     _clean(review, work_id, "host_tool_budget_exhaustion")
     claim, = review.pending()
     judge = _assign(review, "challenge")
-    unassigned = {**_proposal(inputs), "payload": {**_proposal(inputs)["payload"], "evidence_refs": [support]}}
     judged = {"verdicts": [{**_verdict(inputs, claim), "uid": "domain:claim:9"}, _verdict(inputs, claim)],
-              "claims": [unassigned]}
+              "claims": []}
     async with judge.session():
         judge.admit("final", "structured_output", judged, terminal=True)
-        # Each verdict is checked alone too, and the rule a claim broke is reported for the claim.
-        with pytest.raises(HostToolRejected, match=r"at most once \(1 verdict: domain:claim:9\); .*source_id from "
-                                                   r"source_options is required.* \(1 claim: claims\[0\]\)$"):
+        # Each verdict is checked alone too: the valid one is kept because the batch refused no claim.
+        with pytest.raises(HostToolRejected, match=r"at most once \(1 verdict: 'domain:claim:9'\)$"):
             judge.submit("final", judged)
         assert review.pending() == [claim]
     review.close("work:2")

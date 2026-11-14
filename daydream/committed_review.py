@@ -83,7 +83,7 @@ from daydream.review_result import (
 )
 from daydream.review_source_refs import (
     SOURCE_SELECTORS_SCHEMA,
-    SupportingSourceRejected,
+    SourceSelectorRejected,
     _SubmissionSources,
     source_id,
 )
@@ -510,8 +510,8 @@ class Review:
                         try:
                             check(item)
                         except HostToolRejected as exc:
-                            message, label = exc.group if isinstance(exc, SupportingSourceRejected) else (
-                                str(exc), redact_text(identity)[:160])
+                            message, label = exc.group if isinstance(exc, SourceSelectorRejected) else (
+                                str(exc), repr(redact_text(identity)[:160]))
                             refused.setdefault((name, message), []).append(label)
                             withdrawn.add(identity)
                         except HostToolFatal:
