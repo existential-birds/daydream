@@ -233,9 +233,8 @@ _REMOVED_PHASE_FLAGS: dict[str, str] = {
     "--test-backend": "[tool.daydream.phases.test] backend = \"...\"",
     "--exploration-model": "[tool.daydream.phases.exploration] model = \"...\"",
     "--review-model": "[tool.daydream.phases.review] model = \"...\"",
-    "--per-stack-review-model": "[tool.daydream.phases.per_stack_review] model = \"...\"",
+    "--per-stack-review-model": "[tool.daydream.phases.review] model = \"...\"",
     "--arbiter-model": "[tool.daydream.phases.arbiter] model = \"...\"",
-    "--parse-model": "[tool.daydream.phases.parse] model = \"...\"",
     "--fix-model": "[tool.daydream.phases.fix] model = \"...\"",
     "--test-model": "[tool.daydream.phases.test] model = \"...\"",
 }
@@ -245,6 +244,8 @@ def _reject_removed_phase_flags(parser: argparse.ArgumentParser, argv: list[str]
     """Reject removed phase flags, including --flag=value, with their config-table replacement."""
     for token in argv:
         flag = token.split("=", 1)[0]
+        if flag == "--parse-model":
+            parser.error("--parse-model was removed: the review has no parse phase; drop it.")
         replacement = _REMOVED_PHASE_FLAGS.get(flag)
         if replacement is not None:
             parser.error(

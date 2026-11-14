@@ -191,7 +191,8 @@ def replaced_review_options(config: RunConfig) -> list[str]:
     review = runs_review(config)
     builtin = config.flow_name in (None, *DEEP_FLOW_ALIASES)
     return [f"{option}: {guidance}" for option, selected, guidance in (
-        ("--shallow", builtin and (config.shallow or config.flow_name == "shallow"),
+        ("--shallow" if config.shallow else "--flow shallow",
+         builtin and (config.shallow or config.flow_name == "shallow"),
          "there is no shallow mode; drop it"),
         ("--stack", review and config.stack is not None,
          "the reviewer covers the whole change in one review; drop it"),

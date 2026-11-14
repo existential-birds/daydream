@@ -154,7 +154,7 @@ def test_incompatible_cli_flags_are_rejected_with_the_offending_flag(
         (["--precision", "/tmp/repo"], "--precision: every finding is already challenged in a fresh context"),
         (["--latency-profile", "fast", "/tmp/repo"], "--latency-profile: review time and tool allowances come from"),
         (["--no-review-cache", "/tmp/repo"], "--no-review-cache: no review cache exists; drop it"),
-        (["--flow", "shallow", "/tmp/repo"], "--shallow: there is no shallow mode; drop it"),
+        (["--flow", "shallow", "/tmp/repo"], "--flow shallow: there is no shallow mode; drop it"),
         (["--fix", "--non-interactive", "/tmp/repo"], "cannot confirm the fix gate; add --yes"),
         (["--fix", "--yes", "--findings-out", "f.json", "/tmp/repo"], "--findings-out exports"),
         (["--diagram", "both", "--diagram-only", "sequence", "/tmp/repo"], "--diagram-only"),
@@ -163,6 +163,9 @@ def test_incompatible_cli_flags_are_rejected_with_the_offending_flag(
         (["--diagram-only", "sequence", "--shallow", "/tmp/repo"], "--shallow: there is no shallow mode; drop it"),
         (["--diagram-only", "sequence", "--yes", "/tmp/repo"], "it does not apply to --diagram-only"),
         (["--fix-backend=claude-opus-5", str(tmp_path)], "[tool.daydream.phases.fix]"),
+        # A removed flag never points at a table this build ignores.
+        (["--per-stack-review-model", "m", "/tmp/repo"], "instead: [tool.daydream.phases.review] model"),
+        (["--parse-model=m", "/tmp/repo"], "--parse-model was removed: the review has no parse phase; drop it"),
     ]
     for argv, expected in rejected:
         with pytest.raises(SystemExit) as exc_info:
