@@ -118,7 +118,7 @@ async def _run_real_phases_deep(
 
 async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_phase_state(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, no_ci_remote: NoCIRemote,
-    tmp_path: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Archive and push tracked/generated fixes while leaving pre-existing notes untracked."""
     head_before = git_ops.head_sha(multi_stack_target)
@@ -129,6 +129,8 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     remote, exit_code = await _run_real_phases_deep(
         multi_stack_target, monkeypatch, archive_dir, no_ci_remote, dataset_store=store.root, dump_path=dump_dir)
     assert exit_code == 0
+    join = capsys.readouterr().out.split("Verdict Join", 1)[1].split("Total", 1)[0]
+    assert "Matched" in join and "Structural" not in join
     head_after = git_ops.head_sha(multi_stack_target)
     assert head_after != head_before
     assert git(remote, "rev-parse", "refs/heads/feature") == head_after

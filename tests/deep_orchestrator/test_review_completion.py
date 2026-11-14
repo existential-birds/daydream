@@ -119,7 +119,9 @@ async def test_comment_pins_pr_head_independently_and_excludes_local_edits(
         return summarize(result, **kwargs)
 
     review.patch.setattr(review_reporting, 'render_github_review_context', unrenderable)
-    assert await review.run(output_mode='comment', findings_out=None, approve_on_clean=True) == 0
+    assert await review.run(output_mode='comment', findings_out=None, approve_on_clean=True,
+                            review_backend='codex') == 0
+    assert json.loads((review.tmp / 'trajectory.json').read_text())['extra']['review_backend'] == 'codex'
     plan = plans['plan']
     assert plan.review_summary == summarize(None, review_warnings=plan.review_warnings) and plan.review_warnings
     assert plan.pr.head_sha == review.pr.head_sha != local_head

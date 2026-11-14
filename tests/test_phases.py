@@ -571,7 +571,7 @@ async def test_grouped_fix_delivers_scopes_verdicts_evidence_and_test_map_then_r
             "id": 3,
             "item_uid": "item:3",
             "file": "src/handler.py",
-            "line": 130,
+            "line": None,
             "description": "Missing await on coroutine",
             "evidence": "tests/test_handler.py:10",
         },
@@ -626,9 +626,8 @@ async def test_grouped_fix_delivers_scopes_verdicts_evidence_and_test_map_then_r
             "Off-by-one in loop bound",
             "Unchecked None deref",
             "Missing await on coroutine",
-            "42",
-            "88",
-            "130",
+            "   Line: 42\n",
+            "   Line: 88\n",
             "Verifier verdict: contradicts",
             "the spec says otherwise",
             "assumes UTC timezone",
@@ -642,6 +641,7 @@ async def test_grouped_fix_delivers_scopes_verdicts_evidence_and_test_map_then_r
             "the contract wins",
         )
     )
+    assert group.count("Line: ") == 2
     singleton = next(prompt for prompt in backend.prompts if "Incorrect test expectation" in prompt)
     assert "This test covers daydream/app.py — read it to understand the expected behavior." in singleton
     assert "tests/test_app.py:10" in singleton
