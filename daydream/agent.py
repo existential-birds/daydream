@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
     from rich.text import Text
 
-from daydream import clock, review_budget
+from daydream import clock
 from daydream.agent_output import StructuredOutputFailure as StructuredOutputFailure, resolve_output
 from daydream.agent_retry import _plan_retry_delay, _resolve_retry_settings, _retry_hint, _RetryTelemetry
 from daydream.artifact_visibility import ArtifactVisibilityError, artifact_session_active, assert_model_cwd_clean
@@ -337,7 +337,6 @@ async def run_agent(
             f"{budget.remaining_s() or 0.0:g} seconds until the absolute deadline; "
             f"current invocation allocation: {budget.remaining_tool_calls} tool calls. "
             "Future-stage reserves are already excluded from this allocation; do not subtract them again. "
-            + ("\n\n" + review_budget.STAGED_REVIEW_GUIDANCE if not review_system_instructions else "")
         )
     if review_limits is not None:
         review_limits = review_limits_for_scope(review_limits)

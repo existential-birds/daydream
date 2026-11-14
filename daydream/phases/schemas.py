@@ -1,6 +1,5 @@
 """Structured phase outputs, sharing the canonical finding and verdict fields."""
 
-import copy
 
 from daydream.output_schema import result_array_schema, severity_enum_schema
 from daydream.repository_paths import REPOSITORY_FILE_PATH_SCHEMA
@@ -14,14 +13,6 @@ _FINDING_FIELDS = {
     "rationale": {"type": "string"},
     "evidence": {"type": "string"},
 }
-PER_STACK_RECORD_SCHEMA = result_array_schema("issues", {
-    **copy.deepcopy(_FINDING_FIELDS), "severity": severity_enum_schema(),
-})
-PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["required"] = [
-    "id", "description", "file", "line", "severity", "confidence", "rationale", "evidence"
-]
-
-
 MERGED_ITEMS_SCHEMA = result_array_schema("items", {
     **_FINDING_FIELDS,
     "lens": {"type": "string", "enum": ["per-stack", "cross-stack", "structural", "wonder"]},

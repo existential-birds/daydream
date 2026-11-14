@@ -317,8 +317,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Python API with no known caller: `run_agent` no longer accepts
     `advisory_tool_call_target`, `review_evidence` or `schema_rejection_guard`;
     `phase_fix_parallel` and `phase_fix` no longer accept `intent_path`;
-    `BudgetLedger.from_limits` is removed (construct `BudgetLedger` directly); and the
-    modules of the staged phases are deleted.
+    `BudgetLedger.from_limits` is removed (construct `BudgetLedger` directly);
+    `phase_verify_recommendations` no longer accepts `selection`;
+    `daydream.phases.PER_STACK_RECORD_SCHEMA` and `review_budget.STAGED_REVIEW_GUIDANCE`
+    are removed; and the modules of the staged phases are deleted.
 
 - **Breaking (0.y.z):** Turn limits: `max_turns` on `run_agent`, the backend protocol,
   `EffectiveRequestConfig` and every adapter, `MaxTurnsError` and its salvage path.
