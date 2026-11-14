@@ -762,15 +762,17 @@ class Review:
                         "omitted": max(0, len(work.targets) - _RESPONSIBILITY_PAGE)},
         }
         if work.kind == "cross_assignment":
+            claims = [{"uid": c["uid"], "revision": c["revision"], "title": c["title"],
+                       "file": c["payload"]["file"], "line": c["payload"]["line"],
+                       "disposition": c["disposition"], "work_id": c["work_id"]}
+                      for c in self._claims.values()]
+            rows = [{"work_id": w.work_id, "kind": w.kind, "targets": len(w.targets),
+                     "admitted_targets": len(w.admitted_targets), "admitted_claims": len(w.admitted_claims),
+                     "unfinished_targets": len(self.leftovers(w.work_id)[0])}
+                    for w in self.work.values() if w.kind in {"discovery", "follow_up"}]
             context["retained_conclusions"] = {
-                "claims": [{"uid": c["uid"], "revision": c["revision"], "title": c["title"],
-                            "file": c["payload"]["file"], "line": c["payload"]["line"],
-                            "disposition": c["disposition"], "work_id": c["work_id"]}
-                           for c in self._claims.values()],
-                "work": [{"work_id": w.work_id, "kind": w.kind, "targets": len(w.targets),
-                          "admitted_targets": len(w.admitted_targets), "admitted_claims": len(w.admitted_claims),
-                          "unfinished_targets": len(self.leftovers(w.work_id)[0])}
-                         for w in self.work.values() if w.kind in {"discovery", "follow_up"}],
+                "claims": claims[:_RESPONSIBILITY_PAGE], "claims_omitted": max(0, len(claims) - _RESPONSIBILITY_PAGE),
+                "work": rows[:_RESPONSIBILITY_PAGE], "work_omitted": max(0, len(rows) - _RESPONSIBILITY_PAGE),
             }
         return context
 
@@ -1445,8 +1447,7 @@ class _Schedule:
             "captured_root": str(repo),
             "catalog": review.catalog(),
             "work": review.context(work_id),
-            "claims": ([c for c in pending if work.claims.get(c["uid"]) == c["revision"]] if kind == "challenge"
-                       else pending if kind == "cross_assignment" else []),
+            "claims": [c for c in pending if work.claims.get(c["uid"]) == c["revision"]],
             "profile": profile,
         }
         strategy = "challenge" if kind == "challenge" else "discovery"

@@ -2140,6 +2140,11 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
                 assert (summary["admitted_targets"], summary["unfinished_targets"]) == (0, 0)
                 assert work["parents"] == ["work:1"] and work["targets"]["total"] == 4
                 assert work["retained_conclusions"]["claims"] == []
+            if scenario == "eight-batches-adaptive":
+                # It reads no claim in full: summaries of the first 256 pending claims, the rest counted.
+                conclusions = work["retained_conclusions"]
+                assert assignment["claims"] == [] and (len(conclusions["claims"]), conclusions["claims_omitted"]) == (
+                    256, 32) and (len(conclusions["work"]), conclusions["work_omitted"]) == (8, 0)
             catalog = _charged(binding, "review_source", {"target_id": None, "path": None, "cursor": None})
             refs = [_decide(binding, [e["target_id"]])[0]["evidence_refs"][0]
                     for e in catalog["entries"] if e["file"] in {"a.py", "f.py"}]
@@ -2150,12 +2155,12 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
                             "file": "f.py", "line": None, "evidence_refs": refs}}]})
         value = {"targets": _decide(binding, targets), "claims": []}
         if scenario == "eight-batches-adaptive" and work["kind"] == "discovery":
-            # Five claims of about 1 KB per target: together more than 128 claims and 131,072 bytes.
+            # Nine claims of about 750 bytes per target: together more than 256 claims and 131,072 bytes.
             value["claims"] = [{"uid": "", "revision": 0, "source_uids": [], "title": f"{target} breaks {n}",
-                                "payload": {**dict.fromkeys(("claim", "trigger", "consequence", "grounds"), "x" * 100),
+                                "payload": {**dict.fromkeys(("claim", "trigger", "consequence", "grounds"), "x" * 20),
                                             "file": target, "line": None,
                                             "evidence_refs": _decide(binding, [target])[0]["evidence_refs"]}}
-                               for target in targets for n in range(5)]
+                               for target in targets for n in range(9)]
         if scenario == "contention":
             # The model-facing catalog names each sibling target's owner; deciding one is correctable.
             entries = _charged(binding, "review_source", {"target_id": None, "path": None, "cursor": None})["entries"]
@@ -2364,7 +2369,7 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
         assert cross["targets"] == [] and cross["parents"] == []
     # Every claim is delivered confirmed, and the large row retains more than one unscaled capacity of claims.
     *found, finding = value["findings"]
-    assert len(found) == len(value["claims"]) - 1 == (160 if scenario == "eight-batches-adaptive" else 0)
+    assert len(found) == len(value["claims"]) - 1 == (288 if scenario == "eight-batches-adaptive" else 0)
     assert (len(json_utils.canonical_json([{**c, "challenge_evidence": []} for c in value["claims"]]).encode())
             > 131072) == (scenario == "eight-batches-adaptive")
     # The spanning claim is judged by a distinct fresh invocation, never its author's context.
@@ -2737,6 +2742,8 @@ async def test_committed_review_completes_through_native_host_tools(
         judged = [[c["uid"] for c in work["claims"]] for work, _ in processes if work["kind"] == "challenge"]
         assert sorted(map(len, judged)) == [1, 4] and sorted(sum(judged, [])) == sorted(
             c["uid"] for c in sealed["claims"])
+        assert [(work["claims"], work["work"]["retained_conclusions"]["claims_omitted"])
+                for work, _ in processes if work["kind"] == "cross_assignment"] == [([], 0)]
         assert all(len(row["host"]["instructions"].encode()) < 10 * 1024
                    for row in [*codex.observations(), *silent.observations(), *split.observations()])
     assert len(delivered) >= 2
