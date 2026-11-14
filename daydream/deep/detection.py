@@ -71,8 +71,7 @@ def _is_config_generic_default(path: str) -> bool:
     if base == "Dockerfile":
         return True
     # Repository infrastructure has no ownership relationship to a co-changed
-    # frontend file. Keep it out of the ambiguous single-stack shortcut while
-    # preserving that inference for configs/helpers nested inside an app.
+    # frontend file, unlike configs/helpers nested inside an app.
     # JS project configs use bounded local evidence instead of co-change promotion.
     if PurePosixPath(path).parent == PurePosixPath(".") and (base == "Makefile" or suffix == ".json"):
         return True
@@ -157,7 +156,6 @@ def detect_stacks(changed_files: list[str], *, target_dir: Path | None = None) -
     # Ambiguous files (D-12).
     for path in ambiguous:
         if len(present_stacks) == 1:
-            # D-12 single-stack shortcut: unconditional join.
             assigned[path] = next(iter(present_stacks))
             continue
         if len(present_stacks) == 0:

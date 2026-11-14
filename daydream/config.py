@@ -95,8 +95,8 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
 
 # GPT-6.1 Sol defaults to medium: use it for bounded review and judgment work,
 # low for mechanical work, and high for arbitration. Explicit pins can raise effort;
-# xhigh needs measured benefit to justify its extra cost. Pi and Claude review phases
-# retain their ambient defaults.
+# xhigh needs measured benefit to justify its extra cost. Pi and Claude phases keep
+# the effort their own native settings give.
 DEEP_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
     "codex": {
         "parse": "low",
@@ -112,7 +112,6 @@ DEEP_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
         "merge": "medium",
         "intent": "medium",
     },
-    "pi": {"per_stack_review": "medium"},
 }
 
 # Improve tiers cover all backends. Plan authoring/repair uses max because

@@ -23,7 +23,7 @@ from daydream.ui import print_error, print_warning
 
 
 async def _step_load_items(ctx: FlowContext) -> Stop | None:
-    """Host-side merged-items guard + render-only markdown recovery."""
+    """Host-side guard: the canonical items file must exist before any later step reads it."""
     deep_state = DeepState(ctx.data)
     target_dir = ctx.work.repo
     dd = deep_state.dd

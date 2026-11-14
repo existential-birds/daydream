@@ -14,7 +14,7 @@ from daydream.artifact_visibility import ArtifactSession, artifact_dir_for
 
 
 class DeepArtifact(StrEnum):
-    """Fixed session-private files; dynamic stack and group paths remain separate."""
+    """Fixed session-private files."""
 
     # Diagram decisions are auditable even when no kind renders.
     DIAGRAM = "diagram.json"

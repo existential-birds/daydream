@@ -20,12 +20,12 @@ from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 
 
-async def test_runner_injected_execution_reaches_a_real_custom_flow_and_its_effort_backends(
+async def test_runner_injected_execution_reaches_a_real_custom_flow_with_one_backend_per_phase(
     improve_monorepo_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir,
 ) -> None:
     """An injected execution input owns every created backend and GitHub call, bypassing ambient App env.
 
-    Per-effort backends are cached once per effort and the private key never reaches the trajectory.
+    A phase's backend is created once and reused by every turn; the private key never reaches the trajectory.
     """
     repo = improve_monorepo_target
     backend_name, login = "claude", "execution-owner"
@@ -41,11 +41,10 @@ async def test_runner_injected_execution_reaches_a_real_custom_flow_and_its_effo
         "    assert ctx._backend_factory is not None\n"
         "    assert '_backend_factory' not in repr(ctx)\n"
         "    assert 'github_execution' not in repr(ctx)\n"
-        "    for effort, label in ((None, 'default'), ('xhigh', 'xhigh'), "
-        "('medium', 'medium'), ('xhigh', 'xhigh-again')):\n"
+        "    for turn in ('first', 'again'):\n"
         "        backend = ctx.backend_for(phase)\n"
         "        assert backend is first\n"
-        "        await run_agent(backend, ctx.work.repo, 'FACTORY_EFFORT_' + label, "
+        "        await run_agent(backend, ctx.work.repo, 'FACTORY_TURN_' + turn, "
         "phase=DaydreamPhase.REVIEW, run_context=ctx.run_context)\n"
         "def register(registry):\n"
         "    registry.register_phase(FlowStep(name='factory-probe', run=probe))\n"
@@ -97,8 +96,7 @@ async def test_runner_injected_execution_reaches_a_real_custom_flow_and_its_effo
     assert created and any(backend.calls for backend in created)
     assert github_environments == [github_input.auth.environment_for_request()]
     assert [(backend.reasoning_effort, backend.prompts) for backend in created] == [
-        (None, ['FACTORY_EFFORT_default', 'FACTORY_EFFORT_xhigh', 'FACTORY_EFFORT_medium',
-                'FACTORY_EFFORT_xhigh-again'])]
+        (None, ['FACTORY_TURN_first', 'FACTORY_TURN_again'])]
     assert all(call['cwd'] == repo for backend in created for call in backend.calls)
     trajectory = (tmp_path / "trajectory.json").read_text()
     assert "factory-owned-private-key" not in trajectory

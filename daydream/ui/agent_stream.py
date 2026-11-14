@@ -204,21 +204,7 @@ class AgentDisplay:
             self.console.print()
 
 
-def _issue_line(issue: dict[str, Any]) -> str:
-    issue_id = issue.get("id", "?")
-    if "file" in issue and "line" in issue:
-        return f"[{issue_id}] {issue['file']}:{issue['line']} - {issue.get('description', '')}"
-    return f"[{issue_id}] {issue.get('title', issue.get('description', ''))}"
-
-
-def present_result(console: Console, policy: InteractionPolicy, callback: Callable[[Text], Any] | None,
-                   value: Any) -> None:
-    """Present the host-resolved result after validation and any staged admission."""
+def present_result(policy: InteractionPolicy, value: Any) -> None:
+    """Log the host-resolved result after validation and any staged admission."""
     if policy.log_mode:
         _print_log(f"[result] {json.dumps(redact_value(value))[:500]}")
-    elif callback is None and isinstance(value, dict):
-        issues = value.get("issues", [])
-        if issues:
-            renderer = AgentTextRenderer(console)
-            renderer.append(redact_structured_text("\n".join(_issue_line(issue) for issue in issues)))
-            renderer.finish()

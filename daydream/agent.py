@@ -456,7 +456,7 @@ async def run_agent(
                 and hard_deadline == shared and clock.monotonic() >= shared):
             result = (result[0], result[1], "pipeline_budget_exceeded")
         if output_schema is not None and not investigation and not isinstance(result[0], str):
-            present_result(console, context.policy, progress_callback, result[0])
+            present_result(context.policy, result[0])
         observed.output(result[0])
         observed.finish(1 if result[2] else 0, reason=result[2])
         return result
