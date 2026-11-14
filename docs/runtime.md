@@ -117,6 +117,19 @@ fresh challenge, navigates it under the profile's
   starts, remaining time to the original deadline and protected reserves),
   labelled as distinct from dispatch-time snapshots.
 
+Every item of a batch is checked on its own, so one rejection names each distinct
+violation in the batch, within the 1,024-byte rejection bound, and an unknown `target_id`
+by name. When a work's authority closes without an accepted final submission and the
+last batch the review processed for it was a rejected final batch, the host installs the
+target decisions, verdicts and claims of that batch that passed their own checks,
+together and under the unchanged installation checks; if they fail those together,
+nothing of the batch is kept. Any later submission, accepted or not, replaces the
+remembered batch, so a corrected batch is never admitted twice, and a rejected
+`review_admit` batch is never kept. No receipt is produced and the sealed result does
+not mark such items: the work stays not accepted (`closed`, with its execution reason),
+so its scopes are incomplete with partial evidence, and the kept items count as its
+admitted progress.
+
 A reviewed target decision or challenge verdict with empty `evidence_refs` records
 up to four of the target's assigned sources, in inventory order, or the judged claim's
 evidence; models cite source IDs only to locate claims or add evidence. Every

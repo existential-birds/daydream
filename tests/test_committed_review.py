@@ -1541,12 +1541,18 @@ async def test_lookup_is_read_only_and_cursor_bound(tmp_path: Path) -> None:
         assert catalog["decided_targets"] == 0 and all(entry["decided"] is None for entry in catalog["entries"])
 
 
-async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(review_inputs: StageInputFactory) -> None:
+async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
+    review_inputs: StageInputFactory, tmp_path: Path,
+) -> None:
     """Progressive admission replaces single-shot discovery without weakening atomicity.
 
     The single-submission path never exercised partial batches: a rejected batch must
     leave no decision, claim or coverage reservation, earlier decisions are final,
     oversized batches are refused, and sealing types undecided targets per target.
+    A final batch rejected on the reserved start was fatal, named one violation and lost
+    every decision in it: a batch of that shape (128 decisions, 105 valid alone) is now
+    correctable, installs nothing while its work is live, and keeps its valid items only
+    once the work closes unaccepted, as a challenge's rejected final batch keeps its verdict.
     """
     review = Review(review_inputs, "domain")
     binding = _assign(review, "discovery")
@@ -1574,10 +1580,17 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(rev
             with pytest.raises(HostToolRejected, match=message):
                 _charged(binding, "review_admit", batch)
         final = {"targets": [decision(second, evidence_refs=[])], "claims": []}
+        lost = {"targets": [*final["targets"], decision(second, target_id="unplanned")],
+                "claims": [_proposal(review_inputs)]}
+        binding.admit("lost", "structured_output", lost, terminal=True)
+        with pytest.raises(HostToolRejected, match="unplanned"):
+            binding.submit("lost", lost)
         binding.admit("final", "structured_output", final, terminal=True)
         # Rejected batches installed nothing: one claim and exactly the two admitted decisions remain.
         progress = binding.submit("final", final)["progress"]
         assert (progress["decided"], progress["pending_challenge"]) == (2, 1)
+    # The accepted correction replaced the rejected final batch: closing the work admits nothing of it.
+    review.close("work:1")
     value = review.seal({})
     decisions = [d for scope in value["terminal_result"]["stack_outcomes"] for d in scope["target_decisions"]]
     assert {d["target_id"] for d in decisions if d["status"] == "reviewed"} == {first, second}
@@ -1587,6 +1600,58 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(rev
     assert [d["evidence_refs"] for d in decisions if d["status"] == "reviewed"] == [inventories[0][:4], inventories[1]]
     assert all(d["reason"].startswith("unsubmitted:") for d in decisions if d["status"] == "not_reviewed")
     assert value["terminal_result"]["analysis_state"] == "incomplete" and len(value["claims"]) == 1
+
+    files = {"api.py": "VALUE = 1\n", **{f"m{index:03}.py": "VALUE = 1\n" for index in range(124)}}
+    seed_feature_branch(tmp_path / "live", base=files, feature={name: "VALUE = 0\n" for name in files})
+    inputs = _inputs(tmp_path / "live", tmp_path / "live-inputs", sorted(files))
+    review = Review(inputs, "domain")
+    (work_id,) = review.plan("discovery")
+    binding, _ = review.open(work_id, budget=BudgetLedger("test", deadline=clock.monotonic() + 30, limit=2))
+    targets = [part["target_id"] for part in review.assignments]
+    support = {"path": "api.py", "side": "new", "source_range": {"start": 1, "end": 1}, "basis": "source_inspection"}
+    # Supporting selectors alone, one of them unavailable, and three paths that are not target ids.
+    refused = [*({"target_id": target, "status": "reviewed", "reason": "", "evidence_refs": [support]}
+                 for target in targets[105:]),
+               *({"target_id": f"split/{index}.py", "status": "reviewed", "reason": "", "evidence_refs": []}
+                 for index in range(3))]
+    refused[0]["evidence_refs"] = [{**support, "path": "gone.py"}]
+    final = {"targets": [*({"target_id": target, "status": "not_reviewed", "reason": "No start was left to read it.",
+                            "evidence_refs": []} for target in targets[:105]), *refused],
+             "claims": [_proposal(inputs)]}
+    async with binding.session():
+        binding.admit("read", "read", None)
+        binding.admit("final", "structured_output", final, terminal=True)
+        with pytest.raises(HostToolRejected) as rejected:
+            binding.submit("final", final)
+        # One rejection names each distinct violation once, and its reserved start is kept for the correction.
+        assert [str(rejected.value).count(violation) for violation in (
+            "requires at least one assigned source_id", "'gone.py' (new): no available regular blob",
+            "split/0.py: choose a planned target", "split/2.py: choose a planned target")] == [1, 1, 1, 1]
+        assert binding.authority_open and binding.remaining_tool_calls == 1
+        assert review.catalog()["decided_targets"] == 0 and review.pending() == []
+    review.close(work_id)
+    _clean(review, work_id, "host_tool_budget_exhaustion")
+    claim, = review.pending()
+    judge = _assign(review, "challenge")
+    judged = {"verdicts": [_verdict(inputs, claim)], "claims": [{**_proposal(inputs), "source_uids": ["unretained"]}]}
+    async with judge.session():
+        judge.admit("final", "structured_output", judged, terminal=True)
+        with pytest.raises(HostToolRejected, match="retained predecessor UIDs"):
+            judge.submit("final", judged)
+        assert review.pending() == [claim]
+    review.close("work:2")
+    _clean(review, "work:2", "missing_output")
+    value = review.seal({})
+    # Neither work was accepted: its retained items are partial evidence of an incomplete review.
+    assert [(work["state"], work["admitted_targets"], work["verdicts"]) for work in value["work"]] == [
+        ("closed", targets[:105], []), ("closed", [], [{"uid": claim["uid"], "revision": 1}])]
+    assert [finding["uid"] for finding in value["findings"]] == [claim["uid"]] and len(value["claims"]) == 1
+    outcomes = value["terminal_result"]["stack_outcomes"]
+    assert [scope["partial_evidence"] for scope in outcomes] == [True] * 9 + [False] * 2
+    reasons = [decision["reason"] for scope in outcomes for decision in scope["target_decisions"]]
+    assert reasons[:105] == ["No start was left to read it."] * 105
+    assert all(reason.startswith("unsubmitted:") for reason in reasons[105:]) and len(reasons) == 125
+    assert value["terminal_result"]["analysis_state"] == "incomplete"
 
 
 async def test_denied_over_limit_discovery_start_cannot_spend_protected_challenge_reserve(
@@ -1739,8 +1804,8 @@ def _decide(binding: HostToolBinding, targets: Sequence[str]) -> list[dict[str, 
             "source_id"], "basis": "supplied_diff", "source_range": None}]} for target in targets]
 
 
-_SCENARIOS = ["empty-local", "follow-up", "evidence-free", "contention", "native-capacity", "revision", "title",
-              "undecomposed"]
+_SCENARIOS = ["empty-local", "follow-up", "rejected-final", "evidence-free", "contention", "native-capacity",
+              "revision", "title", "undecomposed"]
 
 
 @pytest.mark.parametrize("scenario", _SCENARIOS)
@@ -1754,7 +1819,8 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
     one sibling's install between another's validation and installation closing it,
     renewed sibling allocations, and empty local results skipping the spanning defect
     between a.py (ratio) and f.py (its caller) in different assignments. Revision rows
-    prove the scheduler dispatches a new challenge only for a semantic revision.
+    prove the scheduler dispatches a new challenge only for a semantic revision. A local
+    assignment that ended on a rejected final batch lost the valid decision in it.
     """
     repo, base = _adaptive_repo(tmp_path)
     dispatches: list[dict[str, Any]] = []
@@ -1856,9 +1922,17 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
             installed.set()
             assert fired and receipt["progress"]["remaining"] == 0
             return receipt
-        if work_id == "work:1" and scenario in {"follow-up", "evidence-free"}:
+        if work_id == "work:1" and scenario in {"follow-up", "rejected-final", "evidence-free"}:
             if scenario == "follow-up":
                 _charged(binding, "review_admit", {"targets": _decide(binding, targets[:1]), "claims": []})
+            else:
+                # The work ends on a batch rejected for its second decision alone. Its valid decision is
+                # kept only from a final batch; a rejected review_admit batch stays wholly unadmitted.
+                unexplained = {**_decide(binding, targets[1:2])[0], "status": "not_reviewed"}
+                batch = {"targets": [*_decide(binding, targets[:1]), unexplained], "claims": []}
+                with pytest.raises(HostToolRejected, match="explain unfinished work"):
+                    submit(binding, batch) if scenario == "rejected-final" else _charged(
+                        binding, "review_admit", batch)
             stale.append(binding)
             raise PiError("native local assignment failed")
         if stale:
@@ -1922,7 +1996,8 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
         assert dispatches[1]["deadline"] == local_deadline
         assert cross_deadline - local_deadline == pytest.approx(limits["protected_cross_assignment_s"])
         assert challenge_deadline - cross_deadline == pytest.approx(limits["protected_challenge_s"])
-    if scenario == "follow-up":
+    if scenario in {"follow-up", "rejected-final"}:
+        # A rejected final batch's valid decision is progress like an admitted one: only the rest is followed up.
         parent, follow = work["work:1"], next(r for r in value["work"] if r["kind"] == "follow_up")
         assert parent["state"] == "superseded" and follow["parents"] == ["work:1"]
         assert follow["targets"] == parent["targets"][1:] and parent["admitted_targets"] == parent["targets"][:1]

@@ -364,6 +364,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   execution entry's `observed_starts` can exceed its `allocation` while `overshoot` stays
   0. Bindings without a reserved start keep the fatal outcome
   ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+- A committed-review assignment that ends on a rejected final batch no longer loses the
+  whole batch. When its work closes without an accepted final submission and that batch
+  was the last one it submitted, the target decisions, verdicts and claims in it that are
+  valid on their own are retained, so the review is sealed `incomplete` with partial
+  evidence instead of losing them. Batches submitted while the assignment is live stay
+  atomic. The sealed result does not mark such items; their work is recorded as not
+  accepted. If the retained items together exceed retained capacity, nothing of the batch
+  is kept ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+- One committed-review rejection now names every distinct violation in the batch, within
+  the 1,024-byte rejection bound, instead of the first one only, and names an unknown
+  `target_id` ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
 - Committed review no longer rejects a reviewed target submitted with empty
   `evidence_refs` when the target has more than four sources. The host expanded `[]` to
   every source of the target and then refused its own expansion ("supply at most four

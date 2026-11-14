@@ -9,7 +9,7 @@ import os
 import re
 import uuid
 from collections.abc import Callable
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -132,6 +132,8 @@ class _Work:
     admitted_claims: list[dict[str, Any]] = field(default_factory=list)
     verdicts: list[dict[str, Any]] = field(default_factory=list)
     resolved: int = 0
+    # Installs the valid items of a rejected final batch while that batch is this work's latest submission.
+    salvage: Callable[[], Any] | None = None
 
     @property
     def live(self) -> bool:
@@ -479,8 +481,10 @@ class Review:
         retained_claims = assignment_schema(schema_kind, selectors=False, retained=True)["properties"]["claims"]
         judged: set[str] = set()
 
-        def admit(value: dict[str, Any], *, final: bool) -> dict[str, Any]:
-            binding.ensure_open()
+        def admit(value: dict[str, Any], *, final: bool, salvage: bool = False) -> dict[str, Any]:
+            if not salvage:
+                binding.ensure_open()
+            work.salvage = None
             if len(canonical_json(value).encode()) > COMMITTED_SUBMISSION_MAX_BYTES:
                 raise HostToolRejected(
                     f"submission exceeds {COMMITTED_SUBMISSION_MAX_BYTES} UTF-8 bytes; split it into smaller "
@@ -490,12 +494,23 @@ class Review:
                 canonical = deepcopy(value)
                 decisions: dict[str, dict[str, Any]] = {}
                 verdicts: dict[str, dict[str, Any]] = {}
+                refused: list[str] = []
+
+                def each(check: Callable[[dict[str, Any]], None], items: list[dict[str, Any]]) -> None:
+                    """Check every item alone: a rejection names each violation, and salvage keeps the rest."""
+                    for item in items:
+                        try:
+                            check(item)
+                        except HostToolRejected as exc:
+                            refused.append(str(exc))
+
                 if kind in INVESTIGATION_KINDS:
-                    for target in canonical["targets"]:
+                    def decide(target: dict[str, Any]) -> None:
                         identifier = target["target_id"]
                         if identifier not in self._index:
                             raise HostToolRejected(
-                                "targets.target_id: choose a planned target from review_source's catalog")
+                                f"targets.target_id {identifier}: choose a planned target from review_source's "
+                                "catalog; a file split into parts is decided by its part ids")
                         if identifier in decisions:
                             raise HostToolRejected("targets: submit each target_id at most once per batch")
                         if identifier in self._decisions:
@@ -517,8 +532,9 @@ class Review:
                         target["evidence_refs"] = self._refs(sources, selectors, target=identifier,
                                                              required=reviewed)
                         decisions[identifier] = target
+                    each(decide, canonical["targets"])
                 else:
-                    for verdict in canonical["verdicts"]:
+                    def judge(verdict: dict[str, Any]) -> None:
                         uid = verdict["uid"]
                         # A claim revised by an earlier batch needs a verdict on its current revision.
                         if (uid in judged or uid in verdicts or work.claims.get(uid) != verdict["revision"]
@@ -532,17 +548,24 @@ class Review:
                                                     if verdict["evidence_refs"]
                                                     else deepcopy(self._claims[uid]["payload"]["evidence_refs"]))
                         verdicts[uid] = {**verdict, "work_id": work_id}
+                    each(judge, canonical["verdicts"])
                 changes: list[dict[str, Any]] = []
-                for submitted in canonical["claims"]:
+
+                def change(submitted: dict[str, Any]) -> None:
                     if submitted["uid"] and any(c["uid"] == submitted["uid"] for c in changes):
                         raise HostToolRejected("claims: update a retained uid at most once per submission")
                     changes.append(self._claim_change(sources, submitted, work.claims, work_id))
+
+                each(change, canonical["claims"])
+                if refused and not salvage:
+                    raise HostToolRejected("; ".join(dict.fromkeys(refused)))
 
                 def install() -> dict[str, Any]:
                     # No await, I/O, or model decision between final checks and installation.
                     # Only identities this submission touches are rechecked; sibling updates
                     # elsewhere never invalidate it.
-                    binding.ensure_open()
+                    if not salvage:
+                        binding.ensure_open()
                     if self._sealed or work.binding is not binding or work.superseded_by:
                         raise HostToolFatal("Review authority has closed", code="authority_closed")
                     if kind == "challenge" and set(verdicts) & judged:
@@ -622,6 +645,10 @@ class Review:
 
             try:
                 return self.inputs.admit_submission(prepare)
+            except HostToolRejected:
+                if final and not salvage:
+                    work.salvage = lambda: admit(value, final=True, salvage=True)
+                raise
             except SanctionedInputUnavailable as exc:
                 raise HostToolFatal('Captured review input is unavailable', code='input_unavailable') from exc
 
@@ -635,6 +662,19 @@ class Review:
         binding.configure_schema(schema)
         work.binding = binding
         return binding, schema
+
+    def close(self, work_id: str) -> None:
+        """Close one work's authority for good.
+
+        If the last batch the work submitted was a rejected final one, its items that are valid alone are
+        installed together under the unchanged installation checks. The work stays not accepted.
+        """
+        work = self.work[work_id]
+        assert work.binding is not None
+        work.binding.close_authority()
+        if work.salvage is not None:
+            with suppress(HostToolRejected, HostToolFatal):
+                work.salvage()
 
     def pending(self) -> list[dict[str, Any]]:
         """An immutable projection; a model cannot clear required work by declaring completion."""
@@ -1348,7 +1388,7 @@ class _Schedule:
             exhausted = isinstance(binding.fatal_error, HostToolCallBudgetExceeded)
             reason = (ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION if exhausted else reason_for_exception(exc)).value
         finally:
-            binding.close_authority()
+            review.close(work_id)
             entry = {
                 "assignment": kind,
                 "work_id": work_id,
