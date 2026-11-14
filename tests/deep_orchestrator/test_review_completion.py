@@ -448,6 +448,13 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         assert [(entry['assignment'], entry.get('reason')) for entry in sealed['execution']][-1] == (
             'pipeline', 'backend_failure')
         assert [finding['title'] for finding in sealed['findings']] == ['Grounded defect']
+        # No allowance was spent, so neither the console, the report nor the notice names a key to raise.
+        panel = collapse_panel_text(capsys)
+        assert 'Review incomplete: 1 confirmed finding. Not finished: ' in panel
+        notice = review_reporting.render_github_review_context(result)
+        report = (review.repo / '.review-output.md').read_text()
+        assert '**Review incomplete.**' in notice and '## Review outcome' in report
+        assert all('used up its allowance' not in text for text in (panel, notice, report))
         return
     # The reviewer retains its own failures, so every row ends as an exit status, never as an exception.
     assert await review.run(dataset_capture=fault == 'source-loss', dataset_store_path=review.tmp / 'records',
