@@ -741,7 +741,6 @@ async def run_deep(
         latency_resolution = _resolved_latency_profile(config)
         latency_summary = summarize_risk(latency_signals)
         latency_route = route_for(latency_resolution.profile, latency_summary)
-        config.latency_route = latency_route
         write_routing_record(
             dd,
             {
@@ -834,6 +833,11 @@ async def run_deep(
                 print_error(console, "Review Plan", str(exc))
                 return 1
             coverage = DeepState(ctx.data).review_coverage
+            planned = ctx.data["committed_review"].settings["assignment_policy"]["planned_assignments"]
+            print_info(console, f"Review: {len(changed_files)} changed file(s) in {planned} discovery assignment(s), "
+                                "then a fresh challenge of every claim.")
+            if mode == "loop":
+                print_info(console, "Fixing is selected: confirmed findings go to the fix gate.")
 
         # Publish one cache handle and its root so the next run can reuse completed units.
         ctx.data["reuse_cache"] = build_reuse_cache(ctx)

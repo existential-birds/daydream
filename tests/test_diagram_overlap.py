@@ -175,8 +175,11 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
     )
     created: list[str] = []
 
+    efforts: list[str | None] = []
+
     def create_backend(name: str, *args: Any, **kwargs: Any) -> Any:
         created.append(name)
+        efforts.append(kwargs.get("reasoning_effort"))
         if name == "codex":
             assert kwargs["execution_input"] is backend_input
             return backend
@@ -185,8 +188,9 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
         return real_create_backend(name, *args, **kwargs)
 
     monkeypatch.setattr(runner, "create_backend", create_backend)
+    # Settings only the replaced reviewer read are named once and change nothing.
     config = config_for(target, diagram="auto", file_config=DaydreamFileConfig(
-        backend="codex", phases={phase: {"backend": "osprey"}},
+        backend="codex", latency_profile="fast", precision_mode=True, phases={phase: {"backend": "osprey"}},
     ))
     roots = private_root_locations(base=tmp_path / "private")
     delivered: list[FinalizedReview] = []
@@ -210,6 +214,13 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
     else:
         assert exit_code == 0
         assert set(created) == {"codex"}
+        printed = " ".join(capsys.readouterr().out.replace("│", " ").split())
+        assert printed.count("are ignored; remove them: latency_profile, precision_mode") == 1
+        # The run says what it is about to do, and a review announces no fix gate.
+        assert "Review: 1 changed file(s) in 1 discovery assignment(s), then a fresh challenge" in printed
+        assert "fix gate" not in printed
+        # Discovery and its challenge keep their own default efforts; no latency route lowers the challenge.
+        assert efforts == ["medium", "high"]
         artifact = dr.load_diagram_artifact(target)
         assert all(result["status"] == "skipped" for result in artifact["results"].values())
         assert backend.diagram_turns == {}

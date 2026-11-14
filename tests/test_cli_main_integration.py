@@ -82,7 +82,9 @@ def test_cli_main_wrong_branch_exits_1(
     The operator answers yes to every question, so an offered fix gate would edit the tree."""
     _silence_all(monkeypatch)
     _force_interactive(monkeypatch)
-    _install_stub_backend(monkeypatch, tiny_diff_target).fix_edit_line = "# fixed by the selected loop\n"
+    stub = _install_stub_backend(monkeypatch, tiny_diff_target)
+    stub.fix_edit_line = "# fixed by the selected loop\n"
+    stub.review_claims = [{"title": "Sample issue", "file": "api.py", "line": 1}]
     mute_side_effects()
     asked: list[str] = []
 
@@ -93,10 +95,10 @@ def test_cli_main_wrong_branch_exits_1(
     monkeypatch.setattr("daydream.run_context._prompt_user", answer)
     target = (str(tiny_diff_target), "--no-archive", "--no-cleanup", "--test-command", f"{sys.executable} -c pass")
 
-    for unselected in ((), ("--flow", "shallow")):
+    for unselected in ((), ("--flow", "deep")):
         code = _cli_main_exit(monkeypatch, *target, *unselected)
         assert (
-            code, "## Issues" in (tiny_diff_target / ".review-output.md").read_text(),
+            code, "### 1. Sample issue" in (tiny_diff_target / ".review-output.md").read_text(),
             [question for question in asked if "Apply fixes" in question],
             git(tiny_diff_target, "status", "--porcelain", "--untracked-files=no"),
         ) == (0, True, [], ""), unselected

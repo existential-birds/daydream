@@ -93,6 +93,9 @@ from daydream.run_config import (
     _resolved_backend_name,
     _resolved_model,
     _resolved_reasoning_effort,
+    ignored_review_settings,
+    replaced_review_options,
+    runs_review,
 )
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context, resolve_gate
 from daydream.trajectory import DaydreamRunFlow
@@ -311,18 +314,12 @@ def _fix_request_refusal(config: RunConfig) -> str | None:
 
 def _review_refusal(config: RunConfig) -> str | None:
     """Explain why the reviewer cannot serve this request, before any workspace or GitHub call."""
-    if config.flow_name not in (None, *DEEP_FLOW_ALIASES) or config.output_mode == "diagram":
-        return None
-    replaced = [option for option, selected in (
-        ("--shallow", config.shallow or config.flow_name == "shallow"), ("--stack", config.stack is not None),
-        ("--precision", config.precision_mode), ("--latency-profile", config.latency_profile is not None),
-        ("--no-review-cache", config.review_cache_enabled is False),
-        ("--start-at", config.start_at not in (None, "review")),
-    ) if selected]
+    replaced = replaced_review_options(config)
     if replaced:
-        return (f"{', '.join(replaced)} belonged to the replaced staged reviewer and no longer applies: every "
-                "review starts fresh and covers the whole change. Drop it; a review profile (--review-profile) "
-                "customizes strategy text, budgets and the assignment policy.")
+        return ("These options belonged to the replaced staged reviewer and no longer apply. "
+                + "; ".join(replaced) + ".")
+    if not runs_review(config):
+        return None
     if _file_config_or_empty(config).supervisor in {"rules", "llm"}:
         return ('The findings supervisor (supervisor = "rules" or "llm") ended with the staged reviewer; its deny '
                 "rules would no longer hold findings back. Remove the setting; an extension flow step can "
@@ -362,6 +359,10 @@ async def run(
     if refusal is not None:
         print_error(console, "Review Not Possible", refusal)
         return 1
+    ignored = ignored_review_settings(config)
+    if ignored:
+        print_warning(console, "Repository settings of the replaced staged reviewer are ignored; remove them: "
+                               + ", ".join(ignored))
     if config.dataset_capture_disabled:
         config = replace(config, dataset_capture=False)
     else:

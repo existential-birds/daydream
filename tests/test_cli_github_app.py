@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from daydream import cli
 from daydream.dataset import LocalRecordStore
+from daydream.review_profile import build_default_profile
 from daydream.reviews.identity import finding_marker
 from tests.harness.dataset import read_records
 from tests.harness.fake_gh import FakeGh
@@ -215,6 +216,11 @@ def test_cli_requested_branch_ignores_current_checkout_pr(
     assert sealed["analyzed_revision"]["head_sha"] == requested_head
     assert [entry["assignment"] for entry in sealed["execution"]] == ["discovery", "challenge"]
     assert sealed["terminal_result"]["analysis_state"] == "complete"
+    # Review work stops before the profile's reserved finalization time, as in the standalone program.
+    pipeline = build_default_profile().pipeline
+    window = min(pipeline.reviewer_investigation_budget_s + 120, pipeline.review_wall_budget_s)
+    limits = sealed["settings"]["limits"]
+    assert (limits["effective_investigation_s"], limits["protected_finalization_s"]) == (window - 120, 120)
     assert [(finding["title"], finding["payload"]["line"]) for finding in sealed["findings"]] == [
         ("Sample issue", 1), ("Removed return", 2)]
     reviews = transport.gh.calls("POST", "repos/acme/widgets/pulls/73/reviews")

@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from daydream.committed_review import HISTORICAL_CONTEXT_MAX_BYTES, _context_bytes
+from daydream.committed_review import _context_bytes
+from daydream.immutable_review import HISTORICAL_CONTEXT_MAX_BYTES
 from daydream.runner import run
 from tests.test_deep_orchestrator import (
     PR_SENTINEL,
