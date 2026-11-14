@@ -69,8 +69,6 @@ def seeded_commit(repo: Path, message: str) -> str:
     return commit(repo, message, env=SEED_ENV)
 
 
-
-
 def init_repo(repo: Path) -> None:
     repo.mkdir(parents=True, exist_ok=True)
     git(repo, "init", "-b", "main")

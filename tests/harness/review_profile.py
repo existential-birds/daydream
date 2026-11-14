@@ -27,8 +27,6 @@ def exploration_strategies() -> dict[str, str]:
     }
 
 
-
-
 def independent_exploration_profile(resolved: ResolvedProfile | None = None,) -> ResolvedProfile:
     """Request model exploration when testing specialist dispatch and lifecycle."""
     profile = resolved.profile if resolved is not None else build_default_profile()

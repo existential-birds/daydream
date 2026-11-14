@@ -47,8 +47,8 @@ class DaydreamFileConfig:
 
     ``test_required_suites`` declares which suites the single configured command
     covers; it never creates a second runner or substitutes a targeted check.
-    An explicit false review-cache switch wins at either CLI or file tier, while
-    cache retention bounds remain independent of the enable switch.
+    The review-cache keys select nothing: a review names them in its warning
+    about replaced settings.
     Field defaults and the full configuration reference live in config.py and README.
     """
 

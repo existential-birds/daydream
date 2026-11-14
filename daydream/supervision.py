@@ -1,4 +1,4 @@
-"""Runtime findings and tool supervision helpers."""
+"""Runtime tool supervision."""
 
 from __future__ import annotations
 

@@ -159,7 +159,6 @@ class StageInputFactory:
         self.by_id = {part.assignment["target_id"]: part for part in self.parts}
         self.assignment_batches = self._batches()
 
-
     def _mapped(self, part: _Part, *, body: str | bytes | None = None) -> _Part:
         old_path, new_path = self.change.paths(part.assignment['file'])
         part.assignment.update(part_source_mapping(part.diff, part.assignment,
@@ -169,7 +168,6 @@ class StageInputFactory:
 
     def _revalidate_canonical(self) -> None:
         _revalidate(self.canonical, self.captured_source)
-
 
     def admit_submission[T](self, prepare: Callable[[_SubmissionSources], Callable[[], T]], *,
                             validated: bool = False) -> T:

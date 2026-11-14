@@ -250,8 +250,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   review that exits 0, with or without `assume="yes"`. `--yes` acts on a fixing run and
   is a usage error without `--fix`, naming what to use; a custom `--flow` keeps it.
   `--flow deep` is now the default review and rejects `--yes` (use `--fix`). To fix what
-  a review reported, rerun with `--fix`; `--shallow` and `--start-at` no longer exist
-  (see the removed staged reviewer below). A fixing request that could only end as a review used to
+  a review reported, rerun with `--fix`; `--shallow` no longer exists and `--start-at` is
+  refused outside a custom `--flow`, which still reads its own start point (see the
+  removed staged reviewer below). A fixing request that could only end as a review used to
   exit 0 and is now refused: `--fix --non-interactive` without `--yes`, `--fix` with
   `--findings-out` and `--flow` with `--fix` are usage errors, and the runner returns 1
   before any work for `output_mode="loop"` whose fix gate cannot be confirmed (no

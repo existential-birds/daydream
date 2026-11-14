@@ -41,8 +41,6 @@ def _only_archived_run(archive_dir: Path) -> Path:
     return run_dirs[0]
 
 
-
-
 def _iter_run_payloads(run_root: Path, traj: Path) -> Iterator[dict[str, Any]]:
     """Yield every parsed JSON object under *run_root* plus the *traj* file.
 
@@ -84,16 +82,6 @@ def _scan_phase_events(run_root: Path, traj: Path, event: str) -> list[dict[str,
             if isinstance(ev, dict) and ev.get("event") == event:
                 found.append(ev)
     return found
-
-
-
-
-
-
-
-
-
-
 
 
 def _direct_fix_context(repo: Path, items: list[dict[str, Any]], *, changed_files: set[str], start_at: str = "review",

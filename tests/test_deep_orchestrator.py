@@ -91,8 +91,6 @@ def _migration_project(tmp_path: Path, name: str) -> tuple[Path, Path]:
     return project, project / migration_rel
 
 
-
-
 async def _ok(*_a: Any, **kwargs: Any) -> Any:
     """Always-passing async test phase shared with archive data-capture tests."""
     key = kwargs["capture_tree_key"]()

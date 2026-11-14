@@ -48,7 +48,6 @@ os.environ.update({
 })
 
 
-
 def _fsync_without_durability(fd: Any) -> None:
     """Keep fsync's bad-descriptor failure; no test can observe power-loss durability."""
     os.fstat(fd if isinstance(fd, int) else fd.fileno())
@@ -239,11 +238,9 @@ def multi_stack_target(tmp_path: Path) -> Path:
     })
 
 
-
-
 @pytest.fixture
 def tiny_diff_target(tmp_path: Path) -> Path:
-    """Two-language diff small enough to combine stacks and skip merge/arbiter."""
+    """Two-language diff of two small files."""
     return _feature_repo(tmp_path, "tiny_diff", {
         "api.py": "def hello():\n    return 'world'\n",
         "App.tsx": 'import React from "react"; export const App = () => <div>hello</div>;\n',

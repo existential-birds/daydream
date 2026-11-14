@@ -1,4 +1,4 @@
-"""Cross-stack merge prompt + invocation tests (D-23..D-27, D-38)."""
+"""A report-only review never enters pull request posting."""
 from __future__ import annotations
 
 from pathlib import Path

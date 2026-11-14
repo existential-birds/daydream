@@ -668,8 +668,6 @@ async def test_sanctioned_input_preparation_expiry_never_dispatches_pi(
     assert stop["partial_edit_handling"] == "discarded"
 
 
-
-
 def test_rule_based_tool_supervision_vetoes_denied_writes_and_commands() -> None:
     """Denied writes and Bash commands are vetoed with their reason; reads and other paths pass."""
     supervisor = RuleBasedToolSupervisor(deny_globs=["*.lock"], bash_deny=[r"\brm\b"])

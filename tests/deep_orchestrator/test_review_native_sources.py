@@ -55,10 +55,6 @@ async def test_local_capture_failures_refuse_dispatch_without_changing_the_sourc
     assert not (repo / '.daydream/deep/review-coverage.json').exists()
 
 
-
-
-
-
 def test_source_selectors_construct_supporting_evidence_from_the_pinned_git_blob(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

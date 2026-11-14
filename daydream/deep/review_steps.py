@@ -85,8 +85,7 @@ async def _step_exploration(ctx: FlowContext) -> None:
         ):
             # Early return BEFORE the pre_scan/write_to_dir block below: routing
             # a hit through it with an empty in-memory context would overwrite
-            # the cached files with "No data collected" stubs. Its outcome is
-            # recorded as provenance before the return.
+            # the cached files with "No data collected" stubs.
             print_dim(console, f"Reusing exploration pre-scan from {exploration_path}")
             deep_state.exploration_dir = exploration_path
             return

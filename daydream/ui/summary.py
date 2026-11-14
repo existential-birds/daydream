@@ -1,8 +1,7 @@
 """Summary, table, and deep-review status components.
 
-Fix-progress indicators, the iteration divider, the run summary table, the
-issues table, the verdict-join table, the exploration-context summary, and the
-deep-mode stage/verification/preflight notices.
+Fix-progress indicators, the verdict-join table, the exploration-context
+summary and the verification summary.
 """
 
 import json

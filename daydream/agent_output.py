@@ -151,7 +151,7 @@ def resolve_output(
             rejection is not None
             if structured_result is not None else selection.schema_retry_eligible if selection is not None else False
         )
-        # Preserve the domain guard's rejection diagnostics even when a selected native payload cannot retry.
+        # An investigation's rejected native payload is final: it is reported, never retried.
         if staged and structured_result is not None:
             eligible = False
         failure = StructuredOutputFailure(raw, reason, reject_detail, rejection=rejection,

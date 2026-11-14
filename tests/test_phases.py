@@ -136,8 +136,6 @@ def _inline_or_exact_backend(repo: Path, *, inline: bool, events: tuple[AgentEve
     return ScriptedBackend(script=script, events=events)
 
 
-
-
 def _unconfined_finding_file(tmp_path: Path, path_kind: str) -> str:
     """Build a unique traversal, absolute, or outward-symlink finding path for rejection."""
     if path_kind == "traversal":
@@ -801,14 +799,6 @@ async def test_fix_verify_keeps_one_cleaned_outcome_per_finding_and_carries_chec
     assert _build_verifier_suffix({}) == ""
 
 
-
-
-
-
-
-
-
-
 # phase_commit_push — declined gate still validates applied fixes (issue #726)
 
 
@@ -892,7 +882,6 @@ async def test_approved_investigator_backtick_only_command_is_skipped_not_crash(
     _quiet_phase_ui: None,
 ) -> None:
     """A suggestion that sanitizes to empty argv is skipped with a warning."""
-
 
     backend = ScriptedBackend(script=[_structured_turn(_verdict("replace", "```", "verdict reason"))])
 
@@ -1146,7 +1135,6 @@ async def test_phase_test_and_heal_option4_inlines_body_when_write_fails(
     assert any("FULL_BODY_LINE_2" in line for line in printed), printed
 
 
-
 # _changed_files — untracked files must appear in the handoff change list
 
 
@@ -1212,10 +1200,6 @@ async def test_failure_summarizer_falls_back_for_non_live_private_runtime_paths(
 
 
 # The host renders review-output.md from validated merge items.
-
-
-
-
 
 
 @pytest.mark.asyncio

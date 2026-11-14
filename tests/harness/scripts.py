@@ -1,7 +1,4 @@
-"""Canonical Codex scripts with structured-output or recorded-byte replay.
-
-Synthesized structured output replaces final agent-message text so the real
-backend parser can extract it. Recorded raw_lines bypass all synthesis."""
+"""Command-line entry point of the scripted harness backends."""
 
 from __future__ import annotations
 

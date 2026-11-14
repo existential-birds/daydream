@@ -108,8 +108,7 @@ def _nearest_ancestor_stack(path: str, assigned: dict[str, str]) -> str | None:
 def detect_stacks(changed_files: list[str], *, target_dir: Path | None = None) -> list[StackAssignment]:
     """Route changed POSIX paths.
 
-    Return nonempty language scopes alphabetically, then generic, then structure.
-    The structure meta-stack contains all changed files unless the diff is docs-only.
+    Return nonempty language scopes alphabetically, then generic.
     """
     inspection = FrameworkInspection(target_dir)
 

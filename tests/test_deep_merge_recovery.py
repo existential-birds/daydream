@@ -1,10 +1,4 @@
-"""Recover malformed cross-stack merges into partial, resumable reports.
-
-Coverage includes current envelope validation and bare-list rejection, structured error context, surviving
-per-stack artifacts, typed synthesis failure outcomes, and fix/merge resume.
-Salvage dedup uses host UIDs; malformed unbound pairs reject.
-Phase tests mock only the backend; integration uses runner.run.
-"""
+"""Review coverage refuses malformed failure diagnostics."""
 from __future__ import annotations
 
 import pytest
@@ -17,8 +11,6 @@ from tests.harness.review_result import review_coverage
 @pytest.fixture(autouse=True)
 def _no_open_pr(fake_gh: FakeGh) -> None:
     fake_gh.set_response("pr-list", value=[])
-
-
 
 
 def test_coverage_rejects_malformed_failure_diagnostics() -> None:

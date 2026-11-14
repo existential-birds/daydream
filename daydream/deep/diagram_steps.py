@@ -580,10 +580,6 @@ def _prepare_diagram_inputs(ctx: FlowContext) -> DiagramInputs:
         repo_root=target_dir,
         changed_files=changed_files,
         hunk_ranges=hunk_ranges,
-        # Detection is re-run here rather than read off ``ctx.data["stacks"]``:
-        # that list is published AFTER the tiny-diff collapse and the sharder,
-        # so on a small two-language diff every file could sit in one
-        # ``generic`` assignment, hiding non-JS/TS language files from diagrams.
         stacks=detect_stacks(changed_files, target_dir=target_dir),
         services=enumerate_services(
             target_dir, file_config, service_roots=settings.service_roots or None

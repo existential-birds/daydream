@@ -193,7 +193,6 @@ EFFORT_TIERS: dict[str, EffortTier] = {
 REVIEW_OUTPUT_FILE = ".review-output.md"
 
 
-
 # Bot setup names shared with workflow templates; packaging tests guard drift.
 SETUP_SECRET_NAMES: tuple[str, ...] = (
     "DAYDREAM_APP_ID",

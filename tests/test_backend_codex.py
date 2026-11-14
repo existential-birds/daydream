@@ -55,7 +55,6 @@ from tests.harness.trajectory import make_recorder
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
 
 
-
 def _case_dir(tmp_path: Path, index: int) -> Path:
     case = tmp_path / f"case-{index}"
     case.mkdir()
@@ -271,10 +270,6 @@ async def test_nonzero_exit_raises_with_captured_output() -> None:
     # Parser diagnostic labels redact a complete credential before applying their 64-character cap.
     bounded = codex._bounded_diagnostic_label("x" * 54 + " ghp_" + "y" * 12)
     assert len(bounded) <= 64 and "ghp_" not in bounded and "[REDACTED" in bounded
-
-
-
-
 
 
 async def _continuation_token_resumes_case(tmp_path: Path, read_only: bool) -> None:
@@ -749,7 +744,6 @@ def _reset_real_git_resolution() -> Iterator[Any]:
 
 class TestResolveRealGitDir:
     """Darwin real-git resolver (issue #1122): resolve once, validate, fail open."""
-
 
     def test_non_executable_target_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(codex.sys, "platform", "darwin")

@@ -66,10 +66,6 @@ def scopes(data: dict[str, Any]) -> dict[str, Any]:
     return {s['scope_id']: s for s in data['terminal_result']['stack_outcomes']}
 
 
-
-
-
-
 async def test_comment_pins_pr_head_independently_and_excludes_local_edits(
     review: ReviewRun, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -258,12 +254,6 @@ async def test_snapshot_boundaries(
     assert all(marker not in report for marker in ('PRIOR_FINDING', 'PRIOR_HELD', 'PRIOR_DIAGRAM'))
     assert 'No confirmed findings.' in report and result['run_id'] in report
     assert (review.repo / '.daydream/deep/review-output.md').read_text() == report
-
-
-
-
-
-
 
 
 @pytest.mark.parametrize('fault', ['absent-install', 'prior-install', 'staging', 'later-run-moved-checkout',

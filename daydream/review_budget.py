@@ -137,7 +137,6 @@ class BudgetLedger:
     stopped: BudgetStop | None = field(default=None, init=False)
     _dispatched: tuple[float, int] | None = field(default=None, init=False, repr=False)
 
-
     def _chain(self) -> Iterator[BudgetLedger]:
         ledger: BudgetLedger | None = self
         while ledger is not None:

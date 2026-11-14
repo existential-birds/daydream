@@ -370,7 +370,6 @@ class ReviewCoverage:
         if sum(self._target_decision_bytes.values()) > RUN_TARGET_DECISIONS_MAX_BYTES:
             raise ValueError('run source attribution exceeds retained byte limit')
 
-
     @property
     def is_finalized(self) -> bool:
         """Whether the review boundary has frozen its terminal result."""
@@ -379,7 +378,6 @@ class ReviewCoverage:
     def _mutable(self) -> None:
         if self._terminal is not None:
             raise ValueError('review coverage is frozen')
-
 
     def _record(self, outcomes: dict[str, dict[str, Any]], key: str, status: str,
                 reasons: Iterable[str], diagnostic: str | None, **fields: Any) -> None:

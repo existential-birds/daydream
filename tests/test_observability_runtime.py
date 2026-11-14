@@ -48,7 +48,6 @@ def _memory_tracing() -> tuple[InMemorySpanExporter, Registry]:
     return exporter, registry
 
 
-
 @pytest.mark.anyio
 async def test_attempt_records_scrubbed_diagnostic_events_in_observed_order(monkeypatch: pytest.MonkeyPatch,) -> None:
     secret = "opaque-diagnostic-secret"
@@ -342,8 +341,6 @@ async def test_run_trace_identity_and_delivery_failures_never_block_the_run(
     assert "Trace processor flush failed" in caplog.text
     assert caplog.text.count("Local trace evidence write failed (NotADirectoryError); the review continues") == 1
     assert str(tmp_path) not in caplog.text and not blocked.exists()
-
-
 
 
 async def test_codex_lifecycle_export_retains_exit_without_creating_usage() -> None:

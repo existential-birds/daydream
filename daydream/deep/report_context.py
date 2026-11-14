@@ -21,7 +21,7 @@ def _exported_size(value: Any) -> int:
 
 
 def retain_author_context(deep: Path, body: str | None, head_sha: str | None) -> None:
-    """Keep only the PR body already fetched by intent, with its observed head."""
+    """Keep only the PR body the review already fetched, with its observed head."""
     atomic_write_json(deep / AUTHOR_CONTEXT, {
         "source": "pull_request_body", "head_sha": head_sha,
         "body": redact_structured_text(body)[:4096], "truncated": len(body) > 4096,

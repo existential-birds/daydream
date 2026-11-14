@@ -16,11 +16,10 @@ from daydream.tree_sitter_index import (
 )
 from daydream.tree_sitter_index.runtime import _query_for_language
 
-# Extension -> tree-sitter language id for the sharding dependency graph,
-# derived from the canonical registry so the two can never drift. ``.js`` is
-# excluded because ``_resolve_import`` does not resolve JavaScript specifiers;
-# unknown extensions are fail-open (the file becomes a singleton, never
-# dropped).
+# Extension -> tree-sitter language id for the import graph, derived from the
+# canonical registry so the two can never drift. ``.js`` is excluded because
+# ``_resolve_import`` does not resolve JavaScript specifiers; a file with an
+# unknown extension contributes no edges.
 _LANG_BY_EXT: dict[str, str] = {
     ext: lang for ext, (lang, _) in LANGUAGES.items() if ext != ".js"
 }
@@ -86,7 +85,7 @@ def build_import_graph(
     """Return directed imports between changed files within a five-second wall budget.
 
     Unknown grammars and unreadable files contribute no edges. Timeout returns the
-    partial graph; callers retain remaining files as singleton groups.
+    partial graph.
     """
     changed = set(changed_files)
     graph: dict[str, set[str]] = {}
