@@ -698,13 +698,16 @@ async def test_bound_phase_fix_transports_only_named_private_inputs(
         assert "src/app.py -> tests/test_app.py" in prompt
         assert str(affected) not in prompt
 
-        # An exploration dir without its index must not reach the fix prompt.
+        assert "\nLine: 1" in prompt
+        # An exploration dir without its index must not reach the fix prompt; a finding without a line names none.
         affected.unlink()
-        await phases.phase_fix(backend, work, {"id": 1, "description": "repair", "file": "src/app.py", "line": 1}, 1, 1,
+        lineless = {"id": 1, "description": "repair", "file": "src/app.py", "line": None}
+        await phases.phase_fix(backend, work, lineless, 1, 1,
             exploration_dir=affected.parent,
             edit_scope=frozenset({"src/app.py"}), read_scope=frozenset({"src/app.py"}),
         )
         assert "affected_files.md" not in backend.last_prompt
+        assert "Line:" not in backend.last_prompt and "\nFile: " in backend.last_prompt
 
 
 @pytest.mark.asyncio

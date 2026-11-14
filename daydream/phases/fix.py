@@ -387,16 +387,18 @@ def _finding_prompt(repo: Path, item: dict[str, Any], *, number: int | None = No
     """Render shared finding fields using the single- or grouped-prompt layout."""
     description = item.get("description", "No description")
     file_ref = _resolve_finding_file_ref(repo, item.get("file"))
-    line = item.get("line", "Unknown")
+    line = item.get("line")
     related = _item_related_files(item)
     evidence = _item_evidence(item)
     if number is None:
         related_line = f"\nRelated files: {', '.join(related)}" if related else ""
         evidence_line = f"\nEvidence: {evidence}" if evidence else ""
-        return f"{description}\n\nFile: {file_ref}\nLine: {line}{related_line}{evidence_line}"
+        line_text = "" if line is None else f"\nLine: {line}"
+        return f"{description}\n\nFile: {file_ref}{line_text}{related_line}{evidence_line}"
     evidence_line = f"   Evidence: {evidence}\n" if evidence else ""
     related_line = f"   Related files: {', '.join(related)}\n" if related else ""
-    return f"\n{number}. {description}\n   File: {file_ref}\n   Line: {line}\n{evidence_line}{related_line}"
+    line_text = "" if line is None else f"   Line: {line}\n"
+    return f"\n{number}. {description}\n   File: {file_ref}\n{line_text}{evidence_line}{related_line}"
 
 
 async def _fix_findings(
