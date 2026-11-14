@@ -74,6 +74,9 @@ async def test_extension_step_rewrites_items_before_the_review_is_sealed(
     (captured,) = read_records(store).runs
     assert [(item["description"], item["item_uid"]) for item in captured["findings"]["value"]["items"]] == [
         (KEEP_ME, sealed["findings"][0]["item_uid"])]
+    printed = " ".join(capsys.readouterr().out.replace("║", " ").split())
+    assert "Review complete: 1 confirmed finding delivered (the reviewer confirmed 2)." in printed
+    assert "Confirmed findings: 1." in (multi_stack_target / ".daydream/deep/review-output.md").read_text()
 
     calls = len(backend.calls)
     assert await runner.run(make_config(multi_stack_target, flow_name="borrowed")) == 1

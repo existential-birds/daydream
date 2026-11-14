@@ -206,9 +206,10 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
     if "source_integrity" in {entry["assignment"] for entry in sealed["execution"]}:
         print_warning(console, 'Captured source integrity failed; rerun the review.')
     atomic_write_json(DeepArtifact.REVIEW_COVERAGE.at(state.dd), coverage.to_dict())
-    confirmed = len(sealed["findings"])
-    outcome = (f"Review {result['analysis_state']}: {confirmed or 'no'} confirmed "
-               f"finding{'' if confirmed == 1 else 's'}.")
+    delivered, confirmed = len(items), len(sealed["findings"])
+    outcome = (f"Review {result['analysis_state']}: {delivered or 'no'} confirmed "
+               f"finding{'' if delivered == 1 else 's'}"
+               + ("." if delivered == confirmed else f" delivered (the reviewer confirmed {confirmed})."))
     if result["analysis_state"] == "complete":
         print_info(console, outcome)
     else:
