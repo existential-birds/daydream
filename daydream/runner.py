@@ -309,6 +309,33 @@ def _fix_request_refusal(config: RunConfig) -> str | None:
     return None
 
 
+def _review_refusal(config: RunConfig) -> str | None:
+    """Explain why the reviewer cannot serve this request, before any workspace or GitHub call."""
+    if config.flow_name not in (None, *DEEP_FLOW_ALIASES) or config.output_mode == "diagram":
+        return None
+    replaced = [option for option, selected in (
+        ("--shallow", config.shallow or config.flow_name == "shallow"), ("--stack", config.stack is not None),
+        ("--precision", config.precision_mode), ("--latency-profile", config.latency_profile is not None),
+        ("--no-review-cache", config.review_cache_enabled is False),
+        ("--start-at", config.start_at not in (None, "review")),
+    ) if selected]
+    if replaced:
+        return (f"{', '.join(replaced)} belonged to the replaced staged reviewer and no longer applies: every "
+                "review starts fresh and covers the whole change. Drop it; a review profile (--review-profile) "
+                "customizes strategy text, budgets and the assignment policy.")
+    if _file_config_or_empty(config).supervisor in {"rules", "llm"}:
+        return ('The findings supervisor (supervisor = "rules" or "llm") ended with the staged reviewer; its deny '
+                "rules would no longer hold findings back. Remove the setting; an extension flow step can "
+                "rewrite the canonical items, and --ignore-path excludes paths from review.")
+    from daydream.committed_review import REVIEW_PHASES, host_tools_refusal
+
+    for kind, phase in REVIEW_PHASES:
+        name = _resolved_backend_name(config, phase)
+        if name == "osprey":
+            return host_tools_refusal(kind, name)
+    return None
+
+
 # Public entry points
 
 
@@ -324,6 +351,10 @@ async def run(
     refusal = _fix_request_refusal(config)
     if refusal is not None:
         print_error(console, "Fix Not Possible", refusal)
+        return 1
+    refusal = _review_refusal(config)
+    if refusal is not None:
+        print_error(console, "Review Not Possible", refusal)
         return 1
     if config.dataset_capture_disabled:
         config = replace(config, dataset_capture=False)
