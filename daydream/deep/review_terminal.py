@@ -222,8 +222,9 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
     ctx.data['terminal_review_items'] = items
     # Embedded evaluation consumes the same validated result as publication,
     # before optional rendering, without inventing a live GitHub PR target.
-    # A cancelled run returns nothing to its embedder: the published files hold the sealed result.
-    if pipeline_state != "cancelled":
+    # A cancelled run hands nothing over, to its embedder or to a poster: the published files hold the sealed result.
+    handed_over = pipeline_state != "cancelled"
+    if handed_over:
         recorder = get_current_recorder()
         deliver_finalized_review(result, items, usage={} if recorder is None else recorder.review_usage())
     try:
@@ -235,7 +236,7 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
         context = None
     ctx.data['terminal_review_context'] = context
     failed = int(result["analysis_state"] == "failed")
-    if ctx.config.findings_out is None:
+    if ctx.config.findings_out is None or not handed_over:
         return failed
     pr = ctx.data.get("analyzed_pr")
     if not isinstance(pr, PRInfo):

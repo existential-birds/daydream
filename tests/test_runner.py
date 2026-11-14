@@ -53,6 +53,7 @@ from tests.harness.git_helpers import bare_remote, commit as _commit, git as _gi
 from tests.harness.otlp import attributes, kind_of
 from tests.harness.stub_backend import StubBackend
 from tests.harness.trajectory import make_recorder
+from tests.test_deep_orchestrator import _pin_findings_pr
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
 
@@ -561,7 +562,10 @@ async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
     reviewer.review_claims = [{"title": "Admitted before cancellation", "file": "app.py", "line": 1}]
     monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: reviewer)
     caught.clear()
-    config = RunConfig(target=str(reviewed), base="main", archive=False, run_eval=False, non_interactive=True)
+    exported = tmp_path / "cancelled-findings.json"
+    _pin_findings_pr(monkeypatch, reviewed)
+    config = RunConfig(target=str(reviewed), base="main", archive=False, run_eval=False, non_interactive=True,
+                       findings_out=str(exported), pr_number=7)
     handled: list[Any] = []
 
     async def review() -> None:
@@ -575,7 +579,7 @@ async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
         reviewer.review_after_acceptance = lambda kind: group.cancel_scope.cancel() if kind == "discovery" else None
         group.start_soon(review)
     assert len(caught) == 1 and isinstance(caught[0], anyio.get_cancelled_exc_class())
-    assert handled == []
+    assert handled == [] and not exported.exists()
     sealed = json.loads((reviewed / ".daydream/deep/committed-review.json").read_text())
     assert [claim["title"] for claim in sealed["claims"]] == ["Admitted before cancellation"]
     assert sealed["findings"] == [] and sealed["terminal_result"]["analysis_state"] == "incomplete"
