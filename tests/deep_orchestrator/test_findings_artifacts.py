@@ -41,7 +41,7 @@ def _coverage_metadata_keys(value: object) -> set[str]:
 @pytest.mark.parametrize("passed,ignored,exit_code,retries", [
     pytest.param(False, True, 0, 0, id="operator-ignore-records-failure"),
 ])
-async def test_test_verdict_persists_actual_suite_outcome_and_operator_override(
+async def test_embedded_fixing_is_selected_explicitly_and_persists_the_suite_verdict(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
     passed: bool, ignored: bool, exit_code: int, retries: int,
 ) -> None:
@@ -69,6 +69,7 @@ async def test_test_verdict_persists_actual_suite_outcome_and_operator_override(
     refusals: list[str] = []
     with monkeypatch.context() as patch:
         patch.setattr("daydream.runner.print_error", lambda _console, title, _message: refusals.append(title))
+        patch.setattr("daydream.runner.print_phase_hero", lambda *_args: refusals.append("run started"))
         codes = [
             await run(make_config(tiny_diff_target, output_mode="loop", test_command=command, **unfixable))
             for unfixable in ({}, {"assume": "no", "non_interactive": False}, {"assume": "yes", "flow_name": "review"},

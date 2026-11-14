@@ -334,7 +334,7 @@ def capture_manifest_run_identity(
         per_stack_review_backend=per_stack_backend,
         per_stack_review_model=per_stack_model,
         review_only=flow_kind is DaydreamRunFlow.TTT and config.output_mode == "review",
-        deep=not config.shallow,
+        deep=flow_kind is not DaydreamRunFlow.NORMAL,
         profile=None if profile is None else RunProfileIdentity(
             schema_version=profile.profile.schema_version,
             name=profile.name,

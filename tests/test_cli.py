@@ -139,12 +139,17 @@ def test_incompatible_cli_flags_are_rejected_with_the_offending_flag(
         (["--flow", "x", "--review", "/tmp/project"], ""),
         (["--flow", "x", "--shallow", "/tmp/project"], ""),
         (["--flow", "x", "--fix", "/tmp/project"], "--flow cannot be combined"),
+        (["--flow", "deep", "--yes", "/tmp/repo"], "use --fix in place of --flow deep"),
         (["--yes", "/tmp/repo"], "--yes only answers the gates of a fixing run; add --fix"),
-        (["--flow", "deep", "--yes", "/tmp/repo"], "--yes only answers the gates of a fixing run; add --fix"),
+        (["--comment", "--yes", "/tmp/repo"], "it does not apply to --comment"),
+        (["--flow", "review", "--yes", "/tmp/repo"], "it does not apply to --flow review"),
         # Options of the replaced staged reviewer are usage errors that name what replaces them.
         (["--start-at", "fix", "/tmp/repo"], "--start-at: every review starts fresh; rerun without it"),
         (["--fix", "--yes", "--start-at", "fix", "/tmp/repo"], "--start-at: every review starts fresh"),
+        (["--review", "--start-at", "merge", "/tmp/repo"], "--start-at: every review starts fresh"),
+        (["--shallow", "/tmp/repo"], "--shallow: the reviewer covers the whole change"),
         (["--fix", "--yes", "--shallow", "/tmp/repo"], "--shallow: the reviewer covers the whole change"),
+        (["--shallow", "--findings-out", "f.json", "/tmp/repo"], "--shallow: the reviewer covers the whole change"),
         (["-s", "python", "/tmp/repo"], "--stack: the reviewer covers the whole change in one review; drop it"),
         (["--precision", "/tmp/repo"], "--precision: every finding is already challenged in a fresh context"),
         (["--latency-profile", "fast", "/tmp/repo"], "--latency-profile: review time and tool allowances come from"),
@@ -154,7 +159,7 @@ def test_incompatible_cli_flags_are_rejected_with_the_offending_flag(
         (["--fix", "--yes", "--findings-out", "f.json", "/tmp/repo"], "--findings-out exports"),
         (["--diagram", "both", "--diagram-only", "sequence", "/tmp/repo"], "--diagram-only"),
         (["--diagram-only", "sequence", "--start-at", "merge", "/tmp/repo"], "--start-at: every review starts fresh"),
-        (["--diagram-only", "sequence", "--yes", "/tmp/repo"], "--yes"),
+        (["--diagram-only", "sequence", "--yes", "/tmp/repo"], "it does not apply to --diagram-only"),
         (["--fix-backend=claude-opus-5", str(tmp_path)], "[tool.daydream.phases.fix]"),
     ]
     for argv, expected in rejected:

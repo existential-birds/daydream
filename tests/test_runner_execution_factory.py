@@ -87,7 +87,7 @@ async def test_runner_injected_execution_reaches_a_real_custom_flow_and_its_effo
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "parent-private-key")
     config = RunConfig(
         target=str(repo), flow_name="factory-probe", base="main", backend=backend_name, model="factory-model",
-        archive=False, run_eval=False, non_interactive=True, file_config=DaydreamFileConfig(),
+        archive=False, run_eval=False, non_interactive=True, output_mode="loop", file_config=DaydreamFileConfig(),
         trajectory_path=tmp_path / "trajectory.json",
     )
     result = await runner.run(
