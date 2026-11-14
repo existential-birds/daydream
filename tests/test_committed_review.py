@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import tracemalloc
 import urllib.request
 import zlib
@@ -284,22 +285,29 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
     Every admission re-reads the whole capture. Held on the host loop, that read made
     concurrent assignments miss the endpoint's three-second control requests, so the
     capture row goes through the endpoint and asks it for a sibling's status meanwhile.
+    Reads run one at a time: a submission that arrives during another's read waits for
+    its own, and is refused when the capture has become unreadable by then.
     """
     answered: list[int] = []
     sibling: Any = None
     injected = unreadable = False
+    reading, release = threading.Event(), threading.Event()
     real_open = os.open
 
     def close_during_source_read(path: Any, *args: Any, **kwargs: Any) -> int:
-        nonlocal injected
+        nonlocal injected, unreadable
         if fault == "capture-integrity":
-            if path == "caller.py" and not injected:
-                # Blocks this thread: only a free host loop can answer it.
-                with urllib.request.urlopen(sibling, timeout=2) as response:
-                    answered.append(response.status)
-            if path == "caller.py" and unreadable:
-                injected = True
-                raise OSError("final native integrity read failed")
+            if path == "caller.py":
+                if not injected:
+                    # Blocks this thread: only a free host loop can answer it.
+                    with urllib.request.urlopen(sibling, timeout=2) as response:
+                        answered.append(response.status)
+                if unreadable:
+                    injected = True
+                    raise OSError("final native integrity read failed")
+                reading.set()
+                release.wait(5)
+                unreadable = True
             return real_open(path, *args, **kwargs)
         fd = real_open(path, *args, **kwargs)
         if Path(path) == review_inputs.canonical[0].path and not injected:
@@ -336,21 +344,26 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
                 "native_limits": {"model": {"context_window": 400000, "max_tokens": 64000}}})
             with monkeypatch.context() as patching:
                 patching.setattr(os, "open", close_during_source_read)
-                for name, arguments in (("review_source", {"target_id": None, "path": None, "cursor": None}),
-                                        ("review_admit", {"verdicts": [], "claims": []})):
-                    await client.post("/admit", json={"id": name, "name": name, "arguments": None})
-                    reply = (await client.post("/call", json={"id": name, "name": name,
-                                                              "arguments": arguments})).json()
-                    # Only an admission reads the capture, once, and the endpoint answers the sibling meanwhile.
-                    assert "result" in reply and answered == [200] * (name == "review_admit")
-                unreadable = True
+                await client.post("/admit", json={"id": "lookup", "name": "review_source", "arguments": None})
+                reply = (await client.post("/call", json={"id": "lookup", "name": "review_source", "arguments": {
+                    "target_id": None, "path": None, "cursor": None}})).json()
+                assert "result" in reply and answered == []  # A lookup does not read the capture.
+                await client.post("/admit", json={"id": "batch", "name": "review_admit", "arguments": None})
                 await client.post("/admit", json={"id": "terminal", "name": "structured_output",
                                                   "arguments": update, "terminal": True})
-                reply = (await client.post("/submit", json={"id": "terminal", "arguments": update})).json()
-        # The failed read is repeated and reported by the synchronous admission, which installs nothing:
-        # the earlier successful read does not vouch for this submission.
+                admitted = asyncio.create_task(client.post("/call", json={
+                    "id": "batch", "name": "review_admit", "arguments": {"verdicts": [], "claims": []}}))
+                await asyncio.to_thread(reading.wait, 5)
+                # The final submission arrives while the admission's read is still in progress.
+                submitted = asyncio.create_task(client.post("/submit", json={"id": "terminal", "arguments": update}))
+                await asyncio.sleep(0.1)
+                release.set()
+                assert "result" in (await admitted).json()
+                reply = (await submitted).json()
+        # The submission's own read failed after it waited: the admission's successful read does not vouch
+        # for it. The synchronous admission repeats the failed read, reports it and installs nothing.
         assert injected and (reply["outcome"], reply["code"]) == ("fatal", "input_unavailable")
-        assert answered == [200, 200]
+        assert answered == [200, 200]  # Each read ran once while the endpoint answered the sibling.
     else:
         async with binding.session():
             binding.admit("terminal", "structured_output", update, terminal=True)
