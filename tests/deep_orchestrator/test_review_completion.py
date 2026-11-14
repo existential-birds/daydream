@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import itertools
 import json
 import os
 import shutil
@@ -205,10 +204,9 @@ async def test_snapshot_boundaries(
                 return value
             binding.admit('admit', 'review_admit', value)
             binding.call('admit', 'review_admit', value)
-            for number in itertools.count():
+            while True:
                 with contextlib.suppress(HostToolRejected):
-                    binding.admit(f'read-{number}', 'read', {})
-            raise AssertionError('unreachable')
+                    binding.admit(f'read-{binding.calls}', 'read', {})
 
         review.patch.setattr(review.backend, '_scripted_review', exhaust)
         live, partial = review.pr, review.tmp / 'incomplete.json'
