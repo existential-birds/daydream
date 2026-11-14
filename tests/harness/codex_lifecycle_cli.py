@@ -178,7 +178,7 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
     Codex-owned starts, a rejected submission, an admitted batch, the terminal submission
     and two host calls after acceptance) or challenged. The first review attempt admits its
     targets and ends its turn unsubmitted; the host's retry admits the claim and submits.
-    Mode ``unsubmitted`` admits targets and claim at once and never submits its review, and
+    Mode ``unsubmitted`` admits its claim, then its targets, and never submits its review, and
     judges nothing until a challenge supersedes the unsubmitted one. Otherwise the user prompt
     is the JSON submission, followed by as many Codex-owned shell starts as its ``shells`` asks.
     """
@@ -261,16 +261,18 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
                 other = {"type": "mcp_tool_call", "id": "other", "server": "user", "tool": "search", "arguments": {}}
                 _emit({"type": "item.started", "item": {**other, "status": "in_progress"}})
                 _emit({"type": "item.completed", "item": {**other, **failed}})
-                await call("structured_output", {"targets": [{**decisions[0], "target_id": "unplanned"}],
-                                                 "claims": []})
                 claim = {"uid": "", "revision": 0, "source_uids": [], "title": "Zero divides the caller", "payload": {
                     "claim": "VALUE becomes zero.", "trigger": "The caller divides by it.",
                     "consequence": "Requests fail.", "grounds": "The captured change sets zero.",
                     "file": option["path"], "line": 1, "evidence_refs": [
                         {key: option[key] for key in ("source_id", "basis", "source_range")}]}}
+                if mode == "unsubmitted":
+                    await call("review_admit", {"targets": [], "claims": [claim]})
+                else:
+                    await call("structured_output", {"targets": [{**decisions[0], "target_id": "unplanned"}],
+                                                     "claims": []})
                 retry = "Retry dispatch-time snapshot" in prompt
-                await call("review_admit", {"targets": [] if retry else decisions,
-                                            "claims": [claim] if retry or mode == "unsubmitted" else []})
+                await call("review_admit", {"targets": [] if retry else decisions, "claims": [claim] if retry else []})
                 if retry:
                     await call("structured_output", {"targets": [], "claims": []})
                     # After acceptance: one host call the host refuses, one Codex fails itself.
