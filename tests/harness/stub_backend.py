@@ -104,14 +104,15 @@ class StubBackend:
         self.review_bound = True
         return {"configuration_identity": "0" * 64}
 
-    def _scripted_review(self, instructions: str, binding: Any) -> dict[str, Any]:
+    def _scripted_review(self, prompt: str, binding: Any) -> dict[str, Any]:
         """Answer one committed-review assignment through its real host binding.
 
-        Discovery decides its targets from the host lookup and proposes the configured claims;
-        challenge returns ``review_verdict`` for every assigned claim revision.
+        The assignment is the first message's second host line. Discovery decides its targets from the
+        host lookup and proposes the configured claims; challenge returns ``review_verdict`` for every
+        assigned claim revision.
         """
-        assignment = json.loads(instructions.split("\nCommitted review assignment:\n")[1]
-                                .split("\nEnd committed review assignment.\n")[0])
+        token = prompt.split(" ", 1)[0]
+        assignment = json.loads(prompt.split("\n")[1].removeprefix(f"{token} Committed review assignment: "))
         if assignment["kind"] == "challenge":
             return {"claims": [], "verdicts": [
                 {"uid": claim["uid"], "revision": claim["revision"], "verdict": self.review_verdict,
@@ -158,7 +159,7 @@ class StubBackend:
                 yield ToolStartEvent(id="failed-tool", name="Read", input={"file_path": "api.py"})
                 raise self.review_failure
             async with host_tools.session():
-                value = self._scripted_review(review_instructions, host_tools)
+                value = self._scripted_review(prompt, host_tools)
                 host_tools.admit("terminal", "structured_output", value, terminal=True)
                 accepted = host_tools.submit("terminal", value)
                 if self.review_after_acceptance is not None:

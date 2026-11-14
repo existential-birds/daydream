@@ -27,6 +27,7 @@ from daydream.review_reporting import REVIEW_CONTEXT_SCHEMA
 from daydream.review_result import (
     RUN_TARGET_DECISIONS_MAX_BYTES,
     TERMINAL_RESULT_SCHEMA,
+    ReasonCode,
     published_attribution_bytes,
     validate_terminal_result,
 )
@@ -302,20 +303,55 @@ def build_committed_findings_artifact(
     owner, repo = original['repository'].split('/', 1)
     pr = PRInfo(original['pr_number'], original['head_sha'], original['comparison_base_sha'],
                 '', '', owner, repo, '')
-    issues = []
     spans = fragment_spans(payload['assignments'])
-    for finding in payload['findings']:
-        item = committed_finding_item(finding)
-        # Placement reads the line as a head line, so a location only the old side has carries none.
-        issues.append(ParsedIssue(
-            path=item['file'], line=head_line(finding, spans), title=item['description'], body=item['rationale'],
-            severity=None, confidence=None, is_cross_stack=False,
-            fingerprint=pr_review.compute_fingerprint(item['file'], item['description'], item['rationale']),
-        ))
     return build_findings_artifact(
-        target_dir, pr, issues, run_info=f"Committed review {payload['run_id']}",
+        # Placement reads the line as a head line, so a location only the old side has carries none.
+        target_dir, pr, [_committed_issue(finding, head_line(finding, spans)) for finding in payload['findings']],
+        run_info=f"Committed review {payload['run_id']}",
         terminal_result=payload['terminal_result'], snapshot_diff=snapshot_diff, immutable_input=immutable,
     )
+
+
+def _committed_issue(claim: dict[str, Any], line: int | None) -> ParsedIssue:
+    item = committed_finding_item(claim)
+    return ParsedIssue(
+        path=item['file'], line=line, title=item['description'], body=item['rationale'],
+        severity=None, confidence=None, is_cross_stack=False,
+        fingerprint=pr_review.compute_fingerprint(item['file'], item['description'], item['rationale']),
+    )
+
+
+def committed_export_bytes(coverage: dict[str, Any], immutable_input: dict[str, Any] | None,
+                           claims: list[dict[str, Any]]) -> int:
+    """Counted bytes of a committed review's findings export if every claim became a finding.
+
+    An upper bound: each claim is an inline finding relocated to a ten-digit line, and every scope and phase of
+    ``coverage`` (unsealed, without target decisions, which the bound does not count) ends incomplete
+    with every reason code.
+    """
+    reasons = sorted(ReasonCode)
+    scopes = [outcome['scope_id'] for outcome in coverage['stack_outcomes']]
+    terminal = {
+        **{key: value for key, value in coverage.items() if key != 'diagnostics'},
+        **{key: [{**outcome, 'status': 'incomplete', 'reason_codes': reasons} for outcome in coverage[key]]
+           for key in ('stack_outcomes', 'phase_outcomes')},
+        'pipeline_state': 'cancelled', 'projection_valid': False, 'completed_stacks': [], 'failed_stacks': scopes,
+        'uncovered_stacks': scopes, 'analysis_state': 'incomplete', 'reason_codes': reasons,
+    }
+    provenance = (immutable_input or {}).get('provenance', {})
+    posted = 10**10 - 1
+    issues = [_committed_issue(claim, claim['payload']['line']) for claim in claims]
+    for issue in issues:
+        pr_review._note_relocation(issue, posted)
+    artifact = {
+        'schema_version': IMMUTABLE_FINDINGS_SCHEMA_VERSION, 'repo': provenance.get('repository', 'r' * 256),
+        'pr_number': provenance.get('pr_number', 2**63), 'head_sha': '0' * 64,
+        'run_info': f"Committed review {coverage['run_id']}", 'kind': 'review', 'diagrams': None,
+        'findings': [_finding_dict(issue, placement='inline', line=posted) for issue in issues],
+        'review_warnings': [], 'terminal_result': terminal,
+        **({'immutable_input': immutable_input} if immutable_input is not None else {}),
+    }
+    return len(_artifact_payload(artifact))
 
 
 def write_findings_artifact(path: Path, artifact: dict[str, Any]) -> None:

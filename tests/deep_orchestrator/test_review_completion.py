@@ -198,8 +198,8 @@ async def test_snapshot_boundaries(
         review.backend.review_undecided = 1
         scripted = review.backend._scripted_review
 
-        def exhaust(instructions: str, binding: Any) -> dict[str, Any]:
-            value = scripted(instructions, binding)
+        def exhaust(prompt: str, binding: Any) -> dict[str, Any]:
+            value = scripted(prompt, binding)
             if 'verdicts' in value:
                 return value
             binding.admit('admit', 'review_admit', value)
@@ -407,8 +407,8 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         # The challenge calls tools until its allowance is spent, so the review is also unfinished.
         scripted = review.backend._scripted_review
 
-        def exhaust_challenge(instructions: str, binding: Any) -> dict[str, Any]:
-            value = scripted(instructions, binding)
+        def exhaust_challenge(prompt: str, binding: Any) -> dict[str, Any]:
+            value = scripted(prompt, binding)
             while 'verdicts' in value:
                 with contextlib.suppress(HostToolRejected):
                     binding.admit(f'read-{binding.calls}', 'read', {})

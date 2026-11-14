@@ -174,7 +174,7 @@ def _response(prompt: str) -> tuple[str, str | None]:
 async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None:
     """Drive the invocation's host tools over MCP, as a scripted model would.
 
-    A committed-review assignment in the developer instructions is reviewed (lookup, two
+    A committed-review assignment in the first message is reviewed (lookup, two
     Codex-owned starts, a rejected submission, an admitted batch, the terminal submission
     and two host calls after acceptance) or challenged, every assigned claim in one turn;
     one with no targets submits an empty batch. The first review attempt admits its
@@ -237,7 +237,7 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
                 _emit({"type": "item.completed", "item": {**command, "status": "completed",
                                                             "aggregated_output": "", "exit_code": 0}})
 
-            _, marker, assignment = instructions.partition("\nCommitted review assignment:\n")
+            _, marker, assignment = prompt.partition(" Committed review assignment: ")
             if not marker:
                 await call("structured_output", submission := json.loads(prompt))
                 for index in range(submission.get("shells", 0)):
