@@ -37,9 +37,10 @@ daydream --review --backend codex --base main /path/to/project
 ```
 
 A review ends with findings; only `--fix` [selects fixing](docs/runtime.md#validation-and-repair),
-and `--yes` answers its gates. Review is deep and multi-stack; `--fix --shallow` runs a
-single-stack pass. Use `--help` for common options and `--help-all` for configuration
-and advanced flags.
+and `--yes` answers its gates. One reviewer covers the whole change and challenges
+every finding in a fresh context before reporting it; it needs a backend with native
+host tools (Pi, Claude or Codex). Use `--help` for common options and `--help-all` for
+configuration and advanced flags.
 Reports land in `.review-output.md`; trajectories in `.daydream/runs/<id>/`.
 Report-only local review uses the captured net base-to-final-working change,
 including nonignored untracked files. PR comments exclude local edits and use a

@@ -30,12 +30,10 @@ nothing else to post and approval is not enabled, it posts a COMMENT saying it i
 complete if the latest Daydream review on its head or an ancestor, by the same login
 and carrying the Daydream footer, is such a notice. Earlier reviews are never
 edited, dismissed or minimized.
-Cache/resume must validate the same identities and current typed target
-attribution; missing/damaged proofs restart review.
 If the expected source becomes unavailable, terminal export retains validated
 findings and coverage using the bound captured diff, with conservative file/body
-placement instead of live-source line resolution. This does not resume review
-or establish completeness.
+placement instead of live-source line resolution. This does not establish
+completeness.
 
 Approval requires explicit opt-in and no blocking severity among all retained
 findings, including deduplication matches. Immutable schema-3 findings without
@@ -175,8 +173,9 @@ run/source and complete planned-work identity. Prior/competing bytes survive pub
 and `capture_state` report installation and trajectory independently. Admission,
 native settlement/cleanup, completeness, output, capture and delivery are separate.
 Explicit unsupported exports fail before dispatch. Immutable PR exports use the
-same artifact session as described below. Ordinary CLI routing/default cutover
-and external delivery remain separate integration work.
+same artifact session as described below. The ordinary CLI, embedded and bot
+routes run this program as the review step of the `deep` flow; external delivery
+remains separate integration work.
 
 ### Assignment policy and work
 
@@ -189,9 +188,7 @@ transport's assignment byte allowance, inventory order) into concurrent local di
 trajectory. It decomposes only when every batch keeps a usable two-start allocation
 after the cross-assignment floor; otherwise it runs one broad assignment. Any other value
 fails the profile, and committed review refuses a profile built in code with one before
-dispatching work. No CLI route reaches committed review until #1641. Other review routes do not
-act on the key, but it still changes the profile digest, so their cached reviews miss.
-There is no numeric threshold or default change (#1641). `settings.assignment_policy`
+dispatching work. There is no numeric threshold. `settings.assignment_policy`
 records `name`, `decomposed`, `planned_assignments` and `cross_assignment`
 (`required` or `not_applicable`).
 
@@ -237,8 +234,13 @@ unresolved verdict keeps the revision with its work, so the next round supersede
 Each shard's status derives from its targets and the current (non-superseded) work
 responsible for them; required phases are `challenge` and `cross_assignment`.
 Superseded failed work whose responsibilities were transferred and accepted elsewhere
-remains evidence but does not make the review incomplete. The staged deep path keeps
-its own rule ([stage-aware builders](extensions.md#stage-aware-review-builders)).
+remains evidence but does not make the review incomplete.
+
+The reviewer's assignments come from one canonical change: the full diff and its hunk
+index are captured once with their identities, revalidated before every admission,
+and split into whole parts sized to the transport's assignment allowance
+([review assignments](../daydream/review_stage_inputs.py)). Changed canonical bytes
+are refused, never re-read.
 
 ### Captured local source
 
@@ -293,7 +295,7 @@ body reads; the resolver closes before one complete capture/canonical-input chec
 Only then does Review synchronously recheck original authority/deadline and install.
 Empty selectors and sibling callbacks get the same final guard. Standalone/stored
 reference checks, preparation, and terminal validation remain independent; no
-validation success survives a callback. Stack and stage preparation validate on a
+validation success survives a callback. Review preparation validates on a
 worker thread because a full check on the shared loop starves sibling invocations'
 host-tool setup timers. The writable capture is not a sandbox.
 
@@ -321,15 +323,9 @@ results 7, immutable results 8 and their committed terminal version 1 stay disti
 Results 1–3 predate bounded navigation and sharded per-target coverage, and 4–6 predate
 work records; they are rejected with a restart instruction rather than converted.
 Mismatched versions/identities and local-to-PR relabeling are explicitly rejected.
-Private stage/cache contract 17 invalidates older cache entries. Captured review
-paths reject `--start-at` and do not restore judgment shards: a complete shard
-marker does not establish that its enclosing review completed. Stopped reviews
-restart; retained evidence cannot restore assignment authority. Replace incompatible
-inputs by starting a new review; no historical converter is provided. This changes
-local review semantics under the current `0.y.z` policy and requires release notes;
-package version bumps remain release work. Queued-scope admission and the shared
-canonical change follow the
-[stage-aware review contract](extensions.md#stage-aware-review-builders).
+Every review starts fresh: `--start-at` is refused and nothing restores a stopped
+review, because retained evidence cannot restore assignment authority. Replace
+incompatible inputs by starting a new review; no historical converter is provided.
 
 Run-record capture keeps `head_sha` as real provenance and retains local `source_id`
 in the task and final state. `captured_working` identifies its population policy;
@@ -495,14 +491,12 @@ authorize a successful candidate or delivery.
 This is an additive minor feature under the current `0.y.z` policy. Immutable
 request 1, committed result 2 and findings 3 must be consumed together; ordinary
 result 1/findings 2 retain their existing contracts. The bounded
-Harbor adapter consumes this API; broader Harbor/native migration (#1639), and
-ordinary CLI/bot migration with supported-default cutover (#1641), remain
+Harbor adapter consumes this API; broader Harbor/native migration (#1639) remains
 separately owned. This contract does not claim other-backend or large-plan parity.
 
 ## Budget ledger
 
-Each budget owner (an invocation, a staged scope or stage such as
-`stage:python/integration`, or committed work such as `committed:challenge`) has one
+Each budget owner (an invocation, or committed work such as `committed:challenge`) has one
 [`BudgetLedger`](../daydream/review_budget.py): an absolute `clock.monotonic()` deadline
 and one charged tool-call count. `run_agent` takes it as `budget=` and has no other
 time, tool-call or turn limit; no backend receives a turn limit. A relative `wall_s` is
@@ -522,7 +516,7 @@ the retry dispatches, because it is a fresh native conversation that must redo t
 lost work; a retry stopped before dispatch refunds nothing. Elapsed time is never refunded. Retries stay bounded by the
 attempt count, the absolute deadline and the outage circuit; a failure after possible
 host acceptance still permits no retry. Paths that do not retry are never refunded,
-including a staged schema re-dispatch and a committed challenge re-dispatch. Committed
+including a committed challenge re-dispatch. Committed
 batches admitted before a provider failure stay installed while that attempt's starts
 are refunded with the rest of the attempt.
 
@@ -530,8 +524,7 @@ Every budget stop records its owner, dimension (`time` or `tool_calls`), limit, 
 spent, amount remaining at dispatch and calls reserved for later work, as durations and
 counts only, and appears on the trace once
 ([observability](observability.md#budget-stops)), including a finalization turn's stop
-and a dispatch refused before any agent runs. Staged review also leads its coverage
-diagnostic with those numbers. A read cut short by the ledger deadline and a binding's
+and a dispatch refused before any agent runs. A read cut short by the ledger deadline and a binding's
 deadline or allocation failure are budget stops (`wall_budget_exceeded`,
 `tool_call_budget_exceeded`), not `StreamStalledError`; idle, setup, drain and cleanup
 timeouts remain liveness checks.
@@ -544,7 +537,7 @@ to the captured source while native configuration and its trust policy remain
 rooted in the original source.
 Existing private artifact/sanctioned-input owners furnish frozen diff parts and
 source context.
-Every staged review backend selects assigned source IDs or supporting
+Every review backend selects assigned source IDs or supporting
 path/side/LF ranges; the host constructs canonical `evidence_refs` from the full
 assignment inventory and pinned regular Git blobs with the same admission code for
 all backends. Exact continuation fragments retain their null source ranges and
@@ -768,17 +761,50 @@ one JSON-encoded content array, so captured bytes are JSON-escaped there; later 
 pass each block as its own text. A real provider and model, both authentication modes
 and macOS are not yet exercised.
 
+## Replaced reviewer options
+
+Committed review is the only reviewer. It reviews the whole change in one program, so
+the options and settings of the staged reviewer it replaced select nothing.
+
+- **Refused before any work**, as a usage error on the CLI (exit 2) and by `runner.run`
+  (exit 1) with the same guidance: `--shallow` and the `shallow` flow alias, `--stack`/`-s`,
+  `--precision`, `--latency-profile`, `--no-review-cache`, and `--start-at` with any value
+  other than `review`. `--shallow`, `--no-review-cache` and `--start-at` are refused on
+  `--diagram-only` runs too. A custom flow reads its own options.
+- **Ignored with one printed notice** naming each key: the repository settings
+  `latency_profile`, `shallow_fanout_threshold`, `precision_mode`, `deep_shard_enabled`,
+  `deep_shard_max_files`, `deep_shard_max_bytes`, `deep_shard_fanout_cap`,
+  `deep_shard_frontier_max`, `review_cache_enabled`, `review_cache_max_entries`,
+  `review_cache_max_bytes`, `review_cache_max_age_days`, and the phase tables `intent`,
+  `merge`, `parse`, `per_stack_review`, `supervise`, `suppression` and `wonder`.
+  `[phases.review]` configures discovery and `[phases.arbiter]` configures the challenge.
+- **Refused:** `supervisor = "rules"` or `"llm"`. The findings supervisor ended with the
+  staged reviewer; an extension flow step can rewrite the canonical items, and
+  `--ignore-path` excludes paths. `tool_supervisor` is unaffected.
+- **Refused:** a review or challenge backend without native host tools. Pi, Claude and
+  Codex serve them; Osprey does not and cannot run a review.
+
+Nothing an earlier build wrote is deleted or converted. An existing
+`.daydream/review-cache/` is preserved and never read; a fresh review rebuilds its own
+`.daydream/deep/` working directory as every fresh run did; archive indexes, dataset
+stores, findings artifacts and repair checkpoints keep their own
+[refuse-or-read rules](#artifacts-and-recovery).
+
+Findings carry head-side lines only. A finding whose location exists only on the old
+side of the diff is published without a line and, like any finding without one, may be
+anchored by the placement search. An author description longer than the bound is
+cut to the longest prefix that fits, with an in-text marker. Diagrams requested with a
+review are generated after it.
+
 ## Validation and repair
 
 A review ends with findings. Fixing is selected explicitly: `--fix` on the CLI,
 `output_mode="loop"` for embedded callers. `--yes` (`assume="yes"`) answers the gates
-of a selected fixing run or a custom flow and never selects fixing. `--shallow` narrows
-a fixing run and `--start-at` resumes one. Without `--fix` the CLI rejects a bare
-`--shallow`, `--flow shallow` and, except on a custom `--flow`, `--yes` and
-`--start-at`, naming the replacement; an explicit `--review`, `--comment` or
-`--diagram-only` still accepts and ignores `--shallow`. An embedded
-`flow_name="shallow"` or `shallow=True` without `output_mode="loop"` is a full
-multi-stack review. A review cannot be resumed into fixing: to fix what it reported,
+of a selected fixing run or a custom flow and never selects fixing; without `--fix` the
+CLI rejects it except on a custom `--flow`. There is no shallow mode and no resume:
+`--shallow`, `--flow shallow`, `flow_name="shallow"`, `shallow=True` and `--start-at`
+are refused before any work, on diagram-only runs too
+([replaced options](#replaced-reviewer-options)). To fix what a review reported,
 rerun with `--fix`.
 
 A fixing request that could only end as a review is refused before any work: one whose

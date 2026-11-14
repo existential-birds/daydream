@@ -82,9 +82,10 @@ or older testing requirements.
 
 Daydream reviews diffs, applies authorized fixes, validates them, and records agent
 interactions as ATIF v1.7 trajectories. Captured records feed the bitemporal corpus
-pipeline. A deep multi-stack review that ends with findings is the default; fixing is
-[selected explicitly](docs/runtime.md#validation-and-repair), shallow is its single-stack
-variant, and review/comment modes stop before fixes. Improve currently requires Claude for
+pipeline. One reviewer, the committed-review program, reviews the whole change; a review
+that ends with findings is the default, fixing is
+[selected explicitly](docs/runtime.md#validation-and-repair), and review/comment modes stop
+before fixes. Improve currently requires Claude for
 every model phase because it needs the snapshot-root tool boundary.
 
 ```text
@@ -147,22 +148,14 @@ These boundaries matter across subsystems; module docstrings carry finer detail:
   join writers before freezing evidence, then archive/evaluate/publish. Preserve
   competing bytes on conflicts. Use sanctioned exact inputs or bounded inline
   contents without broadening backend read roots or reconstructing public paths.
-- Host-assigned `uid` identifies a pre-merge record, `item_uid` a merged item,
-  `source_uids` provenance, and integer `id` a renumberable display position.
-  Preserve identities through rewriting; content fingerprints answer similarity,
-  not identity. Load stack records in stack-name order for reproducibility.
-- Compute latency risk, sharding inputs, file/stack counts, diff keys, and coverage
-  from the full captured patch before bounding `DeepState.diff`. Routing evidence
-  is diagnostic; missing/corrupt routing records must not block execution/resume.
-  `forensic` is a latency profile with an unsharded arbiter; per-stack review
-  sharding is independent.
-- Model-owned merge receives all retained language and structural records; its
-  validated output is authoritative without structural reappend. Whole-file
-  structural privileges require retained structural source UIDs. Host bypass and
-  failure salvage retain their separate folding policy.
+- `item_uid` identifies a finding and integer `id` is its renumberable display
+  position ([finding identity](docs/extensions.md#finding-identity)). Preserve
+  identities through rewriting; content fingerprints answer similarity, not identity.
+- Compute diff keys and coverage from the full captured patch before bounding
+  `DeepState.diff`.
 - Preserve admitted findings and truthful incomplete coverage on review failure.
-  Validate submitted source references atomically against frozen side/range/fragment identities and retain per-target
-  attribution through file folding, cache and resume. Correspondence is not proof of understanding, reads or checks;
+  Validate submitted source references atomically against frozen side/range/fragment identities.
+  Correspondence is not proof of understanding, reads or checks;
   optional supporting-file relevance metadata cannot veto valid primary decisions.
   Canonical test readiness gates accepted fixes before verify/FIX work; model
   prose or unresolved command candidates cannot authorize tests or publication.
@@ -201,8 +194,8 @@ and the relevant contracts below.
 - No turn limits; bound invocations with the host ledger's absolute deadline and tool
   limit ([budget ledger](docs/runtime.md#budget-ledger)). Read defaults from
   `config.py` and `retry_policy_from_environment` in `backends/__init__.py`.
-- Adapters emit native events; `agent_output.py` selects final-turn output and
-  `ReviewInvestigation` admits staged domain results before presentation. Retain
+- Adapters emit native events; `agent_output.py` selects final-turn output and the
+  committed-review program admits review results through host tools. Retain
   raw events as evidence. Report transport gaps only from public evidence; never
   invent missing tool calls or invocation-wide coverage warnings.
 
@@ -214,9 +207,8 @@ rules in these owners rather than expanding this file with defaults and inventor
 | Change | Required reference |
 |--------|--------------------|
 | Flow order, extension phases/prompts, configuration | [Extension contract](docs/extensions.md), [configuration](daydream/config.py); defaults in `config.py`, resolution in `run_config.py` / `runner._resolve_backend()` |
-| Staged review, Pi output, budgets/retries, sharding | [Stage-aware builders](docs/extensions.md#stage-aware-review-builders), [review assignments](daydream/review_stage_inputs.py), [budget ledger](docs/runtime.md#budget-ledger), [retry policy](daydream/agent_retry.py) |
-| Latency routing or diff bounding | [Latency routing](daydream/deep/latency.py); `deep/latency.py` and `deep/routing_record.py` own selection and evidence |
-| Record identity or merge/adjudication | [Finding identity](docs/extensions.md#finding-identity), [built-in flow steps](docs/extensions.md#built-in-flows-and-steps); `deep/records.py` owns identities |
+| Review program, host tools, budgets/retries | [Committed review](docs/runtime.md#committed-review-requestresult), [review assignments](daydream/review_stage_inputs.py), [budget ledger](docs/runtime.md#budget-ledger), [retry policy](daydream/agent_retry.py) |
+| Finding identity | [Finding identity](docs/extensions.md#finding-identity), [built-in flow steps](docs/extensions.md#built-in-flows-and-steps); `deep/records.py` owns item identity |
 | Fix, verify, test, commit, remote CI | [Flow gates](docs/extensions.md#built-in-flows-and-steps), [validation contracts](docs/runtime.md#validation-and-repair), [repair jobs](docs/extensions.md#repair-jobs-test-step) |
 | Artifacts, sanctioned inputs, recovery | [Working artifact paths](docs/extensions.md#working-artifact-paths), [artifact contracts](docs/runtime.md#artifacts-and-recovery), [terminal findings](docs/runtime.md#terminal-review-findings-contract) |
 | Diagrams | [Diagram contract](docs/runtime.md#diagrams), [diagram-only flow](docs/extensions.md#diagram); `deep/diagram_grounding/` is the drawing authority, models supply JSON specs and the host renders Mermaid |

@@ -85,7 +85,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     says what was not finished.
   - `--shallow`, `--stack`, `--precision`, `--latency-profile`, `--no-review-cache` and
     `--start-at` are usage errors that say what replaces them; the same values on an
-    embedded `RunConfig` are refused before any work. Every review starts fresh. Repository
+    embedded `RunConfig` are refused before any work, and `--shallow`,
+    `--no-review-cache` and `--start-at` are refused on `--diagram-only` runs too. Every
+    review starts fresh. Repository
     settings only the replaced reviewer read (`precision_mode`, `latency_profile`,
     `shallow_fanout_threshold`, `deep_shard_*`, `review_cache_*` and the `intent`, `merge`,
     `parse`, `per_stack_review`, `supervise`, `suppression` and `wonder` phase tables) are
@@ -175,15 +177,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer apply fixes. To migrate, add `--fix` (`daydream --fix .`, or
   `daydream --fix --yes .` for an unattended run); embedded callers pass
   `output_mode="loop"`. An embedded caller that relied on the old default now gets a
-  review that exits 0, with or without `assume="yes"`. Flags that act on a fixing run are
-  usage errors without `--fix`, and each error names what to use: `--yes`, `--start-at`
-  and a bare `--shallow`. A custom `--flow` keeps `--yes` and `--start-at`; an explicit
-  `--review`, `--comment` or `--diagram-only` still accepts and ignores `--shallow`, as
-  before. `--flow shallow` is a usage error (use `--fix --shallow`); `--flow deep` is now
-  the default review and rejects `--yes` and `--start-at` (use `--fix`). An embedded
-  `flow_name="shallow"` or `shallow=True` without `output_mode="loop"` is a full
-  multi-stack review. A review cannot be resumed into fixing: to fix what a review
-  reported, rerun with `--fix`. A fixing request that could only end as a review used to
+  review that exits 0, with or without `assume="yes"`. `--yes` acts on a fixing run and
+  is a usage error without `--fix`, naming what to use; a custom `--flow` keeps it.
+  `--flow deep` is now the default review and rejects `--yes` (use `--fix`). To fix what
+  a review reported, rerun with `--fix`; `--shallow` and `--start-at` no longer exist
+  (see the removed staged reviewer below). A fixing request that could only end as a review used to
   exit 0 and is now refused: `--fix --non-interactive` without `--yes`, `--fix` with
   `--findings-out` and `--flow` with `--fix` are usage errors, and the runner returns 1
   before any work for `output_mode="loop"` whose fix gate cannot be confirmed (no
@@ -198,9 +196,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attribute and a custom step's `config.output_mode` read `review` instead of `loop`
   unless the caller sets a mode, and a caller that explicitly passes a non-fixing mode to
   one of them now records `review_only` as false and, for a custom flow, gets its `.env`
-  and `--copy` files in an operational worktree. The recorded `deep` label is now false
-  only when the single-stack fixing mode ran, so a review requested with `--shallow` is
-  recorded as the full review it runs; see
+  and `--copy` files in an operational worktree. See
   [fixing selection](docs/runtime.md#validation-and-repair)
   ([#1641](https://github.com/existential-birds/daydream/issues/1641)).
 - **Breaking (0.y.z):** Time and tool-call budgets live on one host ledger per
@@ -227,11 +223,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RunConfig.review_profile_path`, `DAYDREAM_REVIEW_PROFILE`, a repository
   `review_profile`, `RunConfig.review_profile` or a hosted operator profile. Any other
   value is refused before any review work. `CommittedReviewRequest.assignment_policy` is
-  removed (no known caller); set the profile key instead. No CLI route reaches committed
-  review until [#1641](https://github.com/existential-birds/daydream/issues/1641), so
-  `--review-profile` does not select the policy yet; other review routes do not act on
-  the key. The profile digest covers the key, so every profile's digest changes once, the
-  default included, and review cache entries keyed on it miss once after upgrade; see
+  removed (no known caller); set the profile key instead. The profile digest covers the
+  key, so every profile's digest changes once, the default included; see
   [assignment policy](docs/runtime.md#assignment-policy-and-work)
   ([#1686](https://github.com/existential-birds/daydream/issues/1686)).
 - **Breaking (0.y.z):** `DAYDREAM_FANOUT_CONCURRENCY` now sets the fan-out limit for
@@ -266,6 +259,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#1762](https://github.com/existential-birds/daydream/pull/1762)).
 
 ### Removed
+
+- **Breaking (0.y.z):** The staged reviewer is removed; the committed-review program
+  above is the only reviewer. This is a breaking change released as the next minor
+  version under the `0.y.z` policy. Nothing an earlier build wrote is deleted or
+  converted: an existing `.daydream/review-cache/` is kept and never read, and archive
+  indexes and dataset stores keep their schemas. What ends, and what to do instead
+  ([#1687](https://github.com/existential-birds/daydream/issues/1687),
+  [#1641](https://github.com/existential-birds/daydream/issues/1641)):
+  - Passes: intent (and its interactive confirmation), design alternatives, per-language
+    stack reviews, the structural lens, parse, arbiter, suppression, cross-stack merge,
+    automatic sharding, latency profiles and risk-raised effort. Review depth, time and
+    tool allowances come from the review profile's `[pipeline]` table; `[phases.review]`
+    and `[phases.arbiter]` select the discovery and challenge backends.
+  - Shallow mode and stack routing: no single-stack run, forced stack, stack detection for
+    review or docs-only stack. Drop `--shallow` and `--stack`.
+  - Resume and review reuse: no run continues an earlier review or fix run and no
+    completed review unit is reused. Rerun the review; delete `.daydream/exploration/`
+    to force a fresh diagram-only pre-scan.
+  - Diagrams requested with a review are generated after it, not alongside it, so such a
+    run takes longer by the diagram time.
+  - The fixer no longer receives a confirmed-intent file, and earlier verifier verdicts
+    are never carried over. With `verify_all = false` every finding is still verified,
+    because no reviewer certifies a finding as routine; the verdicts artifact keeps its
+    `skipped` and `reused` counters at zero.
+  - Extensions: the prompt names `intent`, `alternatives`, `per-stack`, `structural`,
+    `generic-fallback`, `arbiter`, `supervise`, `suppression` and `merge` are no longer
+    seeded, so overriding one fails registration; the step names `intent`,
+    `per-stack-reviews`, `per-stack-parse`, `arbiter`, `cross-stack-merge`,
+    `single-stack-merge` and `supervise` fail preflight, and `exploration` is a step of
+    the diagram-only flow only; the flow data keys `stacks`, `single_stack_mode`,
+    `latency_route`, `risk_summary`, `reuse_cache`, `record_pool`, `intent_path`,
+    `alts_path`, `intent_authoritative` and `intent_summary` are gone. Put review
+    guidance in a review profile and rewrite findings in a flow step after `load-items`.
+  - Artifacts no run writes any more: `deep/intent.md`, `deep/alternatives.json`,
+    `deep/stack-*-records.json`, `deep/stack-*-review.md`, per-scope report context
+    files, the arbiter, suppression, dedup and adjudication files,
+    `deep/latency-routing.json` and `.daydream/review-cache/`. Still written:
+    `deep/merged-items.json`, `deep/review-coverage.json`, `deep/review-output.md`,
+    `deep/diff-key`, the report context and `committed-review.json`.
+  - Records: dataset records keep `provenance.latency_profile`, `latency_route` and
+    `latency_routing` with null values, and `findings.claims` and `derivation` are
+    empty. Archive rows carry no latency profile and empty per-lens and stack metrics.
+    A run whose provider fails after the reviewer accepted a submission is recorded with
+    outcome `success` and incomplete coverage, where it used to be recorded as `failed`;
+    read the terminal coverage for the analysis state.
+  - Tools: `python -m daydream.eval.latency_report` and the two staged-reviewer
+    measurement scripts are deleted with their notes.
+  - The staged pipeline's preflight notice (agent count and stages) and the
+    `[stage 5/5]` banner are gone; a review prints one notice.
+  - Python API with no known caller: `run_agent` no longer accepts
+    `advisory_tool_call_target`, `review_evidence` or `schema_rejection_guard`;
+    `phase_fix_parallel` and `phase_fix` no longer accept `intent_path`;
+    `BudgetLedger.from_limits` is removed (construct `BudgetLedger` directly); and the
+    modules of the staged phases are deleted.
 
 - **Breaking (0.y.z):** Turn limits: `max_turns` on `run_agent`, the backend protocol,
   `EffectiveRequestConfig` and every adapter, `MaxTurnsError` and its salvage path.
@@ -355,9 +402,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `literal_command_error`. `improve_dir`, `filter_scope`, `enumerate_repository_commands`,
   `issue_body` and other Improve helpers now require the arguments every caller already
   passed. No known caller ([#1637](https://github.com/existential-birds/daydream/issues/1637)).
-- Resuming with `--start-at per-stack` or `--start-at merge` no longer restores the
-  earlier run's completed diagrams; they are generated again, and `diagram-complete.json`
-  is no longer written. Diagram internals nothing read also go: the reason-code sets
+- `diagram-complete.json` is no longer written. Diagram internals nothing read also go: the reason-code sets
   `REASON_CODES` and `OMIT_REASONS`, `DiagramInputs.settings`, and the
   `diagram_comment_kinds`, `render_diagram_comment_body` and `post_diagram_comment_to_pr`
   re-exports from `daydream.pr_review` (all three remain in `daydream.reviews.diagrams`).
