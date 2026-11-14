@@ -74,7 +74,8 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
     monkeypatch.setattr(runner, "create_backend", create_backend)
     # Settings only the replaced reviewer read are named once and change nothing.
     config = config_for(target, diagram="auto", file_config=DaydreamFileConfig(
-        backend="codex", latency_profile="fast", precision_mode=True, phases={phase: {"backend": "osprey"}},
+        backend="codex", latency_profile="fast", precision_mode=True, verify_all=False,
+        phases={phase: {"backend": "osprey"}},
     ))
     roots = private_root_locations(base=tmp_path / "private")
     delivered: list[FinalizedReview] = []
@@ -99,7 +100,7 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
         assert exit_code == 0
         assert set(created) == {"codex"}
         printed = " ".join(capsys.readouterr().out.replace("│", " ").split())
-        assert printed.count("are ignored; remove them: latency_profile, precision_mode") == 1
+        assert printed.count("are ignored; remove them: latency_profile, precision_mode, verify_all") == 1
         # The run says what it is about to do, and a review announces no fix gate.
         assert "Review: 1 changed file(s) in 1 discovery assignment(s), then a fresh challenge" in printed
         assert "fix gate" not in printed

@@ -200,11 +200,6 @@ EFFORT_TIERS: dict[str, EffortTier] = {
 REVIEW_OUTPUT_FILE = ".review-output.md"
 
 
-# Selective verification is the evidence-approved default; latency is reported,
-# not gated. Config verify_all=true restores every non-exempt finding; it has no
-# CLI flag.
-DEFAULT_VERIFY_ALL: bool = False
-
 # Synthetic scope metadata for structural review alongside language stacks;
 # never a CLI-selectable skill name.
 STRUCTURE_STACK_NAME: str = "structure"

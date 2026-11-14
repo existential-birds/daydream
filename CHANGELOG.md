@@ -87,10 +87,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `--start-at` are usage errors that say what replaces them; the same values on an
     embedded `RunConfig` are refused before any work, and `--shallow`,
     `--no-review-cache` and `--start-at` are refused on `--diagram-only` runs too. Every
-    review starts fresh. Repository
-    settings only the replaced reviewer read (`precision_mode`, `latency_profile`,
-    `shallow_fanout_threshold`, `deep_shard_*`, `review_cache_*` and the `intent`, `merge`,
-    `parse`, `per_stack_review`, `supervise`, `suppression` and `wonder` phase tables) are
+    review starts fresh. Repository settings that no longer select anything
+    (`precision_mode`, `latency_profile`, `shallow_fanout_threshold`, `deep_shard_*`,
+    `review_cache_*`, `verify_all` and the `intent`, `merge`, `parse`, `per_stack_review`,
+    `supervise`, `suppression` and `wonder` phase tables) are
     named in one warning and ignored.
   - The findings supervisor (`supervisor = "rules"` or `"llm"`) is refused before any work
     until the setting is removed; an extension step in the `deep` flow can rewrite the
@@ -273,16 +273,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     tool allowances come from the review profile's `[pipeline]` table; `[phases.review]`
     and `[phases.arbiter]` select the discovery and challenge backends.
   - Shallow mode and stack routing: no single-stack run, forced stack, stack detection for
-    review or docs-only stack. Drop `--shallow` and `--stack`.
+    review or docs-only stack. Drop `--shallow` and `--stack`, including `--shallow` on a
+    `--diagram-only` command line, where it used to be accepted and ignored.
   - Resume and review reuse: no run continues an earlier review or fix run and no
     completed review unit is reused. Rerun the review; delete `.daydream/exploration/`
     to force a fresh diagram-only pre-scan.
   - Diagrams requested with a review are generated after it, not alongside it, so such a
     run takes longer by the diagram time.
   - The fixer no longer receives a confirmed-intent file, and earlier verifier verdicts
-    are never carried over. With `verify_all = false` every finding is still verified,
-    because no reviewer certifies a finding as routine; the verdicts artifact keeps its
-    `skipped` and `reused` counters at zero.
+    are never carried over. Every finding is verified before a fix, because no reviewer
+    certifies a finding as routine: the `verify_all` repository setting is ignored and
+    named in the same warning as the other replaced settings, so remove it. The verdicts
+    artifact always records mode `verify_all`, each selected decision carries reason
+    `verify_all`, and its `skipped` and `reused` counters stay at zero.
   - Extensions: the prompt names `intent`, `alternatives`, `per-stack`, `structural`,
     `generic-fallback`, `arbiter`, `supervise`, `suppression` and `merge` are no longer
     seeded, so overriding one fails registration; the step names `intent`,

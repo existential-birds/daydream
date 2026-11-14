@@ -23,7 +23,6 @@ from daydream.backends import (
     ResultEvent,
     TextEvent,
 )
-from daydream.config_file import DaydreamFileConfig
 from daydream.dataset import LocalRecordStore
 from daydream.run_config import RunConfig
 from daydream.runner import run
@@ -109,7 +108,6 @@ async def _run_real_phases_deep(
             pr_number=no_ci_remote.pr_number, pr_repo=pr_repo or no_ci_remote.base_repository,
             dataset_capture=dataset_store is not None, dataset_store_path=dataset_store,
             dump_artifacts=None if dump_path is None else str(dump_path),
-            file_config=DaydreamFileConfig(verify_all=True),
         )
     )
     # Review context stays on the reviewer's own instances: no turn that may edit the checkout runs on one.

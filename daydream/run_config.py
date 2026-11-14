@@ -171,11 +171,12 @@ def _resolved_reasoning_effort(config: RunConfig, phase: str) -> str | None:
 
 DEEP_FLOW_ALIASES = ("review", "shallow", "deep")
 
-# Top-level repository settings and phase tables that only the replaced staged reviewer read.
+# Top-level repository settings and phase tables that only the replaced staged reviewer, or the
+# verifier selection that depended on it, read.
 REPLACED_REVIEW_FILE_KEYS = (
     "latency_profile", "shallow_fanout_threshold", "precision_mode", "deep_shard_enabled", "deep_shard_max_files",
     "deep_shard_max_bytes", "deep_shard_fanout_cap", "deep_shard_frontier_max", "review_cache_enabled",
-    "review_cache_max_entries", "review_cache_max_bytes", "review_cache_max_age_days",
+    "review_cache_max_entries", "review_cache_max_bytes", "review_cache_max_age_days", "verify_all",
 )
 REPLACED_REVIEW_PHASES = ("intent", "merge", "parse", "per_stack_review", "supervise", "suppression", "wonder")
 

@@ -12,7 +12,6 @@ from daydream.check_claims import substantiate_check_claims
 from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.verify_selection import (
     SELECTION_RULE_VERSION,
-    SelectionConfig,
     SelectionDecision,
     select_items,
 )
@@ -84,23 +83,21 @@ async def phase_verify_recommendations(
     merged_items_path: Path,
     deep_dir: Path,
     strategy: str | None = None,
-    selection: SelectionConfig | None = None,
     run_context: RunContext | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     """Classify every canonical item and persist its selection decision beside verdicts.
 
-    Only selected items reach the prompt; an empty selection still writes an artifact
-    without a backend call. No selection config means verify all non-exempt items.
+    Every non-exempt item reaches the prompt; an empty selection still writes an artifact
+    without a backend call.
     """
     run_context = resolve_run_context(run_context)
     output_path = DeepArtifact.VERDICTS.at(deep_dir)
 
     items: list[dict[str, Any]] = json.loads(merged_items_path.read_text()).get("items", [])
-    config = selection if selection is not None else SelectionConfig(verify_all=True)
-    decisions = select_items(items, diff_text=_read_diff_text(deep_dir), config=config)
+    decisions = select_items(items)
     selection_block: dict[str, Any] = {
         "rule_version": SELECTION_RULE_VERSION,
-        "mode": "verify_all" if config.verify_all else "selective",
+        "mode": "verify_all",
         "decisions": [decision.as_dict() for decision in decisions],
         "selected": sum(1 for decision in decisions if decision.selected),
         # No finding is skipped as routine and no verdict is carried over; the stored counters stay.
@@ -140,16 +137,6 @@ def _asked_verdicts(fresh_verdicts: list[dict[str, Any]], decisions: list[Select
     """Keep only the verdicts for the findings this turn was asked to verify."""
     asked = {decision.item_id for decision in decisions if decision.selected and decision.item_id is not None}
     return [verdict for verdict in fresh_verdicts if verdict.get("issue_id") in asked]
-
-
-def _read_diff_text(deep_dir: Path) -> str:
-    """Read diff.patch beside deep artifacts first, then at the artifact root; return empty text if absent."""
-    for candidate in (deep_dir / "diff.patch", deep_dir.parent / "diff.patch"):
-        try:
-            return candidate.read_text()
-        except OSError:
-            continue
-    return ""
 
 
 @bind_resolved_run_context

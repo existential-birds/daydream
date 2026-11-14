@@ -775,8 +775,9 @@ the options and settings of the staged reviewer it replaced select nothing.
   `latency_profile`, `shallow_fanout_threshold`, `precision_mode`, `deep_shard_enabled`,
   `deep_shard_max_files`, `deep_shard_max_bytes`, `deep_shard_fanout_cap`,
   `deep_shard_frontier_max`, `review_cache_enabled`, `review_cache_max_entries`,
-  `review_cache_max_bytes`, `review_cache_max_age_days`, and the phase tables `intent`,
-  `merge`, `parse`, `per_stack_review`, `supervise`, `suppression` and `wonder`.
+  `review_cache_max_bytes`, `review_cache_max_age_days`, `verify_all`, and the phase tables
+  `intent`, `merge`, `parse`, `per_stack_review`, `supervise`, `suppression` and `wonder`.
+  Every finding is verified before a fix, so `verify_all` selects nothing.
   `[phases.review]` configures discovery and `[phases.arbiter]` configures the challenge.
 - **Refused:** `supervisor = "rules"` or `"llm"`. The findings supervisor ended with the
   staged reviewer; an extension flow step can rewrite the canonical items, and

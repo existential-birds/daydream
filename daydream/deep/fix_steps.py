@@ -15,7 +15,6 @@ from daydream.config import (
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     DEFAULT_GROUP_MAX_WALL_S,
     DEFAULT_QUALITY_GATE_ENABLED,
-    DEFAULT_VERIFY_ALL,
     REVIEW_OUTPUT_FILE,
 )
 from daydream.deep import fix_state
@@ -34,7 +33,6 @@ from daydream.deep.settings import (
     repair_job_policy,
 )
 from daydream.deep.state import DeepState
-from daydream.deep.verify_selection import SelectionConfig
 from daydream.extensions.api import BreakLoop, Stop
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.flows.engine import FlowContext
@@ -248,7 +246,6 @@ async def _step_verify(ctx: FlowContext) -> None:
 
     # Accepted fix gates verify recommendations; declined gates
     # produce neither a verifier call nor its artifact.
-    selection = SelectionConfig(verify_all=_resolve_config_value(ctx.config, "verify_all", DEFAULT_VERIFY_ALL))
     async with phase_scope(DaydreamPhase.VERIFY):
         verdicts_file, verdicts_payload = await phase_verify_recommendations(
             ctx.backend_for("verify"),
@@ -256,7 +253,6 @@ async def _step_verify(ctx: FlowContext) -> None:
             merged_items_path=deep_state.items_file,
             deep_dir=dd,
             strategy=ctx.strategy("verification"),
-            selection=selection,
             run_context=ctx.run_context,
         )
     print_verification_summary(console, verdicts_file)
