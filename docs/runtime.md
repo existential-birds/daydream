@@ -301,7 +301,7 @@ Full history still consumes private disk, up to the physical object-store limits
 in [Immutable PR inputs](#immutable-pr-inputs). Python payload buffers are
 fixed-size; Git may reconstruct a whole admitted blob, and concurrent readers
 multiply native memory. Manifest/diff memory remains bounded by its existing
-policies. See the [measurements and reproduction commands](performance/captured-source.md).
+policies.
 
 Local `AnalyzedRevision.head_sha` remains real HEAD provenance. `source_id` binds
 the accepted before/after contents, modes, eligible population and exclusions;

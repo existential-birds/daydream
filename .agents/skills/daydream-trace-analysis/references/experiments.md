@@ -32,9 +32,6 @@ Reject changes that lose required findings or coverage even when faster.
 
 Reuse existing owners rather than inventing metric aggregation:
 
-- `scripts/measure_review_runtime.py`: isolated matched fixtures; currently Pi
-  per-stack reviewer measurements, not a universal full-flow benchmark.
-- `daydream/eval/latency_report.py`: corpus/profile timing and quality reports.
 - `daydream/trajectory/timing.py` and `daydream/eval/analyzer.py`: timing and
   billing ownership; the analyzer consumes archived workspaces/snapshots rather
   than embedded JSONL directly.

@@ -119,10 +119,9 @@ the helper is a navigation tool, not a replacement for runtime contracts.
 | `daydream/trajectory/layout.py`, `types.py` | Physical layout, identity, event vocabularies |
 | `daydream/trajectory/invocation.py`, `scopes.py`, `recorder.py` | Tool correlation, interrupted outcomes, forks, metric ownership |
 | `daydream/trajectory/timing.py` | Authoritative phase interval/latency reduction |
-| `daydream/eval/analyzer.py`, `latency_report.py` | Existing cost/tool/timing signals and corpus comparisons |
+| `daydream/eval/analyzer.py` | Existing cost/tool/timing signals |
 | `daydream/deep/artifacts.py`, `daydream/archive/bundle.py` | Failure artifacts and archived evidence |
 | `docs/observability.md`, `daydream/observability/spans.py` | Lifecycle, billing and timing interpretation |
-| `scripts/measure_review_runtime.py` | Isolated matched-fixture before/after review harness |
 
 The existing analyzer consumes a `RunWriteSnapshot`/artifact workspace; it is not
 a direct embedded JSONL parser. Prefer the bundled CLI for navigation, then use
