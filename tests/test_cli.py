@@ -74,6 +74,7 @@ def test_signal_handler_flushes_before_backend_registry_snapshot(monkeypatch: py
                 "a.env",
                 "--copy",
                 "b.env",
+                "--shallow",
                 "/tmp/project",
             ],
             {
@@ -91,10 +92,21 @@ def test_signal_handler_flushes_before_backend_registry_snapshot(monkeypatch: py
                 "stack": "python",
                 "ignore_paths": [".planning", "vendor"],
                 "extra_copy": [Path("a.env"), Path("b.env")],
+                "shallow": True,
             },
         ),
+        (
+            ["--non-interactive", "--pr-number", "42", "--approved-head-sha", "a" * 40,
+             "--findings-out", "findings/findings.json", "--base", "origin/main", "/tmp/project"],
+            {"output_mode": "review", "findings_out": "findings/findings.json", "assume": None},
+        ),
+        (["--fix", "--yes", "--shallow", "/tmp/project"], {"output_mode": "loop", "assume": "yes", "shallow": True}),
+        (
+            ["--flow", "x", "--yes", "--start-at", "fix", "/tmp/project"],
+            {"output_mode": "review", "assume": "yes", "flow_name": "x", "start_at": "fix"},
+        ),
     ],
-    ids=["configured-review", ],
+    ids=["configured-review", "packaged-single-workflow-export", "selected-fixing", "custom-flow-gates"],
 )
 def test_compatible_cli_vectors_resolve_coherent_configuration(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
@@ -131,10 +143,24 @@ def test_incompatible_cli_flags_are_rejected_with_the_offending_flag(
     rejected = [
         (["--flow", "x", "--review", "/tmp/project"], ""),
         (["--flow", "x", "--shallow", "/tmp/project"], ""),
-        (["--shallow", "--findings-out", "f.json", "/tmp/repo"], "--findings-out"),
+        (["--flow", "x", "--fix", "/tmp/project"], "--flow cannot be combined"),
+        (["--flow", "shallow", "/tmp/repo"], "use --fix --shallow to fix"),
+        (["--flow", "deep", "--yes", "/tmp/repo"], "use --fix in place of --flow deep"),
+        (["--yes", "/tmp/repo"], "--yes only answers the gates of a fixing run; add --fix"),
+        (["--start-at", "fix", "/tmp/repo"], "--start-at fix resumes a fixing run; add --fix"),
+        (["--shallow", "/tmp/repo"], "--shallow narrows a fixing run; add --fix"),
+        (["--shallow", "--non-interactive", "/tmp/repo"], "--shallow narrows a fixing run; add --fix --yes"),
+        (["--shallow", "--findings-out", "f.json", "/tmp/repo"], "--shallow narrows a fixing run; it does not apply"),
+        (["--comment", "--yes", "/tmp/repo"], "it does not apply to --comment"),
+        (["--flow", "review", "--yes", "/tmp/repo"], "it does not apply to --flow review"),
+        (["--review", "--start-at", "merge", "/tmp/repo"], "--start-at merge resumes a fixing run; it does not apply"),
+        (["--shallow", "--start-at", "per-stack", "/tmp/repo"], "--start-at per-stack is not valid with --shallow"),
+        (["--start-at", "test", "/tmp/repo"], "use --fix --start-at fix"),
+        (["--fix", "--non-interactive", "/tmp/repo"], "cannot confirm the fix gate; add --yes"),
+        (["--fix", "--yes", "--findings-out", "f.json", "/tmp/repo"], "--findings-out exports"),
         (["--diagram", "both", "--diagram-only", "sequence", "/tmp/repo"], "--diagram-only"),
-        (["--diagram-only", "sequence", "--start-at", "merge", "/tmp/repo"], "--start-at merge"),
-        (["--diagram-only", "sequence", "--yes", "/tmp/repo"], "--yes"),
+        (["--diagram-only", "sequence", "--start-at", "merge", "/tmp/repo"], "it does not apply to --diagram-only"),
+        (["--diagram-only", "sequence", "--yes", "/tmp/repo"], "it does not apply to --diagram-only"),
         (["--fix-backend=claude-opus-5", str(tmp_path)], "[tool.daydream.phases.fix]"),
     ]
     for argv, expected in rejected:

@@ -29,7 +29,7 @@ from tests.harness.review_profile import (
     independent_alternatives_profile,
 )
 from tests.harness.review_result import saved_coverage
-from tests.harness.stub_backend import install_stub_backend
+from tests.harness.stub_backend import force_interactive, install_stub_backend, silence
 from tests.test_deep_orchestrator import MakeConfig
 
 
@@ -111,11 +111,13 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
 
     A denied optional rationale cleanup on the warm run must not admit stale same-source rationale.
     """
+    silence(monkeypatch)
+    force_interactive(monkeypatch)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     stub.parse_by_stack = _arbiter_stacks({"python": "high", "react": "high", "generic": "high"})
     stub.merge_echo_records = True
-    config = make_config(multi_stack_target, review_profile=independent_alternatives_profile(),
-                         latency_profile="balanced")
+    config = make_config(multi_stack_target, output_mode="loop", non_interactive=False,
+                         review_profile=independent_alternatives_profile(), latency_profile="balanced")
     assert await run(config) == 0
     deep = multi_stack_target / ".daydream" / "deep"
     names = ["intent.md", "alternatives.json", "dedup-candidates.json"]
@@ -353,9 +355,12 @@ async def test_resume_rejects_missing_or_mismatched_coverage(
     """Resume requires a valid same-snapshot inventory and diff identity; bytes alone are insufficient."""
     from tests.test_deep_orchestrator import _pin_findings_pr
 
+    silence(monkeypatch)
+    force_interactive(monkeypatch)
     pr = _pin_findings_pr(monkeypatch, multi_stack_target)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
-    assert await run(make_config(multi_stack_target, pr_number=pr.number)) == 0
+    fixing = {"output_mode": "loop", "non_interactive": False, "pr_number": pr.number}
+    assert await run(make_config(multi_stack_target, **fixing)) == 0
     deep = multi_stack_target / ".daydream" / "deep"
     path, key = deep / "review-coverage.json", deep / "diff-key"
     coverage = path.read_bytes()
@@ -364,7 +369,7 @@ async def test_resume_rejects_missing_or_mismatched_coverage(
     for missing in (path, key):
         missing.unlink()
         stub.calls.clear()
-        assert await run(make_config(multi_stack_target, start_at="merge", pr_number=pr.number)) == 1
+        assert await run(make_config(multi_stack_target, start_at="merge", **fixing)) == 1
         assert stub.calls == []
         assert not missing.exists()
         assert report.read_bytes() == report_bytes

@@ -11,6 +11,7 @@ from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.deep import fix_steps
 from daydream.git_ops import GitTimeoutError
 from tests.test_deep_orchestrator import (
+    _force_interactive,
     _install_stub_backend,
     _run_deep,
     _silence,
@@ -64,6 +65,7 @@ async def test_deep_run_reports_persistent_git_timeout_distinctly(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _silence(monkeypatch)
+    _force_interactive(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
 
 

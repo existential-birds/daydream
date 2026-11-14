@@ -19,6 +19,7 @@ from tests.harness.console import collapse_panel_text as _panel_text
 from tests.harness.review_result import saved_coverage
 from tests.test_deep_orchestrator import (
     _TWIN_DESCRIPTION,
+    _force_interactive,
     _install_stub_backend,
     _record,
     _run_deep,
@@ -32,6 +33,7 @@ async def test_hallucinated_merge_source_uid_is_dropped_and_reported(
     """#1111 real-path: an invented uid is discarded; the finding is not."""
 
     _silence(monkeypatch)
+    _force_interactive(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     _prime_source_uid_merge_resume(multi_stack_target)
     stub.merge_items = [
@@ -73,6 +75,7 @@ async def test_unattributable_merge_source_uids_require_current_schema(
     """Null attribution ships honestly as []; a wrong-typed key rejects synthesis but keeps valid siblings."""
 
     _silence(monkeypatch)
+    _force_interactive(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     _prime_source_uid_merge_resume(multi_stack_target)
     stub.merge_items = [_provenance_item(1, "Unattributable finding",

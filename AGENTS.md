@@ -82,8 +82,9 @@ or older testing requirements.
 
 Daydream reviews diffs, applies authorized fixes, validates them, and records agent
 interactions as ATIF v1.7 trajectories. Captured records feed the bitemporal corpus
-pipeline. Deep multi-stack review is the default; shallow is single-stack, and
-review/comment modes stop before fixes. Improve currently requires Claude for
+pipeline. A deep multi-stack review that ends with findings is the default; fixing is
+[selected explicitly](docs/runtime.md#validation-and-repair), shallow is its single-stack
+variant, and review/comment modes stop before fixes. Improve currently requires Claude for
 every model phase because it needs the snapshot-root tool boundary.
 
 ```text

@@ -312,8 +312,10 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     dump.mkdir()
     (dump / "prior.txt").write_text("prior dump")
     (repo / ".review-output.md").write_text("prior review")
+    (repo / "support.env").write_text("copied for the flow's own steps\n")
     config = RunConfig(
         target=str(repo), base="main", flow_name="artifact-probe", trajectory_path=external_trajectory,
+        extra_copy=[Path("support.env")],
         run_eval=True, dump_artifacts=str(dump), archive=True, non_interactive=True,
         dataset_capture=source_loss or git_redirect,
         dataset_store_path=store_path,
@@ -376,6 +378,7 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
         async with anyio.create_task_group() as group:
             group.start_soon(invoke)
             await backend.entered.wait()
+            assert backend.cwd is not None and (backend.cwd / "support.env").is_file()
             assert not (repo / ".daydream").exists()
             assert external_trajectory.read_text(encoding="utf-8") == "operator baseline\n"
             assert list((tmp_path / "private" / "runtime").glob("*/runs/*/live/.daydream/diff.patch"))
@@ -435,6 +438,7 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
         raw = read_records(LocalRecordStore(store_path)).runs
         assert len(raw) == 1
         assert raw[0]["final_state"]["value"]["head_sha"] is None
+        assert raw[0]["provenance"]["effective_configuration"]["review_only"] is False
         documents = raw[0]["trajectories"]["value"]["documents"]
         assert all(document["session_id"] == raw[0]["run_id"] for document in documents)
         frozen = list((tmp_path / "private" / "runtime").glob("*/runs/*/frozen/.daydream/diff.patch"))
@@ -790,7 +794,8 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
     monkeypatch.setattr("daydream.ui.print_phase_hero", _hero_spy)
     monkeypatch.setattr("daydream.ui.print_dim", _dim_spy)
     exit_code, test_backend, repair_backend, commit_calls = await _drive_fix_cycle_failing(
-        monkeypatch, feature_branch_repo, make_config(feature_branch_repo, start_at="fix", shallow=True, assume="yes"),
+        monkeypatch, feature_branch_repo,
+        make_config(feature_branch_repo, output_mode="loop", start_at="fix", shallow=True, assume="yes"),
         # Suite executions are host processes; reject a second TEST backend turn after the handoff.
         script=[_handoff_turn("# Handoff\n\n--yes bounded fix failure")],
         repair_turn=_FIX_TURN,
@@ -840,3 +845,6 @@ def test_manifest_identity_preserves_mode_capabilities(tmp_path: Path, flow: Day
     assert identity.phases.merge is (flow in (DaydreamRunFlow.NORMAL, DaydreamRunFlow.DEEP, DaydreamRunFlow.TTT))
     assert identity.phases.push is runs_test
     assert identity.phases.remote_ci is runs_test
+    # The labels follow the mode that ran: a review requested with shallow=True is still the full review.
+    review = capture_manifest_run_identity(RunConfig(shallow=True), DaydreamRunFlow.TTT, build_registry(), tmp_path)
+    assert (review.deep, review.review_only) == (True, True)

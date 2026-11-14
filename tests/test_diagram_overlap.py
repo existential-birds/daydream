@@ -26,7 +26,7 @@ from daydream.run_config import RunConfig
 from tests.harness import diagram_repos as dr
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git, seed_feature_branch
-from tests.harness.stub_backend import StubBackend, review_stage_state
+from tests.harness.stub_backend import StubBackend, force_interactive, review_stage_state, silence
 
 
 @pytest.fixture(autouse=True)
@@ -118,7 +118,9 @@ async def test_cancellation_joins_diagram_writer_and_preserves_resumable_review(
     target = dr.build_cross_module_repo(tmp_path)
     backend = DiagramBarrierBackend(target, block=True)
     install_provider(monkeypatch, backend, 4)
-    config = config_for(target, diagram="auto", output_mode="loop", assume="no")
+    silence(monkeypatch)
+    force_interactive(monkeypatch)
+    config = config_for(target, diagram="auto", output_mode="loop", non_interactive=False)
     caught: list[BaseException] = []
     private_base = tmp_path / "private"
     roots = private_root_locations(base=private_base)

@@ -768,6 +768,22 @@ and macOS are not yet exercised.
 
 ## Validation and repair
 
+A review ends with findings. Fixing is selected explicitly: `--fix` on the CLI,
+`output_mode="loop"` for embedded callers. `--yes` (`assume="yes"`) answers the gates
+of a selected fixing run or a custom flow and never selects fixing. `--shallow` narrows
+a fixing run and `--start-at` resumes one. Without `--fix` the CLI rejects a bare
+`--shallow`, `--flow shallow` and, except on a custom `--flow`, `--yes` and
+`--start-at`, naming the replacement; an explicit `--review`, `--comment` or
+`--diagram-only` still accepts and ignores `--shallow`. An embedded
+`flow_name="shallow"` or `shallow=True` without `output_mode="loop"` is a full
+multi-stack review. A review cannot be resumed into fixing: to fix what it reported,
+rerun with `--fix`.
+
+A fixing request that could only end as a review is refused before any work: one whose
+fix gate cannot be confirmed (unattended without `--yes`, or `assume="no"`), and one
+combined with the `review` flow or a findings export. A run that finds no diff says so
+and exits 0. Inside a selected run every gate below stays binding.
+
 The host admits one canonical test recipe before an accepted actionable fix run.
 Missing/invalid commands stop before VERIFY/FIX/TEST, repair, or commit. Manifest
 suggestions and model prose cannot authorize execution. Required suite declarations
