@@ -5,6 +5,7 @@ subprocess transport and the model Backend are fake.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -18,9 +19,11 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from daydream import cli
+from daydream.committed_review import CommittedReviewRequest, run_committed_review
 from daydream.dataset import LocalRecordStore
 from daydream.review_profile import build_default_profile
 from daydream.reviews.identity import finding_marker
+from daydream.run_config import RunConfig
 from tests.harness.dataset import read_records
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote, git
@@ -169,7 +172,9 @@ def test_cli_requested_branch_ignores_current_checkout_pr(
     base = git(repo, "rev-parse", "main")
     git(repo, "checkout", "-b", "requested", "main")
     (repo / "main.py").write_text("def hello(): return 'galaxy'\n")
-    git(repo, "add", "main.py")
+    # Over 1,000 changed lines: the second diff tier, which every route scales the allowances by.
+    (repo / "table.py").write_text("".join(f"VALUE_{number} = {number}\n" for number in range(1001)))
+    git(repo, "add", "main.py", "table.py")
     git(repo, "commit", "-m", "requested branch change")
     requested_head = git(repo, "rev-parse", "HEAD")
     git(repo, "checkout", "feature")
@@ -216,10 +221,13 @@ def test_cli_requested_branch_ignores_current_checkout_pr(
     assert sealed["analyzed_revision"]["head_sha"] == requested_head
     assert [entry["assignment"] for entry in sealed["execution"]] == ["discovery", "challenge"]
     assert sealed["terminal_result"]["analysis_state"] == "complete"
-    # Review work stops before the profile's reserved finalization time, as in the standalone program.
+    # The tier triples the default profile's allowances and its wall; review work stops before the
+    # reserved finalization time.
     pipeline = build_default_profile().pipeline
-    window = min(pipeline.reviewer_investigation_budget_s + 120, pipeline.review_wall_budget_s)
+    window = min(pipeline.reviewer_investigation_budget_s * 3 + 120, pipeline.review_wall_budget_s * 3)
     limits = sealed["settings"]["limits"]
+    assert (limits["scale"], limits["tool_calls"], limits["effective_tool_calls"]) == (
+        3, pipeline.reviewer_tool_call_budget, 3 * pipeline.reviewer_tool_call_budget)
     assert limits["effective_investigation_s"] == pytest.approx(window - 120)
     assert limits["protected_finalization_s"] == 120
     assert [(finding["title"], finding["payload"]["line"]) for finding in sealed["findings"]] == [
@@ -250,3 +258,11 @@ def test_cli_requested_branch_ignores_current_checkout_pr(
     assert lookups and all(cwd == repo and env["GH_TOKEN"] == _TOKEN for cwd, env in lookups)
     assert git(repo, "branch", "--show-current") == "feature"
     assert git(repo, "rev-parse", "HEAD") == current_head
+    # The standalone program plans the same change exactly as the flow's review step did.
+    git(repo, "checkout", "requested")
+    standalone = asyncio.run(run_committed_review(CommittedReviewRequest(
+        repo, base, config=RunConfig(output_mode="review")))).to_dict()
+    assert {key: value for key, value in standalone["settings"].items() if key != "historical_context"} == {
+        key: value for key, value in sealed["settings"].items() if key != "historical_context"}
+    assert [(entry["assignment"], entry["allocation"]) for entry in standalone["execution"]] == [
+        (entry["assignment"], entry["allocation"]) for entry in sealed["execution"]]
