@@ -5,6 +5,7 @@ deep and shallow flows.
 
 from __future__ import annotations
 
+import copy
 import json
 import sqlite3
 import sys
@@ -77,7 +78,8 @@ def _install_deep_capture_backend(
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     if real_internal_phases:
         stub = _ArchiveCaptureBackend(multi_stack_target)
-        monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub,)
+        # One instance per resolved phase backend, as the real factory builds them; the copies share the script.
+        monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: copy.copy(stub))
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     if not real_internal_phases:
         monkeypatch.setattr("daydream.deep.fix_steps.phase_test_and_heal", lambda *a, **k: _ok(**k),)
@@ -109,12 +111,16 @@ async def _run_real_phases_deep(
         stub.merge_items[0]["related_files"] = [untracked_fix]
         (multi_stack_target / "notes.txt").write_text("pre-existing\n")
     exit_code = await run(_deep_run_config(
-            multi_stack_target, pr_number=no_ci_remote.pr_number, pr_repo=pr_repo or no_ci_remote.base_repository,
+            multi_stack_target, backend="pi",
+            pr_number=no_ci_remote.pr_number, pr_repo=pr_repo or no_ci_remote.base_repository,
             dataset_capture=dataset_store is not None, dataset_store_path=dataset_store,
             dump_artifacts=None if dump_path is None else str(dump_path),
             file_config=DaydreamFileConfig(verify_all=True),
         )
     )
+    # Review context stays on the reviewer's own instances: no turn that may edit the checkout runs on one.
+    assert {call["review_bound"] for call in stub.calls if call["review_instructions"]} == {True}
+    assert {call["review_bound"] for call in stub.calls if not call["read_only"]} == {False}
     return remote, exit_code
 
 

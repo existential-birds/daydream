@@ -219,7 +219,9 @@ class StubBackend:
             await anyio.sleep(sleep_s)
 
     def bind_review_context(self, original_source: Path) -> dict[str, object]:
+        """As a native adapter does, keep the binding for every later invocation of this instance."""
         del original_source
+        self.review_bound = True
         return {"configuration_identity": "0" * 64}
 
     def _scripted_review(self, instructions: str, binding: Any) -> dict[str, Any]:
@@ -266,6 +268,7 @@ class StubBackend:
         call = {"cwd": cwd, "prompt": prompt, "output_schema": output_schema, "agents": agents, "model": self.model,
             "continuation": continuation, "read_only": read_only,
             "persist_session": persist_session, "review_instructions": review_instructions,
+            "review_bound": getattr(self, "review_bound", False),
         }
         self.calls.append(call)
         if host_tools is not None:

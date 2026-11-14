@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -118,8 +119,10 @@ async def plan_committed_review(
         # Captured untrusted author context: never authoritative over a claim.
         settings["historical_context"] = {"context": description}
     backends = {}
+    # A bound review context stays on its adapter instance, so the reviewer never shares one with a later phase.
+    reviewers = replace(ctx, _backend_cache={})
     for kind, phase in committed_review.REVIEW_PHASES:
-        backends[kind] = ctx.backend_for(phase)
+        backends[kind] = reviewers.backend_for(phase)
         committed_review.bind_native_context(
             settings, kind, phase, _resolved_backend_name(ctx.config, phase), backends[kind], ctx.work.source)
     state = DeepState(ctx.data)
