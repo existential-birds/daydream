@@ -190,8 +190,11 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
         assert (dump_dir / filename).read_bytes() == (run_dir / filename).read_bytes()
     assert json.loads((run_dir / "deep/committed-review.json").read_text())["run_id"] == manifest["session_id"]
     captured = read_records(store).runs[0]
-    assert captured["provenance"]["resolved_phases"]["per_stack_review"]["backend"] == "codex"
-    assert captured["provenance"]["resolved_phases"]["per_stack_review"]["model"] == review_model
+    # The record lists the phases that ran, each with what it resolved to; a phase no run has is absent.
+    resolved = captured["provenance"]["resolved_phases"]
+    assert sorted(resolved) == ["arbiter", "fix", "review", "test", "verify"]
+    assert (resolved["review"]["backend"], resolved["review"]["model"]) == ("codex", review_model)
+    assert resolved["arbiter"]["backend"] == "pi" and resolved["fix"]["backend"] == "pi"
     task = captured["original_task"]["value"]
     assert (task["analyzed_revision"]["head_sha"], task["analyzed_revision"]["merge_base_sha"]) == (
         head_before, base_before)

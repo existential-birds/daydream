@@ -321,7 +321,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `deep/diff-key`, the report context and `deep/committed-review.json`.
   - Records: dataset records keep `provenance.latency_profile`, `latency_route` and
     `latency_routing` with null values, and `findings.claims` and `derivation` are
-    empty. Archive rows carry no latency profile and empty per-lens and stack metrics.
+    empty. `provenance.resolved_phases` lists the phases that run (`review`, `arbiter`,
+    `verify`, `fix`, `test`); the rows for `intent`, `wonder`, `per_stack_review`, `parse`
+    and `merge` are gone. The archive's `per_stack_review_backend` and
+    `per_stack_review_model` columns keep their names and record the `review` phase. Archive rows carry no latency profile and empty per-lens and stack metrics.
     The recorded outcome follows the exit status. A provider failure after the reviewer
     accepted a submission now ends as an incomplete review that exits 0 and is recorded
     as `success` with incomplete coverage, where the staged reviewer raised and recorded
