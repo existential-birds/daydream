@@ -1765,6 +1765,11 @@ def _adaptive_repo(tmp_path: Path, files: int = 6, lines: int = 1) -> tuple[Path
     return repo, git(repo, "rev-parse", "main")
 
 
+# Planned batches of four one-hunk files for the scenarios over more than two batches.
+_SCALED = {"four-batches": 4, "five-batches-broad": 5, "five-batches-adaptive": 5}
+_SUPPLIED = "\nSupplied target, as review_source returns it:\n"
+
+
 def _decide(binding: HostToolBinding, targets: Sequence[str]) -> list[dict[str, Any]]:
     lookup = binding.host_tools["review_source"].callback
     return [{"target_id": target, "status": "reviewed", "reason": "", "evidence_refs": [{
@@ -1774,9 +1779,6 @@ def _decide(binding: HostToolBinding, targets: Sequence[str]) -> list[dict[str, 
 
 _SCENARIOS = ["empty-local", "follow-up", "evidence-free", "contention", "native-capacity", "revision", "title",
               "undecomposed"]
-# Planned batches of four one-hunk files for the scenarios over more than two batches.
-_SCALED = {"four-batches": 4, "five-batches-broad": 5, "five-batches-adaptive": 5}
-_SUPPLIED = "\nSupplied target, as review_source returns it:\n"
 
 
 @pytest.mark.parametrize("scenario", [*_SCENARIOS, *_SCALED])
@@ -1785,16 +1787,16 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
 ) -> None:
     """Adaptive decomposition through the real program, Git capture and event loop.
 
+    The batch rows prove the allowance grows with the change and that a change over four
+    batches is one assignment per batch under either policy: a fixed allowance starved
+    every assignment of a large change, and ``broad`` held it in one conversation.
+
     Broad-only journeys never split work, so they missed: unfinished targets lost or
     double-credited on supersession, a closed parent's late callback admitting work,
     one sibling's install between another's validation and installation closing it,
     renewed sibling allocations, and empty local results skipping the spanning defect
     between a.py (ratio) and f.py (its caller) in different assignments. Revision rows
     prove the scheduler dispatches a new challenge only for a semantic revision.
-
-    The batch rows prove the allowance grows with the change and that a change over four
-    batches is one assignment per batch under either policy: a fixed allowance starved
-    every assignment of a large change, and ``broad`` held it in one conversation.
     """
     batches = _SCALED.get(scenario, 2)
     # The four-batch subject's diff is over 1,000 lines (tier 3). The broad rows run the default profile.
