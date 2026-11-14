@@ -197,9 +197,10 @@ with `[pipeline] assignment_policy`, whichever source supplied the profile: `"br
 target, and `"adaptive"` splits from two batches. With one batch, and above four, both
 give the same plan. A profile too small to leave every batch two starts runs one broad
 assignment. Split work runs concurrently under
-`anyio.CapacityLimiter(effective_fanout_concurrency(10, backend))`, each in a forked
-trajectory. Any other value fails the profile, and committed review refuses a profile
-built in code with one before dispatching work. No CLI route reaches committed review
+`anyio.CapacityLimiter(effective_fanout_concurrency(10, backend))`, by default ten at a
+time on Pi and eight on Claude and Codex, each in a forked trajectory. Any other policy
+value fails the profile, and committed review refuses a profile built in code with one
+before dispatching work. No CLI route reaches committed review
 until #1641. Other review routes do not act on the key, but it still changes the profile
 digest, so their cached reviews miss. `settings.assignment_policy` records `name`,
 `decomposed` (which can be `true` under `broad`), `planned_assignments` and
@@ -243,8 +244,8 @@ remains fatal.
 
 All work draws on one [budget ledger](#budget-ledger) for the review window; each
 dispatch runs on its own child ledger carved from it, so parallel siblings never share a
-count. Its limits come from the review profile's `[pipeline]`
-keys and the size of the change:
+count. Its limits come from the review profile's `[pipeline]` keys and the size of the
+change:
 
 ```text
 T, INV, WALL = reviewer_tool_call_budget, reviewer_investigation_budget_s, review_wall_budget_s
