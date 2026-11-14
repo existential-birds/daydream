@@ -29,6 +29,7 @@ from daydream.backends import MetricsEvent, TextEvent, claude as claude_backend
 from daydream.backends.pi import PiBackend, PiError
 from daydream.committed_review import CommittedReviewRequest, Review, run_committed_review
 from daydream.committed_review_model import RESULT_VERSIONS, planned_work_id, validate_committed_result
+from daydream.committed_review_output import render_committed_review
 from daydream.deep.detection import StackAssignment
 from daydream.extensions.registry import Registry
 from daydream.git_ops.captured_source import capture_source
@@ -1718,10 +1719,10 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
     assert reasons[1:105] == ["No start was left to read it."] * 104
     assert all(reason.startswith("unsubmitted:") for reason in [reasons[0], *reasons[105:]]) and len(reasons) == 125
     assert value["terminal_result"]["analysis_state"] == "incomplete"
-    # Work that ran out of its allowance tells the user which profile keys raise it; the wall caps the time.
-    assert review._coverage.diagnostics["phases"] == {"challenge": (
-        "The review used up its allowance before it finished; raise reviewer_investigation_budget_s and "
-        "review_wall_budget_s and reviewer_tool_call_budget under [pipeline] in the review profile.")}
+    # The report tells the user which profile keys raise a spent allowance; the wall caps the time.
+    assert ("\nThe review used up its allowance before it finished; raise <code>reviewer_investigation_budget_s</code> "
+            "and <code>review_wall_budget_s</code> and <code>reviewer_tool_call_budget</code> under "
+            "<code>[pipeline]</code> in the review profile.\n") in render_committed_review(value)
 
 
 async def test_denied_over_limit_discovery_start_cannot_spend_protected_challenge_reserve(
@@ -1781,6 +1782,10 @@ async def test_denied_over_limit_discovery_start_cannot_spend_protected_challeng
             config=RunConfig(backend="pi", output_mode="review", review_profile=profile)))
         run.finish(0)
     assert allocations == [("discovery", 5), ("challenge", 5)] and result.output_installed
+    # The report names the one profile key that raises the allowance discovery ran out of.
+    assert ("\nThe review used up its allowance before it finished; raise <code>reviewer_tool_call_budget</code> "
+            "under <code>[pipeline]</code> in the review profile.\n"
+            ) in (review_inputs.work.source / ".review-output.md").read_text()
     discovery = result.to_dict()["execution"][0]
     assert (discovery["allocation"], discovery["observed_starts"], discovery["overshoot"]) == (5, 6, 1)
     refused = BudgetStop("committed", "tool_calls", limit=10, spent=10, remaining_at_dispatch=0, reserved=0)
@@ -2193,6 +2198,8 @@ async def test_unfinished_challenge_revisions_transfer_to_a_fresh_challenge(
     assert work["work:4"]["claims"] == [{"uid": claim["uid"], "revision": 2}]
     assert sealed["findings"][0]["revision"] == 2 and sealed["findings"][0]["revised_by"] == "work:3"
     assert sealed["terminal_result"]["analysis_state"] == "complete"
+    # The superseded work ran out of time; a review that finished elsewhere tells the user to raise nothing.
+    assert "review profile" not in render_committed_review(sealed)
 
 
 async def test_failed_revising_challenge_is_superseded_by_the_challenge_that_judges_it(
@@ -2404,6 +2411,9 @@ async def test_committed_review_completes_through_native_host_tools(
             ("discovery", False, "missing_output"), ("challenge", False, "missing_output"), ("challenge", True, None)]
         assert [finding["title"] for finding in incomplete["findings"]] == ["Zero divides the caller"]
         assert incomplete["terminal_result"]["analysis_state"] == "incomplete"
+        # A review unfinished for another reason is not told to raise an allowance.
+        report = (repo / ".review-output.md").read_text()
+        assert "<code>missing_output</code>" in report and "review profile" not in report
     assert len(systems) >= 2
     for system in systems:
         assert "at most four selectors, and evidence_refs=[] records up to four of a target's sources." in system

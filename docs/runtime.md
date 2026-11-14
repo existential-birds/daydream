@@ -268,13 +268,12 @@ unresolved verdict keeps the revision with its work, so the next round supersede
 Each shard's status derives from its targets and the current (non-superseded) work
 responsible for them; required phases are `challenge` and `cross_assignment`.
 Superseded failed work whose responsibilities were transferred and accepted elsewhere
-remains evidence but does not make the review incomplete. When current work ended for
-want of tool calls or time, the `challenge` phase's coverage diagnostic is one sentence
-that says so and names the profile keys that raise that allowance:
-`reviewer_tool_call_budget`, or `reviewer_investigation_budget_s` with
-`review_wall_budget_s`, which caps the review window. The sealed payload
-carries no diagnostics, so nothing prints it until a CLI route reaches committed review.
-The staged deep path keeps
+remains evidence but does not make the review incomplete. When the sealed reason codes
+hold `host_tool_budget_exhaustion` or `host_wall_budget_exhaustion`, which only current
+work contributes, the report adds one sentence under "Unfinished work" naming the
+`[pipeline]` profile keys that raise that allowance: `reviewer_tool_call_budget`, or
+`reviewer_investigation_budget_s` with `review_wall_budget_s`, which caps the review
+window. The staged deep path keeps
 its own rule ([stage-aware builders](extensions.md#stage-aware-review-builders)).
 
 ### Captured local source

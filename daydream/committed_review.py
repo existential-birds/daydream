@@ -122,10 +122,6 @@ _FANOUT_CEILING = 10
 _MIN_WORK_CALLS = 2
 # Bounded evidence finalization reserved after the review deadline.
 _FINALIZATION_S = 120
-# The [pipeline] profile keys that raise the allowance behind each exhaustion reason; the wall caps the time.
-_ALLOWANCE_KEYS = {
-    ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION.value: "reviewer_tool_call_budget",
-    ReasonCode.HOST_WALL_BUDGET_EXHAUSTION.value: "reviewer_investigation_budget_s and review_wall_budget_s"}
 
 
 @dataclass
@@ -775,7 +771,6 @@ class Review:
         kinds = {entry["assignment"] for entry in self.execution if entry["work_id"] is not None}
         if self.assignments and not kinds & INVESTIGATION_KINDS:
             global_reasons.add(ReasonCode.EVIDENCE_INCOMPLETE.value)
-        unfinished = global_reasons.union(*(failures.get(r["work_id"], set()) for r in current))
         if self.assignments:
             scopes_complete = True
             for index, shard in enumerate(self._shards):
@@ -807,16 +802,14 @@ class Review:
             challenge_reasons = set(global_reasons).union(*(failures.get(r["work_id"], set()) for r in challenges))
             if self._claims and "challenge" not in kinds or self.pending() or not scopes_complete or cross_reasons:
                 challenge_reasons.add(ReasonCode.EVIDENCE_INCOMPLETE.value)
-            keys = sorted(key for reason, key in _ALLOWANCE_KEYS.items() if reason in unfinished)
             coverage.record_phase(
                 "challenge", "incomplete" if challenge_reasons else "complete", reasons=sorted(challenge_reasons),
                 usable_evidence=bool(self._claims),
-                diagnostic=("The review used up its allowance before it finished; raise " + " and ".join(keys)
-                            + " under [pipeline] in the review profile.") if keys else None,
             )
         else:
             coverage.record_phase("no_diff", "complete", noop=True)
         attempted = {e["reason"] for e in self.execution if e["reason"] is not None}
+        unfinished = global_reasons.union(*(failures.get(r["work_id"], set()) for r in current))
         pipeline = ("cancelled" if ReasonCode.INTERRUPTION.value in attempted
                     else "failed" if unfinished else "completed")
         terminal = coverage.finalize(pipeline)
