@@ -2370,6 +2370,31 @@ async def test_committed_review_completes_through_native_host_tools(
             ("discovery", False, "missing_output"), ("challenge", False, "missing_output"), ("challenge", True, None)]
         assert [finding["title"] for finding in incomplete["findings"]] == ["Zero divides the caller"]
         assert incomplete["terminal_result"]["analysis_state"] == "incomplete"
+        # A change of five batches is one assignment per batch through the real adapter. The default
+        # profile's 120 calls double: five local shares of 18, of which each assignment keeps the six its
+        # retry charged, so the cross-assignment receives 120 - 30 and the challenge 240 - 30 - 1.
+        wide = tmp_path / "wide"
+        modules = {f"m{index:02d}.py": "VALUE = 1\n" for index in range(17)}
+        seed_feature_branch(wide, base=modules, feature=dict.fromkeys(modules, "VALUE = 0\n"))
+        split = install_codex_lifecycle_cli(tmp_path / "split")
+        monkeypatch.setenv("PATH", f"{split.bin_dir}{os.pathsep}{os.environ['PATH']}")
+        sealed = (await run_committed_review(CommittedReviewRequest(
+            wide, git(wide, "rev-parse", "main"), config=RunConfig(backend="codex", output_mode="review")))).to_dict()
+        assert sealed["settings"]["assignment_policy"] == {"name": "broad", "decomposed": True,
+                                                          "planned_assignments": 5, "cross_assignment": "required"}
+        assert sorted((e["assignment"], e["accepted"], e["reason"], e["allocation"]) for e in sealed["execution"]) == [
+            ("challenge", True, None, 209), ("cross_assignment", True, None, 90),
+            *[("discovery", True, None, 18)] * 5]
+        assert sealed["terminal_result"]["analysis_state"] == "complete" and len(sealed["findings"]) == 5
+        # Two processes per discovery assignment (the unsubmitted turn and its retry), one cross-assignment
+        # that inherits nothing, one challenge. Each discovery process is handed exactly its own targets.
+        processes = [(_assignment({"review_system_instructions": row["host"]["instructions"]}), row["host"]["prompt"])
+                     for row in split.observations()]
+        assert sorted(work["kind"] for work, _ in processes) == ["challenge", "cross_assignment", *["discovery"] * 10]
+        for work, prompt in processes:
+            targets = work["work"]["targets"]["ids"] if work["kind"] == "discovery" else []
+            assert prompt.count(_SUPPLIED) == len(targets)
+            assert all(f"diff --git a/{target} b/{target}" in prompt for target in targets)
     assert len(systems) >= 2
     for system in systems:
         assert "at most four selectors, and evidence_refs=[] records up to four of a target's sources." in system
