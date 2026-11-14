@@ -391,8 +391,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   had filled, so on a change with a few dozen claims the challenge's verdicts were refused
   and the review sealed with no finding; discovery also refused valid claims past about 54
   of typical size, whatever the change's size. Verdicts no longer count against the
-  retained claims' capacity, which now grows with the review's scale as
-  `min(128 KiB × scale, 1 MiB)`, 1 MiB being the findings-export bound, with no count
+  retained claims' capacity, which is now what the review's findings export can hold: a
+  batch is refused, correctably, when the 1 MiB export would overflow with every retained
+  claim as a finding, so an admitted review's export always installs. No count applies
   beyond the per-batch 128. A review split across assignments challenges its claims in one
   conversation per four planned batches of the claims' files, split again at 64 KiB of
   claims so each fits Pi's capacity preflight, concurrently under the existing fan-out
@@ -401,8 +402,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   work rows as pages of 256 with omitted counts instead of every pending claim in full.
   What users lose: large reviews run more challenge conversations and cost more (about 25
   on a change of 400 files); the cross-assignment no longer sees each claim's text and
-  names at most 256 claims and assignments; a review of scale 8 or more retains at most
-  1 MiB of claims (about 430 of typical size) and refuses the rest at discovery; a reader
+  names at most 256 claims and assignments; a review retains at most what its findings
+  export holds (about 470 claims of typical size, fewer with a long pull request
+  description or on a very large change) and refuses the rest at discovery; a reader
   on an older release rejects a sealed result with more than 128 claims
   ([#1842](https://github.com/existential-birds/daydream/issues/1842)).
 - Committed review on Codex and Claude now starts the cross-assignment and every challenge

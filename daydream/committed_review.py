@@ -56,11 +56,10 @@ from daydream.committed_review_model import (
 from daydream.committed_review_output import write_committed_review_output
 from daydream.config import REVIEWER_BATCHES_PER_ALLOWANCE
 from daydream.deep.detection import StackAssignment
-from daydream.findings import MAX_ARTIFACT_BYTES
+from daydream.findings import MAX_ARTIFACT_BYTES, committed_export_bytes
 from daydream.git_ops.captured_source import CapturedSource, capture_source
 from daydream.host_tools import (
     _MAX_REJECTION_BYTES,
-    _MAX_RESULT_BYTES,
     HostTool,
     HostToolBinding,
     HostToolCallBudgetExceeded,
@@ -187,11 +186,9 @@ class Review:
 
     def __init__(
         self, inputs: StageInputFactory, run_id: str, *, allowed_tools: frozenset[str] | None = None,
-        scale: int = 1,
+        immutable_input: ImmutableReviewInput | None = None,
     ) -> None:
-        self.inputs, self.run_id = inputs, run_id
-        # Retained claims grow with the review's scale up to what the findings export holds.
-        self._claim_capacity = min(_MAX_RESULT_BYTES * scale, MAX_ARTIFACT_BYTES)
+        self.inputs, self.run_id, self.immutable_input = inputs, run_id, immutable_input
         self._allowed_tools = allowed_tools
         self.assignments = deepcopy([part.assignment for part in inputs.parts])
         self._index = {part["target_id"]: index for index, part in enumerate(self.assignments)}
@@ -232,6 +229,7 @@ class Review:
         except ValueError as exc:
             raise ValueError("captured plan exceeds retained per-target coverage capacity before review; "
                              "narrow the review base or exclusions and rerun") from exc
+        self._export = (self._coverage.to_dict(), None if immutable_input is None else immutable_input.to_dict())
         self._checking = threading.Lock()
 
     def check(self) -> None:
@@ -675,8 +673,8 @@ class Review:
                     except jsonschema.ValidationError as exc:
                         raise HostToolRejected(
                             "claims: canonical retention limit exceeded; reduce optional proposals") from exc
-                    if len(canonical_json([{**c, "challenge_evidence": []} for c in retained]).encode()) > (
-                            self._claim_capacity):
+                    # Every retained claim can become a finding, so all of them must fit the findings export.
+                    if committed_export_bytes(*self._export, retained) > MAX_ARTIFACT_BYTES:
                         raise HostToolRejected("retained claims exceed shared byte capacity; reduce optional material")
                     merged = {**self._decisions, **decisions}
                     updates = {shard_scope_id(index): self._shard_decisions(index, merged)
@@ -777,9 +775,7 @@ class Review:
             }
         return context
 
-    def seal(
-        self, settings: dict[str, Any], *, immutable_input: ImmutableReviewInput | None = None,
-    ) -> dict[str, Any]:
+    def seal(self, settings: dict[str, Any]) -> dict[str, Any]:
         """Called after native contexts/host callbacks have quiesced; current work decides completion."""
         if self._sealed:
             raise ValueError("Review is already sealed")
@@ -860,8 +856,8 @@ class Review:
             "settings": settings,
             "execution": self.execution,
         }
-        if immutable_input is not None:
-            result.update(schema_version=RESULT_VERSIONS["immutable"], immutable_input=immutable_input.to_dict())
+        if self.immutable_input is not None:
+            result.update(schema_version=RESULT_VERSIONS["immutable"], immutable_input=self.immutable_input.to_dict())
         elif 'source_id' in self.inputs.revision:
             result['schema_version'] = RESULT_VERSIONS["local"]
         validate_committed_result(result)
@@ -894,8 +890,9 @@ targets remain typed unfinished work. Empty findings are legitimate.
 Limits: a batch holds at most 128 targets or verdicts and 128 claims in 131072 bytes of arguments, and one
 evidence_refs array 8192 bytes. reason holds at most 1024 characters, an id 512 (a new claim's uid is empty),
 source_uids 128 unique ids and any other text 1 to 4096; a not_reviewed reason and verdict grounds are never
-blank. Retained claims share one byte capacity that grows with the change, verdicts not counted, and target
-reasons another. target_id is a catalog id: a file split into parts is decided by its part ids, never by its path.
+blank. Retained claims share one byte capacity, what the review's findings export holds (verdicts are not
+counted), and target reasons another. target_id is a catalog id: a file split into parts is decided by its
+part ids, never by its path.
 A claim names a changed file. Non-empty evidence_refs of a reviewed target include one of its own
 source_ids; a claim's are never empty and, like a verdict's, include an assigned source_id. An assigned
 source_range only narrows the offered range. A supporting selector names a regular UTF-8 file of at most
@@ -1193,7 +1190,8 @@ async def _run_committed_review(
         finish = started + min(investigation_s * scale + _FINALIZATION_S,
                                wall_s * (tier if profile.source_kind == "default" else 1))
         review = await anyio.to_thread.run_sync(lambda: Review(
-            inputs, run_id, allowed_tools=None if hosted is None else HOSTED_PI_TOOLS, scale=scale,
+            inputs, run_id, allowed_tools=None if hosted is None else HOSTED_PI_TOOLS,
+            immutable_input=request.immutable_input,
         ))
         schedule = _Schedule(review, backends, tool_calls, settings, started=started, deadline=finish - _FINALIZATION_S,
                              adaptive=pipeline.assignment_policy == "adaptive")
@@ -1234,7 +1232,7 @@ async def _run_committed_review(
                     work.captured_source.validate()
                 except (git_ops.GitError, OSError):
                     review.execution.append(_host_entry("source_integrity", ReasonCode.EVIDENCE_INCOMPLETE.value))
-            payload = review.seal(settings, immutable_input=request.immutable_input)
+            payload = review.seal(settings)
             output_error: str | None = None
             installed = False
             capture_state = (

@@ -311,11 +311,15 @@ Siblings admit independently. Preparation validates a delta; installation, at on
 synchronous point, rechecks only touched identities (target still undecided and owned
 by this work, claim revision current, retained claim/coverage capacity) and then mints
 claim ordinals. A sibling conflict is a correctable rejection; closure or deadline
-remains fatal. Retained claims share `min(128 KiB * scale, 1 MiB)` of canonical JSON,
-`scale` as defined below and 1 MiB the findings-export bound; challenge evidence does not
-count against it, so a challenge can always record its verdicts. No count bounds a review's
-claims beyond what fits; a batch still holds at most 128. A sealed result can therefore
-hold more than 128 claims and findings, which a reader on an older release rejects.
+remains fatal. Any retained claim can become a finding, so retained claims share what the
+review's findings export (`findings.json`, the hosted route's paired output) can hold:
+installation refuses, correctably, a batch after which that export would exceed its
+1 MiB bound with every retained claim as an inline finding and every scope and phase
+unfinished. Target decisions are attribution the bound does not count, and verdicts are not
+in the export, so a challenge can always record its verdicts. The export of an admitted
+review therefore always fits and installs, and no claim is lost after admission. No count
+bounds a review's claims beyond that; a batch still holds at most 128. A sealed result can
+therefore hold more than 128 claims and findings, which a reader on an older release rejects.
 
 All work draws on one [budget ledger](#budget-ledger) for the review window; each
 dispatch runs on its own child ledger carved from it, so parallel siblings never share a

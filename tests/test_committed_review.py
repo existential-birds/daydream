@@ -335,6 +335,8 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
     prior = review.pending()
     update = {"verdicts": [_verdict(review_inputs, prior[0])], "claims": [_proposal(review_inputs)]}
     if fault == "shared-capacity":
+        # Retained claims share what the findings export holds; a smaller export makes 128 compact claims overflow.
+        monkeypatch.setattr(committed_review, "MAX_ARTIFACT_BYTES", 32768)
         compact = _proposal(review_inputs)
         for key in ("claim", "trigger", "consequence", "grounds"):
             compact["payload"][key] = "source"
@@ -439,11 +441,6 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
         verdicts = [_verdict(review_inputs, claim, grounds="g" * 3000) for claim in review.pending()]
         await _submit(review, "challenge", {"verdicts": verdicts, "claims": []})
         assert len(review.seal({})["findings"]) == 30
-        # The capacity grows with the review's scale only up to the findings export bound.
-        monkeypatch.setattr(committed_review, "MAX_ARTIFACT_BYTES", 131072)
-        with pytest.raises(HostToolRejected, match="shared byte capacity"):
-            await _submit(Review(review_inputs, "capped", scale=2), "discovery",
-                          {**_discovery(review_inputs), "claims": [_proposal(review_inputs), *update["claims"]]})
 
 
 @pytest.mark.parametrize("challenge", ["accepted-then-failed-bundle-stage", "cancelled", "hub-export"])
@@ -1066,6 +1063,11 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
                   git(repo, "rev-parse", "main"), "-m", "advanced original base")
         git(repo, "update-ref", "refs/heads/main", tip)
     identity = immutable_input_for(repo)
+    if outcome == "install-failure":
+        # The largest captured context leaves the least of the findings export for claims.
+        maximal = identity.to_dict()
+        maximal["provenance"]["context"] = "c" * 65536
+        identity = ImmutableReviewInput.from_dict(maximal)
     envelope = identity.to_dict()
     marker = tmp_path / "forbidden-git-effect"
     hook = repo / ".git/hooks/post-checkout"
@@ -1122,11 +1124,27 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
                         "file": "api.py", "line": None, "evidence_refs": refs}}
                 value = {"targets": [{"target_id": part["target_id"], "status": "reviewed", "reason": "Inspected.",
                     "evidence_refs": refs}], "claims": [claim]}
+                if outcome == "install-failure":
+                    # Claims of the largest, then the smallest size until the findings export is full: each
+                    # refusal is correctable.
+                    _charged(binding, "review_admit", {"targets": [], "claims": value.pop("claims")})
+                    value["claims"] = []
+                    for size in (4096, 1):
+                        batch = 4
+                        while batch:
+                            many = [{**claim, "title": "t" * size, "payload": {
+                                **claim["payload"], "evidence_refs": deepcopy(refs),
+                                **dict.fromkeys(("claim", "trigger", "consequence", "grounds"), "x" * size)}}
+                                    for _ in range(batch)]
+                            try:
+                                _charged(binding, "review_admit", {"targets": [], "claims": many})
+                            except HostToolRejected as refusal:
+                                assert "shared byte capacity" in str(refusal)
+                                batch //= 2
             else:
-                retained = assignment["claims"][0]
                 value = {"verdicts": [{"uid": retained["uid"],
                     "revision": retained["revision"], "verdict": "confirmed", "grounds": "The zero remains unguarded.",
-                    "evidence_refs": refs}], "claims": []}
+                    "evidence_refs": refs} for retained in assignment["claims"]], "claims": []}
             binding.admit("submit", "structured_output", value, terminal=True)
             accepted = binding.submit("submit", value)
             binding.native_settled = True
@@ -1211,10 +1229,13 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
             validate_committed_result(value)
             assert value["immutable_input"] == envelope
             assert value["settings"]["assignment_policy"]["name"] == "adaptive"  # The operator profile's choice.
-            assert value["terminal_result"]["analysis_state"] == "complete" and len(value["findings"]) == 1
+            assert value["terminal_result"]["analysis_state"] == "complete"
+            assert len(value["findings"]) == len(value["claims"]) > 40
             report, = frozen.glob(".explicit/*/review-output.md")
             assert "Captured zero" in report.read_text()
             findings, = frozen.glob(".explicit/*/findings.json")
+            # Every admitted claim is a finding of an export that is full yet within its bound.
+            assert findings.stat().st_size > 1_000_000
             exported = load_findings_artifact(
                 findings, expected_repo="captured/repository", expected_pr_number=1421,
                 expected_head_sha=envelope["provenance"]["head_sha"],
