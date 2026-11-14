@@ -295,7 +295,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `verify_all`, and its `skipped` and `reused` counters stay at zero.
   - Extensions: the prompt names `intent`, `alternatives`, `per-stack`, `structural`,
     `generic-fallback`, `arbiter`, `supervise`, `suppression` and `merge` are no longer
-    seeded, so overriding one fails registration; the step names `intent`,
+    seeded or called; an override of one still registers, as any prompt name does, and
+    has no effect. The step names `intent`,
     `per-stack-reviews`, `per-stack-parse`, `arbiter`, `cross-stack-merge`,
     `single-stack-merge` and `supervise` fail preflight, and `exploration` is a step of
     the diagram-only flow only; the flow data keys `stacks`, `single_stack_mode`,

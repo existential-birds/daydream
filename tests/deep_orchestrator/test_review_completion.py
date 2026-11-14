@@ -388,6 +388,10 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         assert (result['pipeline_state'], result['analysis_state'], result['projection_valid']) == (
             'completed', 'failed', False)
         assert all(s['status'] == 'complete' for s in scopes(data).values())
+        # The report states the failure; it never calls a review with a sealed finding clean.
+        report = (review.repo / '.review-output.md').read_text()
+        assert 'No confirmed findings.' not in report
+        assert 'The findings could not be read after the review; the sealed result keeps them.' in report
         return
     assert not review.output.exists() and state['export'] is not None
     private_path, private_bytes = state['export']

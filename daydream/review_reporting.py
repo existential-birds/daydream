@@ -104,12 +104,18 @@ def _host_attempt(attempt: Any) -> bool:
             and (identity['outcome'] == 'truncated' or attempt['passed'] == (identity['outcome'] == 'passed')))
 
 
+def _findings_line(terminal_result: dict[str, Any] | None, findings_count: int) -> str:
+    """Count the findings, or say that an unusable items projection left none to count."""
+    if terminal_result is not None and not terminal_result.get('projection_valid', True):
+        return 'The findings could not be read after the review; the sealed result keeps them.'
+    return 'No confirmed findings.' if not findings_count else f'Confirmed findings: {findings_count}.'
+
+
 def _render_review_context(
     context: dict[str, Any], terminal_result: dict[str, Any] | None = None, *, findings_count: int = 0,
 ) -> str:
     """Render host evidence and attributed assertions; missing facts remain unavailable."""
-    lines = ['## Review outcome',
-             'No confirmed findings.' if not findings_count else f'Confirmed findings: {findings_count}.']
+    lines = ['## Review outcome', _findings_line(terminal_result, findings_count)]
     if terminal_result is None:
         lines.append('Terminal completion is not yet available.')
     else:
@@ -256,7 +262,7 @@ def render_review_context(
         header = '\n\n'.join(rendered.split('\n\n')[:7])
     if len(header) > 8_000:
         header = ('## Review outcome\n\n'
-                  + ('No confirmed findings.' if not findings_count else f'Confirmed findings: {findings_count}.')
+                  + _findings_line(terminal_result, findings_count)
                   + '\n\n<pre>' + _escaped_excerpt(json.dumps(terminal_result, ensure_ascii=False), 7_500)
                   + '</pre>')
     verification = context.get('verification')

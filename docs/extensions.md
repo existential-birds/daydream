@@ -50,7 +50,11 @@ It runs only in the `deep` flow: a custom-named flow that lists `review` is refu
 with an extension error. A flow that lists a step name of the replaced staged reviewer
 (`intent`, `per-stack-reviews`, `per-stack-parse`, `arbiter`, `cross-stack-merge`,
 `single-stack-merge`, `supervise`) fails preflight. `exploration` is no longer a step
-of `deep`.
+of `deep`. Replacing the `review` phase (`register_phase(..., replace=True)`) does not
+replace the reviewer: the planned review is never dispatched, so the run seals without
+evidence and ends as a failed review with exit 1. Rewrite findings in a step after
+`load-items` instead; if that step leaves the items unusable, the review also ends as
+failed and its report says the findings could not be read.
 
 ### Diagram
 
@@ -92,7 +96,8 @@ preserve host schemas. The seeded prompt names are `fix`, `verify`, `fix-verify`
 `diagram_sequence`, `diagram_flowchart`, `audit`, `vet` and `plan-writer`. The review
 itself has no prompt seam: the nine names of the replaced staged reviewer (`intent`,
 `alternatives`, `per-stack`, `structural`, `generic-fallback`, `arbiter`, `supervise`,
-`suppression`, `merge`) are no longer seeded, so overriding one fails registration.
+`suppression`, `merge`) are removed. `override_prompt` accepts any name, as it always
+has, so an override of one of them still registers; nothing calls it.
 Review behavior is configured through the review profile.
 
 ### Committed-review program
