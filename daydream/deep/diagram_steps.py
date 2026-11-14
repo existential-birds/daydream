@@ -34,7 +34,6 @@ from daydream.deep.diagram_schema import (
 from daydream.deep.diagram_trigger import Eligibility, decide_eligibility
 from daydream.deep.diagram_types import DiagramResult, DiagramThresholds
 from daydream.deep.diff import _ttt_diff_text
-from daydream.deep.render import insert_diagrams_section
 from daydream.deep.settings import _resolve_config_value
 from daydream.deep.state import DeepState
 from daydream.extensions import get_registry
@@ -539,31 +538,13 @@ def _diagram_payload_without_mermaid(payload: dict[str, Any]) -> dict[str, Any]:
     return {"eligibility": payload.get("eligibility"), "results": stripped}
 
 
-def _apply_diagrams_to_report(ctx: FlowContext, blocks: str) -> None:
-    """Idempotently insert diagrams into both reports, preserving supervision and coverage text."""
-    deep_state = DeepState(ctx.data)
-    targets = [DeepArtifact.MERGED_REPORT.at(deep_state.dd)]
-    canonical = deep_state.merged_report_or_none
-    if canonical is not None:
-        targets.append(Path(canonical))
-    for target in targets:
-        if not target.is_file():
-            continue
-        text = target.read_text(encoding="utf-8")
-        target.write_text(insert_diagrams_section(text, blocks), encoding="utf-8")
-
-
 async def _step_diagram(ctx: FlowContext) -> Stop | None:
     """Persist eligibility and results even when no kind qualifies.
 
     Kind failures warn and leave reviews running. Diagram-only failures return 1
     after writing the artifact.
     """
-    result = await _generate_diagrams(ctx)
-    diagrams = DeepState(ctx.data).diagrams
-    if diagrams and diagrams["blocks"] and DeepState(ctx.data).mode != "diagram":
-        _apply_diagrams_to_report(ctx, diagrams["blocks"])
-    return result
+    return await _generate_diagrams(ctx)
 
 
 async def _generate_diagrams(

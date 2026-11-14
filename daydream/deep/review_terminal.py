@@ -30,7 +30,12 @@ from daydream.ui import print_info, print_warning
 def refresh_review_report(ctx: FlowContext, *, no_diff: bool = False) -> dict[str, Any]:
     """Refresh presentation after authorized work without refreezing or republishing review authority."""
     from daydream.artifact_visibility import review_output_path_for
-    from daydream.deep.render import insert_review_context, render_held_section, render_report
+    from daydream.deep.render import (
+        insert_diagrams_section,
+        insert_review_context,
+        render_held_section,
+        render_report,
+    )
     from daydream.deep.report_context import REPORT_CONTEXT, collect_report_context
 
     state = DeepState(ctx.data)
@@ -55,6 +60,10 @@ def refresh_review_report(ctx: FlowContext, *, no_diff: bool = False) -> dict[st
         _, anchor, body = existing.partition('# Review\n')
         if anchor:
             existing = anchor + body
+    # Diagrams are generated before the report exists, so the report takes them here.
+    blocks = (state.diagrams or {}).get('blocks')
+    if blocks:
+        existing = insert_diagrams_section(existing, blocks)
     warning = render_review_warnings(review_warnings(state.dd))
     if warning:
         existing = warning + '\n\n' + existing
