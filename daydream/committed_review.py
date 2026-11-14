@@ -1028,9 +1028,7 @@ def review_settings(config: RunConfig) -> dict[str, Any]:
         },
         "strategies": {
             "discovery": strategies["discovery.generic_fallback"].content,
-            "challenge": strategies["arbitration"].content.replace(
-                "{arbiter_input_path}", "the assignment's captured-source claim inventory"
-            ),
+            "challenge": strategies["challenge"].content,
         },
     }
 

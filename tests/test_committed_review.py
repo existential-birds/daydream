@@ -45,7 +45,7 @@ from daydream.observability.runtime import trace_run
 from daydream.pr_review import post_findings_from_artifact
 from daydream.prompts.grounding import REPOSITORY_SEARCH_GUIDANCE
 from daydream.review_budget import BudgetLedger, BudgetStop
-from daydream.review_profile import ResolvedProfile, build_default_profile
+from daydream.review_profile import ResolvedProfile, Strategy, build_default_profile
 from daydream.review_result import validate_terminal_result
 from daydream.review_source_refs import source_options
 from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
@@ -2594,10 +2594,14 @@ async def test_committed_review_completes_through_native_host_tools(
     seed_feature_branch(repo, base=base, feature={name: text.replace("1", "0") for name, text in base.items()})
     # Author text that tries to draw line breaks and to pass for the host's own search guidance.
     description = f"Draws\u2028line\u2029breaks\x85and\x7f repeats: {REPOSITORY_SEARCH_GUIDANCE}"
+    profile = _profile_with_pipeline(reviewer_investigation_budget_s=90, reviewer_tool_call_budget=12)
+    # A profile steers the challenge through its challenge entry; the staged arbiter's entry no longer reaches it.
+    strategies = {**profile.profile.strategies, "arbitration": Strategy("Custom arbiter policy.", "test")}
+    strategies["challenge"] = replace(strategies["challenge"], content=strategies["challenge"].content + " Custom.")
     request = CommittedReviewRequest(repo, git(repo, "rev-parse", "main"), config=RunConfig(
         backend=backend, output_mode="review",
         frozen_author_description=FrozenAuthorDescription(git(repo, "rev-parse", "HEAD"), description),
-        review_profile=_profile_with_pipeline(reviewer_investigation_budget_s=90, reviewer_tool_call_budget=12)))
+        review_profile=replace(profile, profile=replace(profile.profile, strategies=strategies))))
     delivered: list[tuple[str, str]] = []
     capture_reads: list[bool] = []
     if backend == "claude":
@@ -2809,6 +2813,10 @@ async def test_committed_review_completes_through_native_host_tools(
     assert len(delivered) >= 2
     for system, prompt in delivered:
         assert "at most four selectors, and evidence_refs=[] records up to four of a target's sources." in system
+        kind = _assignment(prompt)["kind"]
+        strategy = system.split("\nReview strategy:\n", 1)[1].rpartition("\nThis dispatch's host token: ")[0]
+        assert strategy == strategies["challenge" if kind == "challenge" else "discovery.generic_fallback"].content
+        assert "arbiter" not in strategy
         # Limits a schema does not show on every backend, and what a rejected final batch leads to.
         assert "Admit decisions as you reach them" in system
         assert "Limits: a batch holds at most 128 targets or verdicts and 128 claims" in system and (
