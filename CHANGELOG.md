@@ -392,7 +392,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   text sizes, part ids as target ids, the assigned and supporting selector rules, and what
   follows a rejected final submission) and ask it to admit decisions as it reaches them.
   Before, a reviewer learned several of them only from rejections, on Codex without a
-  schema that shows them. Each assignment's instructions grow by about 1.2 KB. The Pi
+  schema that shows them. Each assignment's instructions grow by about 1.6 KB. The Pi
   `review_source` description no longer tells the reviewer to omit arguments its schema
   requires ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
 - When a committed review ends unfinished because current work ran out of tool calls or

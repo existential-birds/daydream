@@ -857,18 +857,21 @@ structured_output submits the
 final batch and ends this assignment; call it alone in a completed generation. Every batch is atomic: a
 rejected batch changes nothing and may be corrected within the original cumulative allowance. Undecided
 targets remain typed unfinished work. Empty findings are legitimate.
-Limits: a batch holds at most 128 targets or verdicts and 128 claims in 131072 bytes of arguments; the review
-retains at most 128 claims. reason holds at most 1024 characters, any other text 1 to 4096; a not_reviewed
-reason and verdict grounds are never blank. target_id is a catalog id: a file split into parts is decided by
-its part ids, never by its path. Non-empty evidence_refs of a reviewed target include one of its own
+Limits: a batch holds at most 128 targets or verdicts and 128 claims in 131072 bytes of arguments, and one
+evidence_refs array 8192 bytes. reason holds at most 1024 characters, an id 512 (a new claim's uid is empty),
+source_uids 128 unique ids and any other text 1 to 4096; a not_reviewed reason and verdict grounds are never
+blank. The review retains at most 128 claims; retained claims share one byte capacity and target reasons
+another. target_id is a catalog id: a file split into parts is decided by its part ids, never by its path.
+A claim names a changed file. Non-empty evidence_refs of a reviewed target include one of its own
 source_ids; a claim's are never empty and, like a verdict's, include an assigned source_id. An assigned
 source_range only narrows the offered range. A supporting selector names a regular UTF-8 file of at most
 8 MiB inside the repository at the captured revision, with source_range inside its lines. review_source
-takes target_id or path, never both. A rejection names each distinct violation in its batch, how many items
-broke it and the first three of them. A rejected final
+takes target_id or path, never both. A schema rejection names its first fault; any other names each distinct
+violation in its batch, how many items broke it and the first three of them. A rejected final
 structured_output keeps its reserved start: correct it and submit again. Past 32 denied starts and such
-rejections the assignment closes; if it ends on a rejected final batch, the host keeps that batch's items
-that are valid alone and the rest stay unfinished.
+rejections the assignment closes. If its last submission is then a rejected final batch, the host keeps that
+batch's items that are valid alone, except any whose target or claim another item was refused for and, when
+a claim was refused, its reviewed targets; the rest stays unfinished.
 Capacity: instruction allowances are dispatch-time snapshots. review_source and review_admit results report
 current host capacity after charging that call, including protected reserves you cannot spend.
 Discovery must decide every target explicitly. Challenge must seek counterevidence for each assigned claim
