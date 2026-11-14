@@ -209,7 +209,7 @@ class HostToolBinding:
         self._accept = accept
         self._allowed_tools = frozenset(allowed_tools) if allowed_tools is not None else None
         self._schema: dict[str, Any] | None = None
-        self._session_active = self._cleanup_failed = self._acceptance_started = False
+        self._session_active = self._cleanup_failed = self._acceptance_started = self._final_charged = False
         self._accepted_result: dict[str, Any] | None = None
         self._accepted_identity: tuple[str, str] | None = None
         self._admitted: set[str] = set()
@@ -298,9 +298,10 @@ class HostToolBinding:
                                           code="native_correlation", preacceptance=False))
         rejection = HostToolRejected(message, code=code)
         if self.budget.remaining_tool_calls == 0:
-            if self.protected_submission:
-                # Only the reserved start's own submission leaves a protected binding without calls:
-                # refund it so the rejection stays correctable, within the bound on denied starts.
+            if self.protected_submission and self._final_charged:
+                # The reserved start was charged for this submission: refund it so the rejection stays
+                # correctable, within the bound on denied starts. Calls a sibling spent are never refunded.
+                self._final_charged = False
                 self.denied_starts += 1
                 if self.denied_starts <= PROTECTED_DENIAL_LIMIT:
                     self.budget.refund(self.budget.charged - 1)
@@ -365,6 +366,7 @@ class HostToolBinding:
             raise self.fail(HostToolCallBudgetExceeded(
                 "Tool-call allocation exhausted; no further native calls are authorized",
                 preacceptance=not self.possibly_accepted))
+        self._final_charged = name == NATIVE_SUBMIT
         if self._allowed_tools is not None and name not in self._allowed_tools:
             raise self._reject("This tool is not granted by the operator's read-only policy; use only granted tools",
                                code="permission_denied")

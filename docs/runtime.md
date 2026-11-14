@@ -663,9 +663,11 @@ including parallel-batch members, is counted in `denied_starts` and refused with
 correctable `capacity_protected` without charging or closing authority. A
 `structured_output` charged on that last start and then rejected, for its schema, size or
 content, keeps the start: the charge is refunded, the rejection stays correctable and it
-counts as one more denied start. Past 32 denied starts the binding fails closed with
-`capacity_exhausted`, and the assignment deadline applies throughout; a binding without
-a protected start keeps the fatal outcome for a rejection on its last start.
+counts as one more denied start. Only that charged start is refunded: a rejection that
+finds no call left because a sibling assignment spent the shared allowance keeps the
+fatal outcome. Past 32 denied starts the binding fails closed with `capacity_exhausted`,
+and the assignment deadline applies throughout; a binding without a protected start
+keeps the fatal outcome for a rejection on its last start.
 `capacity()` reports both counts; the ledger observes denied starts without charging them. Pi and Claude deny prospectively at admission,
 so a denied start is still observed and reported as [overshoot](observability.md#committed-review-evidence)
 that never reduces later reserves. Codex denies its host calls the same way, but the tools

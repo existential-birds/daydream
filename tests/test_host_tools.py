@@ -818,7 +818,8 @@ async def test_http_readiness_refuses_native_limits_or_host_schemas_before_provi
     assert binding.calls == 0
 
 
-@pytest.mark.parametrize("case", ["protected", "denial-bound", "rejection-bound", "unprotected"])
+@pytest.mark.parametrize("case", [
+    "protected", "denial-bound", "rejection-bound", "uncharged", "refunded", "unprotected"])
 async def test_http_parallel_batch_cannot_consume_the_protected_submission_start(case: str) -> None:
     """With 95 of 96 starts charged, a two-member batch is denied and submission stays possible.
 
@@ -828,7 +829,8 @@ async def test_http_parallel_batch_cannot_consume_the_protected_submission_start
     that charges or fatally rejects a correctable denial, renews remaining capacity,
     loops on denials forever, or changes the unprotected deep-review behavior. A final
     submission rejected on the reserved start used to be fatal, losing the whole batch;
-    it is refunded and correctable under the same bound as the denials.
+    it is refunded and correctable under the same bound as the denials. That refund was
+    also given to a rejected submission that had charged no start, out of a sibling's calls.
     """
     installed: list[Any] = []
     invalid = {**_RESULT, "verdict": "invalid"}
@@ -837,7 +839,8 @@ async def test_http_parallel_batch_cannot_consume_the_protected_submission_start
             raise HostToolRejected("verdict: choose complete")
         installed.append(value)
         return value
-    binding = HostToolBinding(budget=BudgetLedger("review", deadline=time.monotonic() + 10, limit=96), accept=accept,
+    allowance = BudgetLedger("review", deadline=time.monotonic() + 10, limit=96)
+    binding = HostToolBinding(budget=allowance.carve("assignment"), accept=accept,
                               host_tools={"review_source": HostTool(_LOOKUP_SCHEMA, lambda value: value)},
                               protected_submission=case != "unprotected")
     async with _endpoint(binding) as client:
@@ -859,6 +862,19 @@ async def test_http_parallel_batch_cannot_consume_the_protected_submission_start
         assert (binding.calls, binding.denied_starts, binding.budget.charged) == (97, 2, 95)
         assert binding.remaining_tool_calls == 1
         assert binding.capacity()["protected_submission_calls"] == 1 and binding.capacity()["denied_starts"] == 2
+        if case in {"uncharged", "refunded"}:
+            if case == "refunded":
+                # The binding's own rejected final submission is refunded once,
+                binding.admit("final", NATIVE_SUBMIT, invalid, terminal=True)
+                with pytest.raises(HostToolRejected, match="choose complete"):
+                    binding.submit("final", invalid)
+            # and when a sibling then takes the allowance's last start, a submission rejected without a
+            # charged final start of its own is refunded nothing: it ends as without a reserved start.
+            allowance.charge()
+            with pytest.raises(HostToolFatal, match="no calls remain for correction"):
+                binding.submit("stray", float("nan"))
+            assert (binding.budget.charged, binding.budget.refunded, allowance.charged) == (95, case == "refunded", 96)
+            return
         if case != "protected":
             # Denied starts and rejected final submissions share the one bound, whichever event passes it.
             for index in range(policy.PROTECTED_DENIAL_LIMIT - 2):
