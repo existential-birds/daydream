@@ -138,6 +138,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     alternatives files. Both retain the sealed result as `deep/committed-review.json`; the
     dataset record does not carry it.
 
+- **Changed defaults (0.y.z):** committed review's allowances grow with the change the
+  way the staged reviewer's did. The profile's `reviewer_tool_call_budget` and
+  `reviewer_investigation_budget_s` are multiplied by the larger of the diff tier (3, 6
+  or 9 above 64 KiB or 1,000 lines, 256 KiB or 5,000, 512 KiB or 10,000) and one per
+  four planned batches. A review of a large change therefore uses far more tool calls,
+  time and tokens by default than before, in proportion to its size: a 237-file change
+  of 1.47 MB that plans 134 batches on Pi had 120 tool calls and a 2,400 s window with
+  one discovery conversation, and now has 4,080 tool calls across 134 discovery
+  assignments, a cross-assignment and the challenge within 40,380 s. The staged reviewer
+  at v0.34.0 planned 7,344 tool calls in 138 first-pass invocations within 37,800 s for
+  it. With the default profile `review_wall_budget_s` grows by the tier, to hours for a
+  very large change; in every other profile it stays a fixed ceiling, so an embedder
+  with a hard outer deadline must set `review_wall_budget_s` to it. Every sealed result
+  now records `scale` and `effective_tool_calls` in `settings.limits` beside the
+  profile's own values, for small changes too, and the profile shown to the reviewer in
+  each assignment carries them; the profile digest does not change. A report that names
+  the profile keys raising a spent allowance now also says that the review multiplies
+  `reviewer_tool_call_budget` and `reviewer_investigation_budget_s` by that `scale` and,
+  for spent time, that `review_wall_budget_s` grows with the diff in the default profile
+  only
+  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
+- A change of more than four batches is reviewed as one discovery assignment per batch
+  under both `broad` and `adaptive`, followed by the cross-assignment and the challenge.
+  They run ten at a time on Pi and eight on Claude and Codex by default;
+  `DAYDREAM_FANOUT_CONCURRENCY` changes that, up to ten. Such a change can no longer be
+  reviewed in one conversation under `broad`, and
+  `settings.assignment_policy.decomposed` can be `true` there; the two policies now differ
+  only for changes of two to four batches. A change of at most four batches whose diff is
+  in the first tier is planned under `broad` exactly as before
+  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
+- A split discovery or follow-up assignment receives each of its targets in its first
+  message as `review_source` returns it, instead of fetching each with a charged call,
+  so its prompt and recorded trajectory are larger. Because those bytes are untrusted
+  and now sit in a message of the host's, each header and description line of a supplied
+  target begins with a random token that the message's first line announces, and the
+  instructions of such an assignment say that only those lines are host-authored. This
+  includes `adaptive` reviews of two to four batches
+  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 - Trace agent spans record each retry-ladder stop as a `daydream.retry.stop` event carrying
   the trajectory's `agent_budget_stop` fields as `daydream.retry.*`, with or without a
   trajectory recorder. The run span carries the run's GitHub repository and, when known,
@@ -481,6 +519,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Committed review on Pi no longer aborts when one model generation issues more than
+  three host-tool calls, or when a host callback outlasts the three-second transport
+  allowance of a call waiting behind it. Before, the unanswered calls ended the review as
+  `backend_failure` with "This operation was aborted". Pi now runs every tool call of a
+  generation that calls `review_source` or `review_admit` in order, so each is answered;
+  the stock reads in such a generation no longer run concurrently
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+- A final `structured_output` batch that committed review rejects on its reserved last
+  tool start can now be corrected. Before, that rejection was fatal ("no calls remain
+  for correction") and every decision in the batch was lost. The start is kept: its
+  charge is refunded and the rejection stays correctable, up to the existing bound of 32
+  denied starts, which these rejections now share, and the assignment deadline. A
+  reviewer that keeps resubmitting a rejected batch is paid for until that bound, and an
+  execution entry's `observed_starts` can exceed its `allocation` while `overshoot` stays
+  0. Bindings without a reserved start keep the fatal outcome
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+- A committed-review assignment that ends on a rejected final batch no longer loses the
+  whole batch. When its work closes without an accepted final submission and that batch
+  was the last one it submitted, the target decisions, verdicts and claims in it that are
+  valid on their own are retained as partial evidence. The review is then sealed
+  `incomplete`, unless later work finishes the rest. Batches submitted while the
+  assignment is live stay atomic. Nothing is kept that the batch as submitted would not
+  have done:
+  - no item whose target or claim another item of the batch was refused for;
+  - no `reviewed` decision and no verdict when a claim or claim revision of the batch was
+    refused. Those targets stay for later work, and such a challenge batch keeps nothing
+    of its judgments: its claims are judged again or reported unresolved;
+  - nothing when an item of the batch cannot be checked at all, or when the reviewer
+    replaced the batch with any later submission.
+
+  The sealed result does not mark such items; their work is recorded as not accepted. If
+  the retained items together exceed retained capacity, nothing of the batch is kept
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+- One committed-review rejection now names every distinct violation in the batch instead
+  of the first one only. Each states how many targets, verdicts or claims broke it and
+  the first three of them: quoted ids cut to 160 characters, or the selector itself (a
+  supporting path or a source id, with the allowed lines when a range was refused), so
+  several unknown source ids or out-of-range selections are one violation. Ids are
+  dropped before a violation when the 1,024-byte rejection bound is tight. A schema
+  rejection still names its first fault. The rule that references need an assigned
+  `source_id` no longer calls a claim or verdict "a reviewed target"
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+- A supporting `{path, side, source_range, basis}` selector is no longer refused because
+  its whole file exceeds 65,536 bytes, a rule nothing stated to the reviewer. The existing
+  8 MiB source retrieval limit still applies, and the retained reference is unchanged: the
+  whole file's digest and the cited range
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+- The committed-review instructions now state the limits a reviewer is held to (batch and
+  text sizes, part ids as target ids, the assigned and supporting selector rules, and what
+  follows a rejected final submission) and ask it to admit decisions as it reaches them.
+  Before, a reviewer learned several of them only from rejections, on Codex without a
+  schema that shows them. Each assignment's instructions grow by about 1.6 KB. The Pi
+  `review_source` description no longer tells the reviewer to omit arguments its schema
+  requires ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+- When a committed review ends unfinished because current work ran out of tool calls or
+  time, its report now says so in one sentence under "Unfinished work" and names the
+  `[pipeline]` profile keys that raise the allowance: `reviewer_tool_call_budget`, or
+  `reviewer_investigation_budget_s` with `review_wall_budget_s`, which caps the review
+  window ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
 - Committed review no longer rejects a reviewed target submitted with empty
   `evidence_refs` when the target has more than four sources. The host expanded `[]` to
   every source of the target and then refused its own expansion ("supply at most four
@@ -586,6 +683,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checked only under the fork's name, so the exclusion missed it and its findings could
   reach the corpus and training input
   ([#1684](https://github.com/existential-birds/daydream/issues/1684)).
+- Committed review on Pi and Codex no longer holds the host's event loop while it
+  re-reads the captured source for each `review_admit` and final submission. That read
+  grows with the repository (about 0.2 s for 700 files, 0.6 s for 5,000 and 2.7 s for
+  20,000 on the measuring host), and with several Pi assignments running at once it made
+  the others' three-second control requests time out, which aborted those assignments.
+  The endpoint now performs the read on a worker thread when the request arrives, one
+  such read at a time, and then runs the synchronous admission; a failed read is
+  repeated and reported by the admission as before. What changes: the integrity check
+  for an admission on Pi and Codex now runs just before the callback rather than inside
+  it, so a change to the capture during that one callback's own resolution is not caught
+  at that admission; per-reference blob checks and the seal-time whole-capture check
+  still apply, and a persisting change still fails the review at sealing. A submission
+  that is then rejected for its content has paid for one read, including a rejected
+  final submission whose reserved start is refunded: up to 32 such reads per assignment
+  beyond its charged starts. Claude's in-process admissions, and keeping a rejected final
+  batch when its work closes, still read on the loop
+  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 
 ## [0.34.0] - 2026-11-03
 

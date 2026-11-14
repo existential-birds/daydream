@@ -558,7 +558,8 @@ class _CodexHostEndpoint(HostToolEndpoint):
             return types.ServerResult(types.ListToolsResult(tools=tools))
 
         async def call_tool(request: types.CallToolRequest) -> types.ServerResult:
-            failed, blocks = self._call(request.params.name, request.params.arguments or {})
+            name = request.params.name
+            failed, blocks = await self.admitted(name, lambda: self._call(name, request.params.arguments or {}))
             return types.ServerResult(types.CallToolResult(
                 content=[types.TextContent(type="text", text=text) for text in blocks], isError=failed))
 
@@ -596,7 +597,8 @@ class _CodexHostEndpoint(HostToolEndpoint):
                 await http.startup(sockets=[listener])
                 started.set_result(None)
                 await self._stop.wait()
-                await http.shutdown(sockets=[listener])
+            # The manager has cancelled its handlers, one of which may await a slow check; nothing is left to drain.
+            await http.shutdown(sockets=[listener])
 
         self._serving = asyncio.create_task(serve())
         await asyncio.wait({self._serving, started}, return_when=asyncio.FIRST_COMPLETED)

@@ -10,6 +10,10 @@ from daydream.artifact_visibility import ArtifactSession
 from daydream.committed_review_model import validate_committed_result
 from daydream.json_utils import atomic_write_bytes, atomic_write_json
 
+# The [pipeline] profile keys that raise the allowance behind each exhaustion reason; the wall caps the time.
+_ALLOWANCE_KEYS = {'host_wall_budget_exhaustion': ('reviewer_investigation_budget_s', 'review_wall_budget_s'),
+                   'host_tool_budget_exhaustion': ('reviewer_tool_call_budget',)}
+
 
 def _code(value: object) -> str:
     return '<code>' + html.escape(str(value)) + '</code>'
@@ -28,6 +32,16 @@ def render_committed_review(payload: Mapping[str, Any]) -> str:
     ]
     if terminal['reason_codes']:
         lines.append('Unfinished work: ' + ', '.join(_code(reason) for reason in terminal['reason_codes']) + '.')
+    keys = [_code(key) for reason, names in _ALLOWANCE_KEYS.items() if reason in terminal['reason_codes']
+            for key in names]
+    if keys:
+        wall = 'host_wall_budget_exhaustion' in terminal['reason_codes']
+        lines.append('The review used up its allowance before it finished; raise ' + ' and '.join(keys)
+                     + f" under {_code('[pipeline]')} in the review profile. The review multiplies "
+                     + f"{_code('reviewer_tool_call_budget')} and {_code('reviewer_investigation_budget_s')} by the "
+                     + f"{_code('scale')} its {_code('settings.limits')} record"
+                     + (f"; {_code('review_wall_budget_s')} caps the whole review and grows with the diff in the "
+                        "default profile only." if wall else "."))
     lines.extend(['', '## Findings', ''])
     if not payload['findings']:
         lines.append('No confirmed findings.')

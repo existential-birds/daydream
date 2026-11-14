@@ -118,7 +118,7 @@ async def plan_committed_review(
     from daydream import committed_review
     from daydream.run_config import _resolved_backend_name
 
-    settings, window = committed_review.review_settings(ctx.config)
+    settings = committed_review.review_settings(ctx.config)
     description = _author_description(ctx)
     if description is not None:
         # Captured untrusted author context: never authoritative over a claim.
@@ -133,7 +133,7 @@ async def plan_committed_review(
     state = DeepState(ctx.data)
     program = await committed_review.plan_review(
         ctx.config, ctx.work, backends, settings, run_id=run_id, revision=revision, diff_path=state.diff_path,
-        index_path=index_path, files=files, started=started, window=window,
+        index_path=index_path, files=files, started=started,
     )
     ctx.data["committed_review"] = program
     ctx.data["review_coverage"] = program.review.coverage

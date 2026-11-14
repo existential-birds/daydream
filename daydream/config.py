@@ -21,6 +21,10 @@ DEFAULT_WALL_BUDGET_S = 1800.0
 # Base cumulative tool calls for one review: discovery and its challenge share them (#1762).
 REVIEWER_TOOL_CALL_BUDGET = 120
 
+# Batches one base allowance covers: committed review scales its allowance by one per this
+# many planned batches and holds at most this many in one conversation: docs/runtime.md.
+REVIEWER_BATCHES_PER_ALLOWANCE = 4
+
 # Allow target test suites more wall time than ordinary turns while bounding hangs.
 TEST_WALL_BUDGET_S = 3600.0
 

@@ -818,7 +818,8 @@ async def test_http_readiness_refuses_native_limits_or_host_schemas_before_provi
     assert binding.calls == 0
 
 
-@pytest.mark.parametrize("case", ["protected", "denial-bound", "unprotected"])
+@pytest.mark.parametrize("case", [
+    "protected", "denial-bound", "rejection-bound", "uncorrelated", "host-call", "unprotected"])
 async def test_http_parallel_batch_cannot_consume_the_protected_submission_start(case: str) -> None:
     """With 95 of 96 starts charged, a two-member batch is denied and submission stays possible.
 
@@ -826,10 +827,16 @@ async def test_http_parallel_batch_cannot_consume_the_protected_submission_start
     final batch could never be submitted. Existing allowance tests admit one call at a
     time and only prove that over-limit starts close authority; they miss an endpoint
     that charges or fatally rejects a correctable denial, renews remaining capacity,
-    loops on denials forever, or changes the unprotected deep-review behavior.
+    loops on denials forever, or changes the unprotected deep-review behavior. A final
+    submission rejected on the reserved start used to be fatal, losing the whole batch;
+    it is refunded and correctable under the same bound as the denials. That refund was
+    also given to a rejection that was not the final submission's own.
     """
     installed: list[Any] = []
+    invalid = {**_RESULT, "verdict": "invalid"}
     def accept(value: dict[str, Any]) -> dict[str, Any]:
+        if value == invalid:
+            raise HostToolRejected("verdict: choose complete")
         installed.append(value)
         return value
     binding = HostToolBinding(budget=BudgetLedger("review", deadline=time.monotonic() + 10, limit=96), accept=accept,
@@ -838,7 +845,7 @@ async def test_http_parallel_batch_cannot_consume_the_protected_submission_start
     async with _endpoint(binding) as client:
         assert (await _ready(client))["ready"] is True
         for index in range(95):
-            binding.admit(f"read-{index}", "read", None)
+            binding.admit(f"read-{index}", "read" if index else "review_source", None)
         members = [(await client.post("/admit", json={"id": f"member-{name}", "name": name, "arguments": None})).json()
                    for name in ("read", "review_source")]
         if case == "unprotected":
@@ -854,22 +861,59 @@ async def test_http_parallel_batch_cannot_consume_the_protected_submission_start
         assert (binding.calls, binding.denied_starts, binding.budget.charged) == (97, 2, 95)
         assert binding.remaining_tool_calls == 1
         assert binding.capacity()["protected_submission_calls"] == 1 and binding.capacity()["denied_starts"] == 2
-        if case == "denial-bound":
+        if case in {"uncorrelated", "host-call"}:
+            # Only a final submission's own start is refunded. One refused at its admission is,
+            with pytest.raises(HostToolRejected, match="Invalid structured_output arguments"):
+                binding.admit("unkeyable", NATIVE_SUBMIT, float("nan"), terminal=True)
+            assert (binding.remaining_tool_calls, binding.budget.refunded) == (1, 1)
+            # but while the next one is admitted and pending, a rejection that is not its own stays fatal
+            # and refunds nothing: a submission matching no admitted call, or an earlier host tool's call.
+            binding.admit("final", NATIVE_SUBMIT, invalid, terminal=True)
+            with pytest.raises(HostToolFatal, match="no calls remain for correction"):
+                if case == "uncorrelated":
+                    binding.submit("stray", float("nan"))
+                else:
+                    binding.call("read-0", "review_source", {"undeclared": 1})
+            assert (binding.budget.charged, binding.budget.refunded) == (96, 1)
+            return
+        if case != "protected":
+            # Denied starts and rejected final submissions share the one bound, whichever event passes it.
             for index in range(policy.PROTECTED_DENIAL_LIMIT - 2):
                 with pytest.raises(HostToolRejected):
-                    binding.admit(f"retry-{index}", "read", None)
-            final = (await client.post("/admit", json={"id": "one-too-many", "name": "read",
-                                                       "arguments": None})).json()
+                    # The last event inside the bound is of the kind that then passes it. A denied
+                    # structured_output that is not the sole final call counts as a submission start too.
+                    if index % 2 == (case == "denial-bound"):
+                        binding.admit(f"retry-{index}", NATIVE_SUBMIT, None)
+                    else:
+                        binding.admit(f"final-{index}", NATIVE_SUBMIT, invalid, terminal=True)
+                        binding.submit(f"final-{index}", invalid)
+            assert (binding.remaining_tool_calls, binding.budget.charged) == (1, 95)
+            assert binding.submissions == policy.PROTECTED_DENIAL_LIMIT - 2
+            name = "read" if case == "denial-bound" else NATIVE_SUBMIT
+            final = (await client.post("/admit", json={"id": "one-too-many", "name": name, "arguments": invalid,
+                                                       "terminal": name == NATIVE_SUBMIT})).json()
+            if case == "rejection-bound":
+                assert final == {"id": "one-too-many", "allowed": True}
+                final = (await client.post("/submit", json={"id": "one-too-many", "arguments": invalid})).json()
+                assert "no calls remain for correction" in final["error"] and "choose complete" in final["error"]
             assert final["outcome"] == "fatal" and final["code"] == "capacity_exhausted"
             assert not binding.authority_open and binding.denied_starts == policy.PROTECTED_DENIAL_LIMIT + 1
-            assert binding.budget.charged == 95 and installed == []
+            assert binding.budget.charged == 95 + (case == "rejection-bound") and installed == []
             return
-        assert (await client.post("/admit", json={"id": "submit", "name": NATIVE_SUBMIT,
-                                                  "arguments": _RESULT, "terminal": True})).json()["allowed"]
-        assert (await client.post("/submit", json={"id": "submit", "arguments": _RESULT})).json()["accepted"]
-        assert binding.budget.charged == 96 and binding.remaining_tool_calls == 0
+        for identifier, arguments in (("rejected", invalid), ("submit", _RESULT)):
+            assert (await client.post("/admit", json={"id": identifier, "name": NATIVE_SUBMIT,
+                                                      "arguments": arguments, "terminal": True})).json()["allowed"]
+            response = (await client.post("/submit", json={"id": identifier, "arguments": arguments})).json()
+            if identifier == "rejected":
+                # The reserved start is kept: the charge is refunded and the rejection stays correctable.
+                assert response["outcome"] == "correctable" and response["accepted"] is False
+                assert "choose complete" in response["error"] and binding.authority_open
+                assert (binding.remaining_tool_calls, binding.denied_starts, binding.budget.refunded) == (1, 3, 1)
+        assert response["accepted"]
+        # The refunded start is observed but neither charged nor overshoot; the two denials are overshoot.
+        assert (binding.budget.observed, binding.budget.charged, binding.remaining_tool_calls) == (99, 96, 0)
         extra = (await client.post("/admit", json={"id": "extra", "name": "read", "arguments": None})).json()
         # Past the allowance a start is terminal, never another denial; acceptance already crossed.
         assert extra["outcome"] == "indeterminate" and extra["code"] == "capacity_exhausted"
         assert not binding.authority_open and binding.accepted
-    assert installed == [_RESULT] and binding.calls == 99 and binding.denied_starts == 2
+    assert installed == [_RESULT] and binding.calls == 100 and binding.denied_starts == 3
