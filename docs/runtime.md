@@ -180,22 +180,32 @@ and external delivery remain separate integration work.
 
 ### Assignment policy and work
 
-The run's resolved review profile selects the policy with `[pipeline] assignment_policy`,
-whichever source supplied the profile. `"broad"` (the default) dispatches one
-discovery work over every target. `"adaptive"` partitions the inventory with
-`StageInputFactory.assignment_batches` (whole parts, at most four files within the
-transport's assignment byte allowance, inventory order) into concurrent local discovery work under
-`anyio.CapacityLimiter(effective_fanout_concurrency(10, backend))`, each in a forked
-trajectory. It decomposes only when every batch keeps a usable two-start allocation
-after the cross-assignment floor; otherwise it runs one broad assignment. Any other value
-fails the profile, and committed review refuses a profile built in code with one before
-dispatching work. No CLI route reaches committed review until #1641. Other review routes do not
-act on the key, but it still changes the profile digest, so their cached reviews miss.
-There is no numeric threshold or default change (#1641). `settings.assignment_policy`
-records `name`, `decomposed`, `planned_assignments` and `cross_assignment`
-(`required` or `not_applicable`).
+The inventory is partitioned with `StageInputFactory.assignment_batches` (whole parts,
+at most four files within the transport's assignment byte allowance, inventory order).
+One conversation holds at most four batches, the batches one base allowance covers
+(`REVIEWER_BATCHES_PER_ALLOWANCE`), so the review splits into one local discovery work
+per batch when:
 
-After decomposition, follow-up work inherits a closed local work's unfinished targets
+```text
+split  <=>  B > 1  and  (adaptive or B > 4)  and  I - X >= 2 * B
+```
+
+`B` is the number of batches; `I` and `X` are the discovery and cross-assignment
+allowances defined below. The run's resolved review profile selects the policy
+with `[pipeline] assignment_policy`, whichever source supplied the profile: `"broad"`
+(the default) keeps a change of at most four batches in one discovery work over every
+target, and `"adaptive"` splits from two batches. With one batch, and above four, both
+give the same plan. A profile too small to leave every batch two starts runs one broad
+assignment. Split work runs concurrently under
+`anyio.CapacityLimiter(effective_fanout_concurrency(10, backend))`, each in a forked
+trajectory. Any other value fails the profile, and committed review refuses a profile
+built in code with one before dispatching work. No CLI route reaches committed review
+until #1641. Other review routes do not act on the key, but it still changes the profile
+digest, so their cached reviews miss. `settings.assignment_policy` records `name`,
+`decomposed` (which can be `true` under `broad`), `planned_assignments` and
+`cross_assignment` (`required` or `not_applicable`).
+
+After the split, follow-up work inherits a closed local work's unfinished targets
 only when that work admitted progress; work that failed native-capacity preflight
 without progress is split in two instead. The host then always dispatches one
 `cross_assignment` work over the original captured source and full catalog, even when
@@ -222,14 +232,34 @@ remains fatal.
 
 All work draws on one [budget ledger](#budget-ledger) for the review window; each
 dispatch runs on its own child ledger carved from it, so parallel siblings never share a
-count. Its limits come from the review profile only: `[pipeline]
-reviewer_investigation_budget_s`, `review_wall_budget_s` and `reviewer_tool_call_budget`,
-plus a fixed 120 s finalization reserve. Investigation receives half of the
-tool allowance and challenge the remainder. Under decomposition, cross-assignment keeps
-`max(2, half // 4)` starts; local work runs until 3/8 of the review window,
-cross-assignment until 1/2 and challenge for the rest. Otherwise discovery runs until
-1/2. `finalization_s` is always reserved. Earlier work cannot spend later reserves;
-unspent capacity carries forward. Challenge takes every pending revision not held by
+count. Its limits come from the review profile's `[pipeline]`
+keys and the size of the change:
+
+```text
+T, INV, WALL = reviewer_tool_call_budget, reviewer_investigation_budget_s, review_wall_budget_s
+tier   = 1, or 3 / 6 / 9 for a diff over 64 KiB or 1,000 lines / 256 KiB or 5,000 / 512 KiB or 10,000
+scale  = max(tier, ceil(B / 4))
+T'     = T * scale                                  tool calls
+W      = min(INV * scale + 120, WALL * w) - 120     review window; w = tier for the default profile, else 1
+I      = T' // 2                                    discovery; challenge keeps T' - I
+X      = max(2, I // 4)                             cross-assignment, when split
+```
+
+`scale` is the staged reviewer's factor, computed once per review. The profile keys are
+the bases it multiplies, so a review of a large change uses more tool calls, time and
+tokens than the keys state. `review_wall_budget_s` grows with the tier only in the
+default profile; in any explicit profile it is a fixed ceiling on the whole review, so
+set it to the longest review you accept. The 120 s are a fixed finalization reserve.
+`settings.limits` records the profile's `tool_calls` and `investigation_s` beside
+`scale`, `effective_tool_calls` (`T'`) and `effective_investigation_s` (`W`).
+
+When split, each batch's work receives an equal share of `I - X` (earlier work takes
+the remainder) and runs until 3/8 of the review window, cross-assignment until 1/2 and
+challenge for the rest. Otherwise discovery receives `I` and runs until 1/2. Work the
+local deadline cuts short or finds expired closes with `host_wall_budget_exhaustion`
+and keeps what it admitted; the cross-assignment inherits the rest. Earlier work cannot
+spend later reserves; unspent capacity carries forward. Challenge takes every pending
+revision not held by
 live work in a fresh context. It is re-dispatched for new revisions, after a round
 that resolved a verdict or changed a claim, or once after an evidence-free failure; an
 unresolved verdict keeps the revision with its work, so the next round supersedes it.

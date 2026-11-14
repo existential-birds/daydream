@@ -73,6 +73,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Changed defaults (0.y.z):** committed review's allowances grow with the change the
+  way the staged reviewer's did. The profile's `reviewer_tool_call_budget` and
+  `reviewer_investigation_budget_s` are multiplied by the larger of the diff tier (3, 6
+  or 9 above 64 KiB or 1,000 lines, 256 KiB or 5,000, 512 KiB or 10,000) and one per
+  four planned batches. A review of a large change therefore uses far more tool calls,
+  time and tokens by default than before, in proportion to its size. With the default
+  profile `review_wall_budget_s` grows by the tier, to hours for a very large change; in
+  any explicit profile it stays a fixed ceiling, so an embedder that relied on
+  `reviewer_investigation_budget_s` as the ceiling of a review must set
+  `review_wall_budget_s` to the longest review it accepts. `settings.limits` records
+  `scale` and `effective_tool_calls` beside the profile's own values; the profile digest
+  does not change
+  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
+- A change of more than four batches is reviewed as one discovery assignment per batch
+  under both `broad` and `adaptive`, followed by the cross-assignment and the challenge.
+  It can no longer be reviewed in one conversation under `broad`, and
+  `settings.assignment_policy.decomposed` can be `true` there; the two policies now differ
+  only for changes of two to four batches. A change of at most four batches whose diff is
+  in the first tier is planned under `broad` exactly as before
+  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 - Trace agent spans record each retry-ladder stop as a `daydream.retry.stop` event carrying
   the trajectory's `agent_budget_stop` fields as `daydream.retry.*`, with or without a
   trajectory recorder. The run span carries the run's GitHub repository and, when known,

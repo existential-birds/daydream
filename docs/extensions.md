@@ -164,7 +164,8 @@ independently of extension flow steps/builders. Captured local and committed sub
 follow the [captured-source contract](runtime.md#captured-local-source). The review profile
 selects its [assignment policy](runtime.md#assignment-policy-and-work) and its work records are
 host-owned; profile strategy text cannot change work authority or drop host-appended assignment
-context. Broader route integration and default cutover are #1641 after #1686
+context. The same section defines how its `[pipeline]` time and tool-call keys grow with the
+change. Broader route integration and default cutover are #1641 after #1686
 comparison/owner acceptance; final retirement is #1687.
 
 ### Plan-writer

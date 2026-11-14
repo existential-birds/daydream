@@ -1393,11 +1393,17 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
     continuation fragments) is reachable by charged lookups. A late discovery failure
     keeps earlier admitted decisions and the challenged finding, types every
     undecided target as unfinished, and cannot report complete coverage.
+
+    One conversation could not hold a change this size: under ``broad`` it is one
+    assignment per batch, on an allowance and a window that grow with the change up
+    to the explicit profile's wall.
     """
     repo = tmp_path / "source"
-    # About 20k changed lines across more than 512 files.
-    base_files = {f"pkg/module_{index:04d}.py": "BASE = 0\n" for index in range(600)}
-    feature = {path: "".join(f"ITEM_{line} = {line}\n" for line in range(33)) for path in base_files}
+    # About 20k changed lines in more than 512 targets: each file's 36 hunks exceed one assignment and split.
+    base_files = {f"pkg/module_{index:02d}.py": "".join(f"BASE_{line} = 0\n" for line in range(288))
+                  for index in range(15)}
+    feature = {path: "".join(f"BASE_{line} = 0\n" + "".join(f"ITEM_{line}_{item} = {item}\n" for item in range(38))
+                             * (line % 8 == 0) for line in range(288)) for path in base_files}
     feature["zz_late/target.py"] = "LATE_MARKER = 'late'\n" + _LONG_LINE
     head = seed_feature_branch(repo, base=base_files, feature=feature)
     base = git(repo, "rev-parse", "main")
@@ -1411,6 +1417,7 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
         instructions = kwargs["review_system_instructions"]
         assignment = _assignment(kwargs)
         binding: HostToolBinding = kwargs["host_tools"]
+        own = assignment["work"]["targets"]["ids"]
         async with binding.session():
             if assignment["kind"] == "challenge":
                 claim, = assignment["claims"]
@@ -1418,44 +1425,45 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
                            "grounds": "The late captured bytes contain the marker after counterevidence search.",
                            "evidence_refs": []}
                 value = {"verdicts": [verdict], "claims": []}
-                binding.admit("challenge-final", "structured_output", value, terminal=True)
-                accepted = binding.submit("challenge-final", value)
-                binding.native_settled = True
-                return accepted, None, None
-            catalog = assignment["catalog"]
-            observed["system_catalog"] = catalog
-            assert len(instructions.encode()) < 64 * 1024
-            # Page the complete population through the host cursor.
-            entries: list[dict[str, Any]] = []
-            cursor = None
-            while True:
-                page = _charged(binding, "review_source", {"target_id": None, "path": None, "cursor": cursor})
-                entries.extend(page["entries"])
-                if (cursor := page["next_cursor"]) is None:
-                    break
-            observed["entries"] = entries
-            contents: dict[str, bytes] = {}
-            targets: dict[str, dict[str, Any]] = {}
-            for entry in entries:
-                targets[entry["target_id"]], contents[entry["target_id"]] = _read_target(binding, entry["target_id"])
-            observed["contents"], observed["targets"] = contents, targets
-            late = [entry["target_id"] for entry in entries if "LATE_MARKER" in contents[entry["target_id"]].decode()]
-            late_target = targets[late[0]]
-            observed["late_refs"] = [{"source_id": next(option["source_id"] for option in late_target["source_options"]
-                                                        if option["side"] == "new"),
-                                      "basis": "supplied_diff", "source_range": None}]
-            reviewed = entries[:len(entries) // 2]
-            for start in range(0, len(reviewed), 75):
-                batch = {"targets": [{
-                    "target_id": entry["target_id"], "status": "reviewed", "reason": "", "evidence_refs": [],
-                } for entry in reviewed[start:start + 75]], "claims": [] if start else [{
-                    "uid": "", "revision": 0, "source_uids": [], "title": "Late marker value",
-                    "payload": {"claim": "The late marker changes captured behavior.", "trigger": "Import the file.",
-                                "consequence": "The marker value is observed.", "grounds": "Late captured bytes.",
-                                "file": late_target["file"], "line": None, "evidence_refs": observed["late_refs"]}}]}
-                receipt = _charged(binding, "review_admit", batch)
-                assert receipt["progress"]["decided"] == start + len(batch["targets"])
-        raise PiError("native discovery failed after progressive admissions")
+            elif assignment["kind"] != "discovery":
+                # The follow-up and the cross-assignment inherit the unfinished target and leave it undecided.
+                value = {"targets": [], "claims": []}
+            else:
+                observed.setdefault("system_catalog", assignment["catalog"])
+                assert len(instructions.encode()) < 64 * 1024
+                if "entries" not in observed:
+                    # Page the complete population through the host cursor.
+                    entries: list[dict[str, Any]] = []
+                    cursor = None
+                    while True:
+                        page = _charged(binding, "review_source", {"target_id": None, "path": None, "cursor": cursor})
+                        entries.extend(page["entries"])
+                        if (cursor := page["next_cursor"]) is None:
+                            break
+                    observed["entries"] = entries
+                contents, targets = observed.setdefault("contents", {}), observed.setdefault("targets", {})
+                for target in own:
+                    targets[target], contents[target] = _read_target(binding, target)
+                value = {"targets": [{"target_id": target, "status": "reviewed", "reason": "", "evidence_refs": []}
+                                     for target in own], "claims": []}
+                if late := [targets[target] for target in own if "LATE_MARKER" in contents[target].decode()]:
+                    observed["late_refs"] = [{"source_id": next(option["source_id"]
+                                                                for option in late[0]["source_options"]
+                                                                if option["side"] == "new"),
+                                              "basis": "supplied_diff", "source_range": None}]
+                    observed["unfinished"] = own[-1:]
+                    receipt = _charged(binding, "review_admit", {"targets": value["targets"][:-1], "claims": [{
+                        "uid": "", "revision": 0, "source_uids": [], "title": "Late marker value",
+                        "payload": {"claim": "The late marker changes captured behavior.",
+                                    "trigger": "Import the file.", "consequence": "The marker value is observed.",
+                                    "grounds": "Late captured bytes.", "file": late[0]["file"], "line": None,
+                                    "evidence_refs": observed["late_refs"]}}]})
+                    assert receipt["progress"]["decided"] == len(own) - 1
+                    raise PiError("native discovery failed after progressive admissions")
+            binding.admit("final", "structured_output", value, terminal=True)
+            accepted = binding.submit("final", value)
+            binding.native_settled = True
+            return accepted, None, None
 
     monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=execute, console=agent.console))
     result = await run_committed_review(CommittedReviewRequest(repo, base, config=RunConfig(
@@ -1490,14 +1498,29 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
     assert terminal["analysis_state"] == "incomplete" and not result.complete
     decisions = {d["target_id"]: d for scope in terminal["stack_outcomes"] for d in scope["target_decisions"]}
     assert decisions.keys() == {entry["target_id"] for entry in entries}
-    admitted = {e["target_id"] for e in entries[:len(entries) // 2]}
+    admitted = {e["target_id"] for e in entries} - set(observed["unfinished"])
     assert {t for t, d in decisions.items() if d["status"] == "reviewed"} == admitted
     undecided = [d for t, d in decisions.items() if t not in admitted]
     assert undecided and all(d["status"] == "not_reviewed" and d["reason"].startswith("unsubmitted:")
                              and d["evidence_refs"] == [] for d in undecided)
     assert len(value["findings"]) == 1 and value["findings"][0]["payload"]["file"].endswith("target.py")
-    assert [e["assignment"] for e in value["execution"]] == ["discovery", "challenge"]
-    assert value["execution"][0]["reason"] == "backend_failure" and not value["execution"][0]["accepted"]
+    # The plan is one discovery assignment per batch under broad; the failed one is followed up.
+    local = [row for row in value["execution"] if row["assignment"] == "discovery"]
+    assert value["settings"]["assignment_policy"] == {"name": "broad", "decomposed": True,
+                                                     "planned_assignments": len(local), "cross_assignment": "required"}
+    assert [e["assignment"] for e in value["execution"]] == [
+        *["discovery"] * len(local), "follow_up", "cross_assignment", "challenge"]
+    assert [(row["reason"], row["accepted"]) for row in local if row["reason"]] == [("backend_failure", False)]
+    # One allowance per four batches exceeds this diff's tier of 9: 8000 calls grow by it, discovery keeps
+    # half and cross-assignment a quarter of that, and the rest is shared equally. The explicit profile's
+    # 4500 s wall is a ceiling the 600 s window grows up to.
+    limits = value["settings"]["limits"]
+    scale = -(-len(local) // 4)
+    assert scale > 9
+    assert (limits["scale"], limits["tool_calls"], limits["effective_tool_calls"]) == (scale, 8000, 8000 * scale)
+    share, extra = divmod(3000 * scale, len(local))
+    assert sorted(row["allocation"] for row in local) == [share] * (len(local) - extra) + [share + 1] * extra
+    assert limits["effective_investigation_s"] == pytest.approx(4500 - 120)
 
 
 async def test_lookup_is_read_only_and_cursor_bound(tmp_path: Path) -> None:
@@ -1722,13 +1745,18 @@ _ADAPTIVE_FILES = {"a.py": "def ratio(total, count):\n    return total / count\n
                    "f.py": "from a import ratio\nRESULT = ratio(4, 1)\n"}
 
 
-def _adaptive_repo(tmp_path: Path) -> tuple[Path, str]:
-    """Six changed files: the ratio change in a.py and its caller f.py land in different assignments."""
+def _adaptive_repo(tmp_path: Path, files: int = 6, lines: int = 1) -> tuple[Path, str]:
+    """Changed files: the ratio change in a.py and its caller f.py land in different assignments.
+
+    Files beyond the six named ones follow them in inventory order; the first changes ``lines`` lines.
+    """
     repo = tmp_path / "adaptive"
+    more = {f"m{index:02d}.py": "VALUE = 1\n" * (1 if index else lines) for index in range(files - 6)}
     feature = {**_ADAPTIVE_FILES, "a.py": "def ratio(total, count):\n    return total / (count - 1)\n",
                **{f"{name}.py": f"VALUE_{name.upper()} = 2\n" for name in "bcde"},
-               "f.py": "from a import ratio\nRESULT = ratio(4, 1)\nLIMIT = 2\n"}
-    seed_feature_branch(repo, base=_ADAPTIVE_FILES, feature=feature)
+               "f.py": "from a import ratio\nRESULT = ratio(4, 1)\nLIMIT = 2\n",
+               **{name: text.replace("1", "2") for name, text in more.items()}}
+    seed_feature_branch(repo, base={**_ADAPTIVE_FILES, **more}, feature=feature)
     return repo, git(repo, "rev-parse", "main")
 
 
@@ -1741,9 +1769,11 @@ def _decide(binding: HostToolBinding, targets: Sequence[str]) -> list[dict[str, 
 
 _SCENARIOS = ["empty-local", "follow-up", "evidence-free", "contention", "native-capacity", "revision", "title",
               "undecomposed"]
+# Planned batches of four one-hunk files for the scenarios over more than two batches.
+_SCALED = {"four-batches": 4, "five-batches-broad": 5, "five-batches-adaptive": 5}
 
 
-@pytest.mark.parametrize("scenario", _SCENARIOS)
+@pytest.mark.parametrize("scenario", [*_SCENARIOS, *_SCALED])
 async def test_adaptive_review_transfers_unfinished_work_and_investigates_across_assignments(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str,
 ) -> None:
@@ -1755,8 +1785,16 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
     renewed sibling allocations, and empty local results skipping the spanning defect
     between a.py (ratio) and f.py (its caller) in different assignments. Revision rows
     prove the scheduler dispatches a new challenge only for a semantic revision.
+
+    The batch rows prove the allowance grows with the change and that a change over four
+    batches is one assignment per batch under either policy: a fixed allowance starved
+    every assignment of a large change, and ``broad`` held it in one conversation.
     """
-    repo, base = _adaptive_repo(tmp_path)
+    batches = _SCALED.get(scenario, 2)
+    # The four-batch subject's diff is over 1,000 lines (tier 3) and runs under the default profile.
+    repo, base = _adaptive_repo(tmp_path, files=4 * batches if batches > 2 else 6, lines=520 if batches == 4 else 1)
+    policy = "broad" if scenario in {"four-batches", "five-batches-broad"} else "adaptive"
+    split = scenario not in {"undecomposed", "four-batches"}
     dispatches: list[dict[str, Any]] = []
     stale: list[HostToolBinding] = []
     arrivals: dict[str, tuple[HostToolBinding, dict[str, Any]]] = {}
@@ -1884,9 +1922,9 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
             config=RunConfig(
                 backend="pi", output_mode="review",
                 frozen_author_description=FrozenAuthorDescription(git(repo, "rev-parse", "HEAD"), "Author context."),
-                review_profile=_profile_with_pipeline(
+                review_profile=None if scenario == "four-batches" else _profile_with_pipeline(
                     reviewer_investigation_budget_s=90, reviewer_tool_call_budget=calls,
-                    assignment_policy="adaptive"))))
+                    assignment_policy=policy))))
     value = result.to_dict()
     validate_committed_result(value)
     # Follow-up, cross-assignment and challenge work receive the author's description like discovery.
@@ -1896,28 +1934,51 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
     credited = [t for r in value["work"] for t in r["admitted_targets"]]
     assert sorted(credited) == sorted(p["target_id"] for p in value["assignments"])  # Each credited once.
     assert result.complete and value["terminal_result"]["required_phases"] == ["challenge", "cross_assignment"]
-    if scenario == "undecomposed":
-        # Capacity cannot give each assignment a usable allocation: one broad assignment, no cross phase.
-        assert value["settings"]["assignment_policy"] == {"name": "adaptive", "decomposed": False,
+    limits = value["settings"]["limits"]
+    scaled = {key: limits[key] for key in ("scale", "tool_calls", "effective_tool_calls", "investigation_s")}
+    if not split:
+        # Capacity cannot give each assignment a usable allocation, or broad holds at most four batches:
+        # one broad assignment, no cross phase.
+        assert value["settings"]["assignment_policy"] == {"name": policy, "decomposed": False,
                                                          "planned_assignments": 1,
                                                          "cross_assignment": "not_applicable"}
-        assert allocations == [("work:1", "discovery", 4)] and value["claims"] == []
+        assert value["claims"] == []
+        if scenario == "four-batches":
+            # Tier 3 exceeds one allowance per four batches: 120 calls become 360 and discovery keeps half.
+            # The default profile's window grows with its wall: min(3 * 2400 + 120, 3 * 4500) - 120.
+            assert value["settings"]["profile_source"] == "default"
+            assert scaled == {"scale": 3, "tool_calls": 120, "effective_tool_calls": 360, "investigation_s": 2400}
+            assert allocations == [("work:1", "discovery", 180)]
+            assert limits["effective_investigation_s"] == pytest.approx(7200)
+            return
+        assert allocations == [("work:1", "discovery", 4)]
         # A profile built in code bypasses the parser; an unknown policy must not run as broad.
         unknown = replace(build_default_profile(), pipeline=Pipeline(assignment_policy="hierarchical"))
         with pytest.raises(ValueError, match="assignment_policy"):
             await run_committed_review(CommittedReviewRequest(repo, base, config=RunConfig(
                 backend="pi", output_mode="review", review_profile=ResolvedProfile(unknown, "test"))))
         return
-    assert value["settings"]["assignment_policy"] == {"name": "adaptive", "decomposed": True,
-                                                     "planned_assignments": 2, "cross_assignment": "required"}
-    # 40 calls: investigation 20 = local 15 (shares 8/7) + protected cross 5; challenge keeps 20.
-    assert sorted(allocations[:2]) == [("work:1", "discovery", 8), ("work:2", "discovery", 7)]
+    assert value["settings"]["assignment_policy"] == {"name": policy, "decomposed": True,
+                                                     "planned_assignments": batches, "cross_assignment": "required"}
+    if batches == 5:
+        # One allowance per four batches: 40 calls become 80. Investigation 40 = local 30 (five shares
+        # of 6) + protected cross 10; challenge keeps 40. Every assignment spent one start, the cross two.
+        assert scaled == {"scale": 2, "tool_calls": 40, "effective_tool_calls": 80, "investigation_s": 90}
+        assert sorted(allocations[:5]) == [(f"work:{number}", "discovery", 6) for number in range(1, 6)]
+        assert allocations[5:] == [("work:6", "cross_assignment", 35), ("work:7", "challenge", 73)]
+        assert sorted((e["work_id"], e["assignment"], e["allocation"]) for e in value["execution"]) == sorted(
+            allocations)
+        # An explicit profile's wall is not reached: the window is min(2 * 90 + 120, 4500) - 120.
+        assert limits["effective_investigation_s"] == pytest.approx(180)
+    else:
+        # 40 calls: investigation 20 = local 15 (shares 8/7) + protected cross 5; challenge keeps 20.
+        assert scaled == {"scale": 1, "tool_calls": 40, "effective_tool_calls": 40, "investigation_s": 90}
+        assert sorted(allocations[:2]) == [("work:1", "discovery", 8), ("work:2", "discovery", 7)]
     cross = next(r for r in value["work"] if r["kind"] == "cross_assignment")
     challenges = [d for d in dispatches if d["kind"] == "challenge"]
     if scenario == "empty-local":
         assert allocations[2:] == [("work:3", "cross_assignment", 11), ("work:4", "challenge", 29)]
         # Phase deadlines are carved from the one review window that settings record.
-        limits = value["settings"]["limits"]
         local_deadline, cross_deadline, challenge_deadline = (dispatches[i]["deadline"] for i in (0, 2, 3))
         assert dispatches[1]["deadline"] == local_deadline
         assert cross_deadline - local_deadline == pytest.approx(limits["protected_cross_assignment_s"])

@@ -51,6 +51,7 @@ from daydream.committed_review_model import (
     validate_committed_result,
 )
 from daydream.committed_review_output import write_committed_review_output
+from daydream.config import REVIEWER_BATCHES_PER_ALLOWANCE
 from daydream.deep.detection import StackAssignment
 from daydream.git_ops.captured_source import CapturedSource, capture_source
 from daydream.host_tools import (
@@ -68,7 +69,7 @@ from daydream.immutable_review import HISTORICAL_CONTEXT_MAX_BYTES, ImmutableRev
 from daydream.json_utils import canonical_json, validate_json_schema
 from daydream.observability.spans import record_budget_stop
 from daydream.prompt_budget import SanctionedInputUnavailable
-from daydream.review_budget import BudgetDimension, BudgetLedger
+from daydream.review_budget import BudgetDimension, BudgetLedger, review_scale_for_diff
 from daydream.review_profile import ASSIGNMENT_POLICIES, ResolvedProfile, build_default_profile, resolve_from_runconfig
 from daydream.review_result import (
     AnalyzedRevision,
@@ -1043,7 +1044,14 @@ async def _run_committed_review(
             revision=revision,
             artifact_session=session, allow_standalone=False, read_only=True,
         ))
-        finish = started + min(investigation_s + _FINALIZATION_S, wall_s)
+        # Both allowances grow with the change by the staged reviewer's factor. An explicit profile's wall
+        # stays the user's ceiling; the default profile's grows with the diff tier.
+        tier = review_scale_for_diff(diff)
+        scale = max(tier, math.ceil(len(inputs.assignment_batches) / REVIEWER_BATCHES_PER_ALLOWANCE))
+        tool_calls *= scale
+        settings["limits"].update(scale=scale, effective_tool_calls=tool_calls)
+        finish = started + min(investigation_s * scale + _FINALIZATION_S,
+                               wall_s * (tier if profile.source_kind == "default" else 1))
         review = await anyio.to_thread.run_sync(lambda: Review(
             inputs, run_id, allowed_tools=None if hosted is None else HOSTED_PI_TOOLS,
         ))
@@ -1174,8 +1182,10 @@ class _Schedule:
         investigation_calls = tool_calls // 2
         self.batches = [tuple(part["target_id"] for part in batch) for batch in review.inputs.assignment_batches]
         cross_calls = max(_MIN_WORK_CALLS, investigation_calls // 4)
-        # Decompose only into assignments that each retain a usable allocation.
-        self.decompose = adaptive and len(self.batches) > 1 and (
+        # One conversation holds at most one base allowance of batches. Decompose only into
+        # assignments that each retain a usable allocation.
+        self.decompose = len(self.batches) > 1 and (
+            adaptive or len(self.batches) > REVIEWER_BATCHES_PER_ALLOWANCE) and (
             investigation_calls - cross_calls >= _MIN_WORK_CALLS * len(self.batches))
         cross_deadline = started + window / 2
         local_deadline = started + window * (3 / 8 if self.decompose else 1 / 2)
