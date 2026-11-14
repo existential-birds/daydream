@@ -1058,8 +1058,8 @@ async def _run_committed_review(
             revision=revision,
             artifact_session=session, allow_standalone=False, read_only=True,
         ))
-        # Both allowances grow with the change by the staged reviewer's factor. An explicit profile's wall
-        # stays the user's ceiling; the default profile's grows with the diff tier.
+        # Both allowances grow with the change by the staged reviewer's factor. Only the default profile's
+        # wall grows, with the diff tier: any other profile's wall is the ceiling it states.
         tier = review_scale_for_diff(diff)
         scale = max(tier, math.ceil(len(inputs.assignment_batches) / REVIEWER_BATCHES_PER_ALLOWANCE))
         tool_calls *= scale
