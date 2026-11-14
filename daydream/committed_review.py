@@ -427,7 +427,21 @@ class Review:
                 raise ValueError("no challenge obligations")
             if not available:
                 raise ValueError("Review already has an active assignment for these obligations")
-            planned.append(((), available))
+            # One challenge per base allowance of batches of the claims' files, split again where its first
+            # message would hold more claims than the largest tool result native preflight admits.
+            allowance = {part["file"]: index // REVIEWER_BATCHES_PER_ALLOWANCE for index, batch in
+                         reversed(list(enumerate(self.inputs.assignment_batches))) for part in batch}
+            chunks: dict[int, list[dict[str, int]]] = {}
+            sizes: dict[int, int] = {}
+            for uid, revision in available.items():
+                group = allowance[self._claims[uid]["payload"]["file"]]
+                size = len(canonical_json(self._claims[uid]).encode()) + 1
+                if group not in chunks or sizes[group] + size > LARGEST_TOOL_RESULT_BYTES:
+                    chunks.setdefault(group, []).append({})
+                    sizes[group] = 1
+                chunks[group][-1][uid] = revision
+                sizes[group] += size
+            planned.extend(((), claims) for group in chunks.values() for claims in group)
         else:
             if groups is None:
                 undecided = [p["target_id"] for p in self.assignments if p["target_id"] not in self._decisions]
@@ -1339,7 +1353,7 @@ class _Schedule:
             (work_id,) = review.plan("discovery")
             await self._dispatch(work_id, self.local, self.local_reserves)
         else:
-            await self._round(review.plan("discovery", self.batches), recorder)
+            await self._round(review.plan("discovery", self.batches), recorder, self.local, self.local_reserves)
             while groups := self._follow_ups():
                 # A refused follow-up records the local ledger's stop on the trace.
                 dimension: BudgetDimension | None = (
@@ -1348,28 +1362,31 @@ class _Schedule:
                 if dimension is not None:
                     record_budget_stop(self.local.stop(dimension))
                     break
-                await self._round(review.plan("follow_up", groups), recorder)
+                await self._round(review.plan("follow_up", groups), recorder, self.local, self.local_reserves)
             # Required regardless of local results; it inherits every still-unfinished target.
             (work_id,) = review.plan("cross_assignment")
             await self._dispatch(work_id, self.investigation, self.cross_reserves)
         attempted: set[tuple[str, int]] = set()
-        last: dict[str, Any] | None = None
+        last: list[str] = []
         retried = False
         while pending := {(claim["uid"], claim["revision"]) for claim in review.pending()}:
             if (exhausted := _remaining(self.ledger) < 1) or self.ledger.expired():
                 record_budget_stop(self.ledger.stop("tool_calls" if exhausted else "time"))
                 break
             fresh = not pending <= attempted
-            progressed = last is not None and review.work[last["work_id"]].progress > 0
-            failed = last is not None and last["reason"] is not None
+            progressed = any(review.work[work_id].progress > 0 for work_id in last)
+            failed = any(entry["reason"] is not None for entry in review.execution if entry["work_id"] in last)
             # Re-dispatch only for new revisions, after progress, or once after a failure.
             if not (fresh or progressed or failed and not retried):
                 break
             retried = not fresh and not progressed
             attempted |= pending
-            (work_id,) = review.plan("challenge")
+            last = review.plan("challenge")
             # Each re-dispatch receives only what earlier challenges left; nothing is renewed.
-            last = await self._dispatch(work_id, self.ledger, {"finalization_s": _FINALIZATION_S})
+            if len(last) == 1:
+                await self._dispatch(last[0], self.ledger, {"finalization_s": _FINALIZATION_S})
+            else:
+                await self._round(last, recorder, self.ledger, {"finalization_s": _FINALIZATION_S})
 
     def _follow_ups(self) -> list[tuple[str, ...]]:
         """Closed local work keeps unfinished targets; follow up only after admitted progress."""
@@ -1386,19 +1403,21 @@ class _Schedule:
                 groups.append(targets)
         return groups
 
-    async def _round(self, work_ids: list[str], recorder: Any) -> None:
-        limiter = anyio.CapacityLimiter(effective_fanout_concurrency(_FANOUT_CEILING, self.backends["discovery"]))
+    async def _round(self, work_ids: list[str], recorder: Any, parent: BudgetLedger,
+                     reserves: dict[str, Any]) -> None:
+        backend = self.backends["challenge" if self.review.work[work_ids[0]].kind == "challenge" else "discovery"]
+        limiter = anyio.CapacityLimiter(effective_fanout_concurrency(_FANOUT_CEILING, backend))
         unsupported: list[UnsupportedHostedPolicy] = []
 
         async def child(work_id: str, allocation: int) -> None:
             async with limiter, maybe_fork(recorder, f"committed-{work_id}"):
                 try:
-                    await self._dispatch(work_id, self.local, self.local_reserves, allocation=allocation)
+                    await self._dispatch(work_id, parent, reserves, allocation=allocation)
                 except UnsupportedHostedPolicy as exc:
                     unsupported.append(exc)
 
         async with anyio.create_task_group() as group:
-            for work_id, allocation in zip(work_ids, _split(_remaining(self.local), len(work_ids)), strict=True):
+            for work_id, allocation in zip(work_ids, _split(_remaining(parent), len(work_ids)), strict=True):
                 group.start_soon(child, work_id, allocation)
         if unsupported:
             raise unsupported[0]

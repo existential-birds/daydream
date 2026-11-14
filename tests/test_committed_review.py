@@ -2677,7 +2677,8 @@ async def test_committed_review_completes_through_native_host_tools(
         assert "<code>missing_output</code>" in report and "review profile" not in report
         # A change of five batches is one assignment per batch through the real adapter. The default
         # profile's 120 calls double: five local shares of 18, of which each assignment keeps the six its
-        # retry charged, so the cross-assignment receives 120 - 30 and the challenge 240 - 30 - 1.
+        # retry charged, so the cross-assignment receives 120 - 30, and the claims of batches 0-3 and of batch 4
+        # are challenged in two conversations that share 240 - 30 - 1.
         wide = tmp_path / "wide"
         modules = {f"m{index:02d}.py": "VALUE = 1\n" for index in range(17)}
         seed_feature_branch(wide, base=modules, feature=dict.fromkeys(modules, "VALUE = 0\n"))
@@ -2688,21 +2689,24 @@ async def test_committed_review_completes_through_native_host_tools(
         assert sealed["settings"]["assignment_policy"] == {"name": "broad", "decomposed": True,
                                                           "planned_assignments": 5, "cross_assignment": "required"}
         assert sorted((e["assignment"], e["accepted"], e["reason"], e["allocation"]) for e in sealed["execution"]) == [
-            ("challenge", True, None, 209), ("cross_assignment", True, None, 90),
+            ("challenge", True, None, 104), ("challenge", True, None, 105), ("cross_assignment", True, None, 90),
             *[("discovery", True, None, 18)] * 5]
         assert sealed["terminal_result"]["analysis_state"] == "complete" and len(sealed["findings"]) == 5
         # Two processes per discovery assignment (the unsubmitted turn and its retry), one cross-assignment
-        # that inherits nothing, one challenge. Each discovery process is handed exactly its own targets.
+        # that inherits nothing, two challenges. Each discovery process is handed exactly its own targets.
         processes = [(_assignment(row["host"]["prompt"]), row["host"]["prompt"]) for row in split.observations()]
-        assert sorted(work["kind"] for work, _ in processes) == ["challenge", "cross_assignment", *["discovery"] * 10]
+        assert sorted(work["kind"] for work, _ in processes) == [
+            "challenge", "challenge", "cross_assignment", *["discovery"] * 10]
         for work, prompt in processes:
             targets = work["work"]["targets"]["ids"] if work["kind"] == "discovery" else []
             assert prompt.count(_SUPPLIED) == len(targets)
             assert all(f"diff --git a/{target} b/{target}" in prompt for target in targets)
-        # The first messages carry what grows with the change: the challenge judges five claims and the
-        # cross-assignment reads five work summaries. The instructions Codex passes in one argument hold the
+        # The first messages carry what grows with the change: each challenge only the claims it judges, and the
+        # cross-assignment five work summaries. The instructions Codex passes in one argument hold the
         # default profile's policy for any change: under the 10 KiB docs/runtime.md states, far below 131072 bytes.
-        assert [len(work["claims"]) for work, _ in processes if work["kind"] == "challenge"] == [5]
+        judged = [[c["uid"] for c in work["claims"]] for work, _ in processes if work["kind"] == "challenge"]
+        assert sorted(map(len, judged)) == [1, 4] and sorted(sum(judged, [])) == sorted(
+            c["uid"] for c in sealed["claims"])
         assert all(len(row["host"]["instructions"].encode()) < 10 * 1024
                    for row in [*codex.observations(), *silent.observations(), *split.observations()])
     assert len(delivered) >= 2
