@@ -9,6 +9,7 @@ import os
 import shutil
 import tempfile
 import tracemalloc
+import urllib.request
 import zlib
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager, suppress
@@ -19,6 +20,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import anyio
+import httpx
 import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from rich.console import Console
@@ -278,7 +280,36 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
 
     Existing native correction tests exercise a single stage; they do not protect
     a previously accepted claim/revision while a complete later update is rejected.
+
+    Every admission re-reads the whole capture. Held on the host loop, that read made
+    concurrent assignments miss the endpoint's three-second control requests, so the
+    capture row goes through the endpoint and asks it for a sibling's status meanwhile.
     """
+    answered: list[int] = []
+    sibling: Any = None
+    injected = unreadable = False
+    real_open = os.open
+
+    def close_during_source_read(path: Any, *args: Any, **kwargs: Any) -> int:
+        nonlocal injected
+        if fault == "capture-integrity":
+            if path == "caller.py" and not injected:
+                # Blocks this thread: only a free host loop can answer it.
+                with urllib.request.urlopen(sibling, timeout=2) as response:
+                    answered.append(response.status)
+            if path == "caller.py" and unreadable:
+                injected = True
+                raise OSError("final native integrity read failed")
+            return real_open(path, *args, **kwargs)
+        fd = real_open(path, *args, **kwargs)
+        if Path(path) == review_inputs.canonical[0].path and not injected:
+            injected = True
+            if fault == "deadline":
+                binding.budget.deadline = clock.monotonic() - 1
+            else:
+                binding.close_authority()
+        return fd
+
     if fault == "capture-integrity":
         review_inputs.captured_source = capture_source(
             review_inputs.work.repo, review_inputs.canonical[0].path.parent / "capture",
@@ -296,35 +327,42 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
     if fault == "invalid-selector":
         update["claims"][0]["payload"]["evidence_refs"][0]["source_id"] = "source:" + "f" * 64
     binding = _assign(review, "challenge")
-    injected = False
-    real_open = os.open
-    async with binding.session():
-        binding.admit("terminal", "structured_output", update, terminal=True)
-        with monkeypatch.context() as patching:
-
-            def close_during_source_read(path: Any, *args: Any, **kwargs: Any) -> int:
-                nonlocal injected
-                if fault == "capture-integrity" and path == "caller.py":
-                    injected = True
-                    raise OSError("final native integrity read failed")
-                fd = real_open(path, *args, **kwargs)
-                if Path(path) == review_inputs.canonical[0].path and not injected:
-                    injected = True
-                    if fault == "deadline":
-                        binding.budget.deadline = clock.monotonic() - 1
-                    else:
-                        binding.close_authority()
-                return fd
-
-            if fault in {"deadline", "closed", "capture-integrity"}:
+    if fault == "capture-integrity":
+        async with binding.session() as server, httpx.AsyncClient(
+                base_url=server.url, headers={"Authorization": server.packet()["authorization"]}) as client:
+            sibling = urllib.request.Request(server.url + "/status", headers=dict(client.headers))
+            await client.post("/ready", json={
+                "tool_name": "structured_output", "schema": binding.schema, "host_tools": server.host_schemas(),
+                "native_limits": {"model": {"context_window": 400000, "max_tokens": 64000}}})
+            with monkeypatch.context() as patching:
                 patching.setattr(os, "open", close_during_source_read)
-            with pytest.raises((HostToolRejected, HostToolFatal)) as caught:
-                binding.submit("terminal", update)
-        if fault == "capture-integrity":
-            assert injected and isinstance(caught.value, HostToolFatal) and caught.value.code == 'input_unavailable'
-        if fault in {"deadline", "closed"}:
-            assert isinstance(caught.value, HostToolFatal)
-            assert injected and caught.value.code == ("deadline_expired" if fault == "deadline" else "authority_closed")
+                for name, arguments in (("review_source", {"target_id": None, "path": None, "cursor": None}),
+                                        ("review_admit", {"verdicts": [], "claims": []})):
+                    await client.post("/admit", json={"id": name, "name": name, "arguments": None})
+                    reply = (await client.post("/call", json={"id": name, "name": name,
+                                                              "arguments": arguments})).json()
+                    # Only an admission reads the capture, once, and the endpoint answers the sibling meanwhile.
+                    assert "result" in reply and answered == [200] * (name == "review_admit")
+                unreadable = True
+                await client.post("/admit", json={"id": "terminal", "name": "structured_output",
+                                                  "arguments": update, "terminal": True})
+                reply = (await client.post("/submit", json={"id": "terminal", "arguments": update})).json()
+        # The failed read is repeated and reported by the synchronous admission, which installs nothing:
+        # the earlier successful read does not vouch for this submission.
+        assert injected and (reply["outcome"], reply["code"]) == ("fatal", "input_unavailable")
+        assert answered == [200, 200]
+    else:
+        async with binding.session():
+            binding.admit("terminal", "structured_output", update, terminal=True)
+            with monkeypatch.context() as patching:
+                if fault in {"deadline", "closed"}:
+                    patching.setattr(os, "open", close_during_source_read)
+                with pytest.raises((HostToolRejected, HostToolFatal)) as caught:
+                    binding.submit("terminal", update)
+            if fault in {"deadline", "closed"}:
+                assert isinstance(caught.value, HostToolFatal)
+                assert injected and caught.value.code == (
+                    "deadline_expired" if fault == "deadline" else "authority_closed")
     assert review.pending() == prior
     value = review.seal({})
     assert value["terminal_result"]["analysis_state"] == "incomplete"

@@ -86,20 +86,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it. With the default profile `review_wall_budget_s` grows by the tier, to hours for a
   very large change; in any explicit profile it stays a fixed ceiling, so an embedder
   that relied on `reviewer_investigation_budget_s` as the ceiling of a review must set
-  `review_wall_budget_s` to the longest review it accepts. `settings.limits` records
-  `scale` and `effective_tool_calls` beside the profile's own values; the profile digest
-  does not change ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
+  `review_wall_budget_s` to the longest review it accepts. Every sealed result now
+  records `scale` and `effective_tool_calls` in `settings.limits` beside the profile's
+  own values, for small changes too, and the profile shown to the reviewer in each
+  assignment carries them; the profile digest does not change
+  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 - A change of more than four batches is reviewed as one discovery assignment per batch
   under both `broad` and `adaptive`, followed by the cross-assignment and the challenge.
-  It can no longer be reviewed in one conversation under `broad`, and
+  They run ten at a time on Pi and eight on Claude and Codex by default;
+  `DAYDREAM_FANOUT_CONCURRENCY` changes that, up to ten. Such a change can no longer be
+  reviewed in one conversation under `broad`, and
   `settings.assignment_policy.decomposed` can be `true` there; the two policies now differ
   only for changes of two to four batches. A change of at most four batches whose diff is
   in the first tier is planned under `broad` exactly as before
   ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 - A split discovery or follow-up assignment receives each of its targets in its first
   message as `review_source` returns it, instead of fetching each with a charged call,
-  so its prompt and recorded trajectory are larger. This includes `adaptive` reviews of
-  two to four batches
+  so its prompt and recorded trajectory are larger. A target larger than one 32 KiB
+  lookup page arrives as its first page with the cursor for the rest. This includes
+  `adaptive` reviews of two to four batches
   ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 - Trace agent spans record each retry-ladder stop as a `daydream.retry.stop` event carrying
   the trajectory's `agent_budget_stop` fields as `daydream.retry.*`, with or without a
@@ -376,6 +381,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Committed review on Pi no longer holds the host's event loop while it re-reads the
+  captured source for each `review_admit` and final submission. That read grows with the
+  repository (about 0.2 s for 700 files, 0.6 s for 5,000 and 2.7 s for 20,000 on the
+  measuring host), and with several assignments running at once it made the others'
+  three-second control requests time out, which aborted those assignments. The endpoint
+  now performs the read in a worker thread before the unchanged synchronous admission; a
+  failed read is repeated and reported by the admission as before
+  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 - Committed review no longer rejects a reviewed target submitted with empty
   `evidence_refs` when the target has more than four sources. The host expanded `[]` to
   every source of the target and then refused its own expansion ("supply at most four

@@ -623,13 +623,14 @@ class Review:
                 return install
 
             try:
-                return self.inputs.admit_submission(prepare)
+                return self.inputs.admit_submission(prepare, validated=binding.validated)
             except SanctionedInputUnavailable as exc:
                 raise HostToolFatal('Captured review input is unavailable', code='input_unavailable') from exc
 
         binding = HostToolBinding(
             budget=budget, accept=lambda value: admit(value, final=True),
             allowed_tools=self._allowed_tools, reserves=reserves, protected_submission=True,
+            validate=self.inputs._revalidate_canonical,
             host_tools={LOOKUP_TOOL: HostTool(LOOKUP_SCHEMA, self.lookup),
                         ADMIT_TOOL: HostTool(schema, lambda value: admit(value, final=False), mutating=True)},
             native_requirement=NativeCapacityRequirement(LARGEST_TOOL_RESULT_BYTES, COMMITTED_BATCH_OUTPUT_BYTES),

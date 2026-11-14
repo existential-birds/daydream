@@ -239,19 +239,22 @@ class StageInputFactory:
             source_root=self.work.repo, require_assigned=require_assigned, source_aliases=self._source_aliases,
             captured_source=self.captured_source)
 
-    def admit_submission[T](self, prepare: Callable[[_SubmissionSources], Callable[[], T]]) -> T:
+    def admit_submission[T](self, prepare: Callable[[_SubmissionSources], Callable[[], T]], *,
+                            validated: bool = False) -> T:
         """Resolve a prospective payload, validate once, then synchronously install it.
 
         The resolver retains bounded host facts, never bodies or success across
         callbacks. The Review owner's closure rechecks current authority after
-        all I/O and owns the only domain state transition.
+        all I/O and owns the only domain state transition. ``validated`` says the
+        caller's endpoint revalidated the canonical inputs for this submission.
         """
         sources = _SubmissionSources(self.revision, self.work.repo, self._source_aliases, self.captured_source)
         try:
             install = prepare(sources)
         finally:
             sources.close()
-        self._revalidate_canonical()
+        if not validated:
+            self._revalidate_canonical()
         return install()
 
     def _render(self, parts: list[_Part]) -> dict[str, str]:

@@ -187,7 +187,7 @@ class HostToolBinding:
                  allowed_tools: Set[str] | None = None, host_tools: Mapping[str, HostTool] | None = None,
                  reserves: Mapping[str, Any] | None = None,
                  native_requirement: NativeCapacityRequirement | None = None,
-                 protected_submission: bool = False) -> None:
+                 protected_submission: bool = False, validate: Callable[[], None] | None = None) -> None:
         if budget is None:
             budget = BudgetLedger("host_tools", start_floor=1,
                                   deadline=deadline if type(deadline) in {int, float} else None)
@@ -201,6 +201,9 @@ class HostToolBinding:
         # are the subset refused because they would consume the protected submission start.
         self.calls = self.rejections = self.denied_starts = 0
         self.protected_submission = protected_submission
+        # A slow check an endpoint may run off its loop before a mutating callback; ``validated``
+        # is true only inside the callback that directly follows a successful run.
+        self.validate, self.validated = validate, False
         self.authority_open = self.native_settled = self.cleanup_complete = False
         self.closed = False
         self.fatal_error: HostToolFatal | None = None

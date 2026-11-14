@@ -13,6 +13,9 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+from collections.abc import Callable
+from contextlib import suppress
+from functools import partial
 from typing import Any
 
 from daydream import clock, host_tools as policy
@@ -107,6 +110,20 @@ class PiHostToolServer(HostToolEndpoint):
         if policy._valid_call_id(call_id):
             response["id"] = call_id
         return response
+
+    async def _admitted[T](self, callback: Callable[[], T]) -> T:
+        """Run the binding's slow check off this loop, then its synchronous callback on it.
+
+        Other requests are served meanwhile. A failed check is left to the callback, which repeats and reports it.
+        """
+        if self.binding.validate is not None:
+            with suppress(Exception):
+                await asyncio.to_thread(self.binding.validate)
+                self.binding.validated = True
+        try:
+            return callback()
+        finally:
+            self.binding.validated = False
 
     async def _request(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         admitting = complete = False
@@ -210,7 +227,7 @@ class PiHostToolServer(HostToolEndpoint):
                         # validation and admission use the assignment's deadline.
                         request_timeout.reschedule(asyncio.get_running_loop().time()
                             + max(0.0, self.binding.deadline - clock.monotonic()))
-                    result = self.binding.submit(value.get("id"), value.get("arguments"))
+                    result = await self._admitted(lambda: self.binding.submit(value.get("id"), value.get("arguments")))
                     complete = True
                     await self._reply(writer, 200, {"id": submission_id, "accepted": True, "result": result})
                     return
@@ -219,7 +236,10 @@ class PiHostToolServer(HostToolEndpoint):
                     # the assignment's deadline rather than the short control timeout.
                     request_timeout.reschedule(asyncio.get_running_loop().time()
                         + max(0.0, self.binding.deadline - clock.monotonic()))
-                    result = self.binding.call(value.get("id"), value.get("name"), value.get("arguments"))
+                    name = value.get("name")
+                    call = partial(self.binding.call, value.get("id"), name, value.get("arguments"))
+                    tool = self.binding.host_tools.get(name) if isinstance(name, str) else None
+                    result = await self._admitted(call) if tool is not None and tool.mutating else call()
                     complete = True
                     await self._reply(writer, 200, {"id": submission_id, "result": result})
                     return

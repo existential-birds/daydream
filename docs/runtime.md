@@ -198,7 +198,8 @@ target, and `"adaptive"` splits from two batches. With one batch, and above four
 give the same plan. A profile too small to leave every batch two starts runs one broad
 assignment. Split work runs concurrently under
 `anyio.CapacityLimiter(effective_fanout_concurrency(10, backend))`, by default ten at a
-time on Pi and eight on Claude and Codex, each in a forked trajectory. Any other policy
+time on Pi and eight on Claude and Codex, each in a forked trajectory;
+`DAYDREAM_FANOUT_CONCURRENCY` sets a lower or higher hint, up to ten. Any other policy
 value fails the profile, and committed review refuses a profile built in code with one
 before dispatching work. No CLI route reaches committed review
 until #1641. Other review routes do not act on the key, but it still changes the profile
@@ -208,8 +209,9 @@ digest, so their cached reviews miss. `settings.assignment_policy` records `name
 
 Split discovery and follow-up work holds at most one batch, so its first message
 supplies each of its targets as a `review_source` call returns it: the target's
-description and `source_options` as JSON, then its captured change bytes, up to the
-first 32 KiB page with its `next_cursor`. Its starts go to investigation instead of
+description and `source_options` as JSON, then its captured change bytes. A target
+larger than one 32 KiB lookup page arrives as its first page with the `next_cursor`
+that fetches the rest. Its starts go to investigation instead of
 fetching its own targets. The bytes are untrusted repository content exactly as a
 lookup result is, references to them keep `basis: "supplied_diff"`, and Pi's native
 capacity preflight counts them. They are not in the system instructions, which Codex
@@ -647,7 +649,13 @@ binding owns the first terminal failure and cannot reopen after it. `/admit` and
 capacity with the same recovery semantics. Frames, arguments, results,
 items, request concurrency and cleanup are bounded; overflow rejects whole payloads.
 Frame, readiness and admission I/O keep their short transport allowance. Terminal
-source validation and submission use the original assignment deadline. Native Pi
+source validation and submission use the original assignment deadline. A committed
+review re-reads its whole captured source for every `review_admit` and final
+submission, which takes time in proportion to the repository. The endpoint runs that
+read in a worker thread before the synchronous admission, so concurrent assignments'
+three-second control requests are still answered; if it fails, the admission repeats
+it and reports the failure as before. Claude and Codex admissions run it on the host
+loop. Native Pi
 queries its remaining allowance through the authenticated status endpoint and
 subtracts the full round-trip time, without sharing clock origins or renewing
 authority. Lost receipts still prohibit replay and retain incomplete coverage.
