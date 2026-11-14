@@ -290,7 +290,7 @@ def build_committed_findings_artifact(
     session. Unresolved concerns and native diagnostics remain in the paired
     committed result; this handoff retains confirmed findings and typed coverage.
     """
-    from daydream.committed_review_model import RESULT_VERSIONS, validate_committed_result
+    from daydream.committed_review_model import RESULT_VERSIONS, fragment_spans, head_line, validate_committed_result
 
     validate_committed_result(payload)
     if payload['schema_version'] != RESULT_VERSIONS['immutable']:
@@ -303,9 +303,12 @@ def build_committed_findings_artifact(
     pr = PRInfo(original['pr_number'], original['head_sha'], original['comparison_base_sha'],
                 '', '', owner, repo, '')
     issues = []
-    for item in map(committed_finding_item, payload['findings']):
+    spans = fragment_spans(payload['assignments'])
+    for finding in payload['findings']:
+        item = committed_finding_item(finding)
+        # Placement reads the line as a head line, so a location only the old side has carries none.
         issues.append(ParsedIssue(
-            path=item['file'], line=item['line'], title=item['description'], body=item['rationale'],
+            path=item['file'], line=head_line(finding, spans), title=item['description'], body=item['rationale'],
             severity=None, confidence=None, is_cross_stack=False,
             fingerprint=pr_review.compute_fingerprint(item['file'], item['description'], item['rationale']),
         ))

@@ -46,8 +46,11 @@ from daydream.committed_review_model import (
     CommittedReviewResult,
     assignment_schema,
     coverage_shards,
+    fragment_spans,
+    head_line,
     planned_work_id,
     receipt_schema,
+    reference_covers,
     shard_scope_id,
     validate_committed_result,
 )
@@ -86,7 +89,7 @@ from daydream.review_result import (
     reason_for_budget,
     reason_for_exception,
 )
-from daydream.review_source_refs import _SubmissionSources, source_id
+from daydream.review_source_refs import _SubmissionSources
 from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
 from daydream.run_config import FrozenAuthorDescription, RunConfig, _resolved_backend_name
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
@@ -191,14 +194,7 @@ class Review:
         self._shard_of = {part["target_id"]: index for index, shard in enumerate(self._shards) for part in shard}
         # Fragment-only evidence has no source range; its summarized complete-line span
         # admits claim lines without changing the canonical fragment identity.
-        self._fragment_spans: dict[str, tuple[int, int]] = {}
-        for part in self.assignments:
-            if part["kind"] == "continuation":
-                summary = part["source_summary"][0]
-                for ref in part["source_refs"]:
-                    span = summary.get(ref["side"]) if ref["side"] in {"old", "new"} else None
-                    if span is not None:
-                        self._fragment_spans[source_id(ref)] = (span["start"], span["end"])
+        self._fragment_spans = fragment_spans(self.assignments)
         self._decisions: dict[str, dict[str, Any]] = {}
         self._claims: dict[str, dict[str, Any]] = {}
         self._sealed = False
@@ -236,22 +232,10 @@ class Review:
                                     require_assigned=required)
 
     def _covers(self, ref: dict[str, Any], payload: dict[str, Any]) -> bool:
-        """Whether a reference of the claim's file covers its line, by range or summarized fragment span."""
-        if ref["path"] != payload["file"]:
-            return False
-        bounds = ref["source_range"]
-        if bounds is not None:
-            return bool(bounds["start"] <= payload["line"] <= bounds["end"])
-        span = self._fragment_spans.get(source_id(ref)) if ref["role"] == "assigned" else None
-        return span is not None and span[0] <= payload["line"] <= span[1]
+        return reference_covers(ref, payload, self._fragment_spans)
 
     def head_line(self, claim: dict[str, Any]) -> int | None:
-        """The claim's line as a head line: only when a new-side reference of its file covers it."""
-        payload = claim["payload"]
-        if payload["line"] is not None and any(
-                ref["side"] == "new" and self._covers(ref, payload) for ref in payload["evidence_refs"]):
-            return int(payload["line"])
-        return None
+        return head_line(claim, self._fragment_spans)
 
     def _holds(self, work_id: str, uid: str, revision: int) -> bool:
         """A revision is this work's own, or an unowned revision it authored; never another's."""

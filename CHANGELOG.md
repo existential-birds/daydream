@@ -79,6 +79,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     file the reviewer named; the fix footprint is the reviewed change and the finding's file.
   - A finding's line is carried only when a new-side source reference of its file covers
     it. A location that only the old side has is placed on the file, with its text intact.
+    `build_committed_findings_artifact` applies the same rule to a sealed result, so its
+    artifact no longer places such a finding inline on an unrelated head line.
   - Exit status: a review whose analysis is `failed` (no usable evidence, or an unusable
     findings projection) exits 1 on review, comment, fixing and findings export, after its
     report, notice or artifact has been published. An `incomplete` review keeps exit 0 and

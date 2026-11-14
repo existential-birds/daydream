@@ -1000,10 +1000,14 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
             refs = [{"source_id": part["source_options"][0]["source_id"], "source_range": None,
                      "basis": "supplied_diff"}]
             if assignment["kind"] == "discovery":
+                # The claim cites a line that only the old side of the change has.
+                removed = [{"source_id": next(option["source_id"] for option in part["source_options"]
+                                              if option["side"] == "old"),
+                            "source_range": None, "basis": "supplied_diff"}]
                 claim = {"uid": "", "revision": 0, "source_uids": [], "title": "Captured zero",
                     "payload": {"claim": "Captured zero reaches division.", "trigger": "A caller divides.",
                         "consequence": "The caller fails.", "grounds": "Captured source retains zero.",
-                        "file": "api.py", "line": None, "evidence_refs": refs}}
+                        "file": "api.py", "line": 1, "evidence_refs": removed}}
                 value = {"targets": [{"target_id": part["target_id"], "status": "reviewed", "reason": "Inspected.",
                     "evidence_refs": refs}], "claims": [claim]}
             else:
@@ -1106,6 +1110,11 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
                 expected_comparison_sha=envelope["provenance"]["comparison_base_sha"],
             )
             assert exported.terminal_result == value["terminal_result"]
+            # The sealed claim keeps its old-side line; the findings handoff gives it no head line to post on.
+            assert [(ref["side"], value["findings"][0]["payload"]["line"])
+                    for ref in value["findings"][0]["payload"]["evidence_refs"]] == [("old", 1)]
+            assert [(finding["path"], finding["line"], finding["placement"])
+                    for finding in json.loads(findings.read_text())["findings"]] == [("api.py", None, "file")]
             assert list((operator_policy.private_base / "runtime").glob("*/unreconciled/publish-*"))
             assert not (repo / ".daydream").exists()
             return
