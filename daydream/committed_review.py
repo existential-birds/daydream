@@ -77,12 +77,7 @@ from daydream.observability.spans import record_budget_stop
 from daydream.prompt_budget import SanctionedInputUnavailable, truncate_utf8_to_budget
 from daydream.redaction import redact_text
 from daydream.review_budget import BudgetDimension, BudgetLedger, review_scale_for_diff
-from daydream.review_profile import (
-    ASSIGNMENT_POLICIES,
-    ResolvedProfile,
-    build_default_profile,
-    resolve_from_runconfig,
-)
+from daydream.review_profile import ResolvedProfile, build_default_profile, resolve_from_runconfig
 from daydream.review_result import (
     AnalyzedRevision,
     PlannedScope,
@@ -976,8 +971,6 @@ def review_settings(config: RunConfig) -> dict[str, Any]:
         or type(tool_calls) is not int
     ):
         raise ValueError("committed review requires finite profile time and integer tool allowances")
-    if pipeline.assignment_policy not in ASSIGNMENT_POLICIES:
-        raise ValueError(f"pipeline.assignment_policy must be one of {sorted(ASSIGNMENT_POLICIES)}")
     if min(investigation_s + _FINALIZATION_S, wall_s) <= _FINALIZATION_S:
         raise ValueError("profile investigation and wall allowances cannot preserve finalization capacity")
     if tool_calls < 2:
@@ -1092,7 +1085,7 @@ async def plan_review(
                            pipeline.review_wall_budget_s * (tier if profile.source_kind == "default" else 1))
     review = await anyio.to_thread.run_sync(lambda: Review(inputs, run_id, allowed_tools=allowed_tools))
     schedule = _Schedule(review, backends, tool_calls, settings, started=started,
-                         deadline=finish - _FINALIZATION_S, adaptive=pipeline.assignment_policy == "adaptive")
+                         deadline=finish - _FINALIZATION_S)
     return ReviewProgram(review, schedule, settings, backends, finish)
 
 
@@ -1386,7 +1379,7 @@ class _Schedule:
     """
 
     def __init__(self, review: Review, backends: dict[str, Backend], tool_calls: int,
-                 settings: dict[str, Any], *, started: float, deadline: float, adaptive: bool) -> None:
+                 settings: dict[str, Any], *, started: float, deadline: float) -> None:
         self.review, self.backends, self.settings = review, backends, settings
         self.ledger = BudgetLedger("committed", deadline=deadline, limit=tool_calls, investigation=True,
                                    start_floor=1)
@@ -1396,8 +1389,7 @@ class _Schedule:
         cross_calls = max(_MIN_WORK_CALLS, investigation_calls // 4)
         # One conversation holds at most one base allowance of batches. Decompose only into
         # assignments that each retain a usable allocation.
-        self.decompose = len(self.batches) > 1 and (
-            adaptive or len(self.batches) > REVIEWER_BATCHES_PER_ALLOWANCE) and (
+        self.decompose = len(self.batches) > REVIEWER_BATCHES_PER_ALLOWANCE and (
             investigation_calls - cross_calls >= _MIN_WORK_CALLS * len(self.batches))
         cross_deadline = started + window / 2
         local_deadline = started + window * (3 / 8 if self.decompose else 1 / 2)
@@ -1422,7 +1414,7 @@ class _Schedule:
                 "protected_cross_assignment_s": cross_deadline - local_deadline} if self.decompose else {}),
         )
         settings["assignment_policy"] = {
-            "name": "adaptive" if adaptive else "broad", "decomposed": self.decompose,
+            "name": "broad", "decomposed": self.decompose,
             "planned_assignments": len(self.batches) if self.decompose else 1,
             "cross_assignment": "required" if self.decompose else "not_applicable",
         }

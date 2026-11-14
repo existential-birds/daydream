@@ -87,8 +87,8 @@ exceed it, and that assignment fails to start with the adapter's own error.
 
 The complete planned population is computed from the full captured patch before
 any prompt bounding. Host-dispatched investigation work, followed by host-scheduled
-fresh challenge, navigates it under the profile's
-[assignment policy](#assignment-policy-and-work):
+fresh challenge, navigates it under the
+[assignment rule](#assignment-policy-and-work):
 
 - System instructions, which native compaction never summarizes, carry the stable
   policy, the assignment identity, pending challenge claims and a bounded
@@ -229,23 +229,20 @@ One conversation holds at most four batches, the batches one base allowance cove
 per batch when:
 
 ```text
-split  <=>  B > 1  and  (adaptive or B > 4)  and  I - X >= 2 * B
+split  <=>  B > 4  and  I - X >= 2 * B
 ```
 
 `B` is the number of batches; `I` and `X` are the discovery and cross-assignment
-allowances defined below. The run's resolved review profile selects the policy
-with `[pipeline] assignment_policy`, whichever source supplied the profile: `"broad"`
-(the default) keeps a change of at most four batches in one discovery work over every
-target, and `"adaptive"` splits from two batches. With one batch, and above four, both
-give the same plan. A profile too small to leave every batch two starts runs one broad
-assignment. Split work runs concurrently under
+allowances defined below. Otherwise one discovery work covers every target: a change
+of at most four batches, or one whose profile is too small to leave every batch two
+starts. No setting selects another rule. The `[pipeline] assignment_policy` profile key
+is removed, and a profile that still sets it is refused before any review work with a
+message naming the key. Split work runs concurrently under
 `anyio.CapacityLimiter(effective_fanout_concurrency(10, backend))`, by default ten at a
 time on Pi and eight on Claude and Codex, each in a forked trajectory;
-`DAYDREAM_FANOUT_CONCURRENCY` sets a lower or higher hint, up to ten. Any other policy
-value fails the profile, and committed review refuses a profile built in code with one
-before dispatching work. `settings.assignment_policy` records `name`,
-`decomposed` (which can be `true` under `broad`), `planned_assignments` and
-`cross_assignment` (`required` or `not_applicable`).
+`DAYDREAM_FANOUT_CONCURRENCY` sets a lower or higher hint, up to ten.
+`settings.assignment_policy` records `name` (always `broad`), `decomposed`,
+`planned_assignments` and `cross_assignment` (`required` or `not_applicable`).
 
 Split discovery and follow-up work holds at most one batch, so its first message
 supplies each of its targets as a `review_source` call returns it: the target's

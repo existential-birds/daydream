@@ -105,11 +105,10 @@ Review behavior is configured through the review profile.
 
 The [committed-review API](runtime.md#committed-review-requestresult) owns review
 independently of extension flow steps/builders. Captured local and committed subjects
-follow the [captured-source contract](runtime.md#captured-local-source). The review profile
-selects its [assignment policy](runtime.md#assignment-policy-and-work) and its work records are
-host-owned; profile strategy text cannot change work authority or drop host-appended assignment
-context. The same section defines how its `[pipeline]` time and tool-call keys grow with the
-change. It is the only reviewer: the `review` step of `deep` runs it for the CLI,
+follow the [captured-source contract](runtime.md#captured-local-source). Its
+[assignments](runtime.md#assignment-policy-and-work) and work records are host-owned; profile
+strategy text cannot change work authority or drop host-appended assignment context. The same
+section defines how the profile's `[pipeline]` time and tool-call keys grow with the change. It is the only reviewer: the `review` step of `deep` runs it for the CLI,
 embedded and bot routes ([replaced options](runtime.md#replaced-reviewer-options)).
 
 ### Plan-writer

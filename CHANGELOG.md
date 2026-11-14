@@ -132,8 +132,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     declares an earlier version is rejected before any work. The staged review phases
     are no longer registered, so a flow that names one fails before any work, and only
     the `deep` flow plans the `review` phase.
-    Insert steps into `deep` with `set_flow`; review profiles carry strategy text, budgets
-    and the assignment policy.
+    Insert steps into `deep` with `set_flow`; review profiles carry strategy text and
+    budgets.
   - The artifact dump and the archive no longer contain per-stack records, intent or
     alternatives files. Both retain the sealed result as `deep/committed-review.json`; the
     dataset record does not carry it.
@@ -159,22 +159,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for spent time, that `review_wall_budget_s` grows with the diff in the default profile
   only
   ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
-- A change of more than four batches is reviewed as one discovery assignment per batch
-  under both `broad` and `adaptive`, followed by the cross-assignment and the challenge.
-  They run ten at a time on Pi and eight on Claude and Codex by default;
+- A change of more than four batches is reviewed as one discovery assignment per batch,
+  followed by the cross-assignment and the challenge, when the allowance leaves every
+  batch two starts. They run ten at a time on Pi and eight on Claude and Codex by default;
   `DAYDREAM_FANOUT_CONCURRENCY` changes that, up to ten. Such a change can no longer be
-  reviewed in one conversation under `broad`, and
-  `settings.assignment_policy.decomposed` can be `true` there; the two policies now differ
-  only for changes of two to four batches. A change of at most four batches whose diff is
-  in the first tier is planned under `broad` exactly as before
-  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
+  reviewed in one conversation, and `settings.assignment_policy.decomposed` can be `true`
+  while its `name` is `broad`. A change of at most four batches is one assignment; when
+  its diff is in the first tier it is planned exactly as before
+  ([#1836](https://github.com/existential-birds/daydream/issues/1836),
+  [#1838](https://github.com/existential-birds/daydream/issues/1838)).
 - A split discovery or follow-up assignment receives each of its targets in its first
   message as `review_source` returns it, instead of fetching each with a charged call,
   so its prompt and recorded trajectory are larger. Because those bytes are untrusted
   and now sit in a message of the host's, each header and description line of a supplied
   target begins with a random token that the message's first line announces, and the
-  instructions of such an assignment say that only those lines are host-authored. This
-  includes `adaptive` reviews of two to four batches
+  instructions of such an assignment say that only those lines are host-authored
   ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 - Trace agent spans record each retry-ladder stop as a `daydream.retry.stop` event carrying
   the trajectory's `agent_budget_stop` fields as `daydream.retry.*`, with or without a
@@ -285,15 +284,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CommittedReviewRequest.limits` and `HostedReviewPolicy.limits` are removed. With the
   default profile the committed review window grows from about 600 s to about 2520 s
   ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
-- **Breaking (0.y.z):** Committed review's assignment policy is selected by the review
-  profile: `[pipeline] assignment_policy`, `"broad"` (the default) or `"adaptive"`, from
-  `RunConfig.review_profile_path`, `DAYDREAM_REVIEW_PROFILE`, a repository
-  `review_profile`, `RunConfig.review_profile` or a hosted operator profile. Any other
-  value is refused before any review work. `CommittedReviewRequest.assignment_policy` is
-  removed (no known caller); set the profile key instead. The profile digest covers the
-  key, so every profile's digest changes once, the default included; see
-  [assignment policy](docs/runtime.md#assignment-policy-and-work)
-  ([#1686](https://github.com/existential-birds/daydream/issues/1686)).
+- **Breaking (0.y.z):** Committed review no longer takes an assignment policy, and the
+  `adaptive` policy is gone. `CommittedReviewRequest.assignment_policy` is removed (no
+  known caller) and nothing replaces it: every review splits a change of more than four
+  batches and keeps a smaller one whole
+  ([assignment policy](docs/runtime.md#assignment-policy-and-work)). A review profile that
+  sets `[pipeline] assignment_policy`, which unreleased builds accepted, is refused before
+  any review work with a message naming the key as removed. `settings.assignment_policy`
+  keeps its shape; its `name` is always `broad`. The profile digest covers no policy: a
+  digest recorded by an unreleased build that had the key differs from the one computed
+  now for the same profile, the default included, while against 0.34.0 the key changes
+  no digest ([#1686](https://github.com/existential-birds/daydream/issues/1686),
+  [#1838](https://github.com/existential-birds/daydream/issues/1838)).
 - **Breaking (0.y.z):** `DAYDREAM_FANOUT_CONCURRENCY` now sets the fan-out limit for
   every backend. Unset, each backend keeps its default: Pi 10, Claude and Codex 8,
   Osprey 4 ([#1773](https://github.com/existential-birds/daydream/issues/1773)).

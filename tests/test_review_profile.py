@@ -15,8 +15,6 @@ def test_review_deadline_is_profiled_and_validated() -> None:
     bounded = _profile("[pipeline]\nreview_wall_budget_s = 1200")
     assert bounded.pipeline.review_wall_budget_s == 1200
     assert bounded.digest != base.digest
-    # The digest is the trajectory's only record of the assignment policy.
-    assert _profile('[pipeline]\nassignment_policy = "adaptive"').digest != _profile().digest
     with pytest.raises(rp.ProfileError):
         _profile("[pipeline]\nreview_wall_budget_s = -1")
 
@@ -28,8 +26,9 @@ def test_invalid_profiles_fail_closed_naming_field_and_source() -> None:
                for value in ("-1", "true")]
     invalid += [("bogus = 1", "bogus"),
                 ("[pipeline]\nreviewer_investigation_budget_seconds = 480", "reviewer_investigation_budget_seconds")]
-    invalid += [(f"[pipeline]\nassignment_policy = {value}", "pipeline.assignment_policy")
-                for value in ('"hierarchical"', '["adaptive"]')]
+    # The removed policy key is refused whatever its value.
+    invalid += [(f"[pipeline]\nassignment_policy = {value}", "pipeline.assignment_policy: removed")
+                for value in ('"broad"', '"adaptive"')]
     for body, named in invalid:
         with pytest.raises(rp.ProfileError) as error:
             _profile(body, source=source)
