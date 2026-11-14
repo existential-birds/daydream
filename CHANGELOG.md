@@ -23,6 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `review_admit` and the terminal `structured_output` from a fresh MCP server on loopback,
   bound to the same host authority and registered only through additive `-c` overrides
   on `codex exec`, so a rejected submission is corrected in the same conversation.
+  A turn that completes without an accepted submission is retried as the invocation's
+  first retry: one fresh conversation under the
+  [renewal rule](docs/runtime.md#budget-ledger), keeping the target decisions it
+  admitted. It is not retried after an earlier retryable provider failure or once it
+  admitted a claim, and it never counts as a failure on the outage circuit. An
+  assignment that ends unsubmitted is still reported as `missing_output` unless a budget
+  or deadline limit stops it first
+  ([#1829](https://github.com/existential-birds/daydream/issues/1829)).
   Daydream writes nothing to the Codex home. `daydream --backend codex` and every other
   Codex invocation keep their command line and environment; their one change is the
   failed-tool-result fix listed under Fixed. Codex shows the model a schema without most
@@ -340,6 +348,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Committed review no longer rejects a reviewed target submitted with empty
+  `evidence_refs` when the target has more than four sources. The host expanded `[]` to
+  every source of the target and then refused its own expansion ("supply at most four
+  selectors"), which cost the whole batch and one tool start. `[]` now records the first
+  four of the target's assigned sources; the complete inventory stays in
+  `assignments[].source_refs`, and results for targets with at most four sources are
+  unchanged. The reviewer instructions now state that every `evidence_refs` array holds
+  at most four selectors, a bound Codex does not show in its tool schema
+  ([#1829](https://github.com/existential-birds/daydream/issues/1829)).
 - A Codex MCP tool call whose server marked the result as an error is now recorded as a
   failed tool result. Codex reports such a result only through a `failed` status, which
   was recorded as a success. This applies to every Codex invocation, including
