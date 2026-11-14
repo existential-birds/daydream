@@ -306,6 +306,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Committed review no longer rejects a reviewed target submitted with empty
+  `evidence_refs` when the target has more than four sources. The host expanded `[]` to
+  every source of the target and then refused its own expansion ("supply at most four
+  selectors"), which cost the whole batch and one tool start. `[]` now records the first
+  four of the target's assigned sources; the complete inventory stays in
+  `assignments[].source_refs`, and results for targets with at most four sources are
+  unchanged. The reviewer instructions now state that every `evidence_refs` array holds
+  at most four selectors, a bound Codex does not show in its tool schema
+  ([#1829](https://github.com/existential-birds/daydream/issues/1829)).
 - A Codex MCP tool call whose server marked the result as an error is now recorded as a
   failed tool result. Codex reports such a result only through a `failed` status, which
   was recorded as a success. This applies to every Codex invocation, including

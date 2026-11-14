@@ -1560,7 +1560,7 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(rev
 
     async with binding.session():
         receipt = _charged(binding, "review_admit",
-                           {"targets": [decision(first)], "claims": [_proposal(review_inputs)]})
+                           {"targets": [decision(first, evidence_refs=[])], "claims": [_proposal(review_inputs)]})
         assert receipt["progress"]["decided"] == 1 and receipt["admitted"]["claims"][0]["revision"] == 1
         bad = decision(second)
         bad["evidence_refs"][0]["source_id"] = "source:" + "0" * 64
@@ -1573,7 +1573,7 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(rev
         ]:
             with pytest.raises(HostToolRejected, match=message):
                 _charged(binding, "review_admit", batch)
-        final = {"targets": [decision(second)], "claims": []}
+        final = {"targets": [decision(second, evidence_refs=[])], "claims": []}
         binding.admit("final", "structured_output", final, terminal=True)
         # Rejected batches installed nothing: one claim and exactly the two admitted decisions remain.
         progress = binding.submit("final", final)["progress"]
@@ -1581,6 +1581,10 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(rev
     value = review.seal({})
     decisions = [d for scope in value["terminal_result"]["stack_outcomes"] for d in scope["target_decisions"]]
     assert {d["target_id"] for d in decisions if d["status"] == "reviewed"} == {first, second}
+    # Empty refs record the target's sources: all of a small target's, the first four of a larger inventory.
+    inventories = [part["source_refs"] for part in review.assignments[:2]]
+    assert [len(refs) for refs in inventories] == [6, 2]
+    assert [d["evidence_refs"] for d in decisions if d["status"] == "reviewed"] == [inventories[0][:4], inventories[1]]
     assert all(d["reason"].startswith("unsubmitted:") for d in decisions if d["status"] == "not_reviewed")
     assert value["terminal_result"]["analysis_state"] == "incomplete" and len(value["claims"]) == 1
 
@@ -2226,6 +2230,7 @@ async def test_committed_review_completes_through_native_host_tools(
             ["codex", True, True, True, 6, 1], ["codex", True, True, True, 1, 0]]
     assert len(systems) >= 2
     for system in systems:
+        assert "at most four selectors" in system
         # The natively delivered instructions decode to the exact description with its separators escaped,
         # and the host's own search guidance still follows the assignment that repeats it.
         assert _assignment({"review_system_instructions": system})["profile"]["historical_context"] == {

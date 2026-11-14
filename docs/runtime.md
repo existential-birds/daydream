@@ -118,8 +118,10 @@ fresh challenge, navigates it under the profile's
   labelled as distinct from dispatch-time snapshots.
 
 A reviewed target decision or challenge verdict with empty `evidence_refs` records
-the target's assigned sources or the judged claim's evidence; models cite source IDs
-only to locate claims or add evidence.
+up to four of the target's assigned sources, in inventory order, or the judged claim's
+evidence; models cite source IDs only to locate claims or add evidence. Every
+`evidence_refs` array holds at most four selectors, which the reviewer instructions
+state; a target's complete inventory stays in `assignments[].source_refs`.
 At sealing every planned target has exactly one typed decision: an admitted model
 decision or a host-authored `not_reviewed` decision whose reason starts with
 `unsubmitted:`. Coverage shards targets in inventory order into scopes of 12
