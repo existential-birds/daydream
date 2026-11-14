@@ -28,7 +28,8 @@ REVIEW_WALL_BUDGET_S = 3600.0
 REVIEWER_TOOL_CALL_BUDGET = 120
 
 # First-pass batches one base allowance covers: about 30 calls per batch at the
-# default, above the 7-12 calls per batch observed in #1746.
+# default, above the 7-12 calls per batch observed in #1746. Committed review also
+# holds at most this many batches in one conversation: docs/runtime.md.
 REVIEWER_BATCHES_PER_ALLOWANCE = 4
 
 # Allow target test suites more wall time than ordinary turns while bounding hangs.

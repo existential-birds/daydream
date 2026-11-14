@@ -176,7 +176,8 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
 
     A committed-review assignment in the developer instructions is reviewed (lookup, two
     Codex-owned starts, a rejected submission, an admitted batch, the terminal submission
-    and two host calls after acceptance) or challenged. The first review attempt admits its
+    and two host calls after acceptance) or challenged, every assigned claim in one turn;
+    one with no targets submits an empty batch. The first review attempt admits its
     targets and ends its turn unsubmitted; the host's retry admits the claim and submits.
     Mode ``unsubmitted`` admits its claim, then its targets, and never submits its review, and
     judges nothing until a challenge supersedes the unsubmitted one. Otherwise the user prompt
@@ -207,7 +208,7 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
             await session.initialize()
             host = {
                 "overrides": {key: value for key, value in overrides.items() if key != "developer_instructions"},
-                "instructions": instructions, "output_schema": "--output-schema" in sys.argv,
+                "instructions": instructions, "prompt": prompt, "output_schema": "--output-schema" in sys.argv,
                 "token_exposed": any(token in text for text in (*sys.argv, prompt)),
                 "no_proxy": [os.environ.get(name) for name in ("NO_PROXY", "no_proxy")], "refused": refused,
                 "tools": sorted(tool.name for tool in (await session.list_tools()).tools),
@@ -242,11 +243,14 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
                 for index in range(submission.get("shells", 0)):
                     shell(f"shell_{index}")
             elif (work := json.JSONDecoder().raw_decode(assignment)[0])["kind"] == "challenge":
-                claim = work["claims"][0]
                 if mode != "unsubmitted" or work["work"]["parents"]:
                     await call("structured_output", {"verdicts": [{
                         "uid": claim["uid"], "revision": claim["revision"], "verdict": "confirmed",
-                        "grounds": "The caller divides by the changed value.", "evidence_refs": []}], "claims": []})
+                        "grounds": "The caller divides by the changed value.", "evidence_refs": []}
+                        for claim in work["claims"]], "claims": []})
+            elif not work["work"]["targets"]["ids"]:
+                # A cross-assignment that inherits nothing has nothing to decide.
+                await call("structured_output", {"targets": [], "claims": []})
             else:
                 targets = work["work"]["targets"]["ids"]
                 decisions = [{"target_id": target, "status": "reviewed", "reason": "Captured change inspected.",

@@ -35,8 +35,13 @@ def render_committed_review(payload: Mapping[str, Any]) -> str:
     keys = [_code(key) for reason, names in _ALLOWANCE_KEYS.items() if reason in terminal['reason_codes']
             for key in names]
     if keys:
+        wall = 'host_wall_budget_exhaustion' in terminal['reason_codes']
         lines.append('The review used up its allowance before it finished; raise ' + ' and '.join(keys)
-                     + f" under {_code('[pipeline]')} in the review profile.")
+                     + f" under {_code('[pipeline]')} in the review profile. The review multiplies "
+                     + f"{_code('reviewer_tool_call_budget')} and {_code('reviewer_investigation_budget_s')} by the "
+                     + f"{_code('scale')} its {_code('settings.limits')} record"
+                     + (f"; {_code('review_wall_budget_s')} caps the whole review and grows with the diff in the "
+                        "default profile only." if wall else "."))
     lines.extend(['', '## Findings', ''])
     if not payload['findings']:
         lines.append('No confirmed findings.')

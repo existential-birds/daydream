@@ -73,6 +73,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Changed defaults (0.y.z):** committed review's allowances grow with the change the
+  way the staged reviewer's did. The profile's `reviewer_tool_call_budget` and
+  `reviewer_investigation_budget_s` are multiplied by the larger of the diff tier (3, 6
+  or 9 above 64 KiB or 1,000 lines, 256 KiB or 5,000, 512 KiB or 10,000) and one per
+  four planned batches. A review of a large change therefore uses far more tool calls,
+  time and tokens by default than before, in proportion to its size: a 237-file change
+  of 1.47 MB that plans 134 batches on Pi had 120 tool calls and a 2,400 s window with
+  one discovery conversation, and now has 4,080 tool calls across 134 discovery
+  assignments, a cross-assignment and the challenge within 40,380 s. The staged reviewer
+  at v0.34.0 planned 7,344 tool calls in 138 first-pass invocations within 37,800 s for
+  it. With the default profile `review_wall_budget_s` grows by the tier, to hours for a
+  very large change; in every other profile it stays a fixed ceiling, so an embedder
+  with a hard outer deadline must set `review_wall_budget_s` to it. Every sealed result
+  now records `scale` and `effective_tool_calls` in `settings.limits` beside the
+  profile's own values, for small changes too, and the profile shown to the reviewer in
+  each assignment carries them; the profile digest does not change. A report that names
+  the profile keys raising a spent allowance now also says that the review multiplies
+  `reviewer_tool_call_budget` and `reviewer_investigation_budget_s` by that `scale` and,
+  for spent time, that `review_wall_budget_s` grows with the diff in the default profile
+  only
+  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
+- A change of more than four batches is reviewed as one discovery assignment per batch
+  under both `broad` and `adaptive`, followed by the cross-assignment and the challenge.
+  They run ten at a time on Pi and eight on Claude and Codex by default;
+  `DAYDREAM_FANOUT_CONCURRENCY` changes that, up to ten. Such a change can no longer be
+  reviewed in one conversation under `broad`, and
+  `settings.assignment_policy.decomposed` can be `true` there; the two policies now differ
+  only for changes of two to four batches. A change of at most four batches whose diff is
+  in the first tier is planned under `broad` exactly as before
+  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
+- A split discovery or follow-up assignment receives each of its targets in its first
+  message as `review_source` returns it, instead of fetching each with a charged call,
+  so its prompt and recorded trajectory are larger. Because those bytes are untrusted
+  and now sit in a message of the host's, each header and description line of a supplied
+  target begins with a random token that the message's first line announces, and the
+  instructions of such an assignment say that only those lines are host-authored. This
+  includes `adaptive` reviews of two to four batches
+  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 - Trace agent spans record each retry-ladder stop as a `daydream.retry.stop` event carrying
   the trajectory's `agent_budget_stop` fields as `daydream.retry.*`, with or without a
   trajectory recorder. The run span carries the run's GitHub repository and, when known,
@@ -512,6 +550,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checked only under the fork's name, so the exclusion missed it and its findings could
   reach the corpus and training input
   ([#1684](https://github.com/existential-birds/daydream/issues/1684)).
+- Committed review on Pi and Codex no longer holds the host's event loop while it
+  re-reads the captured source for each `review_admit` and final submission. That read
+  grows with the repository (about 0.2 s for 700 files, 0.6 s for 5,000 and 2.7 s for
+  20,000 on the measuring host), and with several Pi assignments running at once it made
+  the others' three-second control requests time out, which aborted those assignments.
+  The endpoint now performs the read on a worker thread when the request arrives, one
+  such read at a time, and then runs the synchronous admission; a failed read is
+  repeated and reported by the admission as before. What changes: the integrity check
+  for an admission on Pi and Codex now runs just before the callback rather than inside
+  it, so a change to the capture during that one callback's own resolution is not caught
+  at that admission; per-reference blob checks and the seal-time whole-capture check
+  still apply, and a persisting change still fails the review at sealing. A submission
+  that is then rejected for its content has paid for one read, including a rejected
+  final submission whose reserved start is refunded: up to 32 such reads per assignment
+  beyond its charged starts. Claude's in-process admissions, and keeping a rejected final
+  batch when its work closes, still read on the loop
+  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 
 ## [0.34.0] - 2026-11-03
 
