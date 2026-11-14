@@ -957,6 +957,14 @@ the options and settings of the staged reviewer it replaced select nothing.
   `--ignore-path` excludes paths. `tool_supervisor` is unaffected.
 - **Refused:** a review or challenge backend without native host tools. Pi, Claude and
   Codex serve them; Osprey does not and cannot run a review.
+- **Refused when a review profile is parsed**, before any work, with one message naming
+  each key as removed: every key in `review_profile.REMOVED_PROFILE_KEYS`. These are the
+  `[pipeline]` keys `assignment_policy`, `structural_enabled`, `arbitration_enabled`,
+  `arbitration_min_severity`, `arbitration_contested_location`, `suppression_enabled`,
+  `suppression_severity_classes` and `suppression_confidence_classes`, and the strategies
+  `intent`, `alternatives`, `discovery.per_stack`, `discovery.structural`, `suppression`,
+  `merge` and `supervision`. The packaged default carries none of them, so none counts in
+  a profile digest.
 
 No stored format is converted. A fresh review rebuilds its own `.daydream/deep/`
 working directory, as every fresh run did, so the previous run's files there are
