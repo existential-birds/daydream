@@ -6,7 +6,7 @@ import json
 import sys
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -27,10 +27,6 @@ from tests.test_deep_orchestrator import (
 )
 
 
-def _forbidden_input(*_a: Any, **_kw: Any) -> str:
-    raise AssertionError("input() was called in non-interactive mode -- stdin must not be touched")
-
-
 def _capture_warnings(monkeypatch: pytest.MonkeyPatch, module_attr: str) -> list[str]:
     """Route ``module_attr``'s ``print_warning`` into a list and return it."""
     warnings: list[str] = []
@@ -45,11 +41,6 @@ def _only_archived_run(archive_dir: Path) -> Path:
     return run_dirs[0]
 
 
-def _install_post_recorder(monkeypatch: pytest.MonkeyPatch, received: list[dict[str, Any]]) -> None:
-    """Stub the PR-posting boundary, recording each call's keyword arguments."""
-    async def _record_post(*_args: Any, **kwargs: Any) -> None:
-        received.append(kwargs)
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _record_post)
 
 
 def _iter_run_payloads(run_root: Path, traj: Path) -> Iterator[dict[str, Any]]:
@@ -95,53 +86,14 @@ def _scan_phase_events(run_root: Path, traj: Path, event: str) -> list[dict[str,
     return found
 
 
-def _count_review_prompts(calls: list[dict[str, Any]]) -> int:
-    """Count per-stack + structural review prompts in a captured call list.
-
-    Discriminators mirror the production prompt builders:
-      - per-stack / generic-fallback: ``"you are reviewing the <X> stack"``
-      - structural: ``"you are the structural reviewer"``
-    """
-    n = 0
-    for c in calls:
-        pl = c["prompt"].lower()
-        if "you are reviewing the" in pl and "stack" in pl:
-            n += 1
-        elif "you are the structural reviewer" in pl:
-            n += 1
-    return n
-
-
-def _merged_items(deep: Path) -> list[dict[str, Any]]:
-    """Return the canonical merged item list written under *deep*."""
-    return cast("list[dict[str, Any]]", json.loads((deep / "merged-items.json").read_text())["items"])
-
-
-def _source_uids_by_description(deep: Path) -> dict[str, Any]:
-    """Map each merged item's description to its ``source_uids`` value.
-
-    Keyed on ``description`` because ``normalize_items`` reassigns every ``id``
-    at the merge write, so the reviewer-side numbering a test set up with is gone
-    by the time the artifact lands.
-    """
-    return {str(item.get("description")): item.get("source_uids") for item in _merged_items(deep)}
 
 
 
 
-def _provenance_item(item_id: int, description: str, *, file: str = "api.py", line: int = 1, source_uids: Any = None,
-    evidence: str | None = None, severity: str = "medium", rationale: str = "rationale",
-) -> dict[str, Any]:
-    """Build one merge-agent item with an explicitly chosen provenance claim.
 
-    ``_merge_item`` cannot serve here: these tests are about the ``source_uids``
-    value itself, including the shapes a real model gets wrong (a null or a bare
-    string), so each has to be settable.
-    """
-    return {"id": item_id, "lens": "per-stack", "file": file, "line": line, "severity": severity,
-        "description": description, "confidence": "MEDIUM", "rationale": rationale,
-        "evidence": f"{file}:{line}" if evidence is None else evidence, "source_uids": source_uids,
-    }
+
+
+
 
 
 def _direct_fix_context(repo: Path, items: list[dict[str, Any]], *, changed_files: set[str], start_at: str = "review",
@@ -224,18 +176,3 @@ def _finalization_fixture(tmp_path: Path) -> tuple[Any, Any, Any]:
     return ctx, state, snapshot
 
 
-def _arbiter_stacks(severities: dict[str, str]) -> dict[str, dict[str, object]]:
-    """Per-stack findings at three distinct ``(file, line)`` locations.
-
-    Three file components mean three arbiter groups whenever the selection
-    spans more than one co-located target. The descriptions differ so a dedup
-    pass cannot fold the records together.
-    """
-    locations = {"python": ("api.py", "python finding"), "react": ("App.tsx", "react finding"),
-        "generic": ("README.md", "generic finding"),
-    }
-    return {name: {
-            "severity": severities[name], "confidence": "HIGH", "file": file, "line": 1, "description": description,
-        }
-        for name, (file, description) in locations.items()
-    }

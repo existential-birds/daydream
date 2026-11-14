@@ -8,25 +8,18 @@ import sys
 from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from daydream import git_ops
 from daydream.backends import AgentEvent
-from daydream.deep.artifacts import (
-    DeepArtifact,
-    diff_key,
-)
 from daydream.phases import TestAndHealResult, TestAttemptEvidence
 from daydream.pr_review import PRInfo
 from daydream.review_profile import ResolvedProfile, build_default_profile, parse_profile
 from daydream.run_config import RunConfig
 from daydream.runner import run
-from daydream.workspace import _resolve_base
 from tests.harness.git_helpers import (
-    commit as _commit,
-    git as _git,
     seed_feature_branch,
 )
 from tests.harness.stub_backend import StubBackend, force_interactive, install_stub_backend, silence
@@ -77,12 +70,6 @@ def _merge_item(item_id: int, file: str, severity: str, *, desc: str | None = No
         "rationale": "rationale", "evidence": f"{file}:1", "related_files": None, "source_uids": None,
     }
 
-def _add_to_reviewed_diff(target: Path, files: list[str]) -> None:
-    """Commit *files* to the branch for tests that need reviewed-diff fixtures."""
-    for name in files:
-        (target / name).touch()
-    _git(target, "add", *files)
-    _commit(target, f"test: add {' '.join(files)} to the reviewed diff")
 
 def _migration_project(tmp_path: Path, name: str) -> tuple[Path, Path]:
     """Build a feature-branch fixture with one historical migration."""
@@ -103,19 +90,7 @@ def _migration_project(tmp_path: Path, name: str) -> tuple[Path, Path]:
     )
     return project, project / migration_rel
 
-def _record(**overrides: Any) -> dict[str, Any]:
-    """Build one on-disk per-stack record (the shape a merge resume reads back)."""
-    record: dict[str, Any] = {"id": 1, "description": "issue", "file": "api.py", "line": 1,
-                              "severity": "medium", "confidence": "MEDIUM",
-                              "rationale": "fixture defect", "evidence": "api.py:1"}
-    record.update(overrides)
-    return record
 
-def _write_matching_diff_key(target: Path, deep: Path) -> None:
-    """Key primed resume artifacts to the current diff, matching the deep preamble."""
-    base = _resolve_base(target, None, None)
-    diff = git_ops.diff(target, base)
-    DeepArtifact.DIFF_KEY.at(deep).write_text(diff_key(diff or ""), encoding="utf-8")
 
 
 async def _ok(*_a: Any, **kwargs: Any) -> Any:
@@ -162,17 +137,6 @@ def _build_scope_creep_target(tmp_path: Path, name: str) -> Path:
         changed={"api.py": "def hello():\n    return 'galaxy'\n"},
     )
 
-def _sanctioned_inputs(prompt: str) -> dict[str, Path]:
-    """The label -> path map the rendered sanctioned-inputs block enumerates."""
-    lines = prompt.splitlines()
-    start = lines.index("Sanctioned phase inputs (read only these exact files):") + 1
-    sanctioned: dict[str, Path] = {}
-    for line in lines[start:]:
-        if not line.startswith("- "):
-            break
-        label, path = line.removeprefix("- ").split(": ", 1)
-        sanctioned[label] = Path(path)
-    return sanctioned
 
 class _ExtraEditBackend(_StubBackend):
     """Make a fix turn also edit a second file, optionally creating it."""
@@ -198,33 +162,8 @@ def _fix_prompts(stub: _StubBackend) -> list[str]:
 
 PR_SENTINEL = "DELIBERATE_RATIO_PASS_THROUGH_IS_INTENTIONAL"
 
-def _intent_calls(stub: _StubBackend) -> list[dict[str, Any]]:
-    """Recover the intent-phase calls by their stable instruction text."""
-    return [c for c in stub.calls if "understand the intent of these changes" in c["prompt"].lower()]
-
-def _intent_prompt(stub: _StubBackend) -> str:
-    """Recover the intent-phase prompt by its stable instruction text."""
-    return cast(str, next(c["prompt"] for c in _intent_calls(stub)))
-
-def _review_prompts_by_kind(stub: _StubBackend) -> dict[str, list[str]]:
-    """Classify finding-producing prompts by their stable role-opening phrases."""
-    by_kind: dict[str, list[str]] = {
-        "per-stack": [], "generic-fallback": [], "structural": [], "arbiter": [], "merge": [],
-    }
-    for c in stub.calls:
-        pl = c["prompt"].lower()
-        if "you are reviewing the generic-fallback stack" in pl:
-            by_kind["generic-fallback"].append(c["prompt"])
-        elif "you are reviewing the " in pl:
-            by_kind["per-stack"].append(c["prompt"])
-        elif "you are the structural reviewer" in pl:
-            by_kind["structural"].append(c["prompt"])
-        elif "you are the arbiter" in pl:
-            by_kind["arbiter"].append(c["prompt"])
-        elif "cross-stack merge agent" in pl:
-            by_kind["merge"].append(c["prompt"])
-    return by_kind
 
 
-_TWIN_DESCRIPTION = "The staging cache URL does not match the documented shared instance"
+
+
 

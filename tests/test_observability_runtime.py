@@ -20,12 +20,9 @@ from daydream.agent import run_agent
 from daydream.backends import (
     CostEvent,
     DiagnosticEvent,
-    GenerationEndEvent,
-    GenerationStartEvent,
     MetricsEvent,
     RequestEvent,
     ResultEvent,
-    TextChoicePart,
     TextEvent,
     ThinkingEvent,
     ToolResultEvent,
@@ -51,17 +48,6 @@ def _memory_tracing() -> tuple[InMemorySpanExporter, Registry]:
     return exporter, registry
 
 
-def _observe_generation(attempt: Any, *, text: bool = False, metrics: bool = False) -> None:
-    """Emit the canonical generation start/end pair shared by the generation tests."""
-    attempt.observe(GenerationStartEvent(generation_id="gen-1", observed_at_unix_ns=1788690314289000000))
-    attempt.observe(GenerationEndEvent(
-            generation_id="gen-1", native_started_at_unix_ms=1788690314289, ended_at_unix_ns=1788690709621000000,
-            end_source="host_observed_message_end", choice_parts=(TextChoicePart(text="hello"),) if text else (),
-            response_id="resp-1", model_name="pi-model", provider_name="pi", finish_reason="stop",
-        )
-    )
-    if metrics:
-        attempt.observe(MetricsEvent("", 10, 2, None, 0.001, generation_id="gen-1"))
 
 @pytest.mark.anyio
 async def test_attempt_records_scrubbed_diagnostic_events_in_observed_order(monkeypatch: pytest.MonkeyPatch,) -> None:

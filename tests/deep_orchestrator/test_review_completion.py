@@ -27,7 +27,7 @@ from tests.harness.dataset import read_records
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote, git, init_repo
 from tests.test_artifact_visibility import _Entry, _walk_entry
-from tests.test_deep_orchestrator import _pin_findings_pr, _record
+from tests.test_deep_orchestrator import _pin_findings_pr
 from tests.test_pr_review import _recording_fake_submit
 
 
@@ -63,13 +63,8 @@ def scopes(data: dict[str, Any]) -> dict[str, Any]:
     return {s['scope_id']: s for s in data['terminal_result']['stack_outcomes']}
 
 
-def record(line: int = 2) -> dict[str, Any]:
-    return _record(description='Grounded defect', file='api.py', line=line, severity='medium', confidence='MEDIUM',
-                   rationale='Boundary evidence', evidence=f'api.py:{line}')
 
 
-def reviewer(prompt: str) -> bool:
-    return 'you are reviewing the ' in prompt.lower() or 'you are the structural reviewer' in prompt.lower()
 
 
 async def test_comment_pins_pr_head_independently_and_excludes_local_edits(

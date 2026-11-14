@@ -5,24 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from daydream.deep.artifacts import (
-    deep_dir,
-)
 from daydream.extensions import Registry
 from daydream.workspace import WorkContext
-
-
-def _empty_merge_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
-    """Create the empty records/alternatives files the empty-merge guard consumes."""
-    dd = deep_dir(tmp_path, allow_standalone=True)
-    records = dd / "stack-python-records.json"
-    records.write_text('{"issues": []}')
-    alternatives = dd / "alternatives.json"
-    alternatives.write_text("[]")
-    return dd, records, alternatives
-
-
-
 
 # The merge agent returns a schema item list; the host renders the report.
 
