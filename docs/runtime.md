@@ -95,7 +95,11 @@ fresh challenge, navigates it under the profile's
   (16 KiB) first catalog page with `status`, `total_targets`, `total_files` and
   omitted counts. Catalog and decided markers there are a dispatch-time snapshot.
   The assignment is canonical JSON with DEL, U+0085, U+2028 and U+2029 escaped, so text
-  inside it cannot draw a line break.
+  inside it cannot draw a line break. One `Limits:` paragraph of the policy states what a
+  reviewer is held to and a tool schema may not show ([Codex](#codex-host-tools)): batch
+  and text sizes, part ids as target ids, the assigned and supporting selector rules and
+  what follows a rejected final submission. The policy also asks the reviewer to admit
+  decisions as it reaches them.
 - `review_source` is a charged, read-only host lookup over frozen canonical inputs:
   with `target_id`/`path` null it pages the whole catalog; `path` lists one changed
   path's targets; `target_id` returns the target's `source_options`, ranges (for a
@@ -116,6 +120,41 @@ fresh challenge, navigates it under the profile's
 - Both tools report current host capacity after charging the call (remaining tool
   starts, remaining time to the original deadline and protected reserves),
   labelled as distinct from dispatch-time snapshots.
+
+Every item of a batch is checked on its own, so one rejection names each distinct
+violation in the batch once, with how many targets, verdicts or claims broke it and the
+first three of them. An item is named by its target id, its claim uid or `claims[N]` for
+a new claim, quoted and cut to 160 characters after redaction. A selector violation names
+the selector instead: a supporting path with its side and, for a range, the file's lines,
+or a source id with its offered range, so unknown source ids, ranges outside different
+offered ranges and ranges outside files of different lengths are one violation each. When
+that text would exceed the 1,024-byte rejection bound, the ids are dropped before any
+violation is. A schema rejection, which the binding raises before the review sees the
+batch, names its first fault only. Once an item has been refused, a later item that
+cannot be checked at all (a supporting path Git cannot resolve) does not turn the live
+rejection into a fatal one.
+
+When a work's authority closes without an accepted final submission and the last
+submission it started was a rejected final batch, the host installs what that batch
+would have done unchanged: its target decisions, verdicts and claims that passed their
+own checks, without any item whose target or claim another item of the batch was
+refused for (a repeated or contradicting decision or verdict). When any claim or claim
+revision of the batch was refused, none of its `reviewed` decisions and none of its
+verdicts are kept: those targets and claims stay for later work, which reviews and judges
+them again or leaves them reported unfinished. A decision an earlier accepted batch
+installed is not reopened. If an item of the batch cannot be checked at all, nothing of
+the batch is kept. The kept items are installed together under the unchanged
+installation checks; if they fail those together, nothing of the batch is kept. Any later
+`structured_output` or `review_admit` start replaces the remembered batch whatever its
+outcome, including a start the binding refuses for its schema and one admitted before
+the rejection and served after it, so a replaced batch is never kept and a rejected
+`review_admit` batch never is. Two later submissions do not replace it, because the
+binding refuses them before it counts a start: one made after the deadline, and one that
+repeats a call id. No receipt is produced and the sealed result does not mark such
+items: the work stays not accepted (`closed`, with its execution reason) and the kept
+items count as its admitted progress, which a follow-up may complete. An unexpected
+failure during that installation is recorded on the binding as `callback_failed`, as a
+live callback's is, and the work's execution entry is still written.
 
 A reviewed target decision or challenge verdict with empty `evidence_refs` records
 up to four of the target's assigned sources, in inventory order, or the judged claim's
@@ -237,7 +276,12 @@ unresolved verdict keeps the revision with its work, so the next round supersede
 Each shard's status derives from its targets and the current (non-superseded) work
 responsible for them; required phases are `challenge` and `cross_assignment`.
 Superseded failed work whose responsibilities were transferred and accepted elsewhere
-remains evidence but does not make the review incomplete. The staged deep path keeps
+remains evidence but does not make the review incomplete. When the sealed reason codes
+hold `host_tool_budget_exhaustion` or `host_wall_budget_exhaustion`, which only current
+work contributes, the report adds one sentence under "Unfinished work" naming the
+`[pipeline]` profile keys that raise that allowance: `reviewer_tool_call_budget`, or
+`reviewer_investigation_budget_s` with `review_wall_budget_s`, which caps the review
+window. The staged deep path keeps
 its own rule ([stage-aware builders](extensions.md#stage-aware-review-builders)).
 
 ### Captured local source
@@ -514,7 +558,9 @@ dispatch whose remaining calls cannot fit its minimum work. Without host tools,
 ledger when it admits a native start (Pi's `/admit`, Claude's PreToolUse hook) before
 the start runs, and its deadline reads the ledger.
 Starts refused for the protected submission slot or over the limit are observed,
-never charged.
+never charged. A final submission rejected on that slot is charged and then refunded
+([protected submission](#pi-host-tool-lifetime-and-limits)), so a committed execution
+entry's `observed_starts` can exceed its `allocation` while its `overshoot` stays 0.
 
 Renewal rule: compaction or summarization never renews a budget. When a retryable
 provider failure leads to a retry, the failed attempt's tool calls are refunded when
@@ -524,7 +570,7 @@ attempt count, the absolute deadline and the outage circuit; a failure after pos
 host acceptance still permits no retry. A Codex turn that completes with nothing accepted
 is retried under this rule only as the invocation's first retry, and the outage circuit
 records it as a completed turn, never as a failure ([Codex host tools](#codex-host-tools)).
-Paths that do not retry are never refunded,
+Apart from that rejected submission, paths that do not retry are never refunded,
 including a staged schema re-dispatch and a committed challenge re-dispatch. Committed
 batches admitted before a provider failure stay installed while that attempt's starts
 are refunded with the rest of the attempt.
@@ -552,7 +598,9 @@ path/side/LF ranges; the host constructs canonical `evidence_refs` from the full
 assignment inventory and pinned regular Git blobs with the same admission code for
 all backends. Exact continuation fragments retain their null source ranges and
 are cited as fragments, never by a continuation range; an assigned range may only
-narrow its offered range. Supporting attribution cannot satisfy assigned coverage.
+narrow its offered range. Supporting attribution cannot satisfy assigned coverage. A
+supporting selector names a regular UTF-8 file of any size up to the 8 MiB source
+retrieval limit; its reference retains the whole file's digest and none of its bytes.
 Correspondence is never proof of a read, understanding or an executed check.
 Pi submits through its bound host tool and corrects rejected selectors within the
 conversation (below). Other backends return selectors once as final structured
@@ -568,8 +616,8 @@ correctable payload rejection returns a correlated native error naming the
 field/selector, violated constraint and concrete correction. It changes no
 findings, decisions, notes or retention capacity. Correction uses the same
 conversation and [budget ledger](#budget-ledger). A rejected real tool start
-still consumes that allowance, except a protected-slot denial (below); exhausted
-capacity cannot invite another call.
+still consumes that allowance, except a protected-slot denial or a rejected protected
+submission (below); otherwise exhausted capacity cannot invite another call.
 Successful acceptance installs state once, returns canonical output and permits
 native termination; duplicate accepted callbacks cannot admit or charge retention
 again. Unbound structured calls retain their ordinary serializer behavior.
@@ -612,16 +660,26 @@ eight-call ceiling or hidden nested tool execution.
 Committed-review bindings set `protected_submission=True`: the last start belongs to
 `structured_output`. Any other start that would take it, ordinary or host tool and
 including parallel-batch members, is counted in `denied_starts` and refused with
-correctable `capacity_protected` without charging or closing authority; a bounded
-number of denials then fails closed. `capacity()` reports both counts; the ledger
-observes denied starts without charging them. Pi and Claude deny prospectively at admission,
+correctable `capacity_protected` without charging or closing authority. A
+`structured_output` charged on that last start and then rejected, for its schema, size or
+content, keeps the start: the charge is refunded, the rejection stays correctable and it
+counts as one more denied start. Only the rejection of that submission is refunded, and
+once: a submission that matches no admitted call, or a host tool's call, rejected when
+no call is left keeps the fatal outcome. Past 32 denied starts the binding fails closed
+with `capacity_exhausted`, and the assignment deadline applies throughout; a binding
+without a protected start keeps the fatal outcome for a rejection on its last start.
+`capacity()` reports both counts; the ledger observes denied starts without charging them. Pi and Claude deny prospectively at admission,
 so a denied start is still observed and reported as [overshoot](observability.md#committed-review-evidence)
 that never reduces later reserves. Codex denies its host calls the same way, but the tools
 it runs itself have already run when they are observed
 ([Codex host tools](#codex-host-tools)). Osprey serves no host tools and only observes starts.
 
 A binding may also declare charged nonterminal host tools (`HostTool`). Pi registers
-them in the existing extension; `/admit` charges each start, and `/call` serves
+them in the existing extension with `executionMode: "sequential"`, so the supported Pi
+version runs every tool call of a generation that calls one in order, stock reads
+included: one host request is open at a time, the endpoint's bound of three connections
+is never reached, and no request waits behind a host callback past its transport
+allowance. `/admit` charges each start, and `/call` serves
 that admitted identity exactly once under the same readiness, authority, deadline
 and correlation rules. Read-only tools never mutate domain state; mutating tools
 install at the same synchronous boundary as acceptance, and their unexpected

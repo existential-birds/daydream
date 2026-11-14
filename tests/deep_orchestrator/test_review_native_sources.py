@@ -229,15 +229,21 @@ def test_source_selectors_construct_supporting_evidence_from_the_pinned_git_blob
             revoked()
     # Non-native admission revalidates the same pinned blob and rejects unavailable or out-of-range support.
     supporting = canonical[1]
+    # A supporting file over 64 KiB was refused whole; only captured source's retrieval limit bounds it.
+    large = {**supporting, 'path': 'oversized.py', 'source_range': {'start': 1, 'end': 1},
+             'artifact_sha256': hashlib.sha256(b'#' * (64 * 1024 + 1)).hexdigest()}
     for reference, admitted in ((supporting, True), ({**supporting, 'source_range': {'start': 1, 'end': 99}}, False),
+                                (large, True),
                                 ({**supporting, 'path': 'missing.py'}, False),
                                 ({**canonical[0], 'path': 'foreign.py'}, False)):
         assert validate_source_refs([canonical[0], reference], [assigned], revision=revision,
                                     source_root=repo) is admitted, reference
+    assert canonicalize_source_selectors(
+        [contained[0], {**contained[1], 'path': 'oversized.py', 'source_range': {'start': 1, 'end': 1}}],
+        [assigned], revision=revision, source_root=repo) == [canonical[0], large]
     for fault, expected in (('assigned-range', ('1..3', 'null')), ('supporting-range', ('1..2', 'start <= end')),
-                            ('supporting-only', ('reviewed', 'source_id')), ('forged-hash', ()),
-                            ('traversal', ()), ('binary', ()), ('symlink', ()),
-                            ('oversized', ('whole pinned blob', '65536', 'narrowing source_range cannot'))):
+                            ('supporting-only', ('assigned source_id', 'is required')), ('forged-hash', ()),
+                            ('traversal', ()), ('binary', ()), ('symlink', ('retrieval limit',))):
         choices = selectors()
         if fault == 'assigned-range':
             choices[0]['source_range'] = {'start': 1, 'end': 4}
@@ -249,8 +255,8 @@ def test_source_selectors_construct_supporting_evidence_from_the_pinned_git_blob
             choices[1]['artifact_sha256'] = '0' * 64
         else:
             choices[1]['path'] = {'traversal': '../support.py', 'binary': 'binary.dat',
-                                  'oversized': 'oversized.py', 'symlink': 'symlink.py'}[fault]
-            # Keep the range valid for each blob so a missing size/UTF-8/regular-file
+                                  'symlink': 'symlink.py'}[fault]
+            # Keep the range valid for each blob so a missing UTF-8/regular-file
             # guard cannot pass this regression at an unrelated range check.
             choices[1]['source_range'] = {'start': 1, 'end': 1}
         with pytest.raises(HostToolRejected) as rejected:

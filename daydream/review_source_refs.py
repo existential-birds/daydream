@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from daydream.git_ops.captured_source import CapturedSource
 
 SOURCE_REFS_MAX_BYTES = 8192
-_SUPPORTING_SOURCE_MAX_BYTES = 64 * 1024
 _DIGEST = {'type': 'string', 'pattern': '^[0-9a-f]{64}$'}
 _RANGE = strict_object({key: {'type': 'integer', 'minimum': 1} for key in ('start', 'end')})
 _FRAGMENT = strict_object({
@@ -82,7 +81,6 @@ def _source_contents(root: Path, revision: Mapping[str, Any], side: str, path: s
 @dataclass(frozen=True)
 class _SupportingFacts:
     digest: str
-    size: int
     lines: int
     utf8: bool
 
@@ -95,8 +93,16 @@ def _supporting_facts(root: Path, revision: Mapping[str, Any], side: str, path: 
         utf8 = True
     except UnicodeDecodeError:
         utf8 = False
-    return _SupportingFacts(_sha(contents), len(contents),
+    return _SupportingFacts(_sha(contents),
         contents.count(b'\n') + int(bool(contents) and not contents.endswith(b'\n')), utf8)
+
+
+class SourceSelectorRejected(HostToolRejected):
+    """A selector violation; ``group`` holds its rule apart from the selector it names, so a batch can count them."""
+
+    def __init__(self, message: str, rule: str, subject: str) -> None:
+        super().__init__(message)
+        self.group = (rule, subject)
 
 
 class _SubmissionSources:
@@ -184,9 +190,10 @@ def canonicalize_source_selectors(
         if requested != assigned.keys():
             unknown = next(selector['source_id'] for selector in selectors
                            if 'source_id' in selector and selector['source_id'] not in assigned)
-            raise HostToolRejected(
-                f'evidence_refs source_id {unknown}: outside this target\'s assigned inventory; '
-                'choose a source_id from this target\'s source_options, including its assigned deferred parts.')
+            rule = (': outside this target\'s assigned inventory; '
+                    'choose a source_id from this target\'s source_options, including its assigned deferred parts.')
+            raise SourceSelectorRejected(f'evidence_refs source_id {unknown}{rule}',
+                                         f'evidence_refs source_id{rule}', unknown)
         resolved: list[dict[str, Any]] = []
         for index, selector in enumerate(selectors):
             field = f'evidence_refs[{index}]'
@@ -199,42 +206,42 @@ def canonicalize_source_selectors(
                             or not original['start'] <= bounds['start'] <= bounds['end'] <= original['end']):
                         allowed = (f'{original["start"]}..{original["end"]}' if isinstance(original, dict)
                                    else 'no line range (this is an exact fragment)')
-                        raise HostToolRejected(
-                            f'{field}.source_range for {selector["source_id"]}: '
-                            f'allowed {allowed}; use null to retain the exact assigned identity '
-                            'or choose a contained range with start <= end.')
+                        rule = ('; use null to retain the exact assigned identity '
+                                'or choose a contained range with start <= end.')
+                        raise SourceSelectorRejected(
+                            f'{field}.source_range for {selector["source_id"]}: allowed {allowed}{rule}',
+                            f'evidence_refs.source_range: outside the offered range{rule}',
+                            f'{selector["source_id"]} {allowed}')
                     reference['source_range'] = deepcopy(bounds)
                 reference.update(basis=selector['basis'], role='assigned')
             else:
                 path, side, bounds = selector['path'], selector['side'], selector['source_range']
-                field += f' supporting path {redact_text(path)[:160]!r} ({side})'
+                source = f'{redact_text(path)[:160]!r} ({side})'
+                field += f' supporting path {source}'
+                generic = 'evidence_refs supporting path'
                 if not git_observed_path_is_confined(source_root, path):
-                    raise HostToolRejected(
-                        f'{field}: path must remain inside the repository; choose a confined repository path '
-                        'or remove this optional supporting selector.')
+                    rule = (': path must remain inside the repository; choose a confined repository path '
+                            'or remove this optional supporting selector.')
+                    raise SourceSelectorRejected(f'{field}{rule}', f'{generic}{rule}', source)
                 pinned_revision = source_revision(revision, side)
                 try:
                     facts = (_submission._supporting(side, path) if _submission is not None else
                              _supporting_facts(source_root, revision, side, path, captured_source))
                 except (FrozenSourceRejected, PathAbsentError) as exc:
-                    raise HostToolRejected(
-                        f'{field}: no available regular blob at the pinned revision; choose a regular file '
-                        f'on this side within {_SUPPORTING_SOURCE_MAX_BYTES} whole-blob bytes, '
-                        'use an assigned source_id, or remove this optional supporting selector.') from exc
-                if facts.size > _SUPPORTING_SOURCE_MAX_BYTES:
-                    raise HostToolRejected(
-                        f'{field}: the whole pinned blob is {facts.size} bytes, above '
-                        f'{_SUPPORTING_SOURCE_MAX_BYTES}; narrowing source_range cannot reduce this whole-blob '
-                        'limit. Use an assigned source_id or remove this optional supporting selector.')
+                    rule = (': no available regular blob at the pinned revision; choose a regular file '
+                            'on this side within the captured-source retrieval limit, '
+                            'use an assigned source_id, or remove this optional supporting selector.')
+                    raise SourceSelectorRejected(f'{field}{rule}', f'{generic}{rule}', source) from exc
                 if not facts.utf8:
-                    raise HostToolRejected(
-                        f'{field}: the whole pinned blob is not UTF-8 text; choose a UTF-8 regular file '
-                        'or remove this optional supporting selector.')
+                    rule = (': the whole pinned blob is not UTF-8 text; choose a UTF-8 regular file '
+                            'or remove this optional supporting selector.')
+                    raise SourceSelectorRejected(f'{field}{rule}', f'{generic}{rule}', source)
                 line_count = facts.lines
                 if not 1 <= bounds['start'] <= bounds['end'] <= line_count:
-                    raise HostToolRejected(
-                        f'{field}.source_range: allowed 1..{line_count} with start <= end; '
-                        'choose a contained range or remove this optional supporting selector.')
+                    rule = ' with start <= end; choose a contained range or remove this optional supporting selector.'
+                    raise SourceSelectorRejected(
+                        f'{field}.source_range: allowed 1..{line_count}{rule}',
+                        f'{generic}.source_range: outside the file\'s lines{rule}', f'{source} 1..{line_count}')
                 reference = {
                     'artifact_sha256': facts.digest, 'part_sha256': None, 'revision': pinned_revision,
                     'path': path, 'side': side, 'source_range': deepcopy(bounds), 'fragment': None,
@@ -243,8 +250,8 @@ def canonicalize_source_selectors(
             resolved.append(reference)
         if require_assigned and not any(reference['role'] == 'assigned' for reference in resolved):
             raise HostToolRejected(
-                'evidence_refs: a reviewed target requires at least one assigned source_id from its '
-                'source_options; supply that selector. Supporting paths alone cannot identify assigned work.')
+                'evidence_refs: at least one assigned source_id from source_options is required; '
+                'supply that selector. Supporting paths alone cannot identify assigned work.')
         # Canonical evidence has its own retained bounds and contract, independent
         # of the smaller model-facing selector schema.
         if not validate_source_refs(resolved, assigned.values(), revision=revision, source_root=source_root,
@@ -421,7 +428,6 @@ def validate_source_refs(refs: Any, expected_refs: Iterable[dict[str, Any]], *, 
             return False
         bounds = ref['source_range']
         line_count = facts.lines
-        if (facts.size > _SUPPORTING_SOURCE_MAX_BYTES or ref['artifact_sha256'] != facts.digest
-                or not 1 <= bounds['start'] <= bounds['end'] <= line_count):
+        if ref['artifact_sha256'] != facts.digest or not 1 <= bounds['start'] <= bounds['end'] <= line_count:
             return False
     return assigned or not require_assigned
