@@ -64,7 +64,8 @@ class StubBackend:
     def __init__(self, target: Path, *, model: str = "mock-model") -> None:
         self.model = model
         self._target = target
-        # Claims the scripted review discovers, each ``{"title", "file", "line"}``; None proposes
+        # Claims the scripted review discovers, each ``{"title", "file", "line"}`` cited on the new
+        # side unless ``"side": "old"``; None proposes
         # one "Sample issue" on the first changed target. ``review_verdict`` is the challenge's answer
         # and ``review_undecided`` leaves that many trailing targets without a decision.
         self.review_claims: list[dict[str, Any]] | None = None
@@ -244,7 +245,7 @@ class StubBackend:
         claims = []
         for claim in wanted:
             option = next(option for target in targets if target["file"] == claim["file"]
-                          for option in target["source_options"] if option["side"] == "new")
+                          for option in target["source_options"] if option["side"] == claim.get("side", "new"))
             line = claim["line"]
             if line is None and option["source_range"] is not None:
                 line = option["source_range"]["start"]

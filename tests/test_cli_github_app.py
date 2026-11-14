@@ -167,7 +167,7 @@ def test_cli_requested_branch_ignores_current_checkout_pr(
     current_head = git(repo, "rev-parse", "HEAD")
     base = git(repo, "rev-parse", "main")
     git(repo, "checkout", "-b", "requested", "main")
-    (repo / "main.py").write_text("def hello():\n    return 'galaxy'\n")
+    (repo / "main.py").write_text("def hello(): return 'galaxy'\n")
     git(repo, "add", "main.py")
     git(repo, "commit", "-m", "requested branch change")
     requested_head = git(repo, "rev-parse", "HEAD")
@@ -199,6 +199,11 @@ def test_cli_requested_branch_ignores_current_checkout_pr(
         return request(args, *positional, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", route_pr_lookup)
+    stub = StubBackend(repo)
+    # The second claim sits on a line that only the base side has.
+    stub.review_claims = [{"title": "Sample issue", "file": "main.py", "line": 1},
+                          {"title": "Removed return", "file": "main.py", "line": 2, "side": "old"}]
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *a, **kw: stub)
     output = tmp_path / "trajectory.json"
     store = LocalRecordStore(tmp_path / "records")
     assert _run(repo, output, "--comment", "--branch", "requested", "--base", "main", "--approve-on-clean",
@@ -210,18 +215,26 @@ def test_cli_requested_branch_ignores_current_checkout_pr(
     assert sealed["analyzed_revision"]["head_sha"] == requested_head
     assert [entry["assignment"] for entry in sealed["execution"]] == ["discovery", "challenge"]
     assert sealed["terminal_result"]["analysis_state"] == "complete"
-    assert [finding["title"] for finding in sealed["findings"]] == ["Sample issue"]
+    assert [(finding["title"], finding["payload"]["line"]) for finding in sealed["findings"]] == [
+        ("Sample issue", 1), ("Removed return", 2)]
     reviews = transport.gh.calls("POST", "repos/acme/widgets/pulls/73/reviews")
     assert len(reviews) == 1 and reviews[0].payload["commit_id"] == requested_head
     # A confirmed finding asserts no severity, so an opted-in approval is withheld.
     assert reviews[0].payload["event"] == "COMMENT"
-    (comment,) = reviews[0].payload["comments"]
-    assert comment["path"] == "main.py" and "**Severity:**" not in comment["body"]
-    # Capture and publication read the same canonical item, so they agree on its identity.
+    (inline,) = reviews[0].payload["comments"]
+    assert (inline["path"], inline["line"]) == ("main.py", 1) and "**Severity:**" not in inline["body"]
+    # The old-side line is never offered as a head line: that finding is placed on the file, text intact.
+    (on_file,) = [call.payload for call in transport.gh.calls("POST", "repos/acme/widgets/pulls/73/comments")]
+    assert sorted(on_file) == ["body", "commit_id", "path", "subject_type"]
+    assert (on_file["path"], on_file["subject_type"]) == ("main.py", "file")
+    assert "**Removed return**" in on_file["body"]
+    # Capture and publication read the same canonical items, so they agree on each identity and line.
     (captured,) = read_records(store).runs
-    (item,) = captured["findings"]["value"]["items"]
-    assert finding_marker(item["fingerprint"]) in comment["body"]
-    assert item["item_uid"] == sealed["findings"][0]["item_uid"]
+    items = captured["findings"]["value"]["items"]
+    assert [(item["description"], item["line"]) for item in items] == [("Sample issue", 1), ("Removed return", None)]
+    assert finding_marker(items[0]["fingerprint"]) in inline["body"]
+    assert finding_marker(items[1]["fingerprint"]) in on_file["body"]
+    assert [item["item_uid"] for item in items] == [finding["item_uid"] for finding in sealed["findings"]]
     assert captured["findings"]["value"]["terminal_coverage"]["planned_scopes"][0]["scope_id"] == "committed:00000"
     assert not transport.gh.calls("POST", "repos/acme/widgets/pulls/7/reviews")
     _assert_app_requests(transport)

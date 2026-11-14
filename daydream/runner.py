@@ -327,12 +327,18 @@ def _review_refusal(config: RunConfig) -> str | None:
         return ('The findings supervisor (supervisor = "rules" or "llm") ended with the staged reviewer; its deny '
                 "rules would no longer hold findings back. Remove the setting; an extension flow step can "
                 "rewrite the canonical items, and --ignore-path excludes paths from review.")
-    from daydream.committed_review import REVIEW_PHASES, host_tools_refusal
+    from daydream.committed_review import REVIEW_PHASES, bounded_author_description, host_tools_refusal
 
     for kind, phase in REVIEW_PHASES:
         name = _resolved_backend_name(config, phase)
         if name == "osprey":
             return host_tools_refusal(kind, name)
+    try:
+        author = bounded_author_description(config)
+        if author is not None and config.approved_head_sha is not None:
+            author.for_head(config.approved_head_sha)
+    except ValueError as exc:
+        return f"The supplied author description cannot be used: {exc}."
     return None
 
 

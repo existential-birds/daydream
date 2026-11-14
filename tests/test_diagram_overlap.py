@@ -23,7 +23,7 @@ from daydream.backends import AgentEvent, BackendExecutionInput, create_backend 
 from daydream.config_file import DaydreamFileConfig
 from daydream.github_app import GitHubExecutionInput
 from daydream.review_result import FinalizedReview
-from daydream.run_config import RunConfig
+from daydream.run_config import FrozenAuthorDescription, RunConfig
 from tests.harness import diagram_repos as dr
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git, seed_feature_branch
@@ -197,6 +197,14 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
         # workspace or artifact exists, and nothing is delivered.
         assert exit_code == 1
         assert "'osprey' does not serve them" in capsys.readouterr().out
+        # So is embedder-supplied author text over its bound, or frozen for another head than the approved one.
+        head = git(target, "rev-parse", "HEAD")
+        supported = replace(config, file_config=DaydreamFileConfig(backend="codex"), approved_head_sha=head)
+        for description, refusal in ((FrozenAuthorDescription(head, "!" * 65_531), "exceeds its encoded UTF-8 bound"),
+                                     (FrozenAuthorDescription("0" * 40, "intent"), "does not match analyzed HEAD")):
+            assert await runner.run(replace(supported, frozen_author_description=description), execution=execution,
+                                    private_roots=roots, review_result_handler=delivered.append) == 1
+            assert refusal in " ".join(capsys.readouterr().out.split())
         assert created == [] and delivered == [] and backend.calls == []
         assert not (target / ".daydream").exists() and not (tmp_path / "private").exists()
     else:

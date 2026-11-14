@@ -68,7 +68,7 @@ from daydream.hunk_index import write_hunk_index
 from daydream.immutable_review import HISTORICAL_CONTEXT_MAX_BYTES, ImmutableReviewInput
 from daydream.json_utils import canonical_json, validate_json_schema
 from daydream.observability.spans import record_budget_stop
-from daydream.prompt_budget import SanctionedInputUnavailable
+from daydream.prompt_budget import SanctionedInputUnavailable, truncate_utf8_to_budget
 from daydream.review_budget import BudgetDimension, BudgetLedger
 from daydream.review_profile import (
     ASSIGNMENT_POLICIES,
@@ -235,6 +235,24 @@ class Review:
         return sources.canonicalize(selectors, (ref for part in parts for ref in part["source_refs"]),
                                     require_assigned=required)
 
+    def _covers(self, ref: dict[str, Any], payload: dict[str, Any]) -> bool:
+        """Whether a reference of the claim's file covers its line, by range or summarized fragment span."""
+        if ref["path"] != payload["file"]:
+            return False
+        bounds = ref["source_range"]
+        if bounds is not None:
+            return bool(bounds["start"] <= payload["line"] <= bounds["end"])
+        span = self._fragment_spans.get(source_id(ref)) if ref["role"] == "assigned" else None
+        return span is not None and span[0] <= payload["line"] <= span[1]
+
+    def head_line(self, claim: dict[str, Any]) -> int | None:
+        """The claim's line as a head line: only when a new-side reference of its file covers it."""
+        payload = claim["payload"]
+        if payload["line"] is not None and any(
+                ref["side"] == "new" and self._covers(ref, payload) for ref in payload["evidence_refs"]):
+            return int(payload["line"])
+        return None
+
     def _holds(self, work_id: str, uid: str, revision: int) -> bool:
         """A revision is this work's own, or an unowned revision it authored; never another's."""
         return self._claim_owner.get((uid, revision), work_id) == work_id
@@ -247,16 +265,7 @@ class Review:
         if payload["file"] not in self._by_file:
             raise HostToolRejected("claim.payload.file: choose a file from the complete changed-target inventory")
 
-        def covers(ref: dict[str, Any]) -> bool:
-            if ref["path"] != payload["file"]:
-                return False
-            bounds = ref["source_range"]
-            if bounds is not None:
-                return bool(bounds["start"] <= payload["line"] <= bounds["end"])
-            span = self._fragment_spans.get(source_id(ref)) if ref["role"] == "assigned" else None
-            return span is not None and span[0] <= payload["line"] <= span[1]
-
-        if payload["line"] is not None and not any(covers(ref) for ref in payload["evidence_refs"]):
+        if payload["line"] is not None and not any(self._covers(ref, payload) for ref in payload["evidence_refs"]):
             raise HostToolRejected("claim.payload.line: choose a line covered by its canonical source references")
         if not set(claim["source_uids"]) <= self._claims.keys():
             raise HostToolRejected("claim.source_uids: use retained predecessor UIDs, or [] for no predecessors")
@@ -826,14 +835,41 @@ def _instruction_json(value: Any) -> str:
     return text
 
 
+def _context_bytes(text: str) -> int:
+    """Measured as the larger native delivery: the assignment's JSON inside one JSON-escaped argument."""
+    return len(canonical_json(_instruction_json(text)).encode())
+
+
 def bounded_author_description(config: RunConfig) -> FrozenAuthorDescription | None:
     """Refuse embedder-supplied author text over its encoded bound before any source preparation."""
     author = config.frozen_author_description
-    # Measured as the larger native delivery: the assignment's JSON inside one JSON-escaped argument.
-    if author is not None and len(canonical_json(_instruction_json(author.description)).encode()) > (
-            HISTORICAL_CONTEXT_MAX_BYTES["context"]):
+    if author is not None and _context_bytes(author.description) > HISTORICAL_CONTEXT_MAX_BYTES["context"]:
         raise ValueError("frozen author description exceeds its encoded UTF-8 bound")
     return author
+
+
+def fit_author_context(text: str) -> str:
+    """Keep the longest prefix of host-fetched author text that fits the encoded bound, saying what was kept.
+
+    A pull request's author cannot avoid review with a long description: it is cut, never refused.
+    """
+    total = len(text.encode())
+
+    def kept(budget: int) -> str:
+        prefix = truncate_utf8_to_budget(text, budget)
+        return (f"{prefix}\n[author description truncated by the host: first {len(prefix.encode())} of "
+                f"{total} UTF-8 bytes]")
+
+    if _context_bytes(text) <= HISTORICAL_CONTEXT_MAX_BYTES["context"]:
+        return text
+    low, high = 0, total
+    while low < high:
+        middle = (low + high + 1) // 2
+        if _context_bytes(kept(middle)) <= HISTORICAL_CONTEXT_MAX_BYTES["context"]:
+            low = middle
+        else:
+            high = middle - 1
+    return kept(low)
 
 
 def review_settings(config: RunConfig) -> tuple[dict[str, Any], float]:

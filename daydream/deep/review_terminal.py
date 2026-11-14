@@ -67,7 +67,7 @@ def refresh_review_report(ctx: FlowContext, *, no_diff: bool = False) -> dict[st
 
 def _author_description(ctx: FlowContext) -> str | None:
     """The author's description of the analyzed head: embedder-frozen text, else the open PR's own body."""
-    from daydream.committed_review import bounded_author_description
+    from daydream.committed_review import bounded_author_description, fit_author_context
     from daydream.deep.report_context import retain_author_context
 
     config, work = ctx.config, ctx.work
@@ -91,6 +91,10 @@ def _author_description(ctx: FlowContext) -> str | None:
                                        "skipping its description")
             else:
                 description = view.get("body") or None
+                if description is not None and (fitted := fit_author_context(description)) != description:
+                    print_warning(console, f"PR #{config.pr_number} description exceeds the reviewer's context "
+                                           "bound; the reviewer receives a truncated copy")
+                    description = fitted
     ctx.data['author_report_context_unavailable'] = True
     try:
         retain_author_context(DeepState(ctx.data).dd, description, head)
@@ -135,8 +139,10 @@ async def _step_committed_review(ctx: FlowContext) -> None:
     program = ctx.data["committed_review"]
 
     def publish_items() -> None:
-        atomic_write_json(DeepArtifact.MERGED_ITEMS.at(DeepState(ctx.data).dd),
-                          {"items": [committed_finding_item(finding) for finding in program.review.findings()]})
+        # Every consumer reads the line as a head line, so a location only the old side has carries none.
+        atomic_write_json(DeepArtifact.MERGED_ITEMS.at(DeepState(ctx.data).dd), {"items": [
+            {**committed_finding_item(finding), "line": program.review.head_line(finding)}
+            for finding in program.review.findings()]})
 
     try:
         await program.dispatch(get_current_recorder())
