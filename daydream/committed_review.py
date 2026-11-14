@@ -491,6 +491,7 @@ class Review:
         def admit(value: dict[str, Any], *, final: bool, salvage: bool = False) -> dict[str, Any]:
             if not salvage:
                 binding.ensure_open()
+            work.salvage = None
             if len(canonical_json(value).encode()) > COMMITTED_SUBMISSION_MAX_BYTES:
                 raise HostToolRejected(
                     f"submission exceeds {COMMITTED_SUBMISSION_MAX_BYTES} UTF-8 bytes; split it into smaller "
@@ -515,9 +516,9 @@ class Review:
                             refused.setdefault((name, message), []).append(label)
                             withdrawn.add(identity)
                         except HostToolFatal:
-                            # A batch with an item already refused is reported as refused, as it was
-                            # when checking stopped at the first refusal.
-                            if not refused:
+                            # A live batch with an item already refused is reported as refused, as it was when
+                            # checking stopped at the first refusal. Salvage keeps nothing beside a fatal item.
+                            if salvage or not refused:
                                 raise
 
                 if kind in INVESTIGATION_KINDS:
@@ -583,12 +584,13 @@ class Review:
                     text = violations(3)
                     raise HostToolRejected(text if len(text.encode()) <= _MAX_REJECTION_BYTES else violations(0))
                 # Salvage never does what the batch as submitted would not: it keeps no item whose target or
-                # claim another item was refused for, and no reviewed decision of a batch that lost a claim,
-                # so that target stays for later work.
+                # claim another item was refused for, and no reviewed decision or verdict of a batch that lost
+                # a claim, so those stay for later work.
                 lost_claim = any(name == "claims" for name, _ in refused)
                 decisions = {identifier: decision for identifier, decision in decisions.items()
                              if identifier not in withdrawn and not (lost_claim and decision["status"] == "reviewed")}
-                verdicts = {uid: verdict for uid, verdict in verdicts.items() if uid not in withdrawn}
+                verdicts = {uid: verdict for uid, verdict in verdicts.items()
+                            if uid not in withdrawn and not lost_claim}
                 changes = [kept for kept in changes if kept["uid"] not in withdrawn]
 
                 def install() -> dict[str, Any]:
@@ -678,7 +680,7 @@ class Review:
                 return self.inputs.admit_submission(prepare)
             except HostToolRejected:
                 if final and not salvage:
-                    # Forgotten once the reviewer starts another submission, even one the binding refuses.
+                    # Forgotten once another submission starts, even one the binding refuses, or is served.
                     starts = binding.submissions
                     work.salvage = lambda: binding.submissions == starts and admit(value, final=True, salvage=True)
                 raise
@@ -705,10 +707,9 @@ class Review:
         work = self.work[work_id]
         assert work.binding is not None
         work.binding.close_authority()
-        salvage, work.salvage = work.salvage, None
         try:
-            if salvage is not None:
-                salvage()
+            if work.salvage is not None:
+                work.salvage()
         except (HostToolRejected, HostToolFatal):
             pass
         except Exception as exc:
@@ -871,7 +872,7 @@ violation in its batch, how many items broke it and the first three of them. A r
 structured_output keeps its reserved start: correct it and submit again. Past 32 denied starts and such
 rejections the assignment closes. If its last submission is then a rejected final batch, the host keeps that
 batch's items that are valid alone, except any whose target or claim another item was refused for and, when
-a claim was refused, its reviewed targets; the rest stays unfinished.
+a claim was refused, its reviewed targets and its verdicts; the rest stays unfinished.
 Capacity: instruction allowances are dispatch-time snapshots. review_source and review_admit results report
 current host capacity after charging that call, including protected reserves you cannot spend.
 Discovery must decide every target explicitly. Challenge must seek counterevidence for each assigned claim

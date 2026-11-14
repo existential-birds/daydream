@@ -40,7 +40,6 @@ from daydream.immutable_review import ImmutableReviewInput
 from daydream.observability.config import ObservabilityConfig
 from daydream.observability.runtime import trace_run
 from daydream.pr_review import post_findings_from_artifact
-from daydream.prompt_budget import SanctionedInputUnavailable
 from daydream.prompts.grounding import REPOSITORY_SEARCH_GUIDANCE
 from daydream.review_budget import BudgetLedger, BudgetStop
 from daydream.review_profile import Pipeline, ResolvedProfile, build_default_profile
@@ -216,8 +215,9 @@ async def test_review_revision_admission_and_sealing_contracts(
     for corruption in ("wrong-source", "unchallenged-revision", "foreign-plan", "empty-execution", "self-judged",
                        "double-credit", "forged-author", "unrecorded-verdict", "overlap"):
         await _sealed_result_case(review_inputs, corruption)
-    for fault in ("invalid-selector", "shared-capacity", "deadline", "unreadable", "replaced", "contradicted",
-                  "revised", "unavailable", "unexpected", "capture-integrity"):
+    for fault in ("invalid-selector", "shared-capacity", "deadline", "unreadable", "unreadable-later",
+                  "replaced-final", "replaced-nonterminal", "replaced-admit", "replaced-served", "superseded",
+                  "contradicted", "capture-integrity"):
         await _whole_admission_case(review_inputs, monkeypatch, fault)
 
 
@@ -281,8 +281,8 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
 
     Existing native correction tests exercise a single stage; they do not protect
     a previously accepted claim/revision while a complete later update is rejected.
-    Closing the work keeps nothing of a rejected final batch that was replaced, that
-    contradicts itself, whose work was superseded, or whose salvage fails.
+    Closing the work keeps nothing of a rejected final batch that lost a claim, that was
+    replaced, that contradicts itself, whose work was superseded, or whose salvage fails.
     """
     if fault == "capture-integrity":
         review_inputs.captured_source = capture_source(
@@ -298,19 +298,20 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
             compact["payload"][key] = "source"
         compact["payload"]["evidence_refs"] *= 4
         update["claims"] = [deepcopy(compact) for _ in range(127)]
-    if fault in {"invalid-selector", "replaced", "unavailable", "unexpected"}:
+    if fault == "invalid-selector":
         update["claims"][0]["payload"]["evidence_refs"][0]["source_id"] = "source:" + "f" * 64
-    if fault == "unreadable":
+    if fault in {"unreadable", "unreadable-later"}:
         update["claims"][0]["payload"]["evidence_refs"].append({
             "path": ":(glob)*.py", "side": "new", "source_range": {"start": 1, "end": 1}, "basis": "source_inspection"})
-    if fault in {"contradicted", "revised"}:
-        # A verdict beside an opposite verdict, or beside a refused revision, of the same claim.
+    if fault in {"unreadable-later", "superseded"} or fault.startswith("replaced"):
+        # Rejected for a verdict on an unassigned claim alone: its valid verdict and claim could be kept.
+        update["verdicts"].insert(0, {**update["verdicts"][0], "uid": "domain:claim:9"})
+    if fault == "contradicted":
+        # A verdict beside an opposite verdict of the same claim, and a valid revision of that claim.
         revision = {**{key: deepcopy(prior[0][key]) for key in ("uid", "revision", "source_uids", "title")},
-                    "payload": {**_proposal(review_inputs)["payload"], "grounds": "Revised grounds.",
-                                "line": 1 if fault == "contradicted" else 99}}
-        update = {"verdicts": update["verdicts"], "claims": [revision]}
-        if fault == "contradicted":
-            update["verdicts"].append(_verdict(review_inputs, prior[0], verdict="rejected"))
+                    "payload": {**_proposal(review_inputs)["payload"], "grounds": "Revised grounds."}}
+        update = {"verdicts": [*update["verdicts"], _verdict(review_inputs, prior[0], verdict="rejected")],
+                  "claims": [revision]}
     binding = _assign(review, "challenge")
     injected = False
     real_open = os.open
@@ -334,6 +335,8 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
 
             if fault in {"deadline", "closed", "capture-integrity"}:
                 patching.setattr(os, "open", close_during_source_read)
+            if fault == "replaced-served":
+                binding.admit("served", "review_admit", {"verdicts": [], "claims": []})
             with pytest.raises((HostToolRejected, HostToolFatal)) as caught:
                 binding.submit("terminal", update)
         if fault == "capture-integrity":
@@ -344,25 +347,31 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
         if fault in {"deadline", "closed"}:
             assert isinstance(caught.value, HostToolFatal)
             assert injected and caught.value.code == ("deadline_expired" if fault == "deadline" else "authority_closed")
-        if fault == "replaced":
-            # A later submission that the binding itself refuses still replaces the rejected final batch.
-            with pytest.raises(HostToolRejected, match="remove undeclared fields"):
-                _charged(binding, "review_admit", {**update, "undeclared": []})
-    if fault == "invalid-selector":
-        # Work that was superseded before it closed keeps nothing: its claim belongs to the successor.
+        if fault == "unreadable-later":
+            # Behind a refused item the same path is a correctable rejection while the work is live.
+            assert isinstance(caught.value, HostToolRejected) and binding.authority_open
+        if fault == "replaced-served":
+            # A submission admitted before the rejection and served after it replaces the batch,
+            binding.call("served", "review_admit", {"verdicts": [], "claims": []})
+        elif fault.startswith("replaced"):
+            # and so does a later one that the binding itself refuses.
+            with pytest.raises(HostToolRejected, match="undeclared fields|alone in a completed native generation"):
+                if fault == "replaced-admit":
+                    _charged(binding, "review_admit", {**update, "undeclared": []})
+                else:
+                    binding.admit("later", "structured_output", {**update, "undeclared": []},
+                                  terminal=fault == "replaced-final")
+    if fault == "superseded":
+        # Work that was superseded before it closed: its claim belongs to the successor.
         binding.close_authority()
         _assign(review, "challenge")
+    if fault not in {"deadline", "unreadable", "capture-integrity"}:
+        # Closing keeps nothing: the batch lost a claim (invalid-selector), hit retained capacity
+        # (shared-capacity), meets its fatal item again (unreadable-later), or was replaced or contradicted.
         review.close("work:2")
-    elif fault not in {"deadline", "unreadable", "capture-integrity"}:
-        def lose_input() -> None:
-            raise SanctionedInputUnavailable("changed") if fault == "unavailable" else ValueError("unexpected")
-
-        with monkeypatch.context() as patching:
-            if fault in {"unavailable", "unexpected"}:
-                patching.setattr(review_inputs, "_revalidate_canonical", lose_input)
-            review.close("work:2")
-        # Only an unexpected failure is recorded, as a live callback's is; the work's row is still written.
-        assert getattr(binding.fatal_error, "code", None) == ("callback_failed" if fault == "unexpected" else None)
+        # Keeping nothing is not a failure: a late call on the handle is answered as on any closed work.
+        with pytest.raises(HostToolFatal, match="authority is closed"):
+            binding.admit("late", "review_admit", update)
     assert review.pending() == prior
     value = review.seal({})
     assert value["terminal_result"]["analysis_state"] == "incomplete"
@@ -1896,8 +1905,8 @@ def _decide(binding: HostToolBinding, targets: Sequence[str]) -> list[dict[str, 
             "source_id"], "basis": "supplied_diff", "source_range": None}]} for target in targets]
 
 
-_SCENARIOS = ["empty-local", "follow-up", "rejected-final", "evidence-free", "contention", "native-capacity",
-              "revision", "title", "undecomposed"]
+_SCENARIOS = ["empty-local", "follow-up", "rejected-final", "salvage-fails", "evidence-free", "contention",
+              "native-capacity", "revision", "title", "undecomposed"]
 
 
 @pytest.mark.parametrize("scenario", _SCENARIOS)
@@ -1966,7 +1975,7 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
         if work["kind"] == "cross_assignment":
             # Required even though no local work asked for it; it rereads original captured source.
             assert (cwd / "a.py").read_text().endswith("(count - 1)\n") and "ratio(4, 1)" in (cwd / "f.py").read_text()
-            if scenario == "evidence-free":
+            if scenario in {"evidence-free", "salvage-fails"}:
                 summary = next(w for w in work["retained_conclusions"]["work"] if w["work_id"] == "work:1")
                 # Its unfinished targets now belong to this work; the summary records no admission.
                 assert (summary["admitted_targets"], summary["unfinished_targets"]) == (0, 0)
@@ -2014,7 +2023,7 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
             installed.set()
             assert fired and receipt["progress"]["remaining"] == 0
             return receipt
-        if work_id == "work:1" and scenario in {"follow-up", "rejected-final", "evidence-free"}:
+        if work_id == "work:1" and scenario in {"follow-up", "rejected-final", "salvage-fails", "evidence-free"}:
             if scenario == "follow-up":
                 _charged(binding, "review_admit", {"targets": _decide(binding, targets[:1]), "claims": []})
             else:
@@ -2027,18 +2036,31 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
                                      {**twice, "status": "not_reviewed", "reason": "Not read after all."}],
                          "claims": []}
                 with pytest.raises(HostToolRejected, match="explain unfinished work"):
-                    submit(binding, batch) if scenario == "rejected-final" else _charged(
-                        binding, "review_admit", batch)
+                    _charged(binding, "review_admit", batch) if scenario == "evidence-free" else submit(
+                        binding, batch)
                 # A later lookup is not a later submission: the rejected final batch is still the last one.
                 _charged(binding, "review_source", {"target_id": None, "path": None, "cursor": None})
+                if scenario == "salvage-fails":
+                    # Keeping the batch, once this work has closed, fails as no host-tool outcome describes.
+                    inputs, failing = _owner(binding).inputs, pytest.MonkeyPatch()
+                    real = inputs.admit_submission
+
+                    def fail_once_closed(prepare: Any) -> Any:
+                        if not binding.closed:
+                            return real(prepare)
+                        failing.undo()
+                        raise ValueError("unexpected")
+
+                    failing.setattr(inputs, "admit_submission", fail_once_closed)
             stale.append(binding)
             raise PiError("native local assignment failed")
         if stale:
-            # The superseded parent's handle cannot reopen authority or admit anything.
+            # The superseded parent's handle cannot reopen authority or admit anything; after an
+            # unexpected failure while its batch was kept, it answers with that recorded failure.
             with pytest.raises(HostToolFatal) as late:
                 stale[0].admit("late", "review_admit", {"targets": [], "claims": []})
-            assert late.value.code == "authority_closed"
-            with pytest.raises(HostToolFatal, match="closed"):
+            assert late.value.code == ("callback_failed" if scenario == "salvage-fails" else "authority_closed")
+            with pytest.raises(HostToolFatal, match="closed|failed unexpectedly"):
                 async with stale[0].session():
                     pytest.fail("superseded authority reopened")
         if scenario == "empty-local" and work_id == "work:1":
@@ -2106,10 +2128,13 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
         assert [r["parents"] for r in halves] == [["work:1"], ["work:1"]]
         assert [r["targets"] for r in halves] == [work["work:1"]["targets"][:2], work["work:1"]["targets"][2:]]
         assert sorted(a for _, kind, a in allocations if kind == "follow_up") == [7, 7]
-    elif scenario == "evidence-free":
+    elif scenario in {"evidence-free", "salvage-fails"}:
         # No follow-up without progress: the required cross-assignment inherits exactly the unfinished targets.
         assert not any(r["kind"] == "follow_up" for r in value["work"])
         assert cross["parents"] == ["work:1"] and cross["targets"] == work["work:1"]["targets"]
+        # The failed work's row is written whatever went wrong while its rejected final batch was kept.
+        row = next(entry for entry in value["execution"] if entry["work_id"] == "work:1")
+        assert (row["accepted"], row["reason"]) == (False, "backend_failure")
     elif scenario != "contention":
         assert cross["targets"] == [] and cross["parents"] == []
     finding, = value["findings"]
