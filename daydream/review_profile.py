@@ -11,10 +11,9 @@ import json
 import os
 import tomllib
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from daydream import severity
 from daydream.config import REVIEWER_TOOL_CALL_BUDGET
 from daydream.improve.prompts import AUDIT_PLAYBOOK_SECTIONS
 
@@ -28,9 +27,16 @@ class ProfileError(Exception):
         super().__init__(f"invalid review profile: {kind} (source: {source})")
 
 
-# Severity is lowercase; confidence follows the uppercase finding schema.
-_SEVERITY_LEVELS: frozenset[str] = frozenset(severity.CANONICAL_LEVELS)
-_CONFIDENCE_LEVELS: frozenset[str] = frozenset(("HIGH", "MEDIUM", "LOW"))
+# Keys of the replaced staged reviewer and of the assignment policy: no review reads them.
+REMOVED_PROFILE_KEYS: frozenset[str] = frozenset({
+    *(f"pipeline.{key}" for key in (
+        "assignment_policy", "structural_enabled", "arbitration_enabled", "arbitration_min_severity",
+        "arbitration_contested_location", "suppression_enabled", "suppression_severity_classes",
+        "suppression_confidence_classes")),
+    *(f"strategies.{key}" for key in (
+        "intent", "alternatives", "discovery.per_stack", "discovery.structural", "suppression", "merge",
+        "supervision")),
+})
 
 
 # Profiles tune strategy and bounded pipeline fields, never the host evaluator,
@@ -74,30 +80,9 @@ class Strategy:
 
 
 @dataclass(frozen=True)
-class Arbitration:
-    """Bounded arbitration settings."""
-
-    enabled: bool = True
-    min_severity: str = "high"
-    contested_location: bool = True
-
-
-@dataclass(frozen=True)
-class Suppression:
-    """Precision suppression settings; disabled unless explicitly enabled."""
-
-    enabled: bool = False
-    severity_classes: tuple[str, ...] = ("low",)
-    confidence_classes: tuple[str, ...] = ("LOW",)
-
-
-@dataclass(frozen=True)
 class Pipeline:
     """Bounded pipeline policy with production defaults."""
 
-    structural_enabled: bool = True
-    arbitration: Arbitration = field(default_factory=Arbitration)
-    suppression: Suppression = field(default_factory=Suppression)
     review_wall_budget_s: int = 4500
     reviewer_investigation_budget_s: int = 2400
     reviewer_tool_call_budget: int = REVIEWER_TOOL_CALL_BUDGET
@@ -130,19 +115,6 @@ class ReviewProfile:
             self.to_canonical_dict(), sort_keys=True, separators=(",", ":")
         )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-# Inline-diff prompts replace the strategy head and retain the judgment tail.
-# Custom strategies preserve these markers to support the same splice.
-INTENT_STRATEGY_JUDGMENT_MARKER = "That diff is the complete review target"
-ALTERNATIVES_STRATEGY_JUDGMENT_MARKER = "Report only concrete problems you can substantiate "
-
-FOLDED_ALTERNATIVES_INSTRUCTION = (
-    "Within this same boundary review, check design choices that conflict with the confirmed intent, "
-    "an existing canonical implementation, or an applicable repository convention. "
-    "Report only a concrete downside supported by repository evidence; do not launch "
-    "a separate file-by-file alternatives audit or propose hypothetical replacements."
-)
 
 
 def build_default_profile() -> ReviewProfile:
@@ -187,118 +159,6 @@ def build_default_profile() -> ReviewProfile:
                 "Map coverage locations; do not conduct a test-quality review."
             ),
         ),
-        "intent": Strategy(
-            content=(
-                "You have full access to explore the codebase. Read the diff file at "
-                "{diff_path} and examine the codebase to understand the intent of these changes. "
-                f"{INTENT_STRATEGY_JUDGMENT_MARKER}, already computed against the "
-                "repository's base branch — this run is not tied to a GitHub pull request, so "
-                "do not look up, list, or ask about pull requests. Do not invoke any skills or "
-                "slash commands. Use the supplied author context and diff first; "
-                "read source only to resolve ambiguity about intent, not to conduct a correctness review. "
-                "Present your understanding concisely — what problem is being "
-                "solved and how — as plain text in your reply."
-            ),
-            source="copied: daydream.phases.build_intent_prompt",
-        ),
-        "alternatives": Strategy(
-            content=(
-                "The intent of this PR has been confirmed as:\n\n"
-                "{intent_summary}\n\n"
-                "Given this intent, explore the codebase and evaluate the implementation "
-                f"in the diff at {{diff_path}}. {ALTERNATIVES_STRATEGY_JUDGMENT_MARKER}"
-                "with evidence. Focus on design choices that conflict with the confirmed intent or "
-                "an existing canonical implementation. Stack reviewers handle local correctness; "
-                "the structural pass handles cross-module contracts. Do not repeat their full audit. "
-                "Consider design decisions that will cause a real "
-                "failure, or violations of a Codebase Convention above. Do NOT list stylistic "
-                "preferences, speculative 'nice to have' opinions, or alternatives you cannot "
-                "tie to a concrete downside.\n\n"
-                "Return the required JSON object with an issues array. For each issue, include: a sequential id "
-                "number, a brief title, a description of the concrete problem and the evidence "
-                "for it, a severity level (high/medium/low), a concrete recommendation for how "
-                "to address it, and the relevant file paths.\n\n"
-                "If the implementation is solid and you wouldn't change anything, return an empty issues list."
-            ),
-            source="copied: daydream.phases.build_alternative_review_prompt",
-        ),
-        "discovery.per_stack": Strategy(
-            content=(
-                "Review the changed behavior assigned to this stack and its integration "
-                "with the rest of the repository. Use the stack name to orient repository "
-                "searches, not as permission to apply a memorized framework checklist.\n"
-                "\n"
-                "Method:\n"
-                "1. Start with the supplied hunks and context. Inspect an enclosing "
-                "symbol or configuration section when more context would resolve a "
-                "concrete candidate. Follow changed callers, "
-                "callees, types, configuration, "
-                "persistence or network boundaries, error paths, and cleanup or lifecycle "
-                "paths as needed.\n"
-                "2. Compare the change with repository-local conventions and canonical "
-                "helpers before asserting that something is missing, inconsistent, unused, "
-                "or duplicated.\n"
-                "3. Test each candidate with a concrete triggering input or state and an "
-                "observable consequence. Search for evidence that disproves the candidate, "
-                "including guards, validation, callers, tests, generated counterparts, and "
-                "ownership or lifecycle behavior.\n"
-                "4. Prioritize regressions in correctness, data integrity, security or "
-                "trust boundaries, concurrency, resource lifetime, external or wire "
-                "contracts, configuration flow, and tests that can pass while behavior is "
-                "wrong.\n"
-                "5. Report only defects introduced or made actionable by this diff. Exclude "
-                "style preferences, generic best practices, speculative future "
-                "requirements, and pre-existing issues not materially affected by the "
-                "change.\n"
-                "\n"
-                "For every surviving finding, identify the precise file and line, the "
-                "triggering path or state, the observable impact, and the smallest safe "
-                "remediation. Mark an assigned target reviewed after assessing its "
-                "changed behavior from the supplied diff and context, with ordinary "
-                "source investigation when useful. Mark unfinished assigned work not "
-                "reviewed; never invent a finding to fill the review."
-            ),
-            source="authored: #886 NATIVE_PER_STACK_DISCOVERY_STRATEGY",
-        ),
-        "discovery.structural": Strategy(
-            content=(
-                "Review the repository-wide interactions introduced or exposed by this "
-                "diff. Concentrate on boundaries that a file-scoped reviewer can miss:\n"
-                "\n"
-                f"{FOLDED_ALTERNATIVES_INSTRUCTION}\n\n"
-                "- incompatible contracts across modules or stacks, including types, "
-                "schemas, CLI or API behavior, configuration, serialization, error "
-                "semantics, and ownership or lifecycle expectations;\n"
-                "- values parsed or accepted at one layer but dropped, re-resolved, "
-                "renamed, or applied inconsistently downstream;\n"
-                "- partial migrations in which callers, implementations, generated "
-                "counterparts, tests, documentation, or compatibility paths no longer "
-                "agree;\n"
-                "- new dependency-direction or layering violations, duplicated sources of "
-                "truth, and bypasses of an existing canonical helper;\n"
-                "- partial-failure, rollback, cleanup, cancellation, and resource-lifetime "
-                "gaps that emerge only across components;\n"
-                "- diff-introduced branching, duplication, or module growth that creates a "
-                "concrete correctness or maintenance hazard under an established repository "
-                "convention.\n"
-                "\n"
-                "For each candidate, read both sides of the boundary and trace the relevant "
-                "value, call, state transition, or resource lifetime end to end. Do not repeat "
-                "the language reviewers’ file-by-file correctness audit. "
-                "Stop tracing a boundary when its contract agrees and no concrete candidate remains. Search for "
-                "repository evidence that disproves the concern. Verify that any "
-                "recommended canonical helper, contract, or layer actually exists and is "
-                "compatible before proposing reuse.\n"
-                "\n"
-                "Report only a concrete risk introduced or made actionable by this change. "
-                "Do not report general refactoring wishes, subjective architecture "
-                "preferences, arbitrary file-size complaints, or pre-existing design debt "
-                "that the diff does not worsen. Every surviving finding must name the "
-                "trigger, observable impact, precise evidence locations, and smallest safe "
-                "remediation."
-            ),
-            source="authored: #886 NATIVE_STRUCTURAL_DISCOVERY_STRATEGY",
-        ),
         "discovery.generic_fallback": Strategy(
             content=(
                 "Review these files for correctness, clarity, and consistency with the "
@@ -317,37 +177,6 @@ def build_default_profile() -> ReviewProfile:
                 "not introduce findings that are not in the input list."
             ),
             source="copied: daydream.deep.prompts.build_arbiter_prompt",
-        ),
-        "suppression": Strategy(
-            content=(
-                "You are the suppression reviewer. The cheaper per-stack reviewers "
-                "flagged the borderline, low-confidence / low-severity findings listed "
-                "in {suppression_input_path}. These were NOT contested and NOT "
-                "high-severity, so no heavyweight arbiter looked at them. Your job is to "
-                "cut false positives: re-examine each one against the actual code "
-                "(Read/Grep/Bash) and the diff. You are adjudicating their work, NOT "
-                "starting a fresh review: do not introduce findings that are not in the "
-                "input list."
-            ),
-            source="copied: daydream.deep.prompts.build_suppression_prompt",
-        ),
-        "merge": Strategy(
-            content=(
-                "You are the cross-stack merge agent. Read every artifact above by path -- "
-                "do NOT re-run any reviews. Return a single JSON object matching the "
-                "structured-output schema: {\"items\": [ ... ]}. Each item is one "
-                "actionable finding. Synthesize every retained language and structural record; "
-                "combine duplicate defects with all contributing UIDs and retain distinct concerns. Emit nothing else."
-            ),
-            source="copied: daydream.deep.prompts.build_merge_prompt",
-        ),
-        "supervision": Strategy(
-            content=(
-                "Supervisor adjudication: review the canonical findings listed in "
-                "{supervise_input_path}. This is an adjudication pass, not a fresh "
-                "review: do not invent findings or change their file, line, or id."
-            ),
-            source="copied: daydream.deep.prompts.build_supervise_prompt",
         ),
         "verification": Strategy(
             content=(
@@ -446,6 +275,12 @@ def parse_profile(toml_text: str, *, source: str = "<string>") -> ReviewProfile:
     raw_strategies = data.get("strategies", {})
     if not isinstance(raw_strategies, dict):
         raise ProfileError("strategies must be a table", source)
+    found = sorted(name for section in ("pipeline", "strategies") if isinstance(data.get(section), dict)
+                   for name in (f"{section}.{key}" for key in data[section]) if name in REMOVED_PROFILE_KEYS)
+    if found:
+        raise ProfileError("; ".join(f"{name}: removed" for name in found)
+                           + (" (no review reads it; drop it)" if len(found) == 1
+                              else " (no review reads them; drop them)"), source)
     for key, raw in raw_strategies.items():
         if not isinstance(raw, dict):
             raise ProfileError(f"strategies.{key} must be a table", source)
@@ -481,33 +316,11 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
     """Parse the bounded pipeline section (R3 fail-closed, defaults for omitted fields)."""
     if not isinstance(data, dict):
         raise ProfileError("pipeline must be a table", source)
-    _PIPELINE_KEYS = frozenset(
-        {
-            "review_wall_budget_s",
-            "reviewer_investigation_budget_s",
-            "reviewer_tool_call_budget",
-            "structural_enabled",
-            "arbitration_enabled",
-            "arbitration_min_severity",
-            "arbitration_contested_location",
-            "suppression_enabled",
-            "suppression_severity_classes",
-            "suppression_confidence_classes",
-        }
-    )
-    if "assignment_policy" in data:
-        raise ProfileError("pipeline.assignment_policy: removed; every review splits a change of more than "
-                           "four batches and keeps a smaller one whole, so drop it", source)
+    _PIPELINE_KEYS = frozenset({"review_wall_budget_s", "reviewer_investigation_budget_s", "reviewer_tool_call_budget"})
     unknown = set(data) - _PIPELINE_KEYS
     if unknown:
         raise ProfileError(f"pipeline: unknown key `{sorted(unknown)[0]}`", source)
     defaults = Pipeline()
-
-    def _bool(key: str, fallback: bool) -> bool:
-        value = data.get(key, fallback)
-        if not isinstance(value, bool):
-            raise ProfileError(f"pipeline.{key} must be a boolean", source)
-        return value
 
     def _int(key: str, fallback: int) -> int:
         value = data.get(key, fallback)
@@ -517,62 +330,12 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
             raise ProfileError(f"pipeline.{key} must not be negative", source)
         return value
 
-    def _severity_classes(
-        key: str, fallback: tuple[str, ...], allowed: frozenset[str]
-    ) -> tuple[str, ...]:
-        value = data.get(key, fallback)
-        if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
-            raise ProfileError(f"pipeline.{key} must be an array of strings", source)
-        bad = [item for item in value if item not in allowed]
-        if bad:
-            raise ProfileError(
-                f"pipeline.{key}: invalid class `{sorted(set(bad))[0]}`", source
-            )
-        return tuple(value)
-
-    arbitration = Arbitration(
-        enabled=_bool("arbitration_enabled", defaults.arbitration.enabled),
-        min_severity=defaults.arbitration.min_severity,
-        contested_location=_bool(
-            "arbitration_contested_location", defaults.arbitration.contested_location
-        ),
-    )
-    severity = data.get("arbitration_min_severity")
-    if severity is not None:
-        if not isinstance(severity, str) or severity not in _SEVERITY_LEVELS:
-            raise ProfileError(
-                f"pipeline.arbitration_min_severity must be one of "
-                f"{sorted(_SEVERITY_LEVELS)}",
-                source,
-            )
-        arbitration = replace(arbitration, min_severity=severity)
-    suppression = Suppression(
-        enabled=_bool("suppression_enabled", defaults.suppression.enabled),
-        severity_classes=_severity_classes(
-            "suppression_severity_classes",
-            defaults.suppression.severity_classes,
-            _SEVERITY_LEVELS,
-        ),
-        confidence_classes=_severity_classes(
-            "suppression_confidence_classes",
-            defaults.suppression.confidence_classes,
-            _CONFIDENCE_LEVELS,
-        ),
-    )
-    if suppression.enabled and not suppression.confidence_classes:
-        raise ProfileError(
-            "pipeline.suppression: enabled but empty confidence class selection",
-            source,
-        )
     return Pipeline(
         review_wall_budget_s=_int("review_wall_budget_s", defaults.review_wall_budget_s),
         reviewer_investigation_budget_s=_int(
             "reviewer_investigation_budget_s", defaults.reviewer_investigation_budget_s
         ),
         reviewer_tool_call_budget=_int("reviewer_tool_call_budget", defaults.reviewer_tool_call_budget),
-        structural_enabled=_bool("structural_enabled", defaults.structural_enabled),
-        arbitration=arbitration,
-        suppression=suppression,
     )
 
 

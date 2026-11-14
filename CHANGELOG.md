@@ -292,7 +292,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   batches and keeps a smaller one whole
   ([assignment policy](docs/runtime.md#assignment-policy-and-work)). A review profile that
   sets `[pipeline] assignment_policy`, which unreleased builds accepted, is refused before
-  any review work with a message naming the key as removed. `settings.assignment_policy`
+  any review work with a message naming the key as removed, as are the staged reviewer's
+  profile keys (see the removal of the staged reviewer below). `settings.assignment_policy`
   keeps its shape; its `name` is always `broad`. The profile digest covers no policy: a
   digest recorded by an unreleased build that had the key differs from the one computed
   now for the same profile, the default included, while against 0.34.0 the key changes
@@ -373,6 +374,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     A `held` list that a step writes beside the canonical items is no longer rendered as
     `## Held Findings` (an undocumented key, no known caller): keep a finding in `items`
     to have it reported, or report what the step withholds from the step itself.
+  - Review profiles: the keys only the staged reviewer read are refused when a profile is
+    parsed, before any review work, with one message naming each key as removed:
+    `[pipeline]` `structural_enabled`, `arbitration_enabled`, `arbitration_min_severity`,
+    `arbitration_contested_location`, `suppression_enabled`,
+    `suppression_severity_classes` and `suppression_confidence_classes`, and the strategies
+    `intent`, `alternatives`, `discovery.per_stack`, `discovery.structural`,
+    `suppression`, `merge` and `supervision`. The packaged default no longer carries them
+    and the digest no longer covers them, so every profile's digest changes, the
+    default's included, against 0.34.0 and earlier unreleased builds alike.
+    `review_profile.Arbitration`, `Suppression`, `Pipeline`'s
+    `structural_enabled`, `arbitration` and `suppression` fields and the
+    `INTENT_STRATEGY_JUDGMENT_MARKER`, `ALTERNATIVES_STRATEGY_JUDGMENT_MARKER` and
+    `FOLDED_ALTERNATIVES_INSTRUCTION` constants are removed (no known caller).
   - Artifacts no run writes any more: `deep/intent.md`, `deep/alternatives.json`,
     `deep/stack-*-records.json`, `deep/stack-*-review.md`, per-scope report context
     files, the arbiter, suppression, dedup and adjudication files,

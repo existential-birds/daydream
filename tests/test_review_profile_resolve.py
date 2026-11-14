@@ -17,7 +17,7 @@ def _write_profile(tmp_path: Path, name: Any, content: Any) -> Any:
     p = tmp_path / f"{name}.toml"
     p.write_text(f'''schema_version = 1
 name = "{name}"
-[strategies.intent]
+[strategies.arbitration]
 content = "{content}"
 source = "copied: a"''')
     return p
