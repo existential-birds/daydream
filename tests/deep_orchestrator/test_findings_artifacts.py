@@ -82,7 +82,14 @@ async def test_embedded_fixing_is_selected_explicitly_and_persists_the_suite_ver
     ) == (0, True, [], False, "")
     config = make_config(tiny_diff_target, output_mode="loop", assume=None if ignored else "yes",
                          non_interactive=False, test_command=command)
+    # A fixing run after an unfinished review says so before it asks to apply anything.
+    stub.review_undecided = 1
+    monkeypatch.setattr("daydream.deep.review_terminal.print_warning", lambda _console, message: asked.append(message))
+    asked.clear()
     assert await run(config) == exit_code
+    outcome = next(index for index, line in enumerate(asked)
+                   if line.startswith("Review incomplete: 1 confirmed finding. Not finished:"))
+    assert outcome < next(index for index, line in enumerate(asked) if "Apply fixes" in line)
     path = tiny_diff_target / ".daydream" / "deep" / "test-verdict.json"
     assert path.is_file(), "suite verdict must survive both successful completion and an early failure return"
     verdict = json.loads(path.read_text())

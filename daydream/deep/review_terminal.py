@@ -24,7 +24,7 @@ from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
 from daydream.review_budget import render_review_warnings, review_warnings
 from daydream.review_result import ReasonCode, deliver_finalized_review
 from daydream.trajectory import DaydreamPhase, get_current_recorder, phase_scope
-from daydream.ui import print_warning
+from daydream.ui import print_info, print_warning
 
 
 def refresh_review_report(ctx: FlowContext, *, no_diff: bool = False) -> dict[str, Any]:
@@ -207,6 +207,14 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
     if "source_integrity" in {entry["assignment"] for entry in sealed["execution"]}:
         print_warning(console, 'Captured source integrity failed; rerun the review.')
     atomic_write_json(DeepArtifact.REVIEW_COVERAGE.at(state.dd), coverage.to_dict())
+    confirmed = len(sealed["findings"])
+    outcome = (f"Review {result['analysis_state']}: {confirmed or 'no'} confirmed "
+               f"finding{'' if confirmed == 1 else 's'}.")
+    if result["analysis_state"] == "complete":
+        print_info(console, outcome)
+    else:
+        unfinished = "; ".join(review_warnings(state.dd)) or ", ".join(result["reason_codes"])
+        print_warning(console, f"{outcome} Not finished: {unfinished}.")
     # Under ``deep/``, a registered public directory: a top-level file would be an unknown public
     # name that refuses the next run, on this build and on an earlier one, once its private proof is gone.
     write_committed_review_output(ctx.artifacts, sealed, report_path=DeepArtifact.MERGED_REPORT.at(state.dd),

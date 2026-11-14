@@ -104,6 +104,8 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
         # The run says what it is about to do, and a review announces no fix gate.
         assert "Review: 1 changed file(s) in 1 discovery assignment(s), then a fresh challenge" in printed
         assert "fix gate" not in printed
+        # And it says how the review ended.
+        assert printed.count("Review complete: 1 confirmed finding.") == 1
         # Discovery and its challenge keep their own default efforts; no latency route lowers the challenge.
         assert efforts == ["medium", "high"]
         artifact = dr.load_diagram_artifact(target)

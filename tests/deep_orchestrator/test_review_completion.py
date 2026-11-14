@@ -129,7 +129,9 @@ async def test_comment_pins_pr_head_independently_and_excludes_local_edits(
 
 
 @pytest.mark.parametrize('case', ['dirty-no-diff', 'live'])
-async def test_snapshot_boundaries(review: ReviewRun, fake_gh: FakeGh, case: str) -> None:
+async def test_snapshot_boundaries(
+    review: ReviewRun, fake_gh: FakeGh, case: str, capsys: pytest.CaptureFixture[str],
+) -> None:
     """Analysis stays bound to the captured snapshot: dirty edits and a mid-run PR head advance never rebind it.
 
     'live' is a runner row: only a real review whose PR head moves after capture proves the pinned
@@ -150,6 +152,7 @@ async def test_snapshot_boundaries(review: ReviewRun, fake_gh: FakeGh, case: str
         review.backend = EmptyReviewBackend(review.repo, responder=advance)
         review.backend.review_claims = [{'title': 'Grounded defect', 'file': 'api.py', 'line': 2}]
         assert await review.run() == 0
+        assert collapse_panel_text(capsys).count('Review complete: 1 confirmed finding.') == 1
         data = review.load()
         result = data['terminal_result']
         assert result['analysis_state'] == 'complete'
@@ -177,7 +180,12 @@ async def test_snapshot_boundaries(review: ReviewRun, fake_gh: FakeGh, case: str
         # An incomplete review still exports its admitted finding with truthful coverage, and never approves.
         review.backend.review_undecided = 1
         live, partial = review.pr, review.tmp / 'incomplete.json'
+        capsys.readouterr()
         assert await review.run(findings_out=str(partial)) == 0
+        # The console says the review is unfinished, with what was left, though the run exits 0.
+        assert collapse_panel_text(capsys).count(
+            'Review incomplete: 1 confirmed finding. Not finished: challenge: evidence_incomplete; '
+            'committed:00000: evidence_incomplete.') == 1
         exported = json.loads(partial.read_text())
         assert exported['terminal_result']['analysis_state'] == 'incomplete'
         assert [finding['title'] for finding in exported['findings']] == ['Grounded defect']
@@ -221,7 +229,9 @@ async def test_snapshot_boundaries(review: ReviewRun, fake_gh: FakeGh, case: str
 
 @pytest.mark.parametrize('fault', ['absent-install', 'prior-install', 'staging', 'later-run-moved-checkout',
                                    'later-run-private-store-lost', 'later-run-sealed-result-touched'])
-async def test_atomic_public_failure(review: ReviewRun, fault: str, artifact_runtime_root: Path) -> None:
+async def test_atomic_public_failure(
+    review: ReviewRun, fault: str, artifact_runtime_root: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
     """A failed public install or staging leaves the destination absent or byte-identical to the prior export.
 
     What one review publishes never refuses a later run in that checkout: not after the checkout moved,
@@ -243,6 +253,8 @@ async def test_atomic_public_failure(review: ReviewRun, fault: str, artifact_run
         calls = len(review.backend.calls)
         assert await review.run(target=str(repo)) == 0
         assert len(review.backend.calls) > calls
+        # Each run says how its review ended.
+        assert collapse_panel_text(capsys).count('Review complete: no confirmed findings.') == 2
         (resealed,) = (repo / '.daydream').rglob('committed-review.json')
         assert json.loads(resealed.read_text())['run_id'] != first
         # Only a registered public name is published, so an earlier build meets nothing it would refuse either.
