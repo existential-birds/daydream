@@ -200,10 +200,13 @@ def capture_run_record(
                                  "profile_digest": profile.digest}
     from daydream.run_config import _resolved_backend_name, _resolved_model, _resolved_reasoning_effort
 
-    provenance["resolved_phases"] = {phase: {
+    # The stored key ``per_stack_review`` names the reviewer that ran: the ``review`` phase.
+    provenance["resolved_phases"] = {stored: {
         "backend": _resolved_backend_name(config, phase), "model": _resolved_model(config, phase),
         "reasoning_effort": _resolved_reasoning_effort(config, phase),
-    } for phase in ("intent", "wonder", "per_stack_review", "parse", "arbiter", "merge", "verify", "fix", "test")}
+    } for stored, phase in (
+        ("intent", "intent"), ("wonder", "wonder"), ("per_stack_review", "review"), ("parse", "parse"),
+        ("arbiter", "arbiter"), ("merge", "merge"), ("verify", "verify"), ("fix", "fix"), ("test", "test"))}
     # Routing keys of the replaced reviewer stay, empty, so stored-record readers keep one shape.
     provenance.update(latency_profile=None, latency_route=None, latency_routing=None)
     provenance["file_configuration"] = None if config.file_config is None else asdict(config.file_config)

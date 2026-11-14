@@ -410,7 +410,7 @@ async def run(
                 config, private_roots=private_roots, run_context=run_context,
                 backend_factory=backend_factory,
                 backend_execution=(None if execution is None else execution.backends.get(
-                    _resolved_backend_name(config, "per_stack_review"), execution.backend)),
+                    _resolved_backend_name(config, "review"), execution.backend)),
                 github_execution=None if execution is None else execution.github,
             )
         except anyio.get_cancelled_exc_class():

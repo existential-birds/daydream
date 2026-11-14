@@ -242,9 +242,9 @@ def _recorder_backend_names(
     those fields; the representative phase for each built-in is listed below.
     """
     representative, runs_fix, runs_test = {
-        DaydreamRunFlow.NORMAL: ("per_stack_review", True, True),
-        DaydreamRunFlow.DEEP: ("per_stack_review", True, True),
-        DaydreamRunFlow.TTT: ("per_stack_review", False, False),
+        DaydreamRunFlow.NORMAL: ("review", True, True),
+        DaydreamRunFlow.DEEP: ("review", True, True),
+        DaydreamRunFlow.TTT: ("review", False, False),
         DaydreamRunFlow.IMPROVE: ("recon", False, False),
         DaydreamRunFlow.DIAGRAM: ("diagram", False, False),
         DaydreamRunFlow.CUSTOM: ("review", False, False),
@@ -316,8 +316,9 @@ def capture_manifest_run_identity(
     per_stack_backend: str | None = None
     per_stack_model: str | None = None
     if phases.per_stack_review:
-        per_stack_backend = _resolved_backend_name(config, "per_stack_review")
-        per_stack_model = _resolved_model(config, "per_stack_review")
+        # The stored names predate the single reviewer; their values name the review phase that runs.
+        per_stack_backend = _resolved_backend_name(config, "review")
+        per_stack_model = _resolved_model(config, "review")
         if per_stack_model is None and per_stack_backend == "pi":
             from daydream.backends.pi import _configured_pi_model
 

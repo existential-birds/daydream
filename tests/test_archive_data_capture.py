@@ -24,7 +24,7 @@ from daydream.backends import (
     TextEvent,
 )
 from daydream.dataset import LocalRecordStore
-from daydream.run_config import RunConfig
+from daydream.run_config import RunConfig, _resolved_model
 from daydream.runner import run
 from daydream.training.labeler_signals import local_commit_applied_signal
 from tests.deep_orchestrator.support import _only_archived_run
@@ -104,7 +104,7 @@ async def _run_real_phases_deep(
         stub.fix_new_generated = untracked_fix
         (multi_stack_target / "notes.txt").write_text("pre-existing\n")
     exit_code = await run(_deep_run_config(
-            multi_stack_target, backend="pi",
+            multi_stack_target, backend="pi", review_backend="codex",
             pr_number=no_ci_remote.pr_number, pr_repo=pr_repo or no_ci_remote.base_repository,
             dataset_capture=dataset_store is not None, dataset_store_path=dataset_store,
             dump_artifacts=None if dump_path is None else str(dump_path),
@@ -152,6 +152,13 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     verdict = json.loads((multi_stack_target / ".daydream/deep/test-verdict.json").read_text())
     assert verdict["passed"] and all(attempt["kind"] == "host" for attempt in verdict["attempts"])
 
+    # Stored records name the reviewer that ran: discovery on the review phase's backend, not on a phase
+    # table this build ignores. The keys are the stored ones.
+    review_model = _resolved_model(RunConfig(backend="pi", review_backend="codex"), "review")
+    assert trajectory["extra"]["review_backend"] == "codex"
+    recorded = manifest["run"]
+    assert (recorded["review_backend"], recorded["per_stack_review_backend"], recorded["per_stack_review_model"]) == (
+        "codex", "codex", review_model)
     metrics = manifest["metrics"]
     assert "grounding_rate" not in metrics
     assert metrics["total_findings"] is not None
@@ -183,6 +190,8 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
         assert (dump_dir / filename).read_bytes() == (run_dir / filename).read_bytes()
     assert json.loads((run_dir / "deep/committed-review.json").read_text())["run_id"] == manifest["session_id"]
     captured = read_records(store).runs[0]
+    assert captured["provenance"]["resolved_phases"]["per_stack_review"]["backend"] == "codex"
+    assert captured["provenance"]["resolved_phases"]["per_stack_review"]["model"] == review_model
     task = captured["original_task"]["value"]
     assert (task["analyzed_revision"]["head_sha"], task["analyzed_revision"]["merge_base_sha"]) == (
         head_before, base_before)
