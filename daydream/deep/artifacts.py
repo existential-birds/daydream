@@ -65,5 +65,3 @@ def deep_dir(
 def diff_key(diff: str) -> str:
     """Content key for a diff: sha256 hex of its UTF-8 bytes."""
     return hashlib.sha256(diff.encode("utf-8")).hexdigest()
-
-

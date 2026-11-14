@@ -692,5 +692,3 @@ async def test_cancelling_one_codex_invocation_leaves_its_shared_backend_sibling
         with anyio.fail_after(5):
             output, _, reason = await sibling
     assert (output, reason) == ("sibling done", None)
-
-

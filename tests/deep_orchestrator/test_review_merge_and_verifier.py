@@ -44,5 +44,3 @@ def test_diff_changed_files_handles_modify_add_delete_binary() -> None:
     assert info.marker is not None and bounded == info.marker + big
     assert "dropped: keep.py, new.py, old.py, logo.png" in info.marker
     assert (info.retained_blocks, info.oversize_paths) == (1, ["0big.py"])
-
-

@@ -322,5 +322,3 @@ def test_build_import_graph_resolves_python_edges(tmp_path: Path) -> None:
         "a.ts": {"b.ts"}, "b.ts": set(), "a.go": {"b.go"}, "b.go": set(),
         "a.rs": {"b.rs"}, "b.rs": set(),
     }
-
-

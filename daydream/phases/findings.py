@@ -12,5 +12,3 @@ _PLACEHOLDER_EVIDENCE: frozenset[str] = frozenset({"n/a", "none", "-"})
 def severity_sorted(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Stable-sort canonical items by severity (high < medium < low)."""
     return sorted(items, key=lambda it: SEVERITY_RANK.get(it.get("severity") or "", 1))
-
-

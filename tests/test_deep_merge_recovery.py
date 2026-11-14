@@ -27,4 +27,3 @@ def test_coverage_rejects_malformed_failure_diagnostics() -> None:
     payload['diagnostics'] = diagnostics
     with pytest.raises(ValueError):
         ReviewCoverage.from_dict(payload)
-

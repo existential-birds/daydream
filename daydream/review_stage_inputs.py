@@ -352,5 +352,3 @@ class StageInputFactory:
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_bytes(path, text.encode(), fsync=True, dir_fsync=True, mode=0o600)
         return path
-
-

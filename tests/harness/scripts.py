@@ -21,7 +21,3 @@ def cli_main(argv: list[str]) -> int:
     finally:
         sys.argv = saved
     raise AssertionError("cli.main() must exit via sys.exit")
-
-
-
-

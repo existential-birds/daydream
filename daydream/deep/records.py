@@ -99,5 +99,3 @@ def record_issues(records: Any) -> list[Any] | None:
 def record_issues_or_empty(records: Any) -> list[Any]:
     """Read current records, contributing no evidence for a malformed envelope."""
     return record_issues(records) or []
-
-

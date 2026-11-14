@@ -46,5 +46,3 @@ def normalize_severity(value: object) -> str | None:
         return None
     normalized = value.strip().lower()
     return normalized if normalized in CANONICAL_LEVELS else None
-
-

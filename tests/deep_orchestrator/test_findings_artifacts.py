@@ -108,9 +108,3 @@ async def test_embedded_fixing_is_selected_explicitly_and_persists_the_suite_ver
         assert not (tiny_diff_target / ".fixed-api_py").exists()
         assert (suite_dir / "suite-count.txt").read_text() == "1"
         assert stub.test_suite_calls == 0
-
-
-
-
-
-

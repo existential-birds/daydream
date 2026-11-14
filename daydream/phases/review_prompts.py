@@ -42,5 +42,3 @@ def _exploration_pointer(exploration_dir: Path | None, *, fixer: bool = False) -
         "Use the supplied changed hunks as the starting context. Inspect enclosing symbols or "
         "other sections when useful to resolve concrete candidates.\n"
     )
-
-

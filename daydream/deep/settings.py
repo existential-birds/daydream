@@ -93,5 +93,3 @@ def repair_job_policy(config: RunConfig) -> RepairJobPolicy:
         job_total_s=repair_job_wall_s(config),
         max_executions=repair_max_executions(config),
     )
-
-

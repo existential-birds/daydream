@@ -174,5 +174,3 @@ def _finalization_fixture(tmp_path: Path) -> tuple[Any, Any, Any]:
     (repo / "a.py").write_text("A = 2\n")
     snapshot = capture_retained_tree(ctx.work, state)
     return ctx, state, snapshot
-
-

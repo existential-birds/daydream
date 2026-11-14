@@ -117,5 +117,3 @@ def build_import_graph(
         if time.monotonic() > deadline:
             break
     return graph
-
-

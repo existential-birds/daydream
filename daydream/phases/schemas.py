@@ -51,5 +51,3 @@ FIX_VERIFY_VERDICTS_SCHEMA = result_array_schema("verdicts", {
     "check_command": {"type": ["string", "null"]},
     "check_only": {"type": "boolean"},
 })
-
-

@@ -208,5 +208,3 @@ def print_verification_summary(console: Console, verdicts_path: Path) -> None:
 def _is_count(value: object) -> bool:
     """Whether *value* is a real integer count (``bool`` is not)."""
     return isinstance(value, int) and not isinstance(value, bool)
-
-

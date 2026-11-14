@@ -161,9 +161,3 @@ def _fix_prompts(stub: _StubBackend) -> list[str]:
     return [c["prompt"] for c in stub.calls if c["prompt"].startswith(("Fix this issue", "Fix these"))]
 
 PR_SENTINEL = "DELIBERATE_RATIO_PASS_THROUGH_IS_INTENTIONAL"
-
-
-
-
-
-

@@ -39,11 +39,3 @@ def findings_artifact(
 def merge_result(items: Iterable[dict[str, Any]]) -> dict[str, Any]:
     """Current producer envelope with explicit nullable relationships and attribution."""
     return {"items": [{"related_files": None, "source_uids": None, **item} for item in items]}
-
-
-
-
-
-
-
-
