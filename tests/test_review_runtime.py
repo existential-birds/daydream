@@ -141,6 +141,14 @@ async def test_retry_discards_failed_attempt_checkpoint_and_evidence(
     assert "at most 3 seconds and 1 tool calls" in backend.prompts[0]
     assert "FAILED_ATTEMPT" not in backend.last_prompt
     assert "CURRENT_EVIDENCE" in backend.last_prompt
+    # Tool starts that never complete are retained up to a bound; the oldest are counted as omitted.
+    flood = ScriptedBackend(script=[
+        [ToolStartEvent(id=f"start-{number}", name="read", input={"path": "src.py"}) for number in range(67)],
+        [ResultEvent(structured_output=FINDINGS, continuation=None)]])
+    assert (await run_agent(flood, tmp_path, "review", phase=DaydreamPhase.DEEP, output_schema=SCHEMA,
+                            budget=BudgetLedger("deep", deadline=clock.monotonic() + 5),
+                            review_limits=ReviewLimits(10, 2, 66)))[0] == FINDINGS
+    assert "omitted=3; unmatched tool starts=64" in flood.last_prompt
 
 async def test_finalization_revalidates_inputs_and_propagates_capture_failure(tmp_path: Path) -> None:
 

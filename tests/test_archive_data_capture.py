@@ -207,6 +207,9 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     verdicts = verification["recommendation-verdicts.json"]
     assert verdicts["selection"]["decisions"][0]["item_uid"] == item["item_uid"]
     assert verdicts["selection"]["mode"] == "verify_all"
+    # The stored counters and the per-decision flag keep their keys though nothing is skipped or carried over.
+    assert (verdicts["selection"]["skipped"], verdicts["selection"]["reused"]) == (0, 0)
+    assert verdicts["selection"]["decisions"][0]["verdict_reused"] is False
     assert verdicts["verdicts"][0]["issue_id"] == item["id"]
     assert verification["fix-outcomes.json"]["outcomes"][item["item_uid"]]["verdict"] == "resolved"
     assert captured["scoring"]["value"]["persisted_breakdown"]["correctness_per_finding"] == [1.0]

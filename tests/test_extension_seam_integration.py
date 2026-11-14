@@ -13,10 +13,12 @@ import pytest
 from daydream import runner
 from daydream.backends import ResultEvent, TextEvent
 from daydream.config_file import load_file_config
+from daydream.dataset import LocalRecordStore
 from daydream.review_result import FinalizedReview
 from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
+from tests.harness.dataset import read_records
 from tests.harness.stub_backend import StubBackend
 
 KEEP_ME = "KEEP_ME"
@@ -44,8 +46,7 @@ async def test_extension_step_rewrites_items_before_the_review_is_sealed(
         "    path = ctx.data['items_file']\n"
         "    items = json.loads(path.read_text())['items']\n"
         f"    kept = [dict(item, description='{KEEP_ME}') for item in items if item['description'] != '{DROP_ME}']\n"
-        "    held = [item for item in items if item['description'] == 'DROP_ME']\n"
-        "    path.write_text(json.dumps({'items': kept, 'held': held}))\n"
+        "    path.write_text(json.dumps({'items': kept}))\n"
         "def register(r):\n"
         "    r.register_phase(FlowStep(name='rewrite', run=_rewrite))\n"
         "    flow = r.flow('deep')\n"
@@ -59,17 +60,20 @@ async def test_extension_step_rewrites_items_before_the_review_is_sealed(
     install_backend(backend)
     delivered: list[FinalizedReview] = []
 
-    assert await runner.run(make_config(multi_stack_target), review_result_handler=delivered.append) == 0
+    store = LocalRecordStore(multi_stack_target.parent / "records")
+    assert await runner.run(make_config(multi_stack_target, dataset_capture=True, dataset_store_path=store.root),
+                            review_result_handler=delivered.append) == 0
 
     (review,) = delivered
     sealed = json.loads((multi_stack_target / ".daydream/deep/committed-review.json").read_text())
     assert [finding["title"] for finding in sealed["findings"]] == ["Greeting drift", DROP_ME]
     assert review.terminal_result == sealed["terminal_result"] and review.terminal_result["projection_valid"]
-    # Identity survives the rewrite; the embedded callback and the published items agree on what was kept.
+    # Identity survives the rewrite; the embedded callback and the captured record agree on what was kept.
     assert [(item["description"], item["item_uid"]) for item in review.items] == [
         (KEEP_ME, sealed["findings"][0]["item_uid"])]
-    published = json.loads((multi_stack_target / ".daydream/deep/merged-items.json").read_text())
-    assert published["items"] == review.items and [item["description"] for item in published["held"]] == [DROP_ME]
+    (captured,) = read_records(store).runs
+    assert [(item["description"], item["item_uid"]) for item in captured["findings"]["value"]["items"]] == [
+        (KEEP_ME, sealed["findings"][0]["item_uid"])]
 
     calls = len(backend.calls)
     assert await runner.run(make_config(multi_stack_target, flow_name="borrowed")) == 1

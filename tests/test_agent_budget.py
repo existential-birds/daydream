@@ -17,6 +17,7 @@ from daydream import clock
 from daydream.agent import StructuredOutputFailure, run_agent
 from daydream.backends import (
     AgentEvent,
+    PiRequestConfig,
     RequestEvent,
     ResultEvent,
     RetryPolicy,
@@ -109,6 +110,19 @@ async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
     step = _agent_step_with_stop_reason(trajectory)
     assert step["extra"]["stop_reason"] == "tool_call_budget_exceeded"
     assert step["message"] == "partial output"
+
+    # A native result that arrived in a turn the budget then cut is discarded with the turn.
+    async def late_result(*args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+        yield RequestEvent(prompt="go", config=PiRequestConfig(read_only=True, schema_emulated=False),
+                           output_schema={"type": "object"})
+        yield ResultEvent(structured_output={"submitted": "before the cut"}, continuation=None)
+        for index in range(8):
+            yield ToolStartEvent(id=f"late-{index}", name="Bash", input={"command": "ls"})
+
+    cut = await run_agent(ScriptedBackend(responder=late_result, model="mock-model"), tmp_path, "go",
+                          phase=DaydreamPhase.FIX, output_schema={"type": "object"},
+                          budget=BudgetLedger("fix", limit=5))
+    assert cut == ("", None, "tool_call_budget_exceeded")
     # The received over-limit start is retained as evidence even though it is not displayed or executed further.
     assert [call["tool_call_id"] for call in step["tool_calls"]] == [f"tool-{index}" for index in range(6)]
     assert trajectory["extra"]["partial"] is True

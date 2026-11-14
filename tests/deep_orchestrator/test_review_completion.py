@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 from rich.console import Console
 
-from daydream import git_ops, json_utils, runner
+from daydream import git_ops, json_utils, review_reporting, runner
 from daydream.dataset import LocalRecordStore
 from daydream.deep import review_terminal
 from daydream.findings import FindingsValidationError, load_findings_artifact
@@ -110,8 +110,18 @@ async def test_comment_pins_pr_head_independently_and_excludes_local_edits(
 
     review.patch.setattr(review_terminal, 'finalize_review', corrupt_before_finalization)
     review.patch.setattr('daydream.pr_review.post_classified_review', _recording_fake_submit(plans))
+    # The summary of the terminal result cannot be rendered: the post falls back to the checked warnings.
+    summarize = review_reporting.render_github_review_context
+
+    def unrenderable(result: Any, **kwargs: Any) -> str:
+        if result is not None:
+            raise ValueError('summary cannot be rendered')
+        return summarize(result, **kwargs)
+
+    review.patch.setattr(review_reporting, 'render_github_review_context', unrenderable)
     assert await review.run(output_mode='comment', findings_out=None, approve_on_clean=True) == 0
     plan = plans['plan']
+    assert plan.review_summary == summarize(None, review_warnings=plan.review_warnings) and plan.review_warnings
     assert plan.pr.head_sha == review.pr.head_sha != local_head
     assert plan.pr.base_sha == review.pr.base_sha and plan.pr.pr_base_sha == review.pr.base_sha
     assert plan.event is ReviewEvent.COMMENT
@@ -122,7 +132,9 @@ async def test_comment_pins_pr_head_independently_and_excludes_local_edits(
     patch = (review.repo / '.daydream/diff.patch').read_text()
     assert 'LOCAL_' not in patch and patch
     assert captured_roots and all(not root.exists() for root in captured_roots)
-    assert 'excludes local tracked and untracked edits' in collapse_panel_text(capsys)
+    panel = collapse_panel_text(capsys)
+    assert 'excludes local tracked and untracked edits' in panel
+    assert 'Review summary unavailable: ValueError' in panel
     assert git_ops.head_sha(review.repo) == local_head and (review.repo / '.git/index').read_bytes() == before
     assert (review.repo / 'api.py').read_text() == 'LOCAL_WORKING = True\n'
     assert (review.repo / 'untracked.py').read_text() == 'LOCAL_UNTRACKED = True\n'
@@ -300,7 +312,8 @@ async def test_atomic_public_failure(
 
 # Source-loss and replacement-checkout rows are runner rows: only the real terminal export after
 # admission can lose its checkout, read retained bytes, and install privately.
-@pytest.mark.parametrize('fault', ['coverage', 'fix', 'projection', 'source-loss', 'placement-replacement-worktree'])
+@pytest.mark.parametrize('fault', ['coverage', 'fix', 'projection', 'report', 'pipeline', 'source-loss',
+                                   'placement-replacement-worktree'])
 async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str) -> None:
     """A failure after admission publishes typed coverage atomically, never live or replaced Git."""
     force_worktree = fault.endswith('-worktree')
@@ -370,6 +383,32 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         assert saved_path.read_bytes() == state['writes'][-1][1]
         saved = json.loads(saved_path.read_text())
         assert all(s['status'] == 'complete' for s in saved['stack_outcomes'] + saved['phase_outcomes'])
+        return
+    if fault == 'report':
+        # A report that cannot be refreshed is a diagnostic: the sealed review and its export still stand.
+        def unavailable(*_a: Any, **_k: Any) -> Any:
+            raise OSError('report refresh failed')
+        review.patch.setattr(review_terminal, 'refresh_review_report', unavailable)
+        assert await review.run() == 0
+        assert 'Review report unavailable: OSError' in collapse_panel_text(capsys)
+        data = review.load()
+        assert [finding['title'] for finding in data['findings']] == ['Grounded defect']
+        assert data['terminal_result']['analysis_state'] == 'complete'
+        return
+    if fault == 'pipeline':
+        # A flow step that fails after the review seals it as unfinished, with the failure retained run-wide.
+        def broken_step(*_a: Any, **_k: Any) -> Any:
+            raise RuntimeError('flow step failed')
+        review.patch.setattr('daydream.deep.merge_steps.review_output_path_for', broken_step)
+        with pytest.raises(RuntimeError, match='flow step failed'):
+            await review.run()
+        sealed = json.loads((review.repo / '.daydream/deep/committed-review.json').read_text())
+        result = sealed['terminal_result']
+        assert (result['analysis_state'], result['reason_codes']) == (
+            'incomplete', ['backend_failure', 'evidence_incomplete'])
+        assert [(entry['assignment'], entry.get('reason')) for entry in sealed['execution']][-1] == (
+            'pipeline', 'backend_failure')
+        assert [finding['title'] for finding in sealed['findings']] == ['Grounded defect']
         return
     # The reviewer retains its own failures, so every row ends as an exit status, never as an exception.
     assert await review.run(dataset_capture=fault == 'source-loss', dataset_store_path=review.tmp / 'records',

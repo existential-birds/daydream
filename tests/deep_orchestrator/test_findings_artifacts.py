@@ -45,9 +45,12 @@ async def test_embedded_fixing_is_selected_explicitly_and_persists_the_suite_ver
     _silence(monkeypatch, prompts=False)
     _force_interactive(monkeypatch)
     asked: list[str] = []
+    declines: list[str] = []
 
     def answer(_console: object, message: str, *_args: object, **_kwargs: object) -> str:
         asked.append(message)
+        if any(question in message for question in declines):
+            return "n"
         return "3" if ignored and "Choice" in message else "y"
 
     monkeypatch.setattr("daydream.run_context._prompt_user", answer)
@@ -82,6 +85,15 @@ async def test_embedded_fixing_is_selected_explicitly_and_persists_the_suite_ver
     ) == (0, True, [], False, "")
     config = make_config(tiny_diff_target, output_mode="loop", assume=None if ignored else "yes",
                          non_interactive=False, test_command=command)
+    # A selected fixing run with nothing to fix, or whose operator declines the gate, ends cleanly unfixed.
+    def fix_turns() -> int:
+        return sum(call["prompt"].lower().startswith(("fix this issue", "fix these")) for call in stub.calls)
+    claims, stub.review_claims = stub.review_claims, []
+    assert (await run(config), fix_turns()) == (0, 0)
+    stub.review_claims = claims
+    declines.append("Apply fixes")
+    assert (await run(config), fix_turns(), (suite_dir / "suite-count.txt").exists()) == (0, 0, False)
+    declines.clear()
     # A fixing run after an unfinished review says so before it asks to apply anything.
     stub.review_undecided = 1
     monkeypatch.setattr("daydream.deep.review_terminal.print_warning", lambda _console, message: asked.append(message))

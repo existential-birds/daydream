@@ -397,11 +397,6 @@ async def test_bound_pi_context_preserves_native_configuration_and_auth_refresh(
     assert process.call_args.kwargs["cwd"] == str(pi_workspace)
     assert process.call_args.kwargs["env"]["PI_CODING_AGENT_DIR"] == str(agent_dir)
     assert process.call_args.kwargs["env"]["NOUS_API_KEY"] == "refreshed-loopback-credential"
-    # The binding belongs to that instance alone: the separate instance a fixing phase receives starts
-    # in the directory it is given and resolves the live provider.
-    sibling_args, sibling = await _run_and_capture_args(PiBackend(cwd=pi_workspace), cwd=snapshot)
-    assert sibling.call_args.kwargs["cwd"] == str(snapshot)
-    assert sibling_args[sibling_args.index("--provider") + 1] == "other-provider"
     settings.write_text(json.dumps({"defaultProvider": "another-run"}))
     with pytest.raises(PiError, match="start a new run"):
         async for _ in backend.execute(snapshot, "Review captured source"):

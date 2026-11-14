@@ -95,7 +95,7 @@ def test_signal_handler_flushes_before_backend_registry_snapshot(monkeypatch: py
              "--findings-out", "findings/findings.json", "--base", "origin/main", "/tmp/project"],
             {"output_mode": "review", "findings_out": "findings/findings.json", "assume": None},
         ),
-        (["--fix", "--yes", "/tmp/project"], {"output_mode": "loop", "assume": "yes", "start_at": "review"}),
+        (["--fix", "--yes", "/tmp/project"], {"output_mode": "loop", "assume": "yes"}),
         (
             ["--flow", "x", "--yes", "--start-at", "fix", "/tmp/project"],
             {"output_mode": "review", "assume": "yes", "flow_name": "x", "start_at": "fix"},

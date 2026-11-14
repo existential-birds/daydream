@@ -71,11 +71,9 @@ def build_record_dedup_candidates(
 ) -> list[RecordDuplicatePair]:
     """Compare record descriptions across files, ordered by IDs then UID tie-breakers.
 
-    sources must parallel records or ValueError is raised. A zero threshold returns
-    every comparable pair for distribution analysis; empty descriptions never pair.
+    sources parallels records. A zero threshold returns every comparable pair for
+    distribution analysis; empty descriptions never pair.
     """
-    if len(sources) != len(records):
-        raise ValueError("sources must contain exactly one entry per record")
     pairs: list[RecordDuplicatePair] = []
     n = len(records)
     for i in range(n):

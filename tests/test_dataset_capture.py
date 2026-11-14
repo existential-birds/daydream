@@ -12,6 +12,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from daydream import git_ops, runner
 from daydream.dataset import LocalRecordStore, StoreError
+from daydream.deep import review_terminal
 from daydream.extensions import Registry, build_registry
 from daydream.observability.config import ObservabilityConfig
 from daydream.run_config import RunConfig
@@ -99,6 +100,14 @@ async def test_terminal_failure_retains_owned_trace_and_partial_evidence(
     original_head, original_diff = git(repo, "rev-parse", "HEAD"), git_ops.diff(repo, "main")
     backend = install_stub_backend(monkeypatch, repo, pin_skill_availability=False)
     backend.review_failure = RuntimeError("terminal offline failure")
+    # Evidence that cannot be decoded is retained as text with its reason, never dropped.
+    finalize = review_terminal.finalize_review
+
+    def with_malformed_evidence(ctx: Any, *args: Any, **kwargs: Any) -> int:
+        (ctx.data["dd"] / "fix-failures.json").write_text("{malformed")
+        return finalize(ctx, *args, **kwargs)
+
+    monkeypatch.setattr(review_terminal, "finalize_review", with_malformed_evidence)
     config = replace(config, observability=ObservabilityConfig(destinations=("memory",)))
     # The reviewer retains a provider failure as unfinished work; a review with no usable evidence fails the run.
     assert await run(config) == 1
@@ -112,6 +121,8 @@ async def test_terminal_failure_retains_owned_trace_and_partial_evidence(
     assert sealed["terminal_result"]["analysis_state"] == "failed" and sealed["run_id"] == raw["run_id"]
     assert raw["trace_id"] == owned_trace_id(memory_exporters[0], raw["run_id"])
     assert raw["original_task"]["status"] == "available"
+    assert raw["provenance"]["collection_diagnostics"]["fix-failures.json"] == {
+        "status": "failed", "reason": "malformed_json", "raw_text": "{malformed"}
     assert [raw["provenance"][key] for key in ("latency_profile", "latency_route", "latency_routing")] == [None] * 3
     documents = raw["trajectories"]["value"]["documents"]
     assert any(tool["tool_call_id"] == "failed-tool" for doc in documents for step in doc["steps"]

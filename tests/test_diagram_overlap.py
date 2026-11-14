@@ -76,7 +76,7 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
     config = config_for(target, diagram="auto", file_config=DaydreamFileConfig(
         backend="codex", latency_profile="fast", precision_mode=True, verify_all=False,
         phases={phase: {"backend": "osprey"}},
-    ))
+    ), frozen_author_description=FrozenAuthorDescription(git(target, "rev-parse", "HEAD"), "EMBEDDER_STATED_INTENT"))
     roots = private_root_locations(base=tmp_path / "private")
     delivered: list[FinalizedReview] = []
     exit_code = await runner.run(config, execution=execution, private_roots=roots,
@@ -86,6 +86,11 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
         # workspace or artifact exists, and nothing is delivered.
         assert exit_code == 1
         assert "'osprey' does not serve them" in capsys.readouterr().out
+        # So is the findings supervisor, which ended with the staged reviewer.
+        supervised = replace(config, file_config=DaydreamFileConfig(backend="codex", supervisor="rules"))
+        assert await runner.run(supervised, execution=execution, private_roots=roots,
+                                review_result_handler=delivered.append) == 1
+        assert "The findings supervisor" in " ".join(capsys.readouterr().out.replace("│", " ").split())
         # So is embedder-supplied author text over its bound, or frozen for another head than the approved one.
         head = git(target, "rev-parse", "HEAD")
         supported = replace(config, file_config=DaydreamFileConfig(backend="codex"), approved_head_sha=head)
@@ -122,3 +127,15 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
         assert item["item_uid"] and item["rationale"].startswith("The changed behavior is incorrect.")
         assert not {"severity", "confidence", "lens"} & item.keys()
         assert json.loads((target / ".daydream/deep/merged-items.json").read_text())["items"] == review.items
+        # The embedder's description for this head reached both assignments as captured context.
+        sealed = json.loads((target / ".daydream/deep/committed-review.json").read_text())
+        assert sealed["settings"]["historical_context"] == {"context": "EMBEDDER_STATED_INTENT"}
+        assert [call["review_instructions"].count("EMBEDDER_STATED_INTENT")
+                for call in backend.calls if call.get("review_instructions")] == [1, 1]
+        # A description frozen for another head, with no approved head to check it against earlier, is
+        # refused when the review is planned: the run fails and no model is asked.
+        calls = len(backend.calls)
+        stale = replace(config, frozen_author_description=FrozenAuthorDescription("0" * 40, "intent"))
+        assert await runner.run(stale, execution=execution, private_roots=roots) == 1
+        assert "does not match analyzed HEAD" in " ".join(capsys.readouterr().out.replace("│", " ").split())
+        assert len(backend.calls) == calls

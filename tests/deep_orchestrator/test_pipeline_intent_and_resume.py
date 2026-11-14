@@ -25,14 +25,16 @@ async def test_pr_body_reaches_the_reviewer_as_bounded_untrusted_context(
     """The pinned PR's body reaches each assignment once, labelled untrusted; an oversized one is cut, never refused."""
     _silence(monkeypatch)
     body = PR_SENTINEL
-    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, pr=None, **_kwargs: {"number": 7, "body": body})
+    view: dict[str, object] = {}
+    monkeypatch.setattr("daydream.git_ops.gh_pr_view",
+                        lambda repo, pr=None, **_kwargs: {"number": 7, "body": body, **view})
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
 
     async def delivered() -> tuple[str, list[str]]:
         stub.calls.clear()
         assert await run(make_config(multi_stack_target, pr_number=7)) == 0
         sealed = json.loads((multi_stack_target / ".daydream/deep/committed-review.json").read_text())
-        return sealed["settings"]["historical_context"]["context"], [
+        return sealed["settings"].get("historical_context", {}).get("context"), [
             call["review_instructions"] for call in stub.calls if call.get("review_instructions")]
 
     context, instructions = await delivered()
@@ -55,3 +57,10 @@ async def test_pr_body_reaches_the_reviewer_as_bounded_untrusted_context(
     assert [json.loads(text.split("\nCommitted review assignment:\n")[1].split("\nEnd committed review")[0])[
         "profile"]["historical_context"] for text in instructions] == [{"context": context}] * 2
     assert capsys.readouterr().out.count("truncated copy") == 1
+
+    # A closed pull request, or one whose head moved off the analyzed commit, does not speak for this change.
+    body = PR_SENTINEL
+    for view in ({"state": "CLOSED"}, {"state": "OPEN", "headRefOid": "0" * 40}):
+        context, instructions = await delivered()
+        assert context is None and all(PR_SENTINEL not in text for text in instructions), view
+        assert "is not open at the analyzed head" in " ".join(capsys.readouterr().out.replace("│", " ").split())

@@ -183,6 +183,14 @@ async def test_omitted_kind_posts_an_omission_notice_and_a_failed_kind_exits_one
     # The repeat run on the same head reuses the pre-scan: nothing under it is rewritten.
     assert {path.name: path.stat().st_mtime_ns for path in exploration.iterdir()} == scanned
     assert _artifact(target)["results"]["sequence"]["status"] == "failed"
+    # A pre-scan stored under another key is not this change's grounding: it is dropped whole and scanned again.
+    key = (exploration / "cache-key").read_text()
+    (exploration / "cache-key").write_text("0" * len(key))
+    (exploration / "stale.md").write_text("left by an earlier scan")
+    exit_code, _ = await diagram_run(target, diagram="sequence", specs={"sequence": [thin]}, exploration=True)
+    assert exit_code == 0 and (exploration / "cache-key").read_text() == key
+    assert not (exploration / "stale.md").exists()
+    assert "| `pkg_b/client.py` | modified | static |" in (exploration / "affected_files.md").read_text()
 
 async def test_nothing_eligible_posts_an_explanatory_comment(
     tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any],
