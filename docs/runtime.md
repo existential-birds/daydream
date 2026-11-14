@@ -621,7 +621,11 @@ it runs itself have already run when they are observed
 ([Codex host tools](#codex-host-tools)). Osprey serves no host tools and only observes starts.
 
 A binding may also declare charged nonterminal host tools (`HostTool`). Pi registers
-them in the existing extension; `/admit` charges each start, and `/call` serves
+them in the existing extension with `executionMode: "sequential"`, so the supported Pi
+version runs every tool call of a generation that calls one in order, stock reads
+included: one host request is open at a time, the endpoint's bound of three connections
+is never reached, and no request waits behind a host callback past its transport
+allowance. `/admit` charges each start, and `/call` serves
 that admitted identity exactly once under the same readiness, authority, deadline
 and correlation rules. Read-only tools never mutate domain state; mutating tools
 install at the same synchronous boundary as acceptance, and their unexpected

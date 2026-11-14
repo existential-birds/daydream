@@ -348,6 +348,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Committed review on Pi no longer aborts when one model generation issues more than
+  three host-tool calls, or when a host callback outlasts the three-second transport
+  allowance of a call waiting behind it. Before, the unanswered calls ended the review as
+  `backend_failure` with "This operation was aborted". Pi now runs every tool call of a
+  generation that calls `review_source` or `review_admit` in order, so each is answered;
+  the stock reads in such a generation no longer run concurrently
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
 - Committed review no longer rejects a reviewed target submitted with empty
   `evidence_refs` when the target has more than four sources. The host expanded `[]` to
   every source of the target and then refused its own expansion ("supply at most four
