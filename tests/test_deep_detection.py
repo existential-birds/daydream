@@ -8,8 +8,7 @@ from pathlib import Path
 import pytest
 
 from daydream.deep.dependency import build_import_graph
-from daydream.deep.detection import StackAssignment, detect_stacks
-from daydream.deep.sharding import shard_stacks
+from daydream.deep.detection import detect_stacks
 
 
 def test_mixed_repository_routes_source_metadata_and_extension_evidence(tmp_path: Path) -> None:
@@ -325,15 +324,3 @@ def test_build_import_graph_resolves_python_edges(tmp_path: Path) -> None:
     }
 
 
-def test_coarsening_merges_adjacent_lowest_weights_and_recomputes_frontiers() -> None:
-    py = StackAssignment(stack_name='python', files=['a.py', 'b.py', 'c.py', 'd.py'])
-    other = StackAssignment(stack_name='generic', files=['README.md'])
-    diff = ''.join(f'diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n+{body}\n'
-                   for path, body in [('a.py', 'x' * 500), ('b.py', 'x'), ('c.py', 'x'), ('d.py', 'x' * 600)])
-    result = shard_stacks([py, other], diff, max_files=1, max_bytes=10000, fanout_cap=3,
-                          frontier_max=8, graph={'b.py': {'c.py', 'README.md'}})
-    python = [stack for stack in result if stack.stack_name.startswith('python')]
-    assert [stack.files for stack in python] == [['a.py', 'b.py', 'c.py'], ['d.py']]
-    assert [stack.stack_name for stack in python] == ['python#0', 'python#1']
-    assert next(stack for stack in python if 'b.py' in stack.files).frontier_files == ['README.md']
-    assert sum(len(stack.files) for stack in result) == 5

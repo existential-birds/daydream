@@ -11,7 +11,7 @@ from daydream.agent import console
 from daydream.deep.state import DeepState
 from daydream.flows.engine import FlowContext
 from daydream.hunk_index import _unquote_git_path
-from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget
+from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 from daydream.ui import print_warning
 
 _DIFF_BLOCK_SPLIT = re.compile(r"^(?=diff --git )", re.MULTILINE)
@@ -19,12 +19,6 @@ _DIFF_PLUS_HEADER = re.compile(r"^\+\+\+ (.+)$", re.MULTILINE)
 _DIFF_MINUS_HEADER = re.compile(r"^--- (.+)$", re.MULTILINE)
 _DIFF_GIT_HEADER = re.compile(r'^diff --git ("(?:[^"\\]|\\.)*"|a/.+?) ("(?:[^"\\]|\\.)*"|b/.+)$', re.MULTILINE)
 _DIFF_RENAME_HEADER = re.compile(r"^rename to (.+)$", re.MULTILINE)
-# Markers carry dropped paths without matching any diff header, so all block
-# consumers skip the marker while file selection can reject partial input.
-_DIFF_TRUNCATION_MARKER = re.compile(
-    r"^# daydream: deep diff truncated: \d+ -> \d+ bytes "
-    r"\(\d+/\d+ blocks retained(?:; dropped: (?P<dropped>[^)]+))?\)\n"
-)
 
 
 def _diff_block_path(block: str) -> str | None:
@@ -62,31 +56,6 @@ def iter_diff_blocks(diff: str) -> Iterator[tuple[str, str]]:
         path = _diff_block_path(block)
         if path is not None:
             yield path, block
-
-
-def _diff_blocks_for_files(diff: str, files: list[str]) -> str | None:
-    """Select complete file blocks within the inline byte budget.
-
-    Return None when no blocks match, the result exceeds the budget, or a wanted
-    file appears in the truncation marker's dropped list. A wanted file absent
-    from the original diff is harmless; a dropped block would hide changed hunks.
-    """
-    wanted = set(files)
-    if not wanted:
-        return None
-
-    marker = _DIFF_TRUNCATION_MARKER.match(diff)
-    if marker is not None and marker.group("dropped") is not None:
-        dropped = {p.strip() for p in marker.group("dropped").split(",") if p.strip()}
-        if wanted & dropped:
-            return None
-
-    result = "".join(
-        block if block.endswith("\n") else block + "\n"
-        for path, block in iter_diff_blocks(diff)
-        if path in wanted
-    )
-    return result if result and fits_inline_diff_budget(result) else None
 
 
 @dataclass

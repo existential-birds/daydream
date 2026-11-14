@@ -4,15 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-# User-visible pipeline stages (exploration is a pre-stage banner, not counted).
-_PIPELINE_STAGE_NAMES: list[str] = [
-    "TTT intent",
-    "TTT alternative-review",
-    "per-stack reviews",
-    "cross-stack merge",
-    "optional fix gate",
-]
-
 # Merge and diagram steps share this heading for idempotent replacement.
 _DIAGRAMS_HEADING = "## Diagrams"
 _REVIEW_HEADING = "# Review"

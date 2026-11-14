@@ -39,7 +39,7 @@ from tests.harness.stub_backend import (
     silence,
 )
 from tests.harness.trajectory import diff_adding
-from tests.test_deep_orchestrator import _merge_item, _noop_commit, _ok
+from tests.test_deep_orchestrator import _noop_commit, _ok
 
 
 def _deep_run_config(target: Path, **overrides: Any) -> RunConfig:
@@ -80,7 +80,6 @@ def _install_deep_capture_backend(
         stub = _ArchiveCaptureBackend(multi_stack_target)
         # One instance per resolved phase backend, as the real factory builds them; the copies share the script.
         monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: copy.copy(stub))
-    stub.merge_items = [_merge_item(1, "api.py", "high")]
     if not real_internal_phases:
         monkeypatch.setattr("daydream.deep.fix_steps.phase_test_and_heal", lambda *a, **k: _ok(**k),)
         monkeypatch.setattr("daydream.deep.fix_steps.phase_commit_push", _noop_commit)
@@ -102,13 +101,8 @@ async def _run_real_phases_deep(
     stub = _install_deep_capture_backend(multi_stack_target, monkeypatch, real_internal_phases=True)
     stub.fix_edit_line = fix_edit_line
     stub.review_claims = [{"title": "Sample issue", "file": "api.py", "line": 1}]
-    if dataset_store is not None:
-        assert stub.merge_items is not None
-        stub.merge_items[0]["source_uids"] = ["python:1"]
     if untracked_fix is not None:
         stub.fix_new_generated = untracked_fix
-        assert stub.merge_items is not None
-        stub.merge_items[0]["related_files"] = [untracked_fix]
         (multi_stack_target / "notes.txt").write_text("pre-existing\n")
     exit_code = await run(_deep_run_config(
             multi_stack_target, backend="pi",

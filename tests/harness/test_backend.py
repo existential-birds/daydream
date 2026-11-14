@@ -18,7 +18,6 @@ from daydream.backends import Backend
 _SHARED_HARNESS_BACKENDS = (
     ("ScriptedBackend", "tests.harness.backend", "ScriptedBackend"),
     ("StubBackend", "tests.harness.stub_backend", "StubBackend"),
-    ("PhaseDispatchBackend", "tests.harness.phase_backend", "PhaseDispatchBackend"),
     # Most ImproveStubBackend specializations inherit execute through the
     # pre hook. Rendezvous wraps the stream lifetime for cancellation,
     # so its separate protocol declaration also needs signature coverage.

@@ -198,22 +198,15 @@ def capture_run_record(
         provenance["profile"] = {"profile_schema_version": profile.schema_version,
                                  "profile_name": profile.name, "profile_source_kind": profile.source_kind,
                                  "profile_digest": profile.digest}
-    from daydream.run_config import (
-        _resolved_backend_name,
-        _resolved_latency_profile,
-        _resolved_model,
-        _resolved_reasoning_effort,
-    )
+    from daydream.run_config import _resolved_backend_name, _resolved_model, _resolved_reasoning_effort
 
     provenance["resolved_phases"] = {phase: {
         "backend": _resolved_backend_name(config, phase), "model": _resolved_model(config, phase),
         "reasoning_effort": _resolved_reasoning_effort(config, phase),
     } for phase in ("intent", "wonder", "per_stack_review", "parse", "arbiter", "merge", "verify", "fix", "test")}
-    provenance["latency_profile"] = asdict(_resolved_latency_profile(config))
-    provenance["latency_route"] = None if config.latency_route is None else asdict(config.latency_route)
+    # Routing keys of the replaced reviewer stay, empty, so stored-record readers keep one shape.
+    provenance.update(latency_profile=None, latency_route=None, latency_routing=None)
     provenance["file_configuration"] = None if config.file_config is None else asdict(config.file_config)
-    routing_path = deep / "latency-routing.json"
-    provenance["latency_routing"] = read_json(routing_path) if review_sources and routing_path.is_file() else None
     provenance["collection_diagnostics"] = acquisition_failures
     def evidence(value: Any, *, failed: bool = False, absent: str = "unproduced") -> dict[str, Any]:
         return {"status": "available" if value is not None else "failed" if failed else absent,

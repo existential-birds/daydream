@@ -17,9 +17,6 @@ DEFAULT_PI_MODEL = "deepseek/deepseek-v4-flash-0731"
 # Caps the 1.5–5h time tail from a single unbounded run_agent turn (issue #169).
 DEFAULT_WALL_BUDGET_S = 1800.0
 
-# Outer review ceiling. ReviewLimits supplies earlier investigation/finalization
-# bounds; exhaustion produces a partial review. Fix turns retain the default above.
-REVIEW_WALL_BUDGET_S = 3600.0
 
 # Base cumulative calls for one staged reviewer; scaling: docs/extensions.md.
 # The whole-change structure stage spends about 1.5 calls per changed file reading
@@ -202,21 +199,6 @@ EFFORT_TIERS: dict[str, EffortTier] = {
 # Output file for review results
 REVIEW_OUTPUT_FILE = ".review-output.md"
 
-# Dependency-aware review shards retain the stack-keyed pipeline. Automatic
-# activation also considers whole-diff scale and splittable assignment overload;
-# an explicit disabled setting preserves one reviewer per stack.
-DEFAULT_DEEP_SHARD_ENABLED: bool = False
-DEFAULT_DEEP_SHARD_MAX_FILES: int = 5
-DEFAULT_DEEP_SHARD_MAX_BYTES: int = 12288  # == INLINE_DIFF_BUDGET_BYTES
-DEFAULT_DEEP_SHARD_FANOUT_CAP: int = 16
-DEFAULT_DEEP_SHARD_FRONTIER_MAX: int = 8
-
-# Review reuse defaults on. --no-review-cache also disables exploration caching.
-# Evict least-recently-used entries when count, bytes, or idle age exceeds a bound.
-DEFAULT_REVIEW_CACHE_ENABLED: bool = True
-DEFAULT_REVIEW_CACHE_MAX_ENTRIES: int = 1024
-DEFAULT_REVIEW_CACHE_MAX_BYTES: int = 1024**3
-DEFAULT_REVIEW_CACHE_MAX_AGE_DAYS: int = 30
 
 # Selective verification is the evidence-approved default; latency is reported,
 # not gated. Config verify_all=true restores every non-exempt finding; it has no

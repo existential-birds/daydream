@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, cast
 
 import pytest
 
@@ -12,14 +11,12 @@ from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.runner import run
 from tests.harness.execution import host_test_command
 from tests.harness.git_helpers import git as _git
-from tests.harness.review_profile import independent_alternatives_profile
 from tests.test_deep_orchestrator import (
     MakeConfig,
     Mute,
     _add_bare_remote,
     _force_interactive,
     _install_stub_backend,
-    _run_deep,
     _silence,
 )
 
@@ -113,61 +110,7 @@ async def test_embedded_fixing_is_selected_explicitly_and_persists_the_suite_ver
         assert stub.test_suite_calls == 0
 
 
-async def test_intent_artifact_survives_wonder_failure(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.fail_alternatives = True
-    with pytest.raises(RuntimeError, match="alternatives blew up"):
-        await _run_deep(multi_stack_target, review_profile=independent_alternatives_profile())
-    intent_md = multi_stack_target / ".daydream" / "deep" / "intent.md"
-    assert intent_md.read_text().strip(), "intent.md must survive the wonder failure"
-    # The wonder half never ran, so its artifact is legitimately absent.
-    assert not (multi_stack_target / ".daydream" / "deep" / "alternatives.json").exists()
 
 
-def test_coverage_persistence_keeps_the_primary_failure_and_resume_fails_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A secondary evidence-write error annotates the original failure; foreign evidence never resumes.
-
-    Runner resume tests only delete the coverage file; these owner checks bind the revision and
-    target-decision gates and the primary-error rule without a review run.
-    """
-    from daydream.deep import artifacts
-    from tests.harness.review_result import review_coverage
-
-    stored = review_coverage(scope_ids=('python',))
-    stored.record_scope('python', 'complete')
-
-    def fail_write(*_args: Any, **_kwargs: Any) -> None:
-        raise OSError('coverage disk full')
-
-    with monkeypatch.context() as patch:
-        patch.setattr(artifacts, 'atomic_write_json', fail_write)
-        primary = RuntimeError('original stage failure')
-        artifacts.persist_review_coverage(tmp_path, stored, error=primary)
-        assert primary.__notes__ == ['Review coverage persistence failed: OSError']
-        with pytest.raises(OSError, match='coverage disk full'):
-            artifacts.persist_review_coverage(tmp_path, stored)
-    artifacts.persist_review_coverage(tmp_path, stored)
-    restore = cast(Any, artifacts.restore_review_coverage)
-    for current, message in ((review_coverage(scope_ids=('python',), head_sha='f' * 40), 'revision'),
-                             (review_coverage(scope_ids=('python',)), 'target decisions are unavailable')):
-        with pytest.raises(ValueError, match=message):
-            restore(tmp_path, current, backend=None, work=None, stacks=[], registry=None,
-                    artifact_session=None, allow_standalone=True)
 
 
-def test_alternatives_prompt_points_at_the_diff_file_when_no_bounded_copy_is_inlined() -> None:
-    """An over-budget diff is read from disk; the prompt never claims an inline copy it lacks.
-
-    The runner journeys inline bounded diffs, so the file-pointer branch is otherwise unreached.
-    """
-    from daydream.phases.review_prompts import build_alternative_review_prompt
-
-    strategy = 'Intent: {intent_summary}\nRead the diff file at {diff_path} and evaluate it.'
-    prompt = build_alternative_review_prompt(strategy=strategy, intent_summary='Fix greeting', diff_path='d.patch')
-    assert 'Intent: Fix greeting\nRead the diff file at d.patch and evaluate it.' in prompt
-    assert 'inlined below' not in prompt and 'do NOT re-Read' not in prompt

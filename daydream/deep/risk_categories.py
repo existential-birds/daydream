@@ -34,13 +34,6 @@ CATEGORY_TRIGGERS: dict[str, tuple[str, ...]] = {
 }
 """Category id -> trigger words, matched as case-insensitive substrings."""
 
-SURFACE_CATEGORY: dict[str, str] = {
-    "security_surface": "security",
-    "concurrency_surface": "concurrency",
-    "persistence_surface": "persistence",
-    "interface_surface": "public-interface",
-    "migration_surface": "migration",
-}
 """The diff-surface signal names from :class:`daydream.deep.latency.DiffSignals`
 to the category ids they represent, so floors and per-item classification read
 one vocabulary.

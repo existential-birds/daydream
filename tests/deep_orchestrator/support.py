@@ -24,8 +24,6 @@ from tests.harness.git_helpers import (
 )
 from tests.test_deep_orchestrator import (
     _merge_item,
-    _prime_merge_resume,
-    _record,
 )
 
 
@@ -129,22 +127,6 @@ def _source_uids_by_description(deep: Path) -> dict[str, Any]:
     return {str(item.get("description")): item.get("source_uids") for item in _merged_items(deep)}
 
 
-def _prime_source_uid_merge_resume(target: Path, *, structure: list[dict[str, Any]] | None = None,) -> Path:
-    """Prime generic:1, python:1, react:1, structure:1 as the known on-disk UID pool.
-
-    Keep locations distinct so contested arbitration cannot rewrite descriptions.
-    UIDs must exist in record files: merge validation rereads those files and rejects
-    claims absent from their pool.
-    """
-    return _prime_merge_resume(target, python=[_record(description="py issue", evidence="api.py:1", uid="python:1")],
-        react=[_record(description="tsx issue", file="App.tsx", evidence="App.tsx:1", uid="react:1")],
-        generic=[_record(description="docs issue", file="README.md", evidence="README.md:1", uid="generic:1",)],
-        structure=(structure
-            if structure is not None
-            else [_record(description="structural issue", line=5, evidence="api.py:5",
-                          severity="high", uid="structure:1")]
-        ),
-    )
 
 
 def _provenance_item(item_id: int, description: str, *, file: str = "api.py", line: int = 1, source_uids: Any = None,

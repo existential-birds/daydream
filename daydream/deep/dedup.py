@@ -8,7 +8,6 @@ need adjudication; destructive host folding uses the separate, higher bar.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,22 +18,6 @@ _STOP_WORDS = frozenset(
 )
 _PUNCT_RE = re.compile(r"[^a-z0-9\s]+")
 _SIM_THRESHOLD = 0.5
-
-# Host folding has no downstream adjudicator, so it requires a higher
-# similarity than candidate generation.
-FOLD_SIM_THRESHOLD = 0.8
-
-
-@dataclass(frozen=True)
-class CandidatePair:
-    """Record/alternative candidate with verbatim descriptions and bigram similarity."""
-
-    record_id: str
-    record_file: str
-    record_description: str
-    alt_title: str
-    alt_files: tuple[str, ...]
-    similarity: float
 
 
 def normalize_title(text: str) -> str:
@@ -58,24 +41,6 @@ def jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(a | b)
 
 
-def descriptions_match(a: str, b: str, *, threshold: float = _SIM_THRESHOLD) -> bool:
-    """Compare normalized-description bigrams, rejecting empty/stop-word-only input.
-
-    The default threshold proposes candidates for review. Destructive host folding
-    must use FOLD_SIM_THRESHOLD because no later adjudicator checks its decision.
-    """
-    a_bigrams = bigrams(normalize_title(a))
-    b_bigrams = bigrams(normalize_title(b))
-    if not a_bigrams or not b_bigrams:
-        return False
-    return jaccard(a_bigrams, b_bigrams) >= threshold
-
-
-def _files_overlap(record_file: str, alt_files: Iterable[str]) -> bool:
-    """Return True when the record's file appears in the alt-issue files."""
-    return bool(record_file) and record_file in set(alt_files)
-
-
 @dataclass(frozen=True)
 class RecordDuplicatePair:
     """Candidate pair whose field names are the dedup-candidates.json wire format.
@@ -96,44 +61,6 @@ class RecordDuplicatePair:
     record_b_description: str
     record_b_source: str
     similarity: float
-
-
-def build_dedup_candidates(
-    records: list[dict[str, Any]],
-    alt_issues: list[dict[str, Any]],
-) -> list[CandidatePair]:
-    """Return record/alternative pairs sharing a file with similarity >= 0.5.
-
-    Sort by (record_id, alt_title); descriptions and alternative files stay verbatim.
-    """
-    pairs: list[CandidatePair] = []
-    for r in records:
-        r_file = str(r.get("file", ""))
-        r_desc = str(r.get("description", ""))
-        r_bigrams = bigrams(normalize_title(r_desc))
-        if not r_file or not r_bigrams:
-            continue
-        for a in alt_issues:
-            a_files = tuple(a.get("files") or [])
-            a_title = str(a.get("title", ""))
-            if not a_files or not a_title:
-                continue
-            if not _files_overlap(r_file, a_files):
-                continue
-            sim = jaccard(r_bigrams, bigrams(normalize_title(a_title)))
-            if sim >= _SIM_THRESHOLD:
-                pairs.append(
-                    CandidatePair(
-                        record_id=str(r.get("id", "")),
-                        record_file=r_file,
-                        record_description=r_desc,
-                        alt_title=a_title,
-                        alt_files=a_files,
-                        similarity=sim,
-                    )
-                )
-    pairs.sort(key=lambda p: (p.record_id, p.alt_title))
-    return pairs
 
 
 def build_record_dedup_candidates(

@@ -1,7 +1,7 @@
 """Built-in registry seed.
 
 ``register_builtins(registry)`` seeds the registry with Daydream's prompt names
-and three flow definitions (deep, improve, diagram). Review/comment/shallow are
+and three flow definitions (deep, improve, diagram). Review and comment are
 modes of the deep flow (#330); ``diagram`` (issue #1113) is the ``--diagram-only``
 flow and reuses the deep flow's ``exploration`` and ``diagram`` steps.
 
@@ -62,20 +62,10 @@ def _register_builtin_prompts(registry: Registry) -> None:
     Parse/test/commit/setup-investigator/failure-summarizer prompts are
     intentionally NOT registered: they are schema- and control-loop-coupled.
     """
-    from daydream import phases
-    from daydream.deep import diagram_prompts, prompts as deep_prompts, verification_prompts
+    from daydream.deep import diagram_prompts, verification_prompts
     from daydream.phases import testing
 
-    registry.override_prompt("intent", phases.build_intent_prompt)
-    registry.override_prompt("alternatives", phases.build_alternative_review_prompt)
     registry.override_prompt("fix", testing._build_fix_prompt)
-    registry.override_prompt("per-stack", deep_prompts.build_per_stack_prompt)
-    registry.override_prompt("structural", deep_prompts.build_structural_prompt)
-    registry.override_prompt("generic-fallback", deep_prompts.build_generic_fallback_prompt)
-    registry.override_prompt("arbiter", deep_prompts.build_arbiter_prompt)
-    registry.override_prompt("supervise", deep_prompts.build_supervise_prompt)
-    registry.override_prompt("suppression", deep_prompts.build_suppression_prompt)
-    registry.override_prompt("merge", deep_prompts.build_merge_prompt)
     registry.override_prompt("verify", verification_prompts.build_verification_prompt)
     registry.override_prompt("fix-verify", verification_prompts.build_fix_verify_prompt)
     registry.override_prompt("diagram_sequence", diagram_prompts.build_sequence_diagram_prompt)

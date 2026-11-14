@@ -27,25 +27,6 @@ fallback severity policy.
 """
 
 
-SEVERITY_RUBRIC = (
-    "## Severity Rubric\n"
-    "\n"
-    "Assign exactly one level per finding:\n"
-    "\n"
-    "- high: the defect breaks a primary user journey, causes data loss or "
-    "corruption, introduces a security vulnerability, or leaves the changed "
-    "code incorrect as merged. A finding is high only when it meets one of "
-    "these conditions.\n"
-    "- medium: a real defect with a workaround or a limited blast radius -- "
-    "wrong in a secondary path, an edge case, or recoverable at runtime.\n"
-    "- low: a style, clarity, naming, or minor robustness issue with no "
-    "behavioral break. Requests for work outside this diff are not findings; "
-    "when surfaced at all, they are low.\n"
-    "\n"
-    "Maintainability, readability, and structural-erosion findings are never "
-    "high: they do not break a primary user journey, lose or corrupt data, open a "
-    "security vulnerability, or make the merged code incorrect."
-)
 """Host-owned severity rubric appended to every severity-assigning prompt.
 
 Defines all three canonical levels in observable, checkable terms. It is
@@ -67,21 +48,3 @@ def normalize_severity(value: object) -> str | None:
     return normalized if normalized in CANONICAL_LEVELS else None
 
 
-def is_high_severity(value: object) -> bool:
-    """Whether *value* normalizes to the ``high`` level (unknown/absent is never high)."""
-    return normalize_severity(value) == "high"
-
-
-def stronger_severity(a: object, b: object) -> str | None:
-    """Return the stronger canonical input when folding duplicate findings.
-
-    Normalize both inputs; unknown/absent values cannot win or fabricate a level.
-    Return None only when neither input is canonical.
-    """
-    left = normalize_severity(a)
-    right = normalize_severity(b)
-    if left is None:
-        return right
-    if right is None:
-        return left
-    return left if SEVERITY_RANK[left] <= SEVERITY_RANK[right] else right

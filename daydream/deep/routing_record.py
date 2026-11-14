@@ -10,8 +10,6 @@ snapshot-owned risk and diff-population evidence together on a valid resume.
 
 from __future__ import annotations
 
-import json
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -24,26 +22,4 @@ def read_routing_record(deep_dir_path: Path) -> dict[str, Any]:
     return read_json_object(DeepArtifact.LATENCY_ROUTING.at(deep_dir_path))
 
 
-def write_routing_record(deep_dir_path: Path, updates: Mapping[str, Any]) -> Path:
-    """Merge ``updates`` into the record and return the written path.
-
-    Top-level keys in ``updates`` replace the existing value unless both are
-    mappings, in which case their contents are merged one level deep. ``risk``
-    and ``diff_population`` are complete snapshot-owned slices and always replace
-    their prior values, preventing stale nested metrics from surviving a resume.
-    """
-    path = DeepArtifact.LATENCY_ROUTING.at(deep_dir_path)
-    merged = dict(read_routing_record(deep_dir_path))
-    for key, value in updates.items():
-        current = merged.get(key)
-        if key not in {"risk", "diff_population"} and isinstance(current, dict) and isinstance(value, dict):
-            nested = dict(current)
-            nested.update(value)
-            merged[key] = nested
-        else:
-            merged[key] = value
-    path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
-    return path
-
-
-__all__ = ["read_routing_record", "write_routing_record"]
+__all__ = ["read_routing_record",]

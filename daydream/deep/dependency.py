@@ -119,35 +119,3 @@ def build_import_graph(
     return graph
 
 
-def co_locate_groups(files: list[str], edges: dict[str, set[str]]) -> list[list[str]]:
-    """Return sorted connected components over files and the undirected edge closure.
-
-    Unconnected files are singletons; components sort by their smallest path.
-    """
-    wanted = set(files)
-    adjacency: dict[str, set[str]] = {f: set() for f in files}
-    for src, deps in edges.items():
-        if src not in wanted:
-            continue
-        for dep in deps:
-            if dep in wanted:
-                adjacency[src].add(dep)
-                adjacency[dep].add(src)
-
-    seen: set[str] = set()
-    groups: list[list[str]] = []
-    for start in sorted(files):
-        if start in seen:
-            continue
-        component: list[str] = []
-        stack = [start]
-        while stack:
-            node = stack.pop()
-            if node in seen:
-                continue
-            seen.add(node)
-            component.append(node)
-            stack.extend(adjacency[node])
-        groups.append(sorted(component))
-    groups.sort(key=lambda comp: comp[0])
-    return groups

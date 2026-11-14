@@ -25,7 +25,6 @@ from tests.harness.execution import host_test_command
 from tests.harness.stub_backend import StubBackend
 from tests.test_deep_orchestrator import (
     Mute,
-    _merge_item,
     _silence,
 )
 
@@ -43,7 +42,7 @@ def _install(
     stub = StubBackend(target)
     for name, value in knobs.items():
         setattr(stub, name, value)
-    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    stub.review_claims = [{"title": "Sample issue", "file": "api.py", "line": 1}]
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kw: stub)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     return stub

@@ -21,8 +21,6 @@ from tests.harness.dataset import observation, read_records, run_record
 from tests.harness.git_helpers import git
 from tests.harness.stub_backend import install_stub_backend, silence
 
-_SENSITIVE = "Review credential exposure: sk-offlineplaceholder0123456789"
-
 
 def test_invalid_reply_captures_never_enter_the_store(tmp_path: Path) -> None:
     store = LocalRecordStore(tmp_path / "records")
@@ -55,12 +53,9 @@ def test_invalid_reply_captures_never_enter_the_store(tmp_path: Path) -> None:
 @pytest.fixture
 def config(multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunConfig:
     silence(monkeypatch)
-    backend = install_stub_backend(monkeypatch, multi_stack_target, pin_skill_availability=False)
-    backend.merge_echo_records = True
-    backend.parse_by_stack = {"python": {"severity": "high", "confidence": "HIGH", "file": "api.py", "line": 1,
-                                        "description": _SENSITIVE}}
+    install_stub_backend(monkeypatch, multi_stack_target, pin_skill_availability=False)
     return RunConfig(target=str(multi_stack_target), output_mode="review", archive=False, run_eval=False,
-        dataset_capture=True, dataset_store_path=tmp_path / "records", shallow_fanout_threshold=0, cleanup=False)
+        dataset_capture=True, dataset_store_path=tmp_path / "records", cleanup=False)
 
 
 def captured(config: RunConfig) -> dict[str, Any]:
@@ -117,6 +112,7 @@ async def test_terminal_failure_retains_owned_trace_and_partial_evidence(
     assert sealed["terminal_result"]["analysis_state"] == "failed" and sealed["run_id"] == raw["run_id"]
     assert raw["trace_id"] == owned_trace_id(memory_exporters[0], raw["run_id"])
     assert raw["original_task"]["status"] == "available"
+    assert [raw["provenance"][key] for key in ("latency_profile", "latency_route", "latency_routing")] == [None] * 3
     documents = raw["trajectories"]["value"]["documents"]
     assert any(tool["tool_call_id"] == "failed-tool" for doc in documents for step in doc["steps"]
                for tool in step.get("tool_calls", []))

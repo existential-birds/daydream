@@ -696,8 +696,6 @@ async def _drive_fix_cycle_failing(
     reviewer.review_claims = [{"title": _fix_item()["description"], "file": "main.py", "line": 1}]
     config.test_command = "false"
     # The backend script observes phases; mute only terminal output.
-    monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", lambda *a, **k: None)
-    monkeypatch.setattr("daydream.deep.merge_steps.print_stage_progress", lambda *a, **k: None)
     monkeypatch.setattr("daydream.deep.fix_steps.print_verification_summary", lambda *a, **k: None)
     monkeypatch.setattr("daydream.agent.console", Console(file=StringIO()))
     monkeypatch.setattr("daydream.runner.console", type("C", (), {"print": lambda *a, **kw: None})())

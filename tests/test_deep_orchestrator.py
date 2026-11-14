@@ -20,7 +20,6 @@ from daydream.deep.artifacts import (
 )
 from daydream.phases import TestAndHealResult, TestAttemptEvidence
 from daydream.pr_review import PRInfo
-from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE, PR_DESCRIPTION_UNTRUSTED_FRAMING
 from daydream.review_profile import ResolvedProfile, build_default_profile, parse_profile
 from daydream.run_config import RunConfig
 from daydream.runner import run
@@ -118,53 +117,6 @@ def _write_matching_diff_key(target: Path, deep: Path) -> None:
     diff = git_ops.diff(target, base)
     DeepArtifact.DIFF_KEY.at(deep).write_text(diff_key(diff or ""), encoding="utf-8")
 
-def _prime_merge_resume(
-    target: Path, *, python: list[dict[str, Any]] | None = None, react: list[dict[str, Any]] | None = None,
-    generic: list[dict[str, Any]] | None = None, structure: list[dict[str, Any]] | None = None,
-) -> Path:
-    """Write required intent/alternative artifacts and optional stack records.
-
-    None deliberately omits a stack file to exercise the missing-record guard.
-    Return the deep artifact directory.
-    """
-    deep = target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    # Mirror a fresh run: the key marks the beginning of artifact production, so
-    # every primed prerequisite must be newer than it.
-    _write_matching_diff_key(target, deep)
-    (deep / "intent.md").write_text("primed intent")
-    (deep / "alternatives.json").write_text("[]")
-    from daydream.deep.artifacts import persist_review_coverage
-    from daydream.deep.diff import _diff_changed_files
-    from daydream.deep.orchestrator import _prepare_review_stacks
-    from daydream.deep.records import stamp_record_uids
-    from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
-    from tests.harness.review_result import frozen_target_decisions
-
-    config = RunConfig(target=str(target), start_at="merge", cleanup=False)
-    base = _resolve_base(target, None, None)
-    diff = git_ops.diff(target, base) or ""
-    head = git_ops.head_sha(target)
-    merge_base = git_ops.resolve_diff_merge_base(target, base, head)
-    stacks, _, _ = _prepare_review_stacks(config, _diff_changed_files(diff), diff, target, "deep")
-    coverage = ReviewCoverage("primed-review-fixture", AnalyzedRevision(head, merge_base, diff_key(diff)),
-                              [PlannedScope(stack.stack_name, stack.stack_name.split("#", 1)[0],
-                                            files=tuple(sorted(stack.files))) for stack in stacks],
-                              ("intent", "alternatives", "merge"))
-    coverage.record_phase("intent", "complete")
-    coverage.record_phase("alternatives", "complete", noop=True)
-    for stack, records in (("python", python), ("react", react), ("generic", generic), ("structure", structure)):
-        if records is not None:
-            stamp_record_uids(records, stack)
-            envelope = {"issues": records, "scope_id": stack, "analyzed_revision": coverage.revision.to_dict(),
-                        "originating_run_id": coverage.run_id}
-            (deep / f"stack-{stack}-records.json").write_text(json.dumps(envelope))
-            if stack in coverage.scopes:
-                assignment = next(assignment for assignment in stacks if assignment.stack_name == stack)
-                coverage.record_scope(stack, "complete", target_decisions=frozen_target_decisions(
-                    target, assignment, coverage.revision, diff))
-    persist_review_coverage(deep, coverage)
-    return deep
 
 async def _ok(*_a: Any, **kwargs: Any) -> Any:
     """Always-passing async test phase shared with archive data-capture tests."""
@@ -273,20 +225,6 @@ def _review_prompts_by_kind(stub: _StubBackend) -> dict[str, list[str]]:
             by_kind["merge"].append(c["prompt"])
     return by_kind
 
-def _assert_authoritative_rule_gated(stub: _StubBackend, *, expect_present: bool) -> None:
-    """Assert the precedence rule AND the #579 untrusted framing are present/absent
-    in every finding-producing prompt."""
-    by_kind = _review_prompts_by_kind(stub)
-    missing = [k for k, prompts in by_kind.items() if not prompts]
-    assert not missing, f"expected prompts for all five kinds, missing: {missing}"
-    gated_constants = {"AUTHORITATIVE_INTENT_RULE": AUTHORITATIVE_INTENT_RULE,
-        "PR_DESCRIPTION_UNTRUSTED_FRAMING": PR_DESCRIPTION_UNTRUSTED_FRAMING,
-    }
-    for kind, prompts in by_kind.items():
-        for name, constant in gated_constants.items():
-            assert all((constant in p) == expect_present for p in prompts), (
-                f"{kind}: expected {name} {'in' if expect_present else 'absent from'} every prompt"
-            )
 
 _TWIN_DESCRIPTION = "The staging cache URL does not match the documented shared instance"
 

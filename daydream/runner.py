@@ -1,7 +1,7 @@
 """Workspace, extension registry, and flow dispatch for one run.
 
-``run`` binds the per-run registry and opens the workspace. Explicit ``review``,
-``shallow``, and ``deep`` aliases, plus review/comment/diagram/loop output modes,
+``run`` binds the per-run registry and opens the workspace. Explicit ``review``
+and ``deep`` aliases, plus review/comment/diagram/loop output modes,
 use ``deep.orchestrator.run_deep``. ``improve`` opens a read-only audit workspace;
 other registered flow names use the custom-flow preamble.
 """
@@ -297,7 +297,7 @@ def _run_posts_to_github(config: RunConfig) -> bool:
     if config.output_mode in ("comment", "diagram"):
         return True
 
-    return config.output_mode == "loop" and not config.shallow
+    return config.output_mode == "loop"
 
 
 def _fix_request_refusal(config: RunConfig) -> str | None:
@@ -483,7 +483,7 @@ async def _run_with_context(
     try:
         observability = config.observability if config.observability is not None else resolve_observability_config()
         async with trace_run(
-            observability, registry, flow=config.flow_name or ("shallow" if config.shallow else "deep"),
+            observability, registry, flow=config.flow_name or "deep",
         ) as observed:
             observed.attrs({"daydream.output_mode": config.output_mode})
             try:
@@ -785,7 +785,7 @@ async def _capture_review_workspace(
 def _require_reviewable_branch(work: WorkContext, config: RunConfig) -> None:
     """Raise WrongBranchError when a base-branch loop would review itself.
 
-    cli.main renders the same actionable error for default, deep, and shallow flows.
+    cli.main renders the same actionable error for the default and deep flows.
     """
     if (
         config.branch is None
@@ -803,11 +803,6 @@ def _require_reviewable_branch(work: WorkContext, config: RunConfig) -> None:
         )
 
 
-# Built-in deep-flow mode aliases (review / shallow / deep all route to the
-# single deep flow in different modes, #330). Kept as a module constant so
-# downstream consumers (e.g. archive manifest tier gate) share the same list.
-
-
 async def _dispatch_selected_flow(
     work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
     run_context: RunContext,
@@ -816,7 +811,7 @@ async def _dispatch_selected_flow(
 ) -> int:
     """Resolve built-in aliases before registered flows.
 
-    Review/shallow/deep aliases share the deep flow. Unknown names raise
+    The review and deep aliases share the deep flow. Unknown names raise
     ``UnresolvedExtensionError`` for ``run`` to render as an Extension Error.
     """
     name = config.flow_name
@@ -826,7 +821,7 @@ async def _dispatch_selected_flow(
     # routing wins over the "not registered" error.
     if name in DEEP_FLOW_ALIASES:
         # A review or comment run arrives captured, with the base commit as base_branch, so this never binds it.
-        if name in ("shallow", "deep"):
+        if name == "deep":
             _require_reviewable_branch(work, config)
         return await _run_loop_deep(
             work, config, run_artifacts, run_context=run_context, github_execution=github_execution,

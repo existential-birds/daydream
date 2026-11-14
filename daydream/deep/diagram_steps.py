@@ -559,19 +559,10 @@ async def _step_diagram(ctx: FlowContext) -> Stop | None:
     Kind failures warn and leave reviews running. Diagram-only failures return 1
     after writing the artifact.
     """
-    from daydream.deep.diagram_work import diagram_work_for
-
-    work = diagram_work_for(ctx)
-    result = None
-    if work is not None and work.started:
-        await work.join()
-    else:
-        result = await _generate_diagrams(ctx, inputs=work.inputs if work is not None else None)
+    result = await _generate_diagrams(ctx)
     diagrams = DeepState(ctx.data).diagrams
     if diagrams and diagrams["blocks"] and DeepState(ctx.data).mode != "diagram":
         _apply_diagrams_to_report(ctx, diagrams["blocks"])
-    if work is not None:
-        work.capacity.enabled = False
     return result
 
 
