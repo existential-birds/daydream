@@ -153,7 +153,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a hard outer deadline must set `review_wall_budget_s` to it. Every sealed result
   now records `scale` and `effective_tool_calls` in `settings.limits` beside the
   profile's own values, for small changes too, and the profile shown to the reviewer in
-  each assignment carries them; the profile digest does not change. A report that names
+  each assignment carries them; scaling itself does not change the profile digest (the
+  removed profile keys below do). With the default profile a change of more than four
+  batches in the first tier, or one with a scale of at least 6, 12 or 17 in tiers 3, 6
+  and 9, gets a review window as long as the flow's outer review deadline, so diagrams
+  generated after a review that used all of it are left about 120 s. A report that names
   the profile keys raising a spent allowance now also says that the review multiplies
   `reviewer_tool_call_budget` and `reviewer_investigation_budget_s` by that `scale` and,
   for spent time, that `review_wall_budget_s` grows with the diff in the default profile

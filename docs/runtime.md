@@ -316,6 +316,13 @@ closes, on every route. `run_committed_review` also refuses to stage or install 
 once its window has closed. The `deep` flow reserves the allowance when it plans the
 review and applies no such refusal: the steps that follow the review (diagrams,
 extension steps, sealing, the fix cycle) are not bounded by the review window.
+Diagrams generated after the review share the flow's outer review deadline with it:
+`review_wall_budget_s`, times the tier in the default profile, from when the flow
+starts its steps. When `INV * scale + 120` reaches it, the review window equals that
+deadline, and a review that runs to its end leaves them about the 120 s finalization
+reserve. With the default profile that is any change of more than four batches in the
+first tier and a scale of at least 6, 12 or 17 in tiers 3, 6 and 9. Nothing extends the
+deadline for them.
 `settings.limits` records the profile's `tool_calls` and `investigation_s` beside
 `scale`, `effective_tool_calls` (`T'`) and `effective_investigation_s` (`W`). For
 example, a change of 134 batches under the default profile (120 calls, 2,400 s, wall
