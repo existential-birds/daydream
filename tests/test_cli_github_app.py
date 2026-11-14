@@ -18,13 +18,13 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from daydream import cli
-from daydream.backends import ResultEvent, TextEvent
-from tests.harness.backend import ScriptedBackend
+from daydream.dataset import LocalRecordStore
+from daydream.reviews.identity import finding_marker
+from tests.harness.dataset import read_records
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote, git
 from tests.harness.rsa import generate_rsa_pem
-from tests.harness.stub_backend import review_stage_result
-from tests.test_github_app_integration import _minimal_backend
+from tests.harness.stub_backend import StubBackend
 
 _TOKEN = "ghs_scoped_installation_test_token"
 _AMBIENT = "ghp_unusable_ambient_test_token"
@@ -67,14 +67,14 @@ def transport(fake_gh: FakeGh, feature_branch_repo: Path, monkeypatch: pytest.Mo
     monkeypatch.setenv("GITHUB_TOKEN", "ambient-alternate-token")
     monkeypatch.setenv("DAYDREAM_APP_ID", "42")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", generate_rsa_pem())
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: _minimal_backend())
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: StubBackend(feature_branch_repo))
     return boundary
 
 
 def _run(repo: Path, trajectory: Path, *flags: str) -> int | str | None:
     with pytest.raises(SystemExit) as result:
-        cli.main([str(repo), "--shallow", "--stack", "python", "--non-interactive",
-                  "--trajectory", str(trajectory), "--no-capture-data", *flags])
+        cli.main([str(repo), "--non-interactive", "--trajectory", str(trajectory),
+                  *(() if "--capture-data" in flags else ("--no-capture-data",)), *flags])
     return result.value.code
 
 
@@ -199,22 +199,30 @@ def test_cli_requested_branch_ignores_current_checkout_pr(
         return request(args, *positional, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", route_pr_lookup)
-    model_heads: list[str] = []
-
-    def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
-        model_heads.append(git(Path(cwd), "rev-parse", "HEAD"))
-        return [TextEvent(text="Review complete."), ResultEvent(
-            structured_output=review_stage_result(prompt, []) if output_schema else None, continuation=None,
-        )]
-
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *a, **kw: ScriptedBackend(responder=respond))
     output = tmp_path / "trajectory.json"
-    assert _run(repo, output, "--comment", "--branch", "requested", "--base", "main", "--approve-on-clean") == 0
+    store = LocalRecordStore(tmp_path / "records")
+    assert _run(repo, output, "--comment", "--branch", "requested", "--base", "main", "--approve-on-clean",
+                "--capture-data", "--dataset-store", str(store.root)) == 0
 
     assert json.loads(output.read_text())["extra"]["pr_number"] == 73
-    assert model_heads and set(model_heads) == {requested_head}
+    # The sealed review, not the fake, attests which commit discovery and its fresh challenge analyzed.
+    sealed = json.loads((repo / ".daydream/committed-review.json").read_text())
+    assert sealed["analyzed_revision"]["head_sha"] == requested_head
+    assert [entry["assignment"] for entry in sealed["execution"]] == ["discovery", "challenge"]
+    assert sealed["terminal_result"]["analysis_state"] == "complete"
+    assert [finding["title"] for finding in sealed["findings"]] == ["Sample issue"]
     reviews = transport.gh.calls("POST", "repos/acme/widgets/pulls/73/reviews")
     assert len(reviews) == 1 and reviews[0].payload["commit_id"] == requested_head
+    # A confirmed finding asserts no severity, so an opted-in approval is withheld.
+    assert reviews[0].payload["event"] == "COMMENT"
+    (comment,) = reviews[0].payload["comments"]
+    assert comment["path"] == "main.py" and "**Severity:**" not in comment["body"]
+    # Capture and publication read the same canonical item, so they agree on its identity.
+    (captured,) = read_records(store).runs
+    (item,) = captured["findings"]["value"]["items"]
+    assert finding_marker(item["fingerprint"]) in comment["body"]
+    assert item["item_uid"] == sealed["findings"][0]["item_uid"]
+    assert captured["findings"]["value"]["terminal_coverage"]["planned_scopes"][0]["scope_id"] == "committed:00000"
     assert not transport.gh.calls("POST", "repos/acme/widgets/pulls/7/reviews")
     _assert_app_requests(transport)
     # Branch PR discovery runs on the original checkout with the session's minted authentication.

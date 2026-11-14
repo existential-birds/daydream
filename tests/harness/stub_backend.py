@@ -59,10 +59,19 @@ class StubBackend:
     """Emit realistic review/fix results and record calls for pipeline assertions."""
 
     model = "mock-model"
+    supports_host_tools = True
 
     def __init__(self, target: Path, *, model: str = "mock-model") -> None:
         self.model = model
         self._target = target
+        # Claims the scripted review discovers, each ``{"title", "file", "line"}``; None proposes
+        # one "Sample issue" on the first changed target. ``review_verdict`` is the challenge's answer
+        # and ``review_undecided`` leaves that many trailing targets without a decision.
+        self.review_claims: list[dict[str, Any]] | None = None
+        self.review_verdict: str = "confirmed"
+        self.review_undecided: int = 0
+        # Raised by every review assignment after one observed tool start, before any submission.
+        self.review_failure: BaseException | None = None
         # Backend fan-out hint; tests override it for deterministic group ordering.
         self.fanout_concurrency: int = 4
         # Parse severity selects arbiter targets; merge_echo_records exposes revisions.
@@ -208,15 +217,69 @@ class StubBackend:
             yield ToolStartEvent(id=f"{prefix}-{n}", name="Bash", input={"command": "find /"})
             await anyio.sleep(sleep_s)
 
+    def bind_review_context(self, original_source: Path) -> dict[str, object]:
+        del original_source
+        return {"configuration_identity": "0" * 64}
+
+    def _scripted_review(self, instructions: str, binding: Any) -> dict[str, Any]:
+        """Answer one committed-review assignment through its real host binding.
+
+        Discovery decides its targets from the host lookup and proposes the configured claims;
+        challenge returns ``review_verdict`` for every assigned claim revision.
+        """
+        assignment = json.loads(instructions.split("\nCommitted review assignment:\n")[1]
+                                .split("\nEnd committed review assignment.\n")[0])
+        if assignment["kind"] == "challenge":
+            return {"claims": [], "verdicts": [
+                {"uid": claim["uid"], "revision": claim["revision"], "verdict": self.review_verdict,
+                 "grounds": "Captured source was searched for counterevidence.", "evidence_refs": []}
+                for claim in assignment["claims"]]}
+        lookup = binding.host_tools["review_source"].callback
+        targets = [lookup({"target_id": target, "path": None, "cursor": None})["target"]
+                   for target in assignment["work"]["targets"]["ids"]]
+        decided = targets[:len(targets) - self.review_undecided] if self.review_undecided else targets
+        wanted = self.review_claims
+        if wanted is None:
+            wanted = [{"title": "Sample issue", "file": targets[0]["file"], "line": None}] if targets else []
+        claims = []
+        for claim in wanted:
+            option = next(option for target in targets if target["file"] == claim["file"]
+                          for option in target["source_options"] if option["side"] == "new")
+            line = claim["line"]
+            if line is None and option["source_range"] is not None:
+                line = option["source_range"]["start"]
+            claims.append({"uid": "", "revision": 0, "source_uids": [], "title": claim["title"], "payload": {
+                "claim": claim.get("claim", "The changed behavior is incorrect."),
+                "trigger": "The changed path is exercised.", "consequence": "Callers observe the defect.",
+                "grounds": f"{claim['file']} changes this behavior.", "file": claim["file"], "line": line,
+                "evidence_refs": [{key: option[key] for key in ("source_id", "basis", "source_range")}]}})
+        return {"claims": claims, "targets": [
+            {"target_id": target["target_id"], "status": "reviewed", "reason": "Captured change inspected.",
+             "evidence_refs": []} for target in decided]}
+
     async def execute(
         self, cwd: Path, prompt: str, output_schema: Any = None, continuation: Any = None, agents: Any = None,
-        read_only: bool = False, persist_session: bool = True,
+        read_only: bool = False, persist_session: bool = True, review_instructions: str | None = None,
+        host_tools: Any = None,
     ) -> AsyncIterator[AgentEvent]:
         call = {"cwd": cwd, "prompt": prompt, "output_schema": output_schema, "agents": agents, "model": self.model,
             "continuation": continuation, "read_only": read_only,
-            "persist_session": persist_session,
+            "persist_session": persist_session, "review_instructions": review_instructions,
         }
         self.calls.append(call)
+        if host_tools is not None:
+            assert review_instructions is not None
+            host_tools.configure_schema(output_schema)
+            if self.review_failure is not None:
+                yield ToolStartEvent(id="failed-tool", name="Read", input={"file_path": "api.py"})
+                raise self.review_failure
+            async with host_tools.session():
+                value = self._scripted_review(review_instructions, host_tools)
+                host_tools.admit("terminal", "structured_output", value, terminal=True)
+                accepted = host_tools.submit("terminal", value)
+                host_tools.native_settled = True
+            yield ResultEvent(structured_output=accepted, continuation=None)
+            return
         pl = prompt.lower()
 
         # Check alternatives before intent: their prompt embeds the intent summary.
@@ -566,7 +629,6 @@ def silence(monkeypatch: pytest.MonkeyPatch, *, prompts: bool = True) -> None:
     """
     monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.merge_steps.print_stage_progress", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.fix_steps.print_verification_summary", lambda *a, **kw: None)
     if prompts:
         def answer(_console: Any, message: str, default: str = "") -> str:

@@ -22,6 +22,7 @@ from daydream.artifact_visibility import private_root_locations
 from daydream.backends import AgentEvent, BackendExecutionInput, create_backend as real_create_backend
 from daydream.config_file import DaydreamFileConfig
 from daydream.github_app import GitHubExecutionInput
+from daydream.review_result import FinalizedReview
 from daydream.run_config import RunConfig
 from tests.harness import diagram_repos as dr
 from tests.harness.fake_gh import FakeGh
@@ -85,8 +86,7 @@ class DiagramBarrierBackend(StubBackend):
 def config_for(target: Path, **overrides: Any) -> RunConfig:
     fields: dict[str, Any] = {
         "target": str(target), "base": "main", "output_mode": "review", "non_interactive": True,
-        "cleanup": False, "archive": False, "run_eval": False, "review_cache_enabled": False,
-        "shallow_fanout_threshold": 0,
+        "cleanup": False, "archive": False, "run_eval": False, "shallow_fanout_threshold": 0,
     }
     fields.update(overrides)
     return RunConfig(**fields)
@@ -155,7 +155,7 @@ async def test_cancellation_joins_diagram_writer_and_preserves_resumable_review(
 
 @pytest.mark.parametrize("phase", ["diagram", "arbiter"])
 async def test_embedded_review_preserves_backend_dispatch_boundaries(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], phase: str,
 ) -> None:
     """Optional planning preserves lazy dispatch and primary failure evidence."""
     if phase == "diagram":
@@ -186,29 +186,33 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
 
     monkeypatch.setattr(runner, "create_backend", create_backend)
     config = config_for(target, diagram="auto", file_config=DaydreamFileConfig(
-        backend="codex", supervisor="rules", phases={phase: {"backend": "osprey"}},
+        backend="codex", phases={phase: {"backend": "osprey"}},
     ))
     roots = private_root_locations(base=tmp_path / "private")
+    delivered: list[FinalizedReview] = []
+    exit_code = await runner.run(config, execution=execution, private_roots=roots,
+                                 review_result_handler=delivered.append)
     if phase == "arbiter":
-        # This phase really needs its provider. Fail at ordinary dispatch after
-        # preserving primary evidence, rather than during optional preflight.
-        with pytest.raises(ValueError, match="explicit BackendExecutionInput is not supported for osprey"):
-            await runner.run(config, execution=execution, private_roots=roots)
-        deep = target / ".daydream/deep"
-        for scope in ("python", "structure"):
-            records = json.loads((deep / f"stack-{scope}-records.json").read_text())
-            assert records["issues"]
-        coverage = json.loads((deep / "review-coverage.json").read_text())
-        assert coverage["schema_version"] == 2
-        assert coverage["analyzed_revision"]["head_sha"] == git(target, "rev-parse", "HEAD")
-        assert {scope["scope_id"]: scope["status"] for scope in coverage["stack_outcomes"]} == {
-            "python": "complete", "structure": "complete",
-        }
-        assert backend.diagram_turns == {}
+        # The fresh challenge needs native host tools: the review is refused before any backend,
+        # workspace or artifact exists, and nothing is delivered.
+        assert exit_code == 1
+        assert "'osprey' does not serve them" in capsys.readouterr().out
+        assert created == [] and delivered == [] and backend.calls == []
+        assert not (target / ".daydream").exists() and not (tmp_path / "private").exists()
     else:
-        assert await runner.run(config, execution=execution, private_roots=roots) == 0
-        assert backend.calls
+        assert exit_code == 0
         assert set(created) == {"codex"}
         artifact = dr.load_diagram_artifact(target)
         assert all(result["status"] == "skipped" for result in artifact["results"].values())
         assert backend.diagram_turns == {}
+        # The embedded callback receives the one sealed result and the projected canonical items.
+        (review,) = delivered
+        assert review.terminal_result["analysis_state"] == "complete"
+        assert review.terminal_result["analyzed_revision"]["head_sha"] == git(target, "rev-parse", "HEAD")
+        assert [scope["scope_id"] for scope in review.terminal_result["planned_scopes"]] == ["committed:00000"]
+        (item,) = review.items
+        assert {key: item[key] for key in ("id", "file", "line", "description")} == {
+            "id": 1, "file": "README.md", "line": 1, "description": "Sample issue"}
+        assert item["item_uid"] and item["rationale"].startswith("The changed behavior is incorrect.")
+        assert not {"severity", "confidence", "lens"} & item.keys()
+        assert json.loads((target / ".daydream/deep/merged-items.json").read_text())["items"] == review.items

@@ -725,7 +725,6 @@ async def _drive_fix_cycle_failing(
     _seed_fix_resume(target, [_fix_item()])
     config.test_command = "false"
     # The backend script observes phases; mute only terminal output.
-    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **k: None)
     monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", lambda *a, **k: None)
     monkeypatch.setattr("daydream.deep.merge_steps.print_stage_progress", lambda *a, **k: None)
     monkeypatch.setattr("daydream.deep.fix_steps.print_verification_summary", lambda *a, **k: None)

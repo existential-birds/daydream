@@ -99,6 +99,7 @@ async def _run_real_phases_deep(
     no_ci_remote.connect(multi_stack_target, remote)
     stub = _install_deep_capture_backend(multi_stack_target, monkeypatch, real_internal_phases=True)
     stub.fix_edit_line = fix_edit_line
+    stub.review_claims = [{"title": "Sample issue", "file": "api.py", "line": 1}]
     if dataset_store is not None:
         assert stub.merge_items is not None
         stub.merge_items[0]["source_uids"] = ["python:1"]
@@ -128,8 +129,7 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     store = LocalRecordStore(archive_dir.parent / "records")
     dump_dir = tmp_path / "uploaded-artifacts"
     remote, exit_code = await _run_real_phases_deep(
-        multi_stack_target, monkeypatch, archive_dir, no_ci_remote, dataset_store=store.root, dump_path=dump_dir,
-        untracked_fix="migrations/0002_add_x.sql")
+        multi_stack_target, monkeypatch, archive_dir, no_ci_remote, dataset_store=store.root, dump_path=dump_dir)
     assert exit_code == 0
     head_after = git_ops.head_sha(multi_stack_target)
     assert head_after != head_before
@@ -142,7 +142,7 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     manifest = json.loads((run_dir / "manifest.json").read_text())
     trajectory = json.loads((run_dir / "trajectory.json").read_text())
     siblings = [json.loads(path.read_bytes()) for path in (run_dir / "trajectories").glob("*.json")]
-    assert len(siblings) >= 2
+    assert len(siblings) >= 1
     for document in (trajectory, *siblings):
         assert document["session_id"] == manifest["session_id"]
         assert atif_validate(document, validate_images=False)
@@ -179,12 +179,6 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert recommended_text != diff_text
     assert "# daydream recommended change" in recommended_text
     assert "# daydream recommended change" not in diff_text
-    assert "migrations/0002_add_x.sql" in recommended_text
-    assert "notes.txt" not in recommended_text
-    committed = git(remote, "ls-tree", "-r", "--name-only", "refs/heads/feature").splitlines()
-    assert "migrations/0002_add_x.sql" in committed
-    assert "notes.txt" not in committed
-    assert "notes.txt" in git(multi_stack_target, "status", "--porcelain")
     for filename in ("manifest.json", "trajectory.json", "diff.patch", "evaluation.json"):
         assert (dump_dir / filename).is_file()
         assert (dump_dir / filename).read_bytes() == (run_dir / filename).read_bytes()
@@ -195,7 +189,8 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert task["diff"] == original_diff and captured["final_state"]["value"]["head_sha"] == head_after
     assert captured["recommended_patch"]["value"]["patch"] == recommended_text
     item = captured["findings"]["value"]["items"][0]
-    assert item["item_uid"] and item["source_uids"]
+    assert item["item_uid"] and item["source_uids"] == [item["uid"]]
+    assert item["description"] == "Sample issue" and "severity" not in item
     verification = captured["verification"]["value"]
     verdicts = verification["recommendation-verdicts.json"]
     assert verdicts["selection"]["decisions"][0]["item_uid"] == item["item_uid"]

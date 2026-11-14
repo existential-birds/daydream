@@ -85,9 +85,8 @@ def empty_review_config(target: Path, trajectory: Path, **overrides: Any) -> Run
         "archive": False,
         "run_eval": False,
         "diagram": "off",
-        "review_cache_enabled": False,
         "shallow_fanout_threshold": 0,
-        "file_config": DaydreamFileConfig(supervisor="llm"),
+        "file_config": DaydreamFileConfig(),
         "trajectory_path": trajectory,
     }
     fields.update(overrides)

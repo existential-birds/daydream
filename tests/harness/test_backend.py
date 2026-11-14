@@ -38,9 +38,12 @@ def test_shared_harness_backends_satisfy_the_backend_protocol_signature() -> Non
 
     expected = _params(Backend.execute)
     for label, module_name, class_name in _SHARED_HARNESS_BACKENDS:
-        declared = _params(getattr(import_module(module_name), class_name).execute)
+        fake = getattr(import_module(module_name), class_name)
+        declared = _params(fake.execute)
+        # A fake that declares host tools takes the two keywords run_agent passes with a binding.
+        capability = {"review_instructions", "host_tools"} if getattr(fake, "supports_host_tools", False) else set()
         missing = [name for name in expected if name not in declared]
-        extra = [name for name in declared if name not in expected]
+        extra = [name for name in declared if name not in expected and name not in capability]
         drift = [name for name in expected if name in declared and declared[name] != expected[name]]
         order = [name for name in declared if name in expected]
         assert order == [name for name in expected if name in declared], (
