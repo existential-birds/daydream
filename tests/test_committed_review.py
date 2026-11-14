@@ -110,7 +110,7 @@ def _inputs(repo: Path, root: Path, files: list[str], patch: str | None = None) 
     return StageInputFactory(PiBackend(model="unexecuted-domain-test"), work_context(repo, run_id="domain"),
         StackAssignment("committed", files),
         change=CanonicalChange.capture(diff_path, write_hunk_index(root, patch)),
-        revision=revision, artifact_session=None, allow_standalone=True, read_only=True)
+        revision=revision, read_only=True)
 
 
 def _selectors(inputs: StageInputFactory, file: str = "api.py") -> list[dict[str, Any]]:

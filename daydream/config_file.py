@@ -36,9 +36,9 @@ class DaydreamFileConfig:
     Test commands preserve whitespace and a safe invalid-type marker for actionable readiness
     diagnostics instead of silently coercing malformed values to absent.
 
-    ``latency_profile`` is deliberately parsed without validating its vocabulary:
-    the runtime resolver promotes unknown names to forensic. ``review_profile``
-    is only a path here; review_profile.py owns strict profile validation.
+    ``latency_profile`` is parsed without validating its vocabulary: a review ignores
+    it and only names it. ``review_profile`` is only a path here; review_profile.py
+    owns strict profile validation.
 
     Improve service roots/groups and partition bounds come from ``[improve]``;
     issue publication requires explicit ``[improve.github] publish_issues=true``.

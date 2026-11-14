@@ -297,6 +297,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     to force a fresh diagram-only pre-scan.
   - Diagrams requested with a review are generated after it, not alongside it, so such a
     run takes longer by the diagram time.
+  - The exploration pre-scan runs only for `--diagram-only`. A review, the fix step and a
+    diagram requested with a review no longer receive its affected-file index or test map.
   - The fixer no longer receives a confirmed-intent file, and earlier verifier verdicts
     are never carried over. Every finding is verified before a fix, because no reviewer
     certifies a finding as routine: the `verify_all` repository setting is ignored and
@@ -340,6 +342,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `phase_fix_parallel` and `phase_fix` no longer accept `intent_path`;
     `BudgetLedger.from_limits` is removed (construct `BudgetLedger` directly);
     `phase_verify_recommendations` no longer accepts `selection`;
+    `FlowContext.backend_for_effort` is removed (use `backend_for`) and
+    `review_limits_for_scope` no longer accepts `stages`;
     `daydream.phases.PER_STACK_RECORD_SCHEMA` and `review_budget.STAGED_REVIEW_GUIDANCE`
     are removed; and the modules of the staged phases are deleted.
 

@@ -80,7 +80,7 @@ def format_verdict_join(
 ) -> Table:
     """Show verdict categories and ids, plus an independently computed total.
 
-    Matched and Structural always appear; other empty categories are omitted.
+    Matched always appears; other empty categories are omitted.
     Skipped findings were not selected, whereas unmatched findings lack verdicts."""
     table = Table(
         title="Verdict Join",
@@ -103,7 +103,7 @@ def format_verdict_join(
     )
     computed_total = sum(len(values) for _, values in categories)
     for label, values in categories:
-        if values or label in {"Matched", "Structural"}:
+        if values or label == "Matched":
             table.add_row(label, str(len(values)), ", ".join(str(value) for value in values))
     mismatch = f"  [expected {total}]" if computed_total != total else ""
     table.add_row("Total", str(computed_total) + mismatch, "")

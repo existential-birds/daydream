@@ -1,8 +1,7 @@
-"""Deterministic same-concern candidates for merge and arbiter adjudication.
+"""Deterministic same-concern candidates, by normalized-title bigram Jaccard similarity.
 
-Record/alternative pairs require a shared file and normalized-title bigram
-Jaccard similarity >= 0.5. Record/record pairs may span files. Candidates still
-need adjudication; destructive host folding uses the separate, higher bar.
+The archive evaluation measures duplication among shipped items with them, and
+Improve reuses the title normalization. Record pairs may span files.
 """
 
 from __future__ import annotations

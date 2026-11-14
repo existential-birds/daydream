@@ -13,7 +13,7 @@
 #   scripts/review-historic-pr 42
 #   scripts/review-historic-pr 42 /path/to/repo
 #   KEEP_BRANCHES=1 scripts/review-historic-pr 42        # skip branch cleanup
-#   DAYDREAM_ARGS="--shallow" scripts/review-historic-pr 42
+#   DAYDREAM_ARGS="--backend codex" scripts/review-historic-pr 42
 #   ZIP=1 scripts/review-historic-pr 42                  # auto-bundle (no prompt)
 #   ZIP=0 scripts/review-historic-pr 42                  # skip bundling
 #   ZIP_OUT=/tmp/out.zip scripts/review-historic-pr 42   # bundle path override

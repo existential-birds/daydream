@@ -14,7 +14,6 @@ from daydream.deep.state import DeepState
 from daydream.extensions.api import Stop
 from daydream.flows.engine import FlowContext
 from daydream.review_budget import (
-    render_review_warnings,
     review_warnings,
 )
 from daydream.trajectory import (
@@ -44,20 +43,6 @@ async def _step_load_items(ctx: FlowContext) -> Stop | None:
             f"Expected canonical merged items at {items_file}",
         )
         return Stop(1)
-
-    # Best-effort recover the render-only markdown from the deep-dir copy for
-    # the exit message when the canonical file is absent. Non-fatal.
-    if not merged_report.exists():
-        deep_copy = DeepArtifact.MERGED_REPORT.at(dd)
-        if deep_copy.exists():
-            merged_report.write_text(deep_copy.read_text())
-
-
-    warning = render_review_warnings(review_warnings(dd))
-    if warning:
-        for report in (merged_report, DeepArtifact.MERGED_REPORT.at(dd)):
-            if report.exists() and warning not in report.read_text():
-                report.write_text(warning + "\n\n" + report.read_text())
 
     deep_state.merged_report = merged_report
     deep_state.items_file = items_file

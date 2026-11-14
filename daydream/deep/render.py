@@ -120,11 +120,3 @@ def render_report(
 
     text = "\n\n".join(sections) + "\n"
     return text
-
-
-def render_held_section(held: list[dict[str, Any]]) -> str:
-    """Render findings withheld from the actionable report."""
-    if not held:
-        return ""
-    body = "\n".join(_finding_line(item) for item in held)
-    return f"## Held Findings\n{body}"

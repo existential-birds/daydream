@@ -33,7 +33,6 @@ def refresh_review_report(ctx: FlowContext, *, no_diff: bool = False) -> dict[st
     from daydream.deep.render import (
         insert_diagrams_section,
         insert_review_context,
-        render_held_section,
         render_report,
     )
     from daydream.deep.report_context import REPORT_CONTEXT, collect_report_context
@@ -51,9 +50,6 @@ def refresh_review_report(ctx: FlowContext, *, no_diff: bool = False) -> dict[st
         existing = deep_report.read_text(encoding='utf-8')
     else:
         existing = render_report(items)
-        held = ctx.data.get('terminal_review_held', []) if not no_diff else []
-        if held:
-            existing = existing.rstrip() + '\n\n' + render_held_section(held) + '\n'
     # Supervision rendered before recording its own completion, so its generated
     # prefix may be stale. Replace only that host prefix with frozen evidence.
     if existing.startswith('⚠️ **Review incomplete.** '):
@@ -137,8 +133,7 @@ async def plan_committed_review(
     state = DeepState(ctx.data)
     program = await committed_review.plan_review(
         ctx.config, ctx.work, backends, settings, run_id=run_id, revision=revision, diff_path=state.diff_path,
-        index_path=index_path, files=files, started=started, window=window, artifact_session=ctx.artifacts,
-        allow_standalone=ctx.allow_standalone_artifacts,
+        index_path=index_path, files=files, started=started, window=window,
     )
     ctx.data["committed_review"] = program
     ctx.data["review_coverage"] = program.review.coverage
@@ -187,9 +182,8 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
     if pipeline_state == "failed":
         program.fail("pipeline", reason or ReasonCode.UNEXPECTED_ANALYSIS_FAILURE)
     items: list[dict[str, Any]] = []
-    held: list[dict[str, Any]] = []
     projection_valid = no_diff
-    path = ctx.data.get("items_file", DeepArtifact.MERGED_ITEMS.at(state.dd))
+    path = DeepArtifact.MERGED_ITEMS.at(state.dd)
     if not no_diff:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -204,10 +198,6 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
             item_schema["properties"]["confidence"] = {"enum": ["HIGH", "MEDIUM", "LOW"]}
             validate_json_schema(payload, schema)
             items = payload["items"]
-            raw_held = payload.get('held')
-            if isinstance(raw_held, list) and all(isinstance(item, dict)
-                    and {'id', 'file', 'line', 'description'} <= item.keys() for item in raw_held):
-                held = raw_held
             projection_valid = True
         except (OSError, ValueError, AttributeError, jsonschema.ValidationError) as exc:
             print_warning(console, f"Cannot validate terminal findings: {type(exc).__name__}")
@@ -230,7 +220,6 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
                                   result_path=state.dd / "committed-review.json")
     ctx.data["terminal_review_result"] = result
     ctx.data['terminal_review_items'] = items
-    ctx.data['terminal_review_held'] = held
     # Embedded evaluation consumes the same validated result as publication,
     # before optional rendering, without inventing a live GitHub PR target.
     recorder = get_current_recorder()

@@ -11,13 +11,12 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from daydream import prompt_budget as inputs
-from daydream.artifact_visibility import ArtifactSession, artifact_dir_for
 from daydream.backends import Backend
 from daydream.deep.detection import StackAssignment
 from daydream.deep.diff import _DIFF_MINUS_HEADER, _DIFF_PLUS_HEADER, iter_diff_blocks
 from daydream.git_ops.models import GitError
 from daydream.hunk_index import _HUNK_HEADER, _unquote_git_path
-from daydream.json_utils import atomic_write_bytes, canonical_json as _json
+from daydream.json_utils import canonical_json as _json
 from daydream.review_source_refs import (
     _SubmissionSources,
     lf_lines,
@@ -135,12 +134,10 @@ class StageInputFactory:
     """Project scoped first-pass assignments with required-work priority; see the assignment limits in this module."""
 
     def __init__(self, backend: Backend, work: WorkContext, stack: StackAssignment, *,
-        change: CanonicalChange, revision: dict[str, Any], artifact_session: ArtifactSession | None,
-        allow_standalone: bool, read_only: bool) -> None:
+        change: CanonicalChange, revision: dict[str, Any], read_only: bool) -> None:
         self.backend, self.work, self.stack = backend, work, stack
         self.captured_source = work.captured_source
         self.revision = revision
-        self.session, self.allow_standalone, self.read_only = artifact_session, allow_standalone, read_only
         self.transport = inputs.sanctioned_transport_for(backend, work.repo, read_only=read_only)
         self.change = change
         # Identities stay host-only on both transports.
@@ -343,12 +340,3 @@ class StageInputFactory:
             and self._remaining_bytes(self._render(parts), dispatch=True) >= 0,
             "required assignment exceeds the assignment allowance")
         return [[part.assignment for part in batch] for batch in batches]
-
-    def _write(self, relative: Path, text: str) -> Path:
-        if self.session is not None:
-            return self.session.write_review_input(self.work.repo, relative, text)
-        root = artifact_dir_for(self.work.repo, allow_standalone=self.allow_standalone) / "deep" / "stage-inputs"
-        path = root / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_bytes(path, text.encode(), fsync=True, dir_fsync=True, mode=0o600)
-        return path

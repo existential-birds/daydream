@@ -21,7 +21,6 @@ import jsonschema
 from daydream import agent, clock, git_ops
 from daydream.artifact_visibility import (
     ArtifactDisposition,
-    ArtifactSession,
     OutputLabel,
     open_artifact_session,
     private_root_locations,
@@ -961,8 +960,7 @@ class ReviewProgram:
 async def plan_review(
     config: RunConfig, work: WorkContext, backends: dict[str, Any], settings: dict[str, Any], *,
     run_id: str, revision: dict[str, Any], diff_path: Path, index_path: Path, files: list[str],
-    started: float, window: float, artifact_session: ArtifactSession | None, allow_standalone: bool = False,
-    allowed_tools: frozenset[str] | None = None,
+    started: float, window: float, allowed_tools: frozenset[str] | None = None,
 ) -> ReviewProgram:
     """Plan the complete target population and its schedule before any model work."""
     pipeline = resolve_pipeline(config.review_profile)
@@ -970,8 +968,7 @@ async def plan_review(
     inputs = await anyio.to_thread.run_sync(lambda: StageInputFactory(
         backends["discovery"], work, StackAssignment("committed", files),
         change=CanonicalChange.capture(diff_path, index_path, work.captured_source),
-        revision=revision,
-        artifact_session=artifact_session, allow_standalone=allow_standalone, read_only=True,
+        revision=revision, read_only=True,
     ))
     finish = started + window
     review = await anyio.to_thread.run_sync(lambda: Review(inputs, run_id, allowed_tools=allowed_tools))
@@ -1159,7 +1156,7 @@ async def _run_committed_review(
                  git_ops.diff_name_only_strict(captured_root, original.base_sha, original.head_sha))
         program = await plan_review(
             config, work, backends, settings, run_id=run_id, revision=revision, diff_path=diff_path,
-            index_path=index_path, files=files, started=started, window=window, artifact_session=session,
+            index_path=index_path, files=files, started=started, window=window,
             allowed_tools=None if hosted is None else HOSTED_PI_TOOLS,
         )
         finish = program.finish

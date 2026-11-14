@@ -314,7 +314,7 @@ async def run_agent(
         raise NotImplementedError(f"{type(backend).__name__} does not support tools_disabled")
     if review_system_instructions is not None:
         if not tools_disabled and not investigation:
-            raise ValueError("review_system_instructions requires tools_disabled=True or a staged investigation")
+            raise ValueError("review_system_instructions requires tools_disabled=True or an investigation ledger")
         if not investigation and not getattr(backend, "supports_review_instructions", False):
             raise NotImplementedError(f"{type(backend).__name__} does not support review_instructions")
     if sanctioned_inputs is not None:
@@ -325,7 +325,7 @@ async def run_agent(
             prompt = prompt.removesuffix(rendered_suffix)
     context = resolve_run_context(run_context)
     if investigation and review_limits is not None:
-        raise ValueError("staged investigation uses its ledger instead of review_limits")
+        raise ValueError("an investigation ledger replaces review_limits")
     evidence = ReviewEvidence(output_schema) if review_limits is not None else None
     review_instructions = review_system_instructions
     turn = budget

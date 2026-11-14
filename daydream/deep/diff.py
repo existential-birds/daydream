@@ -167,7 +167,7 @@ def _read_full_diff(ctx: FlowContext) -> str:
 
 
 def _ttt_diff_text(ctx: FlowContext) -> str | None:
-    """Give intent/wonder the complete diff so inline claims remain truthful.
+    """Give the diagram authors the complete diff so inline claims remain truthful.
 
     A truncated in-memory diff is replaced by the full artifact, which exceeds
     the inline budget and uses the backend's pointer or truncated-clone transport.
@@ -187,7 +187,7 @@ def _ttt_diff_text(ctx: FlowContext) -> str | None:
         )
         print_warning(
             console,
-            f"Could not read the full diff for the intent/wonder phases "
+            f"Could not read the full diff for the diagram authors "
             f"({exc}); falling back to the bounded in-memory diff{detail}",
         )
     return str(deep_state.diff)

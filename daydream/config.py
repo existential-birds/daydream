@@ -94,9 +94,9 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
 # Merge deep and Improve tables independently so tuning one flow cannot move the other.
 
 # GPT-6.1 Sol defaults to medium: use it for bounded review and judgment work,
-# low for mechanical work, and high for arbitration. Latency routes and explicit
-# pins can raise effort; xhigh needs measured benefit to justify its extra cost.
-# Pi stack review uses medium; its other deep phases and Claude retain ambient defaults.
+# low for mechanical work, and high for arbitration. Explicit pins can raise effort;
+# xhigh needs measured benefit to justify its extra cost. Pi and Claude review phases
+# retain their ambient defaults.
 DEEP_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
     "codex": {
         "parse": "low",
@@ -190,9 +190,6 @@ EFFORT_TIERS: dict[str, EffortTier] = {
 REVIEW_OUTPUT_FILE = ".review-output.md"
 
 
-# Synthetic scope metadata for structural review alongside language stacks;
-# never a CLI-selectable skill name.
-STRUCTURE_STACK_NAME: str = "structure"
 
 # Bot setup names shared with workflow templates; packaging tests guard drift.
 SETUP_SECRET_NAMES: tuple[str, ...] = (

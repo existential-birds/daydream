@@ -9,7 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.framework_detection import JS_SOURCE_SUFFIXES, FrameworkInspection
 
 # Extension -> stack-key (lowercase, matches the supported built-in stacks).
@@ -198,19 +197,6 @@ def detect_stacks(changed_files: list[str], *, target_dir: Path | None = None) -
                 stack_name=GENERIC_STACK,
                 files=files,
                 is_docs_only=diff_is_docs_only,
-            )
-        )
-
-    # Structural meta-stack: appended unconditionally for any non-docs-only diff
-    # with at least one changed file (caller gates on ctx.pipeline().structural_enabled).
-    # Carries the union of all changed files so the structural reviewer judges the
-    # whole change across language boundaries.
-    if changed_files and not diff_is_docs_only:
-        results.append(
-            StackAssignment(
-                stack_name=STRUCTURE_STACK_NAME,
-                files=sorted(set(changed_files)),
-                is_docs_only=False,
             )
         )
     return results

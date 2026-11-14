@@ -1,11 +1,8 @@
 """The per-run latency-routing record (issue #732).
 
-One artifact, one writer, one meaning. ``latency-routing.json`` is *evidence*,
-not an input: no step reads it to decide behaviour, so a missing or corrupt
-record can never fail a run. Each step that owns a routing decision appends its
-slice through :func:`write_routing_record`, which read-modify-writes top-level
-keys so a later phase write preserves earlier slices. The preamble replaces
-snapshot-owned risk and diff-population evidence together on a valid resume.
+Earlier builds wrote ``latency-routing.json`` as evidence of their routing
+decisions; this build writes none. The reader stays for the archive evaluation
+and for embedders: a missing or corrupt record reads as empty and never fails a run.
 """
 
 from __future__ import annotations

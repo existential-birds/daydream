@@ -42,7 +42,7 @@ class RunConfig:
     backend: str | None = None
     model: str | None = None
     reasoning_effort: str | None = None
-    # CLI > file > balanced; unknown names resolve upward to forensic and are recorded.
+    # Refused: the replaced reviewer's option. Kept so the refusal can name it.
     latency_profile: str | None = None
     file_config: DaydreamFileConfig | None = None
     review_backend: str | None = None
@@ -79,9 +79,9 @@ class RunConfig:
     assume: str | None = None  # forced gate answer: "yes" (--yes), "no", or None
     log_mode: bool = False  # --verbose: redacted plain-text diagnostics bypass Rich UI
     identity: str = "unknown"  # resolved GitHub identity; set once by run()
-    # Suppress borderline arbiter findings unless the skeptical agent confirms them.
+    # Refused when set: the replaced reviewer's option.
     precision_mode: bool = False
-    # Opt in to posting APPROVE for deep reviews with zero high/medium findings.
+    # Opt in to posting APPROVE for a complete review with no findings.
     approve_on_clean: bool = False
     # Opt in at CLI/file tier to filing pre-fix findings and post-fix reverted edits.
     scope_issue_filing: bool = False
@@ -91,7 +91,7 @@ class RunConfig:
     improve_scope: str | None = None
     improve_plan_description: str | None = None
     improve_prune_name: str | None = None
-    # CLI > file > defaults; explicit False disables reuse without changing retention bounds.
+    # Refused when False: the replaced reviewer's option.
     review_cache_enabled: bool | None = None
     # Resolve the CLI/env path once into a validated profile with source and digest.
     review_profile_path: str | Path | None = None
@@ -156,9 +156,8 @@ def _explicit_reasoning_effort_pin(config: RunConfig, phase: str) -> str | None:
 
 
 def _resolved_reasoning_effort(config: RunConfig, phase: str) -> str | None:
-    """Resolve effort: CLI global > file phase > file global > route > backend default.
+    """Resolve effort: CLI global > file phase > file global > backend default.
 
-    Latency routes apply to wonder/arbiter; there is no per-phase RunConfig field.
     The default table uses the phase's resolved backend. None leaves the backend's
     ambient default intact, such as Codex's model_reasoning_effort config.
     """

@@ -36,11 +36,11 @@ placement instead of live-source line resolution. This does not establish
 completeness.
 
 Approval requires explicit opt-in and no blocking severity among all retained
-findings, including deduplication matches. Immutable schema-3 findings without
-severity block approval; new findings post as COMMENT, while an all-matched review
-may post nothing. Complete-empty immutable reviews remain eligible for approval
-when coverage and warning checks permit it. Ordinary schema-2 omitted-severity
-behavior and classified-severity policy are unchanged.
+findings, including deduplication matches. A finding without severity blocks
+approval under every findings schema, and the reviewer assigns none, so only a
+complete review with no findings is approved. New findings post as COMMENT, while
+an all-matched review may post nothing. Complete-empty reviews remain eligible for
+approval when coverage and warning checks permit it.
 
 Retained source attribution has an 8 MiB run allocation, with the existing
 512-decision/256 KiB per-scope and four-reference/8192-byte per-decision bounds.

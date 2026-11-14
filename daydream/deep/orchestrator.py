@@ -129,7 +129,7 @@ def _remote_ci_enabled(ctx: FlowContext) -> bool:
 
 
 def _diagram_enabled(ctx: FlowContext) -> bool:
-    """Run diagram eligibility checks unless mode is off or this is a fix-only resume.
+    """Run diagram eligibility checks unless mode is off.
 
     No eligible diagram means zero agent calls, but the step still records why.
     Diagram-only flows always pass this gate.
@@ -366,12 +366,9 @@ async def run_deep(
     diff_path.write_text(diff)
     # Persist the hunk index immediately after the diff bytes, so the run-time
     # authority (changed file/line ranges) is available to every later step
-    # (reviews, arbiter, merge) and never predates the patch.
+    # and never predates the patch.
     index_path = write_hunk_index(daydream_dir, diff)
-    # Diff is immutable from here on; compute the tiering verdict once and reuse
-    # it at both the exploration step's gate and the alternatives step's gate.
-    # The latency route is resolved from this full immutable diff before prompt
-    # bounding, so prompt capacity cannot hide changed-code surface signals.
+    # Diff is immutable from here on; the diagram-only pre-scan reads this tier.
     tier = review_steps.select_tier(review_steps.count_changed_files(diff))
     dd = deep_dir(
         target_dir,
@@ -449,8 +446,8 @@ async def run_deep(
                 "analyzed_pr": captured_pr,
                 "snapshot_diff": diff,
                 "diff": bounded_diff,
-                # Carry reviewed origins for footprint enforcement; resumes can recover them
-                # from the diff. Canonical finding paths have independent authorization.
+                # Carry reviewed origins for footprint enforcement. Canonical finding paths
+                # have independent authorization.
                 "changed_files": set(changed_files),
                 "diff_path": diff_path,
                 "diff_truncated": bound_info.truncated,
