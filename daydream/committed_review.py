@@ -88,7 +88,7 @@ from daydream.review_result import (
     reason_for_budget,
     reason_for_exception,
 )
-from daydream.review_source_refs import _SubmissionSources
+from daydream.review_source_refs import SOURCE_SELECTORS_SCHEMA, _SubmissionSources
 from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
 from daydream.run_config import FrozenAuthorDescription, RunConfig, _resolved_backend_name
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
@@ -507,10 +507,11 @@ class Review:
                         if target["status"] == "not_reviewed" and not target["reason"].strip():
                             raise HostToolRejected("targets.reason: explain unfinished work")
                         reviewed = target["status"] == "reviewed"
-                        # A reviewed target without refs records its own assigned sources.
+                        # A reviewed target without refs records its own assigned sources, up to the selector bound.
+                        options = self.assignments[self._index[identifier]]["source_options"]
                         selectors = target["evidence_refs"] or ([
                             {"source_id": option["source_id"], "basis": "supplied_diff", "source_range": None}
-                            for option in self.assignments[self._index[identifier]]["source_options"]]
+                            for option in options[:SOURCE_SELECTORS_SCHEMA["maxItems"]]]
                             if reviewed else [])
                         target["evidence_refs"] = self._refs(sources, selectors, target=identifier,
                                                              required=reviewed)
@@ -764,7 +765,8 @@ _INSTRUCTIONS = """Review the original captured source using ordinary read/searc
 The complete planned targets are obligations, not read receipts. A reviewed target or a verdict may pass
 evidence_refs=[] to record the target's sources or the judged claim's evidence. Evidence refs select source_options
 with {source_id,basis,source_range}; source_range=null retains the exact identity. Supporting selectors use
-{path,side,source_range,basis} against captured Git blobs and cannot replace assigned evidence.
+{path,side,source_range,basis} against captured Git blobs and cannot replace assigned evidence. Every
+evidence_refs array holds at most four selectors, and evidence_refs=[] records up to four of a target's sources.
 Report only concrete claims with trigger, consequence, location and supporting grounds. A new claim uses
 uid="", revision=0 and source_uids=[] unless it explicitly synthesizes retained predecessor UIDs.
 A retained claim update echoes uid and current revision; changing any semantic payload creates a fresh

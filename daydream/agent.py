@@ -891,6 +891,10 @@ async def _run_agent(
                     # a transient token or the exception advertises a higher
                     # retry cap.
                     classification = classify_failure(exc)
+                    # A completed turn that only lacks its output is the provider answering, not an outage.
+                    completed = getattr(exc, "reason_code", None) == "missing_output"
+                    if completed:
+                        run_context.outage_circuit.record_success()
                     exception_max_retries = min(
                         max_attempts, getattr(exc, "max_retries", max_attempts)
                     )
@@ -920,7 +924,7 @@ async def _run_agent(
                         admission = run_context.outage_circuit.admit_retry(circuit_now)
                         opened_here = (
                             False
-                            if admission.allowed
+                            if completed or admission.allowed
                             and admission.state == CIRCUIT_HALF_OPEN
                             else run_context.outage_circuit.record_failure(circuit_now)
                         )

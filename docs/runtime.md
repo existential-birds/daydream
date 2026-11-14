@@ -118,8 +118,10 @@ fresh challenge, navigates it under the profile's
   labelled as distinct from dispatch-time snapshots.
 
 A reviewed target decision or challenge verdict with empty `evidence_refs` records
-the target's assigned sources or the judged claim's evidence; models cite source IDs
-only to locate claims or add evidence.
+up to four of the target's assigned sources, in inventory order, or the judged claim's
+evidence; models cite source IDs only to locate claims or add evidence. Every
+`evidence_refs` array holds at most four selectors, which the reviewer instructions
+state; a target's complete inventory stays in `assignments[].source_refs`.
 At sealing every planned target has exactly one typed decision: an admitted model
 decision or a host-authored `not_reviewed` decision whose reason starts with
 `unsubmitted:`. Coverage shards targets in inventory order into scopes of 12
@@ -522,7 +524,10 @@ provider failure leads to a retry, the failed attempt's tool calls are refunded 
 the retry dispatches, because it is a fresh native conversation that must redo the
 lost work; a retry stopped before dispatch refunds nothing. Elapsed time is never refunded. Retries stay bounded by the
 attempt count, the absolute deadline and the outage circuit; a failure after possible
-host acceptance still permits no retry. Paths that do not retry are never refunded,
+host acceptance still permits no retry. A Codex turn that completes with nothing accepted
+is retried under this rule only as the invocation's first retry, and the outage circuit
+records it as a completed turn, never as a failure ([Codex host tools](#codex-host-tools)).
+Paths that do not retry are never refunded,
 including a committed challenge re-dispatch. Committed
 batches admitted before a provider failure stay installed while that attempt's starts
 are refunded with the rest of the attempt.
@@ -757,7 +762,15 @@ refused before any process or server starts, and the disposable read-only checko
   ([lifecycle evidence](observability.md#codex-lifecycle-evidence)). A later native
   failure keeps the admission and is not retried; Codex reports usage only with a
   completed turn. Authority closes before the process is torn down, and the server is
-  released after it.
+  released after it. A turn that completes and exits zero with no accepted submission
+  is a retryable truncation. As the invocation's first retry it gets one fresh attempt
+  under the [renewal rule](#budget-ledger): admitted target decisions stay installed and
+  the attempt's starts are refunded. It is not retried after an earlier retryable
+  provider failure, nor once it admitted a claim, because a fresh conversation is not
+  told what the earlier one admitted. It is the provider answering, so the outage
+  circuit records a completed turn, not a failure. An assignment that ends unsubmitted
+  keeps the reason `missing_output` unless a budget or deadline limit stops it first;
+  that limit's reason is then sealed.
 - Not offered: resuming a native conversation with host tools, a capacity preflight, or
   suppression of Codex's own session history, which it writes under its home as for
   every run.

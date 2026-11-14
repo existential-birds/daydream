@@ -24,7 +24,7 @@ from daydream.backends import (
     TextEvent,
     ToolStartEvent,
 )
-from daydream.backends.codex import CodexBackend
+from daydream.backends.codex import CodexBackend, CodexUnsubmittedTurn
 from daydream.backends.pi import PiBackend
 from daydream.config import RETRY_CIRCUIT_FAILURE_THRESHOLD
 from daydream.host_tools import (
@@ -477,7 +477,11 @@ async def _expect_retryable_failure(backend: ScriptedBackend, tmp_path: Path, ru
 async def test_concurrent_invocations_share_one_run_scoped_circuit(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Failing siblings coordinate on one circuit instead of one ladder each."""
+    """Failing siblings coordinate on one circuit instead of one ladder each.
+
+    A turn that completes without its submission is the provider answering: it closes the
+    circuit as any completed turn does and never counts toward the threshold.
+    """
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
     slept = patch_retry_sleep(monkeypatch, fake)
     # Checkpoint each fake sleep so sibling ladders interleave.
@@ -498,6 +502,20 @@ async def test_concurrent_invocations_share_one_run_scoped_circuit(
     assert len(slept) <= 3
     assert run_context.outage_circuit.state() in {"open", "half_open"}
     assert RunContext(InteractionPolicy(interactive=False)).outage_circuit.state() == "closed"
+    # Reviewers that never submit, each retried once, leave the circuit closed; the provider failures that
+    # follow one more unsubmitted turn still get the whole threshold of retries.
+    unsubmitted = CodexUnsubmittedTurn("no accepted submission", category="STREAM_TRUNCATION")
+    policy = RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0)
+    for _ in range(RETRY_CIRCUIT_FAILURE_THRESHOLD):
+        silent = ScriptedBackend(events=[unsubmitted], model="mock-model", retry_policy=policy)
+        with pytest.raises(CodexUnsubmittedTurn):
+            await run_agent(silent, tmp_path, "go", phase=DaydreamPhase.FIX, run_context=run_context)
+        assert silent.call_count == 2 and run_context.outage_circuit.state() == "closed"
+    flaky = ScriptedBackend(model="mock-model", retry_policy=policy, script=[
+        [unsubmitted], *[[_RetryableBackendError("transient")]] * RETRY_CIRCUIT_FAILURE_THRESHOLD,
+        [TextEvent(text="recovered")]])
+    output, _, _ = await run_agent(flaky, tmp_path, "go", phase=DaydreamPhase.FIX, run_context=run_context)
+    assert output == "recovered" and flaky.call_count == RETRY_CIRCUIT_FAILURE_THRESHOLD + 2
 
 
 async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_probe(
