@@ -531,10 +531,15 @@ async def run_deep(
                     exit_code = await run_flow(ctx.registry, "diagram", ctx)
                 else:
                     exit_code = await run_flow(ctx.registry, _flow_name_for_mode(mode), ctx)
-        except Exception as exc:
+        except BaseException as exc:
             if coverage is not None and not coverage.is_finalized:
                 try:
-                    finalize_review(ctx, "failed", reason=reason_for_exception(exc))
+                    if isinstance(exc, Exception):
+                        finalize_review(ctx, "failed", reason=reason_for_exception(exc))
+                    else:
+                        # A cancelled review seals what it admitted before the cancellation escapes;
+                        # the reviewer holds admissions in memory until then.
+                        finalize_review(ctx, "cancelled")
                 except Exception as final_exc:
                     exc.add_note(f"Terminal review finalization failed: {type(final_exc).__name__}")
                     print_warning(console, f"Terminal review finalization failed: {type(final_exc).__name__}")

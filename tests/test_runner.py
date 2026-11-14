@@ -554,6 +554,26 @@ async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
     _, archived_run = _assert_one_published_run(repo, archive_dir)
     assert json.loads((archived_run / "manifest.json").read_text())["archive_status"] == "partial"
 
+    # A review cancelled on the ordinary route seals what it admitted before the cancellation escapes:
+    # its claim and its unfinished coverage are published, and nothing is delivered beyond that.
+    reviewed = _feature_repo(tmp_path / "reviewed")
+    reviewer = StubBackend(reviewed)
+    reviewer.review_claims = [{"title": "Admitted before cancellation", "file": "app.py", "line": 1}]
+    monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: reviewer)
+    caught.clear()
+    config = RunConfig(target=str(reviewed), base="main", archive=False, run_eval=False, non_interactive=True)
+    async with anyio.create_task_group() as group:
+        reviewer.review_after_acceptance = lambda kind: group.cancel_scope.cancel() if kind == "discovery" else None
+        group.start_soon(invoke)
+    assert len(caught) == 1 and isinstance(caught[0], anyio.get_cancelled_exc_class())
+    sealed = json.loads((reviewed / ".daydream/deep/committed-review.json").read_text())
+    assert [claim["title"] for claim in sealed["claims"]] == ["Admitted before cancellation"]
+    assert sealed["findings"] == [] and sealed["terminal_result"]["analysis_state"] == "incomplete"
+    coverage = json.loads((reviewed / ".daydream/deep/review-coverage.json").read_text())
+    assert coverage["run_id"] == sealed["run_id"]
+    assert "Admitted before cancellation" in (reviewed / ".review-output.md").read_text()
+    assert not list((tmp_path / "private").rglob("review-capture-*"))
+
 
 async def test_run_rejects_head_mismatch_on_real_worktree(
     monkeypatch: pytest.MonkeyPatch,
