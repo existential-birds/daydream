@@ -320,6 +320,11 @@ in the export, so a challenge can always record its verdicts. The export of an a
 review therefore always fits and installs, and no claim is lost after admission. No count
 bounds a review's claims beyond that; a batch still holds at most 128. A sealed result can
 therefore hold more than 128 claims and findings, which a reader on an older release rejects.
+The `deep` flow's `--findings-out` artifact is another export: it also carries run
+information, warnings, the review context and diagrams, which this bound does not count.
+Its writer drops review context to fit 1 MiB but nothing else, so a review whose claims
+nearly fill the bound can fail to write it; the sealed result and the report keep every
+finding.
 
 All work draws on one [budget ledger](#budget-ledger) for the review window; each
 dispatch runs on its own child ledger carved from it, so parallel siblings never share a
