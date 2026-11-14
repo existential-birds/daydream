@@ -65,6 +65,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** one reviewer serves every route. `daydream`, `--review`, `--comment`,
+  `--findings-out`, selected fixing (`--fix`), embedded `runner.run` and the packaged bot
+  producer now run the [committed-review program](docs/runtime.md#committed-review-requestresult)
+  as the `review` step of the `deep` flow; it writes the canonical items and coverage that
+  posting, the findings export, capture, diagrams, the embedded result callback and the fix
+  cycle already read, plus `.daydream/committed-review.json`. Findings schema 2, the dataset
+  record and the embedded callback keep their formats. What changes for callers
+  ([#1641](https://github.com/existential-birds/daydream/issues/1641)):
+  - Findings carry no `severity`, `confidence`, `lens`, `evidence` or `related_files`.
+    `--approve-on-clean` approves only a complete review with no findings: a finding
+    without severity withholds approval on every route. A fix may no longer create a
+    file the reviewer named; the fix footprint is the reviewed change and the finding's file.
+  - A finding's line is carried only when a new-side source reference of its file covers
+    it. A location that only the old side has is placed on the file, with its text intact.
+  - Exit status: a review whose analysis is `failed` (no usable evidence, or an unusable
+    findings projection) exits 1 on review, comment, fixing and findings export, after its
+    report, notice or artifact has been published. An `incomplete` review keeps exit 0 and
+    says what was not finished.
+  - `--shallow`, `--stack`, `--precision`, `--latency-profile`, `--no-review-cache` and
+    `--start-at` are usage errors that say what replaces them; the same values on an
+    embedded `RunConfig` are refused before any work. Every review starts fresh. Repository
+    settings only the replaced reviewer read (`precision_mode`, `latency_profile`,
+    `shallow_fanout_threshold`, `deep_shard_*`, `review_cache_*` and the `intent`, `merge`,
+    `parse`, `per_stack_review`, `supervise`, `suppression` and `wonder` phase tables) are
+    named in one warning and ignored.
+  - The findings supervisor (`supervisor = "rules"` or `"llm"`) is refused before any work
+    until the setting is removed; an extension step in the `deep` flow can rewrite the
+    canonical items instead.
+  - The pull request description reaches the reviewer as untrusted context and never
+    overrides a finding. A description over the context bound is cut to the longest prefix
+    that fits, with an in-text marker saying how many bytes were kept. Embedder-supplied
+    `frozen_author_description` over the bound, or frozen for another head than the
+    approved one, is refused before any work.
+  - A review whose review or arbiter backend serves no native host tools (Osprey) is
+    refused before any work.
+  - Extension API 10: the staged review phases are no longer registered, so a flow that
+    names one fails before any work, and only the `deep` flow plans the `review` phase.
+    Insert steps into `deep` with `set_flow`; review profiles carry strategy text, budgets
+    and the assignment policy.
+  - The artifact dump no longer contains per-stack records, intent or alternatives files,
+    and does not include `committed-review.json`.
+
 - Trace agent spans record each retry-ladder stop as a `daydream.retry.stop` event carrying
   the trajectory's `agent_budget_stop` fields as `daydream.retry.*`, with or without a
   trajectory recorder. The run span carries the run's GitHub repository and, when known,

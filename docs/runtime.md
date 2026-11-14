@@ -23,7 +23,9 @@ prove correspondence, not understanding, reads, or executed checks.
 Publish findings and typed coverage atomically, bound to the captured run, head,
 merge base, diff key, and scope inventory. Preserve admitted partial findings and
 failure reasons. Incomplete/failed results can post COMMENT notices but cannot
-approve or resolve stale threads. When a complete review with no findings has
+approve or resolve stale threads. A `failed` analysis exits 1 on review, comment,
+fixing and findings export, after its report, notice or artifact is published; an
+`incomplete` analysis exits 0 and names what was not finished. When a complete review with no findings has
 nothing else to post and approval is not enabled, it posts a COMMENT saying it is
 complete if the latest Daydream review on its head or an ancestor, by the same login
 and carrying the Daydream footer, is such a notice. Earlier reviews are never
