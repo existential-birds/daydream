@@ -140,7 +140,7 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         "--non-interactive",
         action="store_true",
         help="Run without prompting; take each prompt's safe default "
-             "(confirm intent, decline fixes, exit the test/heal loop)."
+             "(confirm intent, exit the test/heal loop)."
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(

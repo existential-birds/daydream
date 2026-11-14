@@ -113,7 +113,7 @@ def _live_deep_dir(artifact_runtime_root: Path) -> Path:
 def _shallow_pr_config(make_config: Callable[..., "RunConfig"], project: Path, **overrides: object) -> "RunConfig":
     """Shallow PR-process config for the remote-CI tests, shared defaults seeded."""
     kwargs: dict[str, object] = {
-        "stack": "python", "quiet": True, "shallow": True, "assume": "yes",
+        "stack": "python", "quiet": True, "output_mode": "loop", "shallow": True, "assume": "yes",
         "archive": True, "test_command": "true", "pr_number": 7, "pr_repo": "base-user/project",
     }
     kwargs.update(overrides)

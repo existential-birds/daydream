@@ -26,6 +26,7 @@ from tests.deep_orchestrator.support import (
 from tests.harness.fake_gh import FakeGh
 from tests.harness.review_result import merge_result, saved_coverage
 from tests.test_deep_orchestrator import (
+    _force_interactive,
     _install_stub_backend,
     _pin_findings_pr,
     _prime_merge_resume,
@@ -282,6 +283,7 @@ def test_diff_changed_files_handles_modify_add_delete_binary() -> None:
 
 async def test_resume_fix_skips_pr_post(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _silence(monkeypatch)
+    _force_interactive(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
 
     post_calls: list[dict[str, Any]] = []

@@ -56,3 +56,8 @@ async def test_posting_aborts_when_owner_repo_undeterminable(
     assert "Cannot determine owner/repo" in out
     assert not mock_mint.called
     assert fake_gh.process_calls() == []  # no gh request can fall back to ambient authentication
+
+    # A deep-flow review posts nothing, so the same checkout needs no installation token.
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: _minimal_backend())
+    review = RunConfig(target=str(feature_branch_repo), non_interactive=True, flow_name="deep", archive=False)
+    assert await run(review) == 0

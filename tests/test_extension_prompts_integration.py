@@ -21,13 +21,16 @@ from tests.harness.improve_backend import (
     improve_artifact,
     install_capable_improve_backend,
 )
+from tests.harness.stub_backend import force_interactive, silence
 
 
 async def test_shallow_without_skill_keeps_detected_language_skill(
     feature_branch_repo: Path, make_config: Callable[..., RunConfig], install_backend: Callable[[object], object],
-    mute_side_effects: Callable[..., None],
+    mute_side_effects: Callable[..., None], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Shallow review without --stack retains detected Python scope and emits no skill token."""
+    silence(monkeypatch)
+    force_interactive(monkeypatch)
     backend = ScriptedBackend(
         events=(TextEvent(text="Intent and review complete."),
                 ResultEvent(structured_output={"issues": []}, continuation=None))
@@ -35,7 +38,7 @@ async def test_shallow_without_skill_keeps_detected_language_skill(
     install_backend(backend)
     mute_side_effects("daydream.deep.fix_steps")
 
-    rc = await runner.run(make_config(feature_branch_repo, shallow=True))
+    rc = await runner.run(make_config(feature_branch_repo, output_mode="loop", non_interactive=False, shallow=True))
 
     assert rc == 0
     per_stack = [p for p in backend.prompts if "python" in p]

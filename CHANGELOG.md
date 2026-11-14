@@ -135,6 +135,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `timing` replaces `compute_timing_summary(write_snapshot)`
   ([#1714](https://github.com/existential-birds/daydream/issues/1714),
   [#1785](https://github.com/existential-birds/daydream/pull/1785)).
+- **Breaking (0.y.z):** A review ends with findings unless fixing is selected.
+  `daydream <target>` is now the report-only review that `--review` selects, and
+  `RunConfig.output_mode` defaults to `"review"`. `daydream .` and `daydream --yes .` no
+  longer apply fixes. To migrate, add `--fix` (`daydream --fix .`, or
+  `daydream --fix --yes .` for an unattended run); embedded callers pass
+  `output_mode="loop"`. An embedded caller that relied on the old default now gets a
+  review that exits 0, with or without `assume="yes"`. Flags that act on a fixing run are
+  usage errors without `--fix`, and each error names what to use: `--yes`, `--start-at`
+  and a bare `--shallow`. A custom `--flow` keeps `--yes` and `--start-at`; an explicit
+  `--review`, `--comment` or `--diagram-only` still accepts and ignores `--shallow`, as
+  before. `--flow shallow` is a usage error (use `--fix --shallow`); `--flow deep` is now
+  the default review and rejects `--yes` and `--start-at` (use `--fix`). An embedded
+  `flow_name="shallow"` or `shallow=True` without `output_mode="loop"` is a full
+  multi-stack review. A review cannot be resumed into fixing: to fix what a review
+  reported, rerun with `--fix`. A fixing request that could only end as a review used to
+  exit 0 and is now refused: `--fix --non-interactive` without `--yes`, `--fix` with
+  `--findings-out` and `--flow` with `--fix` are usage errors, and the runner returns 1
+  before any work for `output_mode="loop"` whose fix gate cannot be confirmed (no
+  terminal, `CI` set or `non_interactive` without `assume="yes"`, or `assume="no"`) or
+  that also sets `flow_name="review"` or `findings_out`. On the base branch a default run
+  no longer stops with the Wrong Branch error, which now binds a selected fixing run
+  only: it reviews the local changes, and with none it prints "No diff found -- nothing
+  to review" and exits 0, as a selected fixing run with no diff now also does. A selected
+  fixing run's gates, `--comment`, `--diagram-only`, `--findings-out` exports and the
+  packaged workflows behave as before. Improve and custom flows run as before with two
+  differences in what is recorded and prepared: the `daydream.output_mode` trace
+  attribute and a custom step's `config.output_mode` read `review` instead of `loop`
+  unless the caller sets a mode, and a caller that explicitly passes a non-fixing mode to
+  one of them now records `review_only` as false and, for a custom flow, gets its `.env`
+  and `--copy` files in an operational worktree. The recorded `deep` label is now false
+  only when the single-stack fixing mode ran, so a review requested with `--shallow` is
+  recorded as the full review it runs; see
+  [fixing selection](docs/runtime.md#validation-and-repair)
+  ([#1641](https://github.com/existential-birds/daydream/issues/1641)).
 - **Breaking (0.y.z):** Time and tool-call budgets live on one host ledger per
   budget owner: an absolute deadline plus one charged tool-call count
   (`daydream.review_budget.BudgetLedger`, which replaces `ReviewInvestigationBudget`).
