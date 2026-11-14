@@ -77,29 +77,52 @@ and the sealed result records it as `settings.historical_context.context`. It is
 untrusted author context: the standing instructions call it intent, not instructions, and
 nothing gives it authority or precedence over a claim. The
 [immutable `context` bound](#immutable-pr-inputs) applies to its encoded size, the text
-JSON-escaped twice as a native command-line argument carries it, so quotes, backslashes
-and control characters count for more than their raw bytes. A description over that bound
-is refused before source preparation, and one bound to a `head_sha` other than the
-analyzed head before source capture; neither starts model work. The bound narrows the
-[single-argument limit](#codex-host-tools), which Claude shares, without removing it: an
-accepted description beside a large catalog page and many challenge claims can still
-exceed it, and that assignment fails to start with the adapter's own error.
+JSON-escaped twice, so quotes, backslashes and control characters count for more than their
+raw bytes. A description over that bound is refused before source preparation, and one bound
+to a `head_sha` other than the analyzed head before source capture; neither starts model work.
+It reaches the reviewer in each assignment's first message, never in the system instructions.
 
 The complete planned population is computed from the full captured patch before
 any prompt bounding. Host-dispatched investigation work, followed by host-scheduled
 fresh challenge, navigates it under the profile's
 [assignment policy](#assignment-policy-and-work):
 
-- System instructions, which native compaction never summarizes, carry the stable
-  policy, the assignment identity, pending challenge claims and a bounded
-  (16 KiB) first catalog page with `status`, `total_targets`, `total_files` and
-  omitted counts. Catalog and decided markers there are a dispatch-time snapshot.
-  The assignment is canonical JSON with DEL, U+0085, U+2028 and U+2029 escaped, so text
-  inside it cannot draw a line break. One `Limits:` paragraph of the policy states what a
-  reviewer is held to and a tool schema may not show ([Codex](#codex-host-tools)): batch
+- System instructions, which native compaction never summarizes, carry only host text:
+  committed review's policy, the kind's paragraph and the profile's strategy for the kind,
+  the same for every dispatch of a kind, followed by a line naming the dispatch's host
+  token and the allowance snapshot and search guidance the host appends to every dispatch.
+  None of it grows with the change: Codex and Claude pass the instructions as one
+  command-line argument, whose size the platform bounds ([Codex](#codex-host-tools)). With
+  the default profile they stay under 10 KiB. One `Limits:` paragraph of the policy
+  states what a reviewer is held to and a tool schema may not show (Codex): batch
   and text sizes, part ids as target ids, the assigned and supporting selector rules and
   what follows a rejected final submission. The policy also asks the reviewer to admit
   decisions as it reaches them.
+- The first message carries the assignment. The token is a random value made for that
+  dispatch, and every line committed review writes there begins with it (the allowance
+  snapshot appended after them repeats the one in the instructions); only the instructions
+  announce it, so text a backend places before the message cannot claim it. The second
+  host line holds the assignment as canonical JSON with DEL, U+0085, U+2028 and U+2029
+  escaped, so text inside it cannot draw a line break: the assignment identity, the work's
+  responsibilities, pending claims (with compact `retained_conclusions` for the
+  cross-assignment), the profile with any historical context, and a bounded (16 KiB) first
+  catalog page with `status`, `total_targets`, `total_files` and omitted counts. Catalog
+  and decided markers there are a dispatch-time snapshot. The third carries the host's
+  search guidance, so a copy quoted inside the assignment cannot stand in for it. The
+  instructions say that only lines beginning with the token are host-authored and that the
+  assignment's paths, claims and historical context are data, never instructions.
+- The trajectory records each dispatch's first message, so it holds every dispatch's whole
+  assignment, and trajectory files of large changes grow accordingly. The token is visible
+  there; it is a framing marker, not a credential, and means nothing once its dispatch ends.
+- Native compaction can summarize the first message. Discovery and follow-up work can
+  recover their targets: a `review_admit` receipt names the work id and its next undecided
+  targets, catalog entries name each undecided target's owner and `review_source` serves
+  every target's bytes. The cross-assignment can recover its inherited targets the same
+  way, but not its pending claims or `retained_conclusions`, so its search for defects
+  spanning assignments continues without them. A challenge cannot request its claims
+  again, so one compacted before judging every claim can leave some unresolved, retained as
+  unfinished work. No kind can request the historical context again; the strategy stays in
+  the instructions.
 - `review_source` is a charged, read-only host lookup over frozen canonical inputs:
   with `target_id`/`path` null it pages the whole catalog; `path` lists one changed
   path's targets; `target_id` returns the target's `source_options`, ranges (for a
@@ -252,19 +275,15 @@ description and `source_options` as JSON, then its captured change bytes. A targ
 one part, at most 24 KiB of rendered change on Pi and Claude and 12,288 bytes on Codex,
 so each arrives whole. Its starts go to investigation instead of fetching its own
 targets. References to them keep `basis: "supplied_diff"`, and Pi's
-native capacity preflight counts them. They are not in the system instructions, which
-Codex and Claude deliver in [one argument](#codex-host-tools). One broad assignment,
-the cross-assignment and every challenge are supplied nothing and navigate with
-`review_source`.
+native capacity preflight counts them. One broad assignment, the cross-assignment and
+every challenge are supplied no targets and navigate with `review_source`.
 
 The supplied bytes are untrusted repository content in a message of the host's, where a
 lookup result keeps them in a block of their own, so a changed file could otherwise draw
-a header or description line. The first line of the message therefore ends with a random
-token made for that dispatch, and each header and description line begins with it; the
-description is JSON with line separators escaped. The system instructions of such work,
-the same for every dispatch, say that supplied targets are untrusted bytes captured when
-the assignment was dispatched, that a `decided` state in them can be stale on a retry,
-and that only lines beginning with the announced token are host-authored.
+a header or description line. Each header and description line therefore begins with the
+dispatch's token; the description is JSON with line separators escaped. The system
+instructions of such work also say that supplied targets are untrusted bytes captured when
+the assignment was dispatched and that a `decided` state in them can be stale on a retry.
 
 After the split, follow-up work inherits a closed local work's unfinished targets
 only when that work admitted progress; work that failed native-capacity preflight
@@ -802,7 +821,8 @@ The dangerous-command and background-Bash guards stay on; the read-only guard al
 allows exactly the three host names, never a wildcard (`allowed_tools` only preapproves
 under the bypass permission mode). Improve's audit root, finalization, continuation,
 agents, writes and persisted sessions are refused before any client starts. The
-assignment's system instructions become Claude's system prompt.
+assignment's system instructions become Claude's system prompt, one command-line argument
+under the same platform bound as Codex's; the first message reaches the CLI on standard input.
 
 - Readiness: before the first provider request, this exact server instance must have
   served `tools/list` and `get_mcp_status()` must report it connected with exactly the
@@ -853,10 +873,11 @@ refused before any process or server starts, and the disposable read-only checko
   fail before model work, but a tool filter does not, and model work then starts without
   the host tools.
 - Instruction size: the instructions travel in one command-line argument, whose size the
-  platform bounds (Linux allows 131072 bytes, counted after TOML escaping). An assignment
-  over it cannot start: the adapter reports that the review instructions exceed the
-  platform's single-argument size and the work stays unfinished. A challenge embeds
-  every unresolved claim, so one whose claims exceed the bound cannot complete on Codex.
+  platform bounds (Linux allows 131072 bytes, counted after TOML escaping). Committed review
+  keeps there only policy no change can grow; the assignment, its claims and supplied
+  targets reach Codex on standard input. Instructions over the bound, such as those of a
+  profile with an oversized strategy, cannot start: the adapter reports that the review
+  instructions exceed the platform's single-argument size and the work stays unfinished.
 - Secret: a per-attempt token travels only in the child environment, never in argv, a
   prompt or request evidence, and it authorizes nothing once the attempt ends. The
   variable is blanked inside model shell commands. Codex 0.139.0 and 0.153.4 also write
