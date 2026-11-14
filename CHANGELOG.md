@@ -301,9 +301,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Records: dataset records keep `provenance.latency_profile`, `latency_route` and
     `latency_routing` with null values, and `findings.claims` and `derivation` are
     empty. Archive rows carry no latency profile and empty per-lens and stack metrics.
-    A run whose provider fails after the reviewer accepted a submission is recorded with
-    outcome `success` and incomplete coverage, where it used to be recorded as `failed`;
-    read the terminal coverage for the analysis state.
+    The recorded outcome follows the exit status. A provider failure after the reviewer
+    accepted a submission now ends as an incomplete review that exits 0 and is recorded
+    as `success` with incomplete coverage, where the staged reviewer raised and recorded
+    `failed`; read the terminal coverage for the analysis state. A run that cannot
+    publish because its source directory was lost or replaced exits 1 and is recorded as
+    `failed`.
   - Tools: `python -m daydream.eval.latency_report` and the two staged-reviewer
     measurement scripts are deleted with their notes.
   - The staged pipeline's preflight notice (agent count and stages) and the

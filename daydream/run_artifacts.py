@@ -360,6 +360,12 @@ def _finalize_run_artifacts(
     from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
 
     outcomes = run_artifacts.outcomes
+    # Publication to a lost or replaced source fails after capture and ends the run non-zero,
+    # so the record captured below must not report that run as successful.
+    try:
+        run_artifacts.session.validate_source()
+    except ArtifactVisibilityError:
+        successful = False
     if config.dataset_capture:
         outcomes.capture = "not attempted"
         if config.trajectory_hub_repo:

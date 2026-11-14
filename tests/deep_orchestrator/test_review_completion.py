@@ -361,7 +361,8 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
     if fault == 'source-loss':
         assert not review.repo.exists() and 'artifact source is unavailable' in panel
         raw = read_records(LocalRecordStore(review.tmp / 'records')).runs
-        assert len(raw) == 1 and raw[0]['outcome'] == 'success'
+        # The run exits 1 because its source is gone, so its record cannot say it succeeded.
+        assert len(raw) == 1 and raw[0]['outcome'] == 'failed'
         assert raw[0]['completeness']['terminal_review'] == 'available'
         findings = raw[0]['findings']['value']
         assert [item['description'] for item in findings['items']] == ['Grounded defect']
