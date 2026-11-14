@@ -290,12 +290,14 @@ only when that work admitted progress; work that failed native-capacity prefligh
 without progress is split in two instead. The host then always dispatches one
 `cross_assignment` work over the original captured source and full catalog, even when
 local work found nothing. It inherits every unfinished target and searches for defects
-spanning assignments. Its `retained_conclusions` hold a summary of each claim (uid,
-revision, title, file, line, disposition and originating work) and a row per local work,
-each as a page of the first 256 with `claims_omitted` and `work_omitted` counts; no claim
-travels in full, so this first message stays bounded however many claims discovery
-admitted. It cannot revise retained claims and names them only as `source_uids` of new
-ones. With one broad assignment the `cross_assignment` phase is a recorded host no-op.
+spanning assignments. Its `retained_conclusions` are one bounded page: a summary of each
+claim (uid, revision, title, file, line, disposition and originating work) for as many
+claims as fit 16 KiB, as the catalog page is bounded, and a row for each of the first 256
+local works, with `claims_omitted` and `work_omitted` counting the rest. No tool returns a
+later page or a claim's text, and its instructions say so. This first message therefore
+stays bounded however many claims discovery admitted and however long their titles. It
+cannot revise retained claims and names them only as `source_uids` of new ones. With one
+broad assignment the `cross_assignment` phase is a recorded host no-op.
 
 Review keeps one host-owned record per work (result `work`: `work_id`, `kind` of
 `discovery`/`follow_up`/`cross_assignment`/`challenge`, `parents`, `state`, `targets`,

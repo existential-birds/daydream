@@ -398,11 +398,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversation per four planned batches of the claims' files, split again at 64 KiB of
   claims so each fits Pi's capacity preflight, concurrently under the existing fan-out
   bound on equal shares of the challenge allowance; a review with one such group keeps a
-  single challenge. The cross-assignment receives claim summaries (title, file, line) and
-  work rows as pages of 256 with omitted counts instead of every pending claim in full.
+  single challenge. The cross-assignment receives one bounded page instead of every pending
+  claim in full: summaries (title, file, line) of the claims that fit 16 KiB and rows for up
+  to 256 local assignments, with counts of the rest, which no tool returns.
   What users lose: large reviews run more challenge conversations and cost more (about 25
   on a change of 400 files); the cross-assignment no longer sees each claim's text and
-  names at most 256 claims and assignments; a review retains at most what its findings
+  names only the claims that fit its page (about 60 of typical size) and at most 256
+  assignments; a review retains at most what its findings
   export holds (about 470 claims of typical size, fewer with a long pull request
   description or on a very large change) and refuses the rest at discovery; a reader
   on an older release rejects a sealed result with more than 128 claims

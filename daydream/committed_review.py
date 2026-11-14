@@ -761,16 +761,22 @@ class Review:
                         "omitted": max(0, len(work.targets) - _RESPONSIBILITY_PAGE)},
         }
         if work.kind == "cross_assignment":
-            claims = [{"uid": c["uid"], "revision": c["revision"], "title": c["title"],
-                       "file": c["payload"]["file"], "line": c["payload"]["line"],
-                       "disposition": c["disposition"], "work_id": c["work_id"]}
-                      for c in self._claims.values()]
+            claims: list[dict[str, Any]] = []
+            size = 2
+            for c in self._claims.values():
+                summary = {"uid": c["uid"], "revision": c["revision"], "title": c["title"],
+                           "file": c["payload"]["file"], "line": c["payload"]["line"],
+                           "disposition": c["disposition"], "work_id": c["work_id"]}
+                size += len(canonical_json(summary).encode()) + 1
+                if claims and size > CATALOG_PAGE_MAX_BYTES:
+                    break
+                claims.append(summary)
             rows = [{"work_id": w.work_id, "kind": w.kind, "targets": len(w.targets),
                      "admitted_targets": len(w.admitted_targets), "admitted_claims": len(w.admitted_claims),
                      "unfinished_targets": len(self.leftovers(w.work_id)[0])}
                     for w in self.work.values() if w.kind in {"discovery", "follow_up"}]
             context["retained_conclusions"] = {
-                "claims": claims[:_RESPONSIBILITY_PAGE], "claims_omitted": max(0, len(claims) - _RESPONSIBILITY_PAGE),
+                "claims": claims, "claims_omitted": len(self._claims) - len(claims),
                 "work": rows[:_RESPONSIBILITY_PAGE], "work_omitted": max(0, len(rows) - _RESPONSIBILITY_PAGE),
             }
         return context
@@ -924,8 +930,11 @@ _KIND_INSTRUCTIONS = {
                         "Actively search the original captured source for defects that span assignments "
                         "(interfaces, callers, shared state, configuration and invariants crossing files), even if "
                         "every local assignment reported nothing. retained_conclusions are model assertions, not "
-                        "evidence; reread source. Report spanning defects as new claims (source_uids may name "
-                        "retained predecessors they combine) and decide any inherited unfinished targets.\n",
+                        "evidence; reread source. They are one bounded page: claims summarizes retained claims (title, "
+                        "file and line, not their text) and work the local assignments, as many as fit; claims_omitted "
+                        "and work_omitted count the rest, which no tool returns. Report spanning defects as new claims "
+                        "(source_uids may name retained predecessors they combine) and decide any inherited unfinished "
+                        "targets.\n",
 }
 _ASSIGNMENT_INSTRUCTIONS = (
     "\nAssignment: a line below names this dispatch's host token. In the first message only lines that begin "
