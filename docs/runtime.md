@@ -567,7 +567,9 @@ path/side/LF ranges; the host constructs canonical `evidence_refs` from the full
 assignment inventory and pinned regular Git blobs with the same admission code for
 all backends. Exact continuation fragments retain their null source ranges and
 are cited as fragments, never by a continuation range; an assigned range may only
-narrow its offered range. Supporting attribution cannot satisfy assigned coverage.
+narrow its offered range. Supporting attribution cannot satisfy assigned coverage. A
+supporting selector names a regular UTF-8 file of any size up to the 8 MiB source
+retrieval limit; its reference retains the whole file's digest and none of its bytes.
 Correspondence is never proof of a read, understanding or an executed check.
 Pi submits through its bound host tool and corrects rejected selectors within the
 conversation (below). Other backends return selectors once as final structured

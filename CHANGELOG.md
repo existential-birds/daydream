@@ -375,6 +375,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - One committed-review rejection now names every distinct violation in the batch, within
   the 1,024-byte rejection bound, instead of the first one only, and names an unknown
   `target_id` ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+- A supporting `{path, side, source_range, basis}` selector is no longer refused because
+  its whole file exceeds 65,536 bytes, a rule nothing stated to the reviewer. The existing
+  8 MiB source retrieval limit still applies, and the retained reference is unchanged: the
+  whole file's digest and the cited range
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
 - Committed review no longer rejects a reviewed target submitted with empty
   `evidence_refs` when the target has more than four sources. The host expanded `[]` to
   every source of the target and then refused its own expansion ("supply at most four

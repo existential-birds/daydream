@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from daydream.git_ops.captured_source import CapturedSource
 
 SOURCE_REFS_MAX_BYTES = 8192
-_SUPPORTING_SOURCE_MAX_BYTES = 64 * 1024
 _DIGEST = {'type': 'string', 'pattern': '^[0-9a-f]{64}$'}
 _RANGE = strict_object({key: {'type': 'integer', 'minimum': 1} for key in ('start', 'end')})
 _FRAGMENT = strict_object({
@@ -82,7 +81,6 @@ def _source_contents(root: Path, revision: Mapping[str, Any], side: str, path: s
 @dataclass(frozen=True)
 class _SupportingFacts:
     digest: str
-    size: int
     lines: int
     utf8: bool
 
@@ -95,7 +93,7 @@ def _supporting_facts(root: Path, revision: Mapping[str, Any], side: str, path: 
         utf8 = True
     except UnicodeDecodeError:
         utf8 = False
-    return _SupportingFacts(_sha(contents), len(contents),
+    return _SupportingFacts(_sha(contents),
         contents.count(b'\n') + int(bool(contents) and not contents.endswith(b'\n')), utf8)
 
 
@@ -219,13 +217,8 @@ def canonicalize_source_selectors(
                 except (FrozenSourceRejected, PathAbsentError) as exc:
                     raise HostToolRejected(
                         f'{field}: no available regular blob at the pinned revision; choose a regular file '
-                        f'on this side within {_SUPPORTING_SOURCE_MAX_BYTES} whole-blob bytes, '
+                        'on this side within the captured-source retrieval limit, '
                         'use an assigned source_id, or remove this optional supporting selector.') from exc
-                if facts.size > _SUPPORTING_SOURCE_MAX_BYTES:
-                    raise HostToolRejected(
-                        f'{field}: the whole pinned blob is {facts.size} bytes, above '
-                        f'{_SUPPORTING_SOURCE_MAX_BYTES}; narrowing source_range cannot reduce this whole-blob '
-                        'limit. Use an assigned source_id or remove this optional supporting selector.')
                 if not facts.utf8:
                     raise HostToolRejected(
                         f'{field}: the whole pinned blob is not UTF-8 text; choose a UTF-8 regular file '
@@ -421,7 +414,6 @@ def validate_source_refs(refs: Any, expected_refs: Iterable[dict[str, Any]], *, 
             return False
         bounds = ref['source_range']
         line_count = facts.lines
-        if (facts.size > _SUPPORTING_SOURCE_MAX_BYTES or ref['artifact_sha256'] != facts.digest
-                or not 1 <= bounds['start'] <= bounds['end'] <= line_count):
+        if ref['artifact_sha256'] != facts.digest or not 1 <= bounds['start'] <= bounds['end'] <= line_count:
             return False
     return assigned or not require_assigned
