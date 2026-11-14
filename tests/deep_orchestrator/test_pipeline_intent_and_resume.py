@@ -31,7 +31,7 @@ async def test_pr_body_reaches_the_reviewer_as_bounded_untrusted_context(
     async def delivered() -> tuple[str, list[str]]:
         stub.calls.clear()
         assert await run(make_config(multi_stack_target, pr_number=7)) == 0
-        sealed = json.loads((multi_stack_target / ".daydream/committed-review.json").read_text())
+        sealed = json.loads((multi_stack_target / ".daydream/deep/committed-review.json").read_text())
         return sealed["settings"]["historical_context"]["context"], [
             call["review_instructions"] for call in stub.calls if call.get("review_instructions")]
 

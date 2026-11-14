@@ -207,8 +207,10 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
     if "source_integrity" in {entry["assignment"] for entry in sealed["execution"]}:
         print_warning(console, 'Captured source integrity failed; rerun the review.')
     atomic_write_json(DeepArtifact.REVIEW_COVERAGE.at(state.dd), coverage.to_dict())
+    # Under ``deep/``, a registered public directory: a top-level file would be an unknown public
+    # name that refuses the next run, on this build and on an earlier one, once its private proof is gone.
     write_committed_review_output(ctx.artifacts, sealed, report_path=DeepArtifact.MERGED_REPORT.at(state.dd),
-                                  result_path=state.dd.parent / "committed-review.json")
+                                  result_path=state.dd / "committed-review.json")
     ctx.data["terminal_review_result"] = result
     ctx.data['terminal_review_items'] = items
     ctx.data['terminal_review_held'] = held

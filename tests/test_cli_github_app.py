@@ -212,7 +212,7 @@ def test_cli_requested_branch_ignores_current_checkout_pr(
 
     assert json.loads(output.read_text())["extra"]["pr_number"] == 73
     # The sealed review, not the fake, attests which commit discovery and its fresh challenge analyzed.
-    sealed = json.loads((repo / ".daydream/committed-review.json").read_text())
+    sealed = json.loads((repo / ".daydream/deep/committed-review.json").read_text())
     assert sealed["analyzed_revision"]["head_sha"] == requested_head
     assert [entry["assignment"] for entry in sealed["execution"]] == ["discovery", "challenge"]
     assert sealed["terminal_result"]["analysis_state"] == "complete"

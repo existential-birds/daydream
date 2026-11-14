@@ -174,8 +174,10 @@ and `capture_state` report installation and trajectory independently. Admission,
 native settlement/cleanup, completeness, output, capture and delivery are separate.
 Explicit unsupported exports fail before dispatch. Immutable PR exports use the
 same artifact session as described below. The ordinary CLI, embedded and bot
-routes run this program as the review step of the `deep` flow; external delivery
-remains separate integration work.
+routes run this program as the review step of the `deep` flow and write its sealed
+result to `.daydream/deep/committed-review.json`, where the archive and
+`--dump-artifacts` retain it; `run_committed_review` keeps publishing
+`.daydream/committed-review.json`. External delivery remains separate integration work.
 
 ### Assignment policy and work
 

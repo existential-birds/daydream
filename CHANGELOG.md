@@ -70,7 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   producer now run the [committed-review program](docs/runtime.md#committed-review-requestresult)
   as the `review` step of the `deep` flow; it writes the canonical items and coverage that
   posting, the findings export, capture, diagrams, the embedded result callback and the fix
-  cycle already read, plus `.daydream/committed-review.json`. Findings schema 2, the dataset
+  cycle already read, plus `.daydream/deep/committed-review.json`. Findings schema 2, the dataset
   record and the embedded callback keep their formats. What changes for callers
   ([#1641](https://github.com/existential-birds/daydream/issues/1641)):
   - Findings carry no `severity`, `confidence`, `lens`, `evidence` or `related_files`.
@@ -106,8 +106,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     names one fails before any work, and only the `deep` flow plans the `review` phase.
     Insert steps into `deep` with `set_flow`; review profiles carry strategy text, budgets
     and the assignment policy.
-  - The artifact dump no longer contains per-stack records, intent or alternatives files,
-    and does not include `committed-review.json`.
+  - The artifact dump and the archive no longer contain per-stack records, intent or
+    alternatives files. Both retain the sealed result as `deep/committed-review.json`; the
+    dataset record does not carry it.
 
 - Trace agent spans record each retry-ladder stop as a `daydream.retry.stop` event carrying
   the trajectory's `agent_budget_stop` fields as `daydream.retry.*`, with or without a
@@ -300,7 +301,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     files, the arbiter, suppression, dedup and adjudication files,
     `deep/latency-routing.json` and `.daydream/review-cache/`. Still written:
     `deep/merged-items.json`, `deep/review-coverage.json`, `deep/review-output.md`,
-    `deep/diff-key`, the report context and `committed-review.json`.
+    `deep/diff-key`, the report context and `deep/committed-review.json`.
   - Records: dataset records keep `provenance.latency_profile`, `latency_route` and
     `latency_routing` with null values, and `findings.claims` and `derivation` are
     empty. Archive rows carry no latency profile and empty per-lens and stack metrics.

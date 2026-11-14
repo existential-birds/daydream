@@ -62,7 +62,7 @@ async def test_extension_step_rewrites_items_before_the_review_is_sealed(
     assert await runner.run(make_config(multi_stack_target), review_result_handler=delivered.append) == 0
 
     (review,) = delivered
-    sealed = json.loads((multi_stack_target / ".daydream/committed-review.json").read_text())
+    sealed = json.loads((multi_stack_target / ".daydream/deep/committed-review.json").read_text())
     assert [finding["title"] for finding in sealed["findings"]] == ["Greeting drift", DROP_ME]
     assert review.terminal_result == sealed["terminal_result"] and review.terminal_result["projection_valid"]
     # Identity survives the rewrite; the embedded callback and the published items agree on what was kept.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -218,9 +219,36 @@ async def test_snapshot_boundaries(review: ReviewRun, fake_gh: FakeGh, case: str
 
 
 
-@pytest.mark.parametrize('fault', ['absent-install', 'prior-install', 'staging'])
-async def test_atomic_public_failure(review: ReviewRun, fault: str) -> None:
-    """A failed public install or staging leaves the destination absent or byte-identical to the prior export."""
+@pytest.mark.parametrize('fault', ['absent-install', 'prior-install', 'staging', 'later-run-moved-checkout',
+                                   'later-run-private-store-lost', 'later-run-sealed-result-touched'])
+async def test_atomic_public_failure(review: ReviewRun, fault: str, artifact_runtime_root: Path) -> None:
+    """A failed public install or staging leaves the destination absent or byte-identical to the prior export.
+
+    What one review publishes never refuses a later run in that checkout: not after the checkout moved,
+    the private store was lost, or the sealed result was rewritten in place.
+    """
+    if fault.startswith('later-run'):
+        assert await review.run() == 0
+        (sealed,) = (review.repo / '.daydream').rglob('committed-review.json')
+        first = json.loads(sealed.read_text())['run_id']
+        repo = review.repo
+        if fault.endswith('moved-checkout'):
+            repo = review.tmp / 'moved-checkout'
+            review.repo.rename(repo)
+            review.backend._target = repo
+        elif fault.endswith('private-store-lost'):
+            shutil.rmtree(artifact_runtime_root.parent)
+        else:
+            sealed.write_text(sealed.read_text() + '\n')
+        calls = len(review.backend.calls)
+        assert await review.run(target=str(repo)) == 0
+        assert len(review.backend.calls) > calls
+        (resealed,) = (repo / '.daydream').rglob('committed-review.json')
+        assert json.loads(resealed.read_text())['run_id'] != first
+        # Only a registered public name is published, so an earlier build meets nothing it would refuse either.
+        assert {path.name for path in (repo / '.daydream').iterdir()} <= {
+            'deep', 'runs', 'diff.patch', 'hunk-index.json'}
+        return
     if fault == 'prior-install':
         assert await review.run() == 0
     prior = review.output.read_bytes() if review.output.exists() else None

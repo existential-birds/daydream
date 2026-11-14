@@ -177,9 +177,11 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert recommended_text != diff_text
     assert "# daydream recommended change" in recommended_text
     assert "# daydream recommended change" not in diff_text
-    for filename in ("manifest.json", "trajectory.json", "diff.patch", "evaluation.json"):
+    # The sealed result lives beside the other deep artifacts, so the archive and the dump retain it.
+    for filename in ("manifest.json", "trajectory.json", "diff.patch", "evaluation.json", "deep/committed-review.json"):
         assert (dump_dir / filename).is_file()
         assert (dump_dir / filename).read_bytes() == (run_dir / filename).read_bytes()
+    assert json.loads((run_dir / "deep/committed-review.json").read_text())["run_id"] == manifest["session_id"]
     captured = read_records(store).runs[0]
     task = captured["original_task"]["value"]
     assert (task["analyzed_revision"]["head_sha"], task["analyzed_revision"]["merge_base_sha"]) == (
