@@ -262,7 +262,10 @@ def test_cli_requested_branch_ignores_current_checkout_pr(
     git(repo, "checkout", "requested")
     standalone = asyncio.run(run_committed_review(CommittedReviewRequest(
         repo, base, config=RunConfig(output_mode="review")))).to_dict()
-    assert {key: value for key, value in standalone["settings"].items() if key != "historical_context"} == {
-        key: value for key, value in sealed["settings"].items() if key != "historical_context"}
+    # Durations carved from the monotonic clock differ by rounding alone.
+    assert standalone["settings"]["limits"] == pytest.approx(sealed["settings"]["limits"])
+    unbound = {"historical_context", "limits"}
+    assert {key: value for key, value in standalone["settings"].items() if key not in unbound} == {
+        key: value for key, value in sealed["settings"].items() if key not in unbound}
     assert [(entry["assignment"], entry["allocation"]) for entry in standalone["execution"]] == [
         (entry["assignment"], entry["allocation"]) for entry in sealed["execution"]]
