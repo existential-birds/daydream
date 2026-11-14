@@ -36,7 +36,7 @@ def test_invalid_profiles_fail_closed_naming_field_and_source() -> None:
                "pipeline.arbitration_contested_location": "false", "pipeline.suppression_enabled": "false",
                "pipeline.suppression_severity_classes": '["low"]', "pipeline.suppression_confidence_classes": '["LOW"]'}
     strategies = ("intent", "alternatives", "discovery.per_stack", "discovery.structural", "suppression", "merge",
-                  "supervision")
+                  "supervision", "arbitration")
     every = "[pipeline]\n" + "".join(f"{key.split('.')[1]} = {value}\n" for key, value in removed.items()) + "".join(
         f'[strategies."{name}"]\ncontent = "x"\nsource = "authored: test"\n' for name in strategies)
     invalid += [(every, f"{key}: removed") for key in [*removed, *(f"strategies.{name}" for name in strategies)]]

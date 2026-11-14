@@ -229,7 +229,7 @@ Claude's SDK resolves its own authentication and user settings live; its opaque 
 covers only the selected model, effort and pinned SDK. Codex likewise keeps its own
 authentication and configuration live; its identity covers the selected model and effort.
 Investigation work takes the profile's `strategies."discovery.generic_fallback"` and challenge its
-`strategies.challenge` (never `strategies.arbitration`, which nothing reads); neither can disable host obligations.
+`strategies.challenge`; neither can disable host obligations.
 
 The run's artifact session stages the report then atomically writes the
 [versioned](#captured-local-source) `committed-review.json`: claims/challenge evidence, work records, typed coverage,
@@ -1011,8 +1011,9 @@ the options and settings of the staged reviewer it replaced select nothing.
   `arbitration_min_severity`, `arbitration_contested_location`, `suppression_enabled`,
   `suppression_severity_classes` and `suppression_confidence_classes`, and the strategies
   `intent`, `alternatives`, `discovery.per_stack`, `discovery.structural`, `suppression`,
-  `merge` and `supervision`. The packaged default carries none of them, so none counts in
-  a profile digest.
+  `merge`, `supervision` and `arbitration`. The packaged default carries none of them, so
+  none counts in a profile digest. A profile that sets `strategies.arbitration` to steer the
+  challenge is refused until the key is dropped; set `strategies.challenge` instead.
 
 No stored format is converted. A fresh review rebuilds its own `.daydream/deep/`
 working directory, as every fresh run did, so the previous run's files there are

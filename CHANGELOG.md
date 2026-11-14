@@ -385,7 +385,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `arbitration_contested_location`, `suppression_enabled`,
     `suppression_severity_classes` and `suppression_confidence_classes`, and the strategies
     `intent`, `alternatives`, `discovery.per_stack`, `discovery.structural`,
-    `suppression`, `merge` and `supervision`. The packaged default no longer carries them
+    `suppression`, `merge`, `supervision` and `arbitration`. A profile that sets
+    `strategies.arbitration` is refused until the key is dropped; steer the challenge
+    with `strategies.challenge`. The packaged default no longer carries them
     and the digest no longer covers them, so every profile's digest changes, the
     default's included, against 0.34.0 and earlier unreleased builds alike.
     `review_profile.Arbitration`, `Suppression`, `Pipeline`'s
@@ -547,9 +549,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   high-severity or contested findings, named tools some backends lack, and forbade the new
   claims a challenge may submit. The default profile has a new `strategies.challenge`
   entry that describes the challenge as it runs on every backend, and committed review reads
-  it. A profile that overrides `strategies.arbitration` no longer changes committed review's
-  challenge, and with the staged arbiter removed nothing reads that entry; override
-  `strategies.challenge` instead. The default profile's digest changes
+  it. A profile that sets `strategies.arbitration` is now refused (see the removal of the
+  staged reviewer above); override `strategies.challenge` instead. The default profile's
+  digest changes
   ([#1845](https://github.com/existential-birds/daydream/issues/1845)).
 - Committed review now delivers the challenged findings of a large change. Before, challenge
   verdicts counted against the same fixed capacity of 128 claims in 128 KiB that discovery

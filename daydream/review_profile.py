@@ -35,7 +35,7 @@ REMOVED_PROFILE_KEYS: frozenset[str] = frozenset({
         "suppression_confidence_classes")),
     *(f"strategies.{key}" for key in (
         "intent", "alternatives", "discovery.per_stack", "discovery.structural", "suppression", "merge",
-        "supervision")),
+        "supervision", "arbitration")),
 })
 
 
@@ -178,16 +178,6 @@ def build_default_profile() -> ReviewProfile:
                 "new one; each is challenged again."
             ),
             source="authored: #1845 committed review challenge",
-        ),
-        "arbitration": Strategy(
-            content=(
-                "You are the arbiter. The cheaper per-stack reviewers flagged the "
-                "high-severity and contested findings listed in {arbiter_input_path}. "
-                "Re-review each one against the actual code (Read/Grep/Bash) and the "
-                "diff. You are adjudicating their work, NOT starting a fresh review: do "
-                "not introduce findings that are not in the input list."
-            ),
-            source="copied: daydream.deep.prompts.build_arbiter_prompt",
         ),
         "verification": Strategy(
             content=(

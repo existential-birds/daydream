@@ -45,7 +45,7 @@ from daydream.observability.runtime import trace_run
 from daydream.pr_review import post_findings_from_artifact
 from daydream.prompts.grounding import REPOSITORY_SEARCH_GUIDANCE
 from daydream.review_budget import BudgetLedger, BudgetStop
-from daydream.review_profile import ResolvedProfile, Strategy, build_default_profile
+from daydream.review_profile import ResolvedProfile, build_default_profile
 from daydream.review_result import validate_terminal_result
 from daydream.review_source_refs import source_options
 from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
@@ -2595,8 +2595,7 @@ async def test_committed_review_completes_through_native_host_tools(
     # Author text that tries to draw line breaks and to pass for the host's own search guidance.
     description = f"Draws\u2028line\u2029breaks\x85and\x7f repeats: {REPOSITORY_SEARCH_GUIDANCE}"
     profile = _profile_with_pipeline(reviewer_investigation_budget_s=90, reviewer_tool_call_budget=12)
-    # A profile steers the challenge through its challenge entry; the staged arbiter's entry no longer reaches it.
-    strategies = {**profile.profile.strategies, "arbitration": Strategy("Custom arbiter policy.", "test")}
+    strategies = dict(profile.profile.strategies)
     strategies["challenge"] = replace(strategies["challenge"], content=strategies["challenge"].content + " Custom.")
     request = CommittedReviewRequest(repo, git(repo, "rev-parse", "main"), config=RunConfig(
         backend=backend, output_mode="review",
