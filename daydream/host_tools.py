@@ -299,9 +299,8 @@ class HostToolBinding:
         rejection = HostToolRejected(message, code=code)
         if self.budget.remaining_tool_calls == 0:
             if self.protected_submission and self._final_charged:
-                # The reserved start was charged for this submission: refund it so the rejection stays
-                # correctable, within the bound on denied starts. Calls a sibling spent are never refunded.
-                self._final_charged = False
+                # The reserved start was charged for the submission being judged: refund it so the
+                # rejection stays correctable, within the bound on denied starts.
                 self.denied_starts += 1
                 if self.denied_starts <= PROTECTED_DENIAL_LIMIT:
                     self.budget.refund(self.budget.charged - 1)
@@ -403,6 +402,8 @@ class HostToolBinding:
         """Synchronously accept once, immediately after the final authority/deadline check."""
         if self._accepted_identity is None:
             self._check_open()
+        # Until it matches an admitted final call, a submission has charged no start of its own.
+        self._final_charged = False
         key = self._arguments_key(arguments)
         if self._accepted_identity == (call_id, key):
             assert self._accepted_result is not None
@@ -412,6 +413,7 @@ class HostToolBinding:
             raise self._fatal("This invocation has already entered terminal acceptance", code="native_correlation")
         if not isinstance(call_id, str) or self._pending.pop(call_id, None) != key:
             raise self._fatal("Host callback has no matching completed native terminal call", code="native_correlation")
+        self._final_charged = True
         if schema_error := _submission_schema_error(arguments, self._schema):
             raise self._reject(schema_error)
         # All payload/identity checks precede this final synchronous boundary.
@@ -462,6 +464,7 @@ class HostToolBinding:
     def call(self, call_id: Any, name: Any, arguments: Any) -> dict[str, Any]:
         """Serve one charged nonterminal host tool exactly once for its admitted start."""
         self._check_open()
+        self._final_charged = False
         if self.possibly_accepted:
             raise self._fatal("This invocation has already entered terminal acceptance", code="native_correlation")
         if (not isinstance(call_id, str) or not isinstance(name, str)

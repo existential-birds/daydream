@@ -819,7 +819,7 @@ async def test_http_readiness_refuses_native_limits_or_host_schemas_before_provi
 
 
 @pytest.mark.parametrize("case", [
-    "protected", "denial-bound", "rejection-bound", "uncharged", "refunded", "unprotected"])
+    "protected", "denial-bound", "rejection-bound", "uncorrelated", "host-call", "unprotected"])
 async def test_http_parallel_batch_cannot_consume_the_protected_submission_start(case: str) -> None:
     """With 95 of 96 starts charged, a two-member batch is denied and submission stays possible.
 
@@ -830,7 +830,7 @@ async def test_http_parallel_batch_cannot_consume_the_protected_submission_start
     loops on denials forever, or changes the unprotected deep-review behavior. A final
     submission rejected on the reserved start used to be fatal, losing the whole batch;
     it is refunded and correctable under the same bound as the denials. That refund was
-    also given to a rejected submission that had charged no start, out of a sibling's calls.
+    also given to a rejection that was not the final submission's own.
     """
     installed: list[Any] = []
     invalid = {**_RESULT, "verdict": "invalid"}
@@ -839,14 +839,13 @@ async def test_http_parallel_batch_cannot_consume_the_protected_submission_start
             raise HostToolRejected("verdict: choose complete")
         installed.append(value)
         return value
-    allowance = BudgetLedger("review", deadline=time.monotonic() + 10, limit=96)
-    binding = HostToolBinding(budget=allowance.carve("assignment"), accept=accept,
+    binding = HostToolBinding(budget=BudgetLedger("review", deadline=time.monotonic() + 10, limit=96), accept=accept,
                               host_tools={"review_source": HostTool(_LOOKUP_SCHEMA, lambda value: value)},
                               protected_submission=case != "unprotected")
     async with _endpoint(binding) as client:
         assert (await _ready(client))["ready"] is True
         for index in range(95):
-            binding.admit(f"read-{index}", "read", None)
+            binding.admit(f"read-{index}", "read" if index else "review_source", None)
         members = [(await client.post("/admit", json={"id": f"member-{name}", "name": name, "arguments": None})).json()
                    for name in ("read", "review_source")]
         if case == "unprotected":
@@ -862,18 +861,20 @@ async def test_http_parallel_batch_cannot_consume_the_protected_submission_start
         assert (binding.calls, binding.denied_starts, binding.budget.charged) == (97, 2, 95)
         assert binding.remaining_tool_calls == 1
         assert binding.capacity()["protected_submission_calls"] == 1 and binding.capacity()["denied_starts"] == 2
-        if case in {"uncharged", "refunded"}:
-            if case == "refunded":
-                # The binding's own rejected final submission is refunded once,
-                binding.admit("final", NATIVE_SUBMIT, invalid, terminal=True)
-                with pytest.raises(HostToolRejected, match="choose complete"):
-                    binding.submit("final", invalid)
-            # and when a sibling then takes the allowance's last start, a submission rejected without a
-            # charged final start of its own is refunded nothing: it ends as without a reserved start.
-            allowance.charge()
+        if case in {"uncorrelated", "host-call"}:
+            # Only a final submission's own start is refunded. One refused at its admission is,
+            with pytest.raises(HostToolRejected, match="Invalid structured_output arguments"):
+                binding.admit("unkeyable", NATIVE_SUBMIT, float("nan"), terminal=True)
+            assert (binding.remaining_tool_calls, binding.budget.refunded) == (1, 1)
+            # but while the next one is admitted and pending, a rejection that is not its own stays fatal
+            # and refunds nothing: a submission matching no admitted call, or an earlier host tool's call.
+            binding.admit("final", NATIVE_SUBMIT, invalid, terminal=True)
             with pytest.raises(HostToolFatal, match="no calls remain for correction"):
-                binding.submit("stray", float("nan"))
-            assert (binding.budget.charged, binding.budget.refunded, allowance.charged) == (95, case == "refunded", 96)
+                if case == "uncorrelated":
+                    binding.submit("stray", float("nan"))
+                else:
+                    binding.call("read-0", "review_source", {"undeclared": 1})
+            assert (binding.budget.charged, binding.budget.refunded) == (96, 1)
             return
         if case != "protected":
             # Denied starts and rejected final submissions share the one bound, whichever event passes it.
