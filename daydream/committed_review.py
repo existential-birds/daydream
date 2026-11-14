@@ -79,7 +79,7 @@ from daydream.review_result import (
     reason_for_budget,
     reason_for_exception,
 )
-from daydream.review_source_refs import _SubmissionSources, source_id
+from daydream.review_source_refs import SOURCE_SELECTORS_SCHEMA, _SubmissionSources, source_id
 from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
 from daydream.run_config import RunConfig, _resolved_backend_name
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
@@ -509,9 +509,10 @@ class Review:
                             raise HostToolRejected("targets.reason: explain unfinished work")
                         reviewed = target["status"] == "reviewed"
                         # A reviewed target without refs records its own assigned sources, up to the selector bound.
+                        options = self.assignments[self._index[identifier]]["source_options"]
                         selectors = target["evidence_refs"] or ([
                             {"source_id": option["source_id"], "basis": "supplied_diff", "source_range": None}
-                            for option in self.assignments[self._index[identifier]]["source_options"][:4]]
+                            for option in options[:SOURCE_SELECTORS_SCHEMA["maxItems"]]]
                             if reviewed else [])
                         target["evidence_refs"] = self._refs(sources, selectors, target=identifier,
                                                              required=reviewed)
