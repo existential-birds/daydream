@@ -367,21 +367,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A committed-review assignment that ends on a rejected final batch no longer loses the
   whole batch. When its work closes without an accepted final submission and that batch
   was the last one it submitted, the target decisions, verdicts and claims in it that are
-  valid on their own are retained, so the review is sealed `incomplete` with partial
-  evidence instead of losing them. Batches submitted while the assignment is live stay
-  atomic. Nothing is kept that the batch as submitted would not have done: no item whose
-  target or claim another item of the batch was refused for, no `reviewed` decision when a
-  claim of the batch was refused (those targets stay for later work), and nothing of a
-  batch the reviewer replaced with any later submission. The sealed result does not mark
-  such items; their work is recorded as not accepted. If the retained items together
-  exceed retained capacity, nothing of the batch is kept
+  valid on their own are retained as partial evidence. The review is then sealed
+  `incomplete`, unless later work finishes the rest. Batches submitted while the
+  assignment is live stay atomic. Nothing is kept that the batch as submitted would not
+  have done:
+  - no item whose target or claim another item of the batch was refused for;
+  - no `reviewed` decision and no verdict when a claim or claim revision of the batch was
+    refused. Those targets stay for later work, and such a challenge batch keeps nothing
+    of its judgments: its claims are judged again or reported unresolved;
+  - nothing when an item of the batch cannot be checked at all, or when the reviewer
+    replaced the batch with any later submission.
+
+  The sealed result does not mark such items; their work is recorded as not accepted. If
+  the retained items together exceed retained capacity, nothing of the batch is kept
   ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
 - One committed-review rejection now names every distinct violation in the batch instead
   of the first one only. Each states how many targets, verdicts or claims broke it and
-  the first three of them (ids, or paths for a supporting selector, cut to 160
-  characters), with ids dropped before a violation when the 1,024-byte rejection bound is
-  tight. A schema rejection still names its first fault. The rule that references need an
-  assigned `source_id` no longer calls a claim or verdict "a reviewed target"
+  the first three of them: quoted ids cut to 160 characters, or the selector itself (a
+  supporting path or a source id, with the allowed lines when a range was refused), so
+  several unknown source ids or out-of-range selections are one violation. Ids are
+  dropped before a violation when the 1,024-byte rejection bound is tight. A schema
+  rejection still names its first fault. The rule that references need an assigned
+  `source_id` no longer calls a claim or verdict "a reviewed target"
   ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
 - A supporting `{path, side, source_range, basis}` selector is no longer refused because
   its whole file exceeds 65,536 bytes, a rule nothing stated to the reviewer. The existing

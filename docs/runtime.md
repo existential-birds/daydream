@@ -123,30 +123,38 @@ fresh challenge, navigates it under the profile's
 
 Every item of a batch is checked on its own, so one rejection names each distinct
 violation in the batch once, with how many targets, verdicts or claims broke it and the
-first three of them: a target id, a claim uid, `claims[N]` for a new claim, or the path
-of a supporting selector, each cut to 160 characters. When that text would exceed the
-1,024-byte rejection bound, the ids are dropped before any violation is. A schema
-rejection, which the binding raises before the review sees the batch, names its first
-fault only. Once an item has been refused, a later item whose path Git cannot resolve
-does not turn the rejection into a fatal one.
+first three of them. An item is named by its target id, its claim uid or `claims[N]` for
+a new claim, quoted and cut to 160 characters after redaction. A selector violation names
+the selector instead: a supporting path with its side and, for a range, the file's lines,
+or a source id with its offered range, so unknown source ids, ranges outside different
+offered ranges and ranges outside files of different lengths are one violation each. When
+that text would exceed the 1,024-byte rejection bound, the ids are dropped before any
+violation is. A schema rejection, which the binding raises before the review sees the
+batch, names its first fault only. Once an item has been refused, a later item that
+cannot be checked at all (a supporting path Git cannot resolve) does not turn the live
+rejection into a fatal one.
 
 When a work's authority closes without an accepted final submission and the last
 submission it started was a rejected final batch, the host installs what that batch
 would have done unchanged: its target decisions, verdicts and claims that passed their
 own checks, without any item whose target or claim another item of the batch was
-refused for (a repeated or contradicting decision or verdict, a verdict beside a refused
-revision of its claim) and, when any claim of the batch was refused, without its
-`reviewed` decisions, so those targets stay for later work and the review cannot finish
-without that finding. They are installed together under the unchanged installation
-checks; if they fail those together, nothing of the batch is kept. Any later
+refused for (a repeated or contradicting decision or verdict). When any claim or claim
+revision of the batch was refused, none of its `reviewed` decisions and none of its
+verdicts are kept: those targets and claims stay for later work, which reviews and judges
+them again or leaves them reported unfinished. A decision an earlier accepted batch
+installed is not reopened. If an item of the batch cannot be checked at all, nothing of
+the batch is kept. The kept items are installed together under the unchanged
+installation checks; if they fail those together, nothing of the batch is kept. Any later
 `structured_output` or `review_admit` start replaces the remembered batch whatever its
-outcome, including a start the binding refuses for its schema, so a replaced batch is
-never kept and a rejected `review_admit` batch never is. No receipt is produced and the
-sealed result does not mark such items: the work stays not accepted (`closed`, with its
-execution reason) and the kept items count as its admitted progress, which a follow-up
-may complete. An unexpected failure during that installation is recorded on the binding
-as `callback_failed`, as a live callback's is, and the work's execution entry is still
-written.
+outcome, including a start the binding refuses for its schema and one admitted before
+the rejection and served after it, so a replaced batch is never kept and a rejected
+`review_admit` batch never is. Two later submissions do not replace it, because the
+binding refuses them before it counts a start: one made after the deadline, and one that
+repeats a call id. No receipt is produced and the sealed result does not mark such
+items: the work stays not accepted (`closed`, with its execution reason) and the kept
+items count as its admitted progress, which a follow-up may complete. An unexpected
+failure during that installation is recorded on the binding as `callback_failed`, as a
+live callback's is, and the work's execution entry is still written.
 
 A reviewed target decision or challenge verdict with empty `evidence_refs` records
 up to four of the target's assigned sources, in inventory order, or the judged claim's
