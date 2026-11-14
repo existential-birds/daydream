@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.commands import common
-from daydream.run_config import DEEP_FLOW_ALIASES, RunConfig
+from daydream.run_config import DEEP_FLOW_ALIASES, RunConfig, replaced_review_options
 
 
 class _HelpAllAction(argparse.Action):
@@ -106,7 +106,7 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
     parser.add_argument(
         "--shallow",
         action="store_true",
-        help="With --fix: single-stack review (skip multi-stack auto-detection).",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--flow",
@@ -118,10 +118,7 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
     parser.add_argument(
         "--precision",
         action="store_true",
-        help="Enable precision mode: run a skeptical suppression pass over borderline "
-             "findings after the arbiter (issue #232; fail-closed). Also settable "
-             "via [tool.daydream] precision_mode in a config file."
-        if full_help else argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--test-command",
@@ -136,7 +133,7 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
     parser.add_argument(
         "--approve-on-clean",
         action="store_true",
-        help="Approve the PR when a deep review has zero high/medium findings "
+        help="Approve the PR when a complete review has no findings "
              "(issue #343): post event: 'APPROVE' instead of 'COMMENT'."
         if full_help else argparse.SUPPRESS,
     )
@@ -182,7 +179,7 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
     parser.add_argument(
         "-s", "--stack",
         choices=["python", "react", "elixir", "go", "rust", "ios"],
-        help="Force a specific stack (default: auto-detect from changed files)",
+        help=argparse.SUPPRESS,
     )
 
     # Cleanup / phase resume
@@ -204,20 +201,13 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         action="store_false",
         default=None,
         dest="review_cache_enabled",
-        help="Ignore and write no review-result cache (forensic run)"
-        if full_help else argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--start-at",
         choices=["review", "parse", "fix", "test", "ttt", "per-stack", "merge"],
         default="review",
-        help=(
-            "Start at a specific phase (default: review). "
-            "Choices: review | fix | ttt | per-stack | merge. "
-            "parse/test are legacy shallow-loop stages with no mapping in the "
-            "unified pipeline and are rejected. "
-            "ttt, per-stack, and merge are valid only in deep (non-shallow) mode."
-        ) if full_help else argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
 
     parser.add_argument(
@@ -243,9 +233,8 @@ _REMOVED_PHASE_FLAGS: dict[str, str] = {
     "--test-backend": "[tool.daydream.phases.test] backend = \"...\"",
     "--exploration-model": "[tool.daydream.phases.exploration] model = \"...\"",
     "--review-model": "[tool.daydream.phases.review] model = \"...\"",
-    "--per-stack-review-model": "[tool.daydream.phases.per_stack_review] model = \"...\"",
+    "--per-stack-review-model": "[tool.daydream.phases.review] model = \"...\"",
     "--arbiter-model": "[tool.daydream.phases.arbiter] model = \"...\"",
-    "--parse-model": "[tool.daydream.phases.parse] model = \"...\"",
     "--fix-model": "[tool.daydream.phases.fix] model = \"...\"",
     "--test-model": "[tool.daydream.phases.test] model = \"...\"",
 }
@@ -255,6 +244,8 @@ def _reject_removed_phase_flags(parser: argparse.ArgumentParser, argv: list[str]
     """Reject removed phase flags, including --flag=value, with their config-table replacement."""
     for token in argv:
         flag = token.split("=", 1)[0]
+        if flag == "--parse-model":
+            parser.error("--parse-model was removed: the review has no parse phase; drop it.")
         replacement = _REMOVED_PHASE_FLAGS.get(flag)
         if replacement is not None:
             parser.error(
@@ -290,49 +281,26 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     # Every message below names flags the parser accepts: unattended fixing must also confirm its gate.
     fix = "--fix" if args.assume == "yes" or not args.non_interactive else "--fix --yes"
 
-    if args.flow_name == "shallow":
-        parser.error(
-            f"--flow shallow was the single-stack fix loop; use {fix} --shallow to fix, "
-            "or drop --flow shallow for a full review"
-        )
     if args.flow_name is not None:
         if args.fix or args.comment or args.review or args.diagram_only is not None:
             parser.error("--flow cannot be combined with --fix/--review/--comment/--diagram-only")
         if args.shallow:
             parser.error("--flow cannot be combined with --shallow")
 
-    # ttt/per-stack/merge are deep-pipeline resume stages; not valid for shallow.
-    if args.shallow and args.start_at in ("ttt", "per-stack", "merge"):
-        parser.error(f"--start-at {args.start_at} is not valid with --shallow")
-
-    # Reject obsolete parse/test resume points: the unified flow has no equivalent.
-    # Treating them as fresh could rerun and commit fixes under --yes unexpectedly.
-    if args.start_at in ("parse", "test"):
-        parser.error(
-            f"--start-at {args.start_at} has no mapping in the unified pipeline "
-            "(the legacy shallow-loop phases are gone); "
-            f"use {fix} --start-at fix to resume after the merged report"
-        )
-
-    # ``--yes``, ``--start-at`` and ``--shallow`` act on a fixing run or a custom flow; none selects fixing.
+    # ``--yes`` answers the gates of a fixing run or a custom flow; it never selects fixing.
     review_only = (
         "--comment" if args.comment else "--review" if args.review
         else "--diagram-only" if args.diagram_only is not None
         else "--flow review" if args.flow_name == "review"
         else "--findings-out" if args.findings_out is not None else None
     )
-    if not (args.fix or (args.flow_name is not None and args.flow_name not in DEEP_FLOW_ALIASES)):
+    if args.assume == "yes" and not (
+            args.fix or (args.flow_name is not None and args.flow_name not in DEEP_FLOW_ALIASES)):
         hint = (
             f"it does not apply to {review_only}" if review_only is not None
             else f"use {fix} in place of --flow deep" if args.flow_name == "deep" else f"add {fix}"
         )
-        if args.assume == "yes":
-            parser.error(f"--yes only answers the gates of a fixing run; {hint}")
-        if args.start_at != "review":
-            parser.error(f"--start-at {args.start_at} resumes a fixing run; {hint}")
-        # An explicit review mode never acted on --shallow; a bare run and a findings export did.
-        if args.shallow and review_only in (None, "--findings-out"):
-            parser.error(f"--shallow narrows a fixing run; {hint}")
+        parser.error(f"--yes only answers the gates of a fixing run; {hint}")
 
     # Unattended, the fix gate declines: a requested fix would end as a successful review.
     if args.fix and args.non_interactive and args.assume != "yes":
@@ -341,9 +309,13 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     if args.findings_out is not None and output_mode not in ("review", "diagram"):
         parser.error("--findings-out exports review or --diagram-only findings; it cannot follow --comment or --fix")
 
-    return common.config_from_args(
+    config = common.config_from_args(
         parser, args, detect_pr=True, output_mode=output_mode,
         # An explicit diagram-only kind overrides a repo's diagram mode.
         diagram=args.diagram_only if args.diagram_only is not None else args.diagram,
         precision_mode=args.precision, scope_issue_filing=args.file_scope_issues,
     )
+    replaced = replaced_review_options(config)
+    if replaced:
+        parser.error("options of the replaced staged reviewer no longer apply. " + "; ".join(replaced))
+    return config

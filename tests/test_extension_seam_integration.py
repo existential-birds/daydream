@@ -4,24 +4,22 @@ Only the backend seam is mocked; temporary extension packages modify registered
 steps. Assert delivered prompts and exit codes."""
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from daydream import git_ops, pr_review, runner
+from daydream import runner
 from daydream.backends import ResultEvent, TextEvent
 from daydream.config_file import load_file_config
-from daydream.deep.merge_steps import _step_post_review
-from daydream.extensions.registry import Registry
-from daydream.flows.engine import FlowContext
+from daydream.dataset import LocalRecordStore
+from daydream.review_result import FinalizedReview
 from daydream.run_config import RunConfig
-from daydream.run_context import InteractionPolicy, RunContext
-from daydream.workspace import WorkContext
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
-from tests.harness.review_result import review_coverage
+from tests.harness.dataset import read_records
+from tests.harness.stub_backend import StubBackend
 
 KEEP_ME = "KEEP_ME"
 DROP_ME = "DROP_ME"
@@ -32,53 +30,59 @@ InstallBackend = Callable[[object], object]
 _EMPTY_TURN = (TextEvent(text=""), ResultEvent(structured_output=None, continuation=None))
 
 
-async def _no_post(*_args: object, **_kwargs: object) -> None:
-    return None
+async def test_extension_step_rewrites_items_before_the_review_is_sealed(
+    ext_dir: ExtDir, multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A step inserted into the deep flow rewrites the canonical items every later consumer reads.
 
-
-def _post_context(*, dd: Path, items_file: Path) -> FlowContext:
-    """Build the smallest context needed by the post-review step."""
-    registry = Registry()
-    registry.override_renderer("finding", pr_review.default_render_finding)
-    registry.override_renderer("summary", pr_review.default_render_summary)
-    coverage = review_coverage()
-    for scope in coverage.scopes:
-        coverage.record_scope(scope, "complete")
-    coverage.record_phase("merge", "complete", noop=True)
-    coverage.finalize("completed")
-    return FlowContext(
-        config=RunConfig(),
-        work=WorkContext(
-            repo=dd.parent, source=dd.parent, base_branch="main", base_sha="base", head_branch="feature",
-            head_sha="head", is_ephemeral=False, run_id="test-run",
-        ), registry=registry, data={"dd": dd, "items_file": items_file, "review_coverage": coverage},
-        run_context=RunContext(InteractionPolicy()),
+    The reviewer's own sealed record keeps both findings; only the deep flow plans the review, so a
+    separately named flow cannot borrow its review phase.
+    """
+    ext_dir.write_module(
+        "import json\n"
+        "from daydream.extensions import FlowStep\n"
+        "async def _rewrite(ctx):\n"
+        "    path = ctx.data['items_file']\n"
+        "    items = json.loads(path.read_text())['items']\n"
+        f"    kept = [dict(item, description='{KEEP_ME}') for item in items if item['description'] != '{DROP_ME}']\n"
+        "    path.write_text(json.dumps({'items': kept}))\n"
+        "def register(r):\n"
+        "    r.register_phase(FlowStep(name='rewrite', run=_rewrite))\n"
+        "    flow = r.flow('deep')\n"
+        "    flow.insert(flow.index('load-items') + 1, 'rewrite')\n"
+        "    r.set_flow('deep', flow)\n"
+        "    r.set_flow('borrowed', ['review', 'load-items'])\n"
     )
+    backend = StubBackend(multi_stack_target)
+    backend.review_claims = [{"title": "Greeting drift", "file": "api.py", "line": 1},
+                             {"title": DROP_ME, "file": "App.tsx", "line": 1}]
+    install_backend(backend)
+    delivered: list[FinalizedReview] = []
 
+    store = LocalRecordStore(multi_stack_target.parent / "records")
+    assert await runner.run(make_config(multi_stack_target, dataset_capture=True, dataset_store_path=store.root),
+                            review_result_handler=delivered.append) == 0
 
-async def test_post_review_uses_published_items_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The post step passes through the canonical path published by load-items."""
-    private_dir = tmp_path / "private-deep"
-    stable_items = tmp_path / "stable-merged-items.json"
-    ctx = _post_context(dd=private_dir, items_file=stable_items)
-    posted_paths: list[Path] = []
-    async def _record_post(
-        target_dir: Path, merged_items_path: Path, *, console: Any, run_info: str, renderers: pr_review.ReviewRenderers,
-        post: bool, approve_on_clean: bool = False, pr_number: int | None = None, diagram_blocks: str | None = None,
-        run_context: RunContext | None = None, auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
-        review_summary: str | None = None, review_complete: bool = True,
-    ) -> None:
-        assert run_context is ctx.run_context
-        assert isinstance(run_info, str)
-        assert isinstance(renderers, pr_review.ReviewRenderers)
-        assert review_complete is False  # Fixture has no sealed terminal result authorizing approval.
-        posted_paths.append(merged_items_path)
+    (review,) = delivered
+    sealed = json.loads((multi_stack_target / ".daydream/deep/committed-review.json").read_text())
+    assert [finding["title"] for finding in sealed["findings"]] == ["Greeting drift", DROP_ME]
+    assert review.terminal_result == sealed["terminal_result"] and review.terminal_result["projection_valid"]
+    # Identity survives the rewrite; the embedded callback and the captured record agree on what was kept.
+    assert [(item["description"], item["item_uid"]) for item in review.items] == [
+        (KEEP_ME, sealed["findings"][0]["item_uid"])]
+    (captured,) = read_records(store).runs
+    assert [(item["description"], item["item_uid"]) for item in captured["findings"]["value"]["items"]] == [
+        (KEEP_ME, sealed["findings"][0]["item_uid"])]
+    printed = " ".join(capsys.readouterr().out.replace("║", " ").split())
+    assert "Review complete: 1 confirmed finding delivered (the reviewer confirmed 2)." in printed
+    assert "Confirmed findings: 1." in (multi_stack_target / ".daydream/deep/review-output.md").read_text()
 
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _record_post)
+    calls = len(backend.calls)
+    assert await runner.run(make_config(multi_stack_target, flow_name="borrowed")) == 1
+    assert "plans the review" in " ".join(capsys.readouterr().out.replace("║", " ").split())
+    assert len(backend.calls) == calls
 
-    await _step_post_review(ctx)
-
-    assert posted_paths == [stable_items]
 
 async def test_bound_custom_flow_rejects_public_artifact_before_backend_entry(
     ext_dir: ExtDir, multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,

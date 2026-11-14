@@ -561,6 +561,8 @@ def test_classify_places_findings_against_real_changed_ranges(git_repo: Path) ->
         ParsedIssue(path="x.py", line=None, title="outside-only anchor", body="`outside_only_token`"),
         replace(_PROSE_HEAVY_ISSUE),
         replace(_PROSE_HEAVY_ISSUE, line=None, title="Expiration collapses from an hour to a minute without hint"),
+        # A path Git cannot read at the head is left unplaced rather than failing the whole classification.
+        ParsedIssue(path="absent.py", line=3, title="unreadable at head", body="context"),
     ]
     result = classify(git_repo, _pr_for(base, head), issues)
     assert [comment.line for comment in result.inline] == [10, 7, 13, 21, 27, 24, 24, 7, 15, 15]
@@ -578,7 +580,7 @@ def test_classify_places_findings_against_real_changed_ranges(git_repo: Path) ->
         "between outside tolerance",
         "after outside tolerance",
     ]
-    assert [issue.title for issue in result.body_only] == ["unchanged", "cross stack"]
+    assert [issue.title for issue in result.body_only] == ["unchanged", "cross stack", "unreadable at head"]
     assert "posted on line 24; reviewer cited line 2" in result.inline[5].body
     assert "<!-- daydream-finding:" not in result.inline[0].body
     # Default anchor ordering feeds persisted fingerprints; rationale prose still crowds `ttl` out of the cap.

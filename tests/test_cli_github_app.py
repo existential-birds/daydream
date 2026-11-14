@@ -5,6 +5,7 @@ subprocess transport and the model Backend are fake.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -18,13 +19,16 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from daydream import cli
-from daydream.backends import ResultEvent, TextEvent
-from tests.harness.backend import ScriptedBackend
+from daydream.committed_review import CommittedReviewRequest, run_committed_review
+from daydream.dataset import LocalRecordStore
+from daydream.review_profile import build_default_profile
+from daydream.reviews.identity import finding_marker
+from daydream.run_config import RunConfig
+from tests.harness.dataset import read_records
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote, git
 from tests.harness.rsa import generate_rsa_pem
-from tests.harness.stub_backend import review_stage_result
-from tests.test_github_app_integration import _minimal_backend
+from tests.harness.stub_backend import StubBackend
 
 _TOKEN = "ghs_scoped_installation_test_token"
 _AMBIENT = "ghp_unusable_ambient_test_token"
@@ -67,14 +71,14 @@ def transport(fake_gh: FakeGh, feature_branch_repo: Path, monkeypatch: pytest.Mo
     monkeypatch.setenv("GITHUB_TOKEN", "ambient-alternate-token")
     monkeypatch.setenv("DAYDREAM_APP_ID", "42")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", generate_rsa_pem())
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: _minimal_backend())
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: StubBackend(feature_branch_repo))
     return boundary
 
 
 def _run(repo: Path, trajectory: Path, *flags: str) -> int | str | None:
     with pytest.raises(SystemExit) as result:
-        cli.main([str(repo), "--shallow", "--stack", "python", "--non-interactive",
-                  "--trajectory", str(trajectory), "--no-capture-data", *flags])
+        cli.main([str(repo), "--non-interactive", "--trajectory", str(trajectory),
+                  *(() if "--capture-data" in flags else ("--no-capture-data",)), *flags])
     return result.value.code
 
 
@@ -167,8 +171,10 @@ def test_cli_requested_branch_ignores_current_checkout_pr(
     current_head = git(repo, "rev-parse", "HEAD")
     base = git(repo, "rev-parse", "main")
     git(repo, "checkout", "-b", "requested", "main")
-    (repo / "main.py").write_text("def hello():\n    return 'galaxy'\n")
-    git(repo, "add", "main.py")
+    (repo / "main.py").write_text("def hello(): return 'galaxy'\n")
+    # Over 1,000 changed lines: the second diff tier, which every route scales the allowances by.
+    (repo / "table.py").write_text("".join(f"VALUE_{number} = {number}\n" for number in range(1001)))
+    git(repo, "add", "main.py", "table.py")
     git(repo, "commit", "-m", "requested branch change")
     requested_head = git(repo, "rev-parse", "HEAD")
     git(repo, "checkout", "feature")
@@ -199,22 +205,52 @@ def test_cli_requested_branch_ignores_current_checkout_pr(
         return request(args, *positional, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", route_pr_lookup)
-    model_heads: list[str] = []
-
-    def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
-        model_heads.append(git(Path(cwd), "rev-parse", "HEAD"))
-        return [TextEvent(text="Review complete."), ResultEvent(
-            structured_output=review_stage_result(prompt, []) if output_schema else None, continuation=None,
-        )]
-
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *a, **kw: ScriptedBackend(responder=respond))
+    stub = StubBackend(repo)
+    # The second claim sits on a line that only the base side has.
+    stub.review_claims = [{"title": "Sample issue", "file": "main.py", "line": 1},
+                          {"title": "Removed return", "file": "main.py", "line": 2, "side": "old"}]
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *a, **kw: stub)
     output = tmp_path / "trajectory.json"
-    assert _run(repo, output, "--comment", "--branch", "requested", "--base", "main", "--approve-on-clean") == 0
+    store = LocalRecordStore(tmp_path / "records")
+    assert _run(repo, output, "--comment", "--branch", "requested", "--base", "main", "--approve-on-clean",
+                "--capture-data", "--dataset-store", str(store.root)) == 0
 
     assert json.loads(output.read_text())["extra"]["pr_number"] == 73
-    assert model_heads and set(model_heads) == {requested_head}
+    # The sealed review, not the fake, attests which commit discovery and its fresh challenge analyzed.
+    sealed = json.loads((repo / ".daydream/deep/committed-review.json").read_text())
+    assert sealed["analyzed_revision"]["head_sha"] == requested_head
+    assert [entry["assignment"] for entry in sealed["execution"]] == ["discovery", "challenge"]
+    assert sealed["terminal_result"]["analysis_state"] == "complete"
+    # The tier triples the default profile's allowances and its wall; review work stops before the
+    # reserved finalization time.
+    pipeline = build_default_profile().pipeline
+    window = min(pipeline.reviewer_investigation_budget_s * 3 + 120, pipeline.review_wall_budget_s * 3)
+    limits = sealed["settings"]["limits"]
+    assert (limits["scale"], limits["tool_calls"], limits["effective_tool_calls"]) == (
+        3, pipeline.reviewer_tool_call_budget, 3 * pipeline.reviewer_tool_call_budget)
+    assert limits["effective_investigation_s"] == pytest.approx(window - 120)
+    assert limits["protected_finalization_s"] == 120
+    assert [(finding["title"], finding["payload"]["line"]) for finding in sealed["findings"]] == [
+        ("Sample issue", 1), ("Removed return", 2)]
     reviews = transport.gh.calls("POST", "repos/acme/widgets/pulls/73/reviews")
     assert len(reviews) == 1 and reviews[0].payload["commit_id"] == requested_head
+    # A confirmed finding asserts no severity, so an opted-in approval is withheld.
+    assert reviews[0].payload["event"] == "COMMENT"
+    (inline,) = reviews[0].payload["comments"]
+    assert (inline["path"], inline["line"]) == ("main.py", 1) and "**Severity:**" not in inline["body"]
+    # The old-side line is never offered as a head line: that finding is placed on the file, text intact.
+    (on_file,) = [call.payload for call in transport.gh.calls("POST", "repos/acme/widgets/pulls/73/comments")]
+    assert sorted(on_file) == ["body", "commit_id", "path", "subject_type"]
+    assert (on_file["path"], on_file["subject_type"]) == ("main.py", "file")
+    assert "**Removed return**" in on_file["body"]
+    # Capture and publication read the same canonical items, so they agree on each identity and line.
+    (captured,) = read_records(store).runs
+    items = captured["findings"]["value"]["items"]
+    assert [(item["description"], item["line"]) for item in items] == [("Sample issue", 1), ("Removed return", None)]
+    assert finding_marker(items[0]["fingerprint"]) in inline["body"]
+    assert finding_marker(items[1]["fingerprint"]) in on_file["body"]
+    assert [item["item_uid"] for item in items] == [finding["item_uid"] for finding in sealed["findings"]]
+    assert captured["findings"]["value"]["terminal_coverage"]["planned_scopes"][0]["scope_id"] == "committed:00000"
     assert not transport.gh.calls("POST", "repos/acme/widgets/pulls/7/reviews")
     _assert_app_requests(transport)
     # Branch PR discovery runs on the original checkout with the session's minted authentication.
@@ -222,3 +258,14 @@ def test_cli_requested_branch_ignores_current_checkout_pr(
     assert lookups and all(cwd == repo and env["GH_TOKEN"] == _TOKEN for cwd, env in lookups)
     assert git(repo, "branch", "--show-current") == "feature"
     assert git(repo, "rev-parse", "HEAD") == current_head
+    # The standalone program plans the same change exactly as the flow's review step did.
+    git(repo, "checkout", "requested")
+    standalone = asyncio.run(run_committed_review(CommittedReviewRequest(
+        repo, base, config=RunConfig(output_mode="review")))).to_dict()
+    # Durations carved from the monotonic clock differ by rounding alone.
+    assert standalone["settings"]["limits"] == pytest.approx(sealed["settings"]["limits"])
+    unbound = {"historical_context", "limits"}
+    assert {key: value for key, value in standalone["settings"].items() if key not in unbound} == {
+        key: value for key, value in sealed["settings"].items() if key not in unbound}
+    assert [(entry["assignment"], entry["allocation"]) for entry in standalone["execution"]] == [
+        (entry["assignment"], entry["allocation"]) for entry in sealed["execution"]]

@@ -10,7 +10,7 @@ filters; the selection helper does not infer backend/model aliases.
 ```bash
 ANALYSIS="$(mktemp -d)"
 python3 "$SKILL/scripts/cohort.py" select "$HOME/.daydream/dataset/runs" \
-  --where '/provenance/resolved_phases/per_stack_review/backend="codex"' \
+  --where '/provenance/resolved_phases/review/backend="codex"' \
   --limit 20 > "$ANALYSIS/cohort.json"
 python3 "$SKILL/scripts/cohort.py" batches "$ANALYSIS/cohort.json" \
   --count 3 --question 'Where does evidence get lost between review stages?' \

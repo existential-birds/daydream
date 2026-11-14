@@ -17,19 +17,12 @@ DEFAULT_PI_MODEL = "deepseek/deepseek-v4-flash-0731"
 # Caps the 1.5–5h time tail from a single unbounded run_agent turn (issue #169).
 DEFAULT_WALL_BUDGET_S = 1800.0
 
-# Outer review ceiling. ReviewLimits supplies earlier investigation/finalization
-# bounds; exhaustion produces a partial review. Fix turns retain the default above.
-REVIEW_WALL_BUDGET_S = 3600.0
 
-# Base cumulative calls for one staged reviewer; scaling: docs/extensions.md.
-# The whole-change structure stage spends about 1.5 calls per changed file reading
-# its exact-path diff parts and catalog pages before investigating, so 48 left
-# 15-file reviews at the cap; 120 leaves room for its observed ~63 calls (#1762).
+# Base cumulative tool calls for one review: discovery and its challenge share them (#1762).
 REVIEWER_TOOL_CALL_BUDGET = 120
 
-# First-pass batches one base allowance covers: about 30 calls per batch at the
-# default, above the 7-12 calls per batch observed in #1746. Committed review also
-# holds at most this many batches in one conversation: docs/runtime.md.
+# Batches one base allowance covers: committed review scales its allowance by one per this
+# many planned batches and holds at most this many in one conversation: docs/runtime.md.
 REVIEWER_BATCHES_PER_ALLOWANCE = 4
 
 # Allow target test suites more wall time than ordinary turns while bounding hangs.
@@ -88,8 +81,7 @@ VET_BATCH_MAX_FINDINGS: int = 20
 # PiBackend first honors Pi's own settings, then DEFAULT_PI_MODEL.
 _MODEL_PHASE_TIERS = (
     ("parse",),
-    ("fix", "test", "verify", "exploration", "per_stack_review", "suppression",
-     "supervise", "diagram", "intent", "recon", "audit"),
+    ("fix", "test", "verify", "exploration", "per_stack_review", "diagram", "intent", "recon", "audit"),
     ("review", "arbiter", "wonder", "merge", "vet", "plan_write"),
 )
 PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
@@ -106,9 +98,9 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
 # Merge deep and Improve tables independently so tuning one flow cannot move the other.
 
 # GPT-6.1 Sol defaults to medium: use it for bounded review and judgment work,
-# low for mechanical work, and high for arbitration. Latency routes and explicit
-# pins can raise effort; xhigh needs measured benefit to justify its extra cost.
-# Pi stack review uses medium; its other deep phases and Claude retain ambient defaults.
+# low for mechanical work, and high for arbitration. Explicit pins can raise effort;
+# xhigh needs measured benefit to justify its extra cost. Pi and Claude phases keep
+# the effort their own native settings give.
 DEEP_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
     "codex": {
         "parse": "low",
@@ -119,14 +111,11 @@ DEEP_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
         "per_stack_review": "medium",
         "review": "medium",
         "arbiter": "high",
-        "suppression": "medium",
-        "supervise": "medium",
         "diagram": "medium",
         "wonder": "medium",
         "merge": "medium",
         "intent": "medium",
     },
-    "pi": {"per_stack_review": "medium"},
 }
 
 # Improve tiers cover all backends. Plan authoring/repair uses max because
@@ -203,30 +192,6 @@ EFFORT_TIERS: dict[str, EffortTier] = {
 # Output file for review results
 REVIEW_OUTPUT_FILE = ".review-output.md"
 
-# Dependency-aware review shards retain the stack-keyed pipeline. Automatic
-# activation also considers whole-diff scale and splittable assignment overload;
-# an explicit disabled setting preserves one reviewer per stack.
-DEFAULT_DEEP_SHARD_ENABLED: bool = False
-DEFAULT_DEEP_SHARD_MAX_FILES: int = 5
-DEFAULT_DEEP_SHARD_MAX_BYTES: int = 12288  # == INLINE_DIFF_BUDGET_BYTES
-DEFAULT_DEEP_SHARD_FANOUT_CAP: int = 16
-DEFAULT_DEEP_SHARD_FRONTIER_MAX: int = 8
-
-# Review reuse defaults on. --no-review-cache also disables exploration caching.
-# Evict least-recently-used entries when count, bytes, or idle age exceeds a bound.
-DEFAULT_REVIEW_CACHE_ENABLED: bool = True
-DEFAULT_REVIEW_CACHE_MAX_ENTRIES: int = 1024
-DEFAULT_REVIEW_CACHE_MAX_BYTES: int = 1024**3
-DEFAULT_REVIEW_CACHE_MAX_AGE_DAYS: int = 30
-
-# Selective verification is the evidence-approved default; latency is reported,
-# not gated. Config verify_all=true restores every non-exempt finding; it has no
-# CLI flag.
-DEFAULT_VERIFY_ALL: bool = False
-
-# Synthetic scope metadata for structural review alongside language stacks;
-# never a CLI-selectable skill name.
-STRUCTURE_STACK_NAME: str = "structure"
 
 # Bot setup names shared with workflow templates; packaging tests guard drift.
 SETUP_SECRET_NAMES: tuple[str, ...] = (

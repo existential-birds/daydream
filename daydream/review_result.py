@@ -371,12 +371,6 @@ class ReviewCoverage:
             raise ValueError('run source attribution exceeds retained byte limit')
 
     @property
-    def unfinished_scopes(self) -> dict[str, str]:
-        """Render current unfinished scope evidence for downstream review context."""
-        return {key: self.diagnostics['scopes'].get(key, ', '.join(outcome['reason_codes']))
-                for key, outcome in self.scopes.items() if outcome['status'] != 'complete'}
-
-    @property
     def is_finalized(self) -> bool:
         """Whether the review boundary has frozen its terminal result."""
         return self._terminal is not None
@@ -384,14 +378,6 @@ class ReviewCoverage:
     def _mutable(self) -> None:
         if self._terminal is not None:
             raise ValueError('review coverage is frozen')
-
-    def require_phase(self, phase: str) -> None:
-        self._mutable()
-        if phase not in self.required_phases:
-            self.required_phases.add(phase)
-            self.phases[phase] = {'phase': phase, 'status': 'uncovered',
-                                  'reason_codes': [ReasonCode.COVERAGE_UNKNOWN.value],
-                                  'noop': False, 'usable_evidence': False}
 
     def _record(self, outcomes: dict[str, dict[str, Any]], key: str, status: str,
                 reasons: Iterable[str], diagnostic: str | None, **fields: Any) -> None:

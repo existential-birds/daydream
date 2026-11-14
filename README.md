@@ -5,8 +5,8 @@
 ```text
 Set up https://github.com/existential-birds/daydream for this repository.
 Read its README and CLI help, install Daydream with uv and Python 3.14+,
-and help me authenticate a supported backend (Claude by default, or Codex,
-Pi, Osprey). Run a report-only review with --review against the intended
+and help me authenticate a supported backend (Claude by default, or Codex
+or Pi). Run a report-only review with --review against the intended
 base branch. Show me the findings and where the trajectory was saved.
 ```
 
@@ -19,7 +19,8 @@ Its review quality is measured in public on AACR-Bench and ReviewBench in
 ## Quick start
 
 Requires [uv](https://docs.astral.sh/uv/), Python 3.14+, and an authenticated
-[Claude Code](https://claude.ai/code) CLI (default backend), or Codex, Pi, or Osprey.
+[Claude Code](https://claude.ai/code) CLI (default backend), or Codex or Pi. Osprey
+cannot run a review.
 PR comments also require authenticated [gh](https://cli.github.com/).
 
 ```bash
@@ -39,9 +40,10 @@ daydream --review --backend codex --base main /path/to/project
 ```
 
 A review ends with findings; only `--fix` [selects fixing](docs/runtime.md#validation-and-repair),
-and `--yes` answers its gates. Review is deep and multi-stack; `--fix --shallow` runs a
-single-stack pass. Use `--help` for common options and `--help-all` for configuration
-and advanced flags.
+and `--yes` answers its gates. One reviewer covers the whole change and challenges
+every finding in a fresh context before reporting it; it needs a backend with native
+host tools (Pi, Claude or Codex). Use `--help` for common options and `--help-all` for
+configuration and advanced flags.
 Reports land in `.review-output.md`; trajectories in `.daydream/runs/<id>/`.
 Report-only local review uses the captured net base-to-final-working change,
 including nonignored untracked files. PR comments exclude local edits and use a

@@ -31,7 +31,7 @@ from tests.deep_orchestrator.support import _scan_phase_events, _scan_trajectory
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import commit, git, work_context
 from tests.harness.stub_backend import StubBackend
-from tests.test_deep_orchestrator import MakeConfig, _fix_prompts, _merge_item
+from tests.test_deep_orchestrator import MakeConfig, _fix_prompts
 
 
 def _arrange(target: Path, monkeypatch: pytest.MonkeyPatch) -> StubBackend:
@@ -40,7 +40,7 @@ def _arrange(target: Path, monkeypatch: pytest.MonkeyPatch) -> StubBackend:
     git(target, "add", "api.py", "requirements.txt")
     commit(target, "test: actionable Python change and manifest candidate")
     backend = StubBackend(target)
-    backend.merge_items = [_merge_item(1, "api.py", "high")]
+    backend.review_claims = [{"title": "Sample issue", "file": "api.py", "line": 1}]
     backend.fix_edit_line = "# unauthorized fix turn ran\n"
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
     return backend
@@ -75,7 +75,7 @@ async def test_runner_rejects_missing_canonical_before_fix_or_test(
     candidate.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
     trajectory = tmp_path / "trajectory.json"
-    config = make_config(target, stack="python", output_mode="loop", assume="yes", test_command=None,
+    config = make_config(target, output_mode="loop", assume="yes", test_command=None,
                          file_config=load_file_config(target), trajectory_path=trajectory)
     rc = await run(config)
     assert rc != 0, "unconfigured validation cannot authorize a successful fix flow"

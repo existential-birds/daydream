@@ -40,16 +40,8 @@ def test_large_diff_expands_review_allowances_without_changing_small_reviews() -
         limits = review_limits_for_scope(ReviewLimits())
         assert limits.investigation_s > 480
         assert limits.tool_calls > 120
-        # Batch scaling takes the larger multiplier, never the product: tier 6 already covers 12 batches.
-        assert review_limits_for_scope(ReviewLimits(), stages=12) == limits
-        assert review_limits_for_scope(ReviewLimits(), stages=40) == ReviewLimits(
-            investigation_s=4800, finalization_s=1200, tool_calls=1200)
     with review_deadline_scope(2700, diff=small, scale_deadline=True):
         assert review_limits_for_scope(ReviewLimits()) == ReviewLimits()
-        assert review_limits_for_scope(ReviewLimits(), stages=4) == ReviewLimits()
-        # Partial allowances round up: five batches need a second one.
-        assert review_limits_for_scope(ReviewLimits(), stages=5) == ReviewLimits(
-            investigation_s=960, finalization_s=240, tool_calls=240)
 
 async def test_checkpoint_survives_hung_stream_without_finalizer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -141,6 +133,14 @@ async def test_retry_discards_failed_attempt_checkpoint_and_evidence(
     assert "at most 3 seconds and 1 tool calls" in backend.prompts[0]
     assert "FAILED_ATTEMPT" not in backend.last_prompt
     assert "CURRENT_EVIDENCE" in backend.last_prompt
+    # Tool starts that never complete are retained up to a bound; the oldest are counted as omitted.
+    flood = ScriptedBackend(script=[
+        [ToolStartEvent(id=f"start-{number}", name="read", input={"path": "src.py"}) for number in range(67)],
+        [ResultEvent(structured_output=FINDINGS, continuation=None)]])
+    assert (await run_agent(flood, tmp_path, "review", phase=DaydreamPhase.DEEP, output_schema=SCHEMA,
+                            budget=BudgetLedger("deep", deadline=clock.monotonic() + 5),
+                            review_limits=ReviewLimits(10, 2, 66)))[0] == FINDINGS
+    assert "omitted=3; unmatched tool starts=64" in flood.last_prompt
 
 async def test_finalization_revalidates_inputs_and_propagates_capture_failure(tmp_path: Path) -> None:
 

@@ -20,9 +20,9 @@ def test_ext_validate_rejects_previous_api(ext_dir: ExtDir, capsys: pytest.Captu
                                          monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv('COLUMNS', "80")
-    ext_dir.write_module("def register(r): ...\n", api_version=8)
+    ext_dir.write_module("def register(r): ...\n", api_version=9)
     assert _run_main(["ext", "validate"]) == 1
-    assert "must declare DAYDREAM_EXT_API = 9; found 8 " in collapse_panel_text(capsys)
+    assert "must declare DAYDREAM_EXT_API = 10; found 9 " in collapse_panel_text(capsys)
 
 def test_ext_validate_rejects_invalid_supervisor_registration(ext_dir: ExtDir, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -36,6 +36,13 @@ def test_ext_validate_broken_ref(ext_dir: ExtDir, capsys: pytest.CaptureFixture[
     rc = _run_main(["ext", "validate"])
     assert rc == 1
     assert "ghost" in strip_ansi(capsys.readouterr().out)
+    # Overriding a prompt of the replaced reviewer is refused by name; an extension's own prompt name registers.
+    own = "def register(r):\n    r.override_prompt('my-own', lambda **kw: 'x')\n"
+    ext_dir.write_module(own + "    r.override_prompt('per-stack', lambda **kw: 'x')\n")
+    assert _run_main(["ext", "validate"]) == 1
+    assert "prompt 'per-stack' was removed" in collapse_panel_text(capsys)
+    ext_dir.write_module(own)
+    assert _run_main(["ext", "validate"]) == 0
 
 def test_ext_validate_reports_registered_renderer_count(
     ext_dir: ExtDir, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
@@ -65,7 +72,7 @@ def test_ext_validate_reports_registered_renderer_count(
         assert match is not None, text
         return int(match.group(1))
 
-    assert "DAYDREAM_EXT_DIR" in out and "api version 9" in out.lower()
+    assert "DAYDREAM_EXT_DIR" in out and "api version 10" in out.lower()
     assert "tool supervisor: registered" in out.lower()
     assert "trace exporters: langsmith, honeyhive, otlp, custom" in out
     assert "registry OK:" in out

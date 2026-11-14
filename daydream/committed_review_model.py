@@ -18,6 +18,7 @@ from daydream.review_source_refs import (
     SOURCE_REF_SCHEMA,
     SOURCE_REFS_SCHEMA,
     SOURCE_SELECTORS_SCHEMA,
+    source_id,
     source_revision,
     validate_source_refs,
 )
@@ -359,3 +360,36 @@ class CommittedReviewResult:
     @property
     def complete(self) -> bool:
         return self.output_installed and self.to_dict()["terminal_result"]["analysis_state"] == "complete"
+
+
+def fragment_spans(assignments: list[dict[str, Any]]) -> dict[str, tuple[int, int]]:
+    """Summarized complete-line span of each fragment-only reference, which carries no source range."""
+    spans: dict[str, tuple[int, int]] = {}
+    for part in assignments:
+        if part["kind"] == "continuation":
+            summary = part["source_summary"][0]
+            for ref in part["source_refs"]:
+                span = summary.get(ref["side"]) if ref["side"] in {"old", "new"} else None
+                if span is not None:
+                    spans[source_id(ref)] = (span["start"], span["end"])
+    return spans
+
+
+def reference_covers(ref: dict[str, Any], payload: dict[str, Any], spans: dict[str, tuple[int, int]]) -> bool:
+    """Whether a reference of the claim's file covers its line, by range or summarized fragment span."""
+    if ref["path"] != payload["file"]:
+        return False
+    bounds = ref["source_range"]
+    if bounds is not None:
+        return bool(bounds["start"] <= payload["line"] <= bounds["end"])
+    span = spans.get(source_id(ref)) if ref["role"] == "assigned" else None
+    return span is not None and span[0] <= payload["line"] <= span[1]
+
+
+def head_line(claim: dict[str, Any], spans: dict[str, tuple[int, int]]) -> int | None:
+    """The claim's line as a head line: only when a new-side reference of its file covers it."""
+    payload = claim["payload"]
+    if payload["line"] is not None and any(
+            ref["side"] == "new" and reference_covers(ref, payload, spans) for ref in payload["evidence_refs"]):
+        return int(payload["line"])
+    return None

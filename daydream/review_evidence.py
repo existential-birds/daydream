@@ -53,7 +53,6 @@ class ReviewEvidence:
         """A retry starts without tool context or output from the rejected attempt."""
         self.native_output = False
         self.output_calls: set[str] = set()
-        self.output_starts = self.output_successes = self.output_failures = 0
         self.pending: dict[str, str] = {}
         self.blocks: list[str] = []
         self.seen: set[str] = set()
@@ -71,16 +70,11 @@ class ReviewEvidence:
             self.native_output = (isinstance(event.config, PiRequestConfig) and event.output_schema is not None
                                   and event.config.schema_emulated is False)
         if self.native_output and isinstance(event, ToolStartEvent) and event.name == "structured_output":
-            self.output_starts += 1
             if len(self.output_calls) < 4096:
                 self.output_calls.add(event.id)
             return
         if self.native_output and isinstance(event, ToolResultEvent) and event.id in self.output_calls:
             self.output_calls.remove(event.id)
-            if event.is_error:
-                self.output_failures += 1
-            else:
-                self.output_successes += 1
             return
         if isinstance(event, ToolStartEvent):
             if len(self.pending) >= 64:

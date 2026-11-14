@@ -48,8 +48,11 @@ from daydream.committed_review_model import (
     CommittedReviewResult,
     assignment_schema,
     coverage_shards,
+    fragment_spans,
+    head_line,
     planned_work_id,
     receipt_schema,
+    reference_covers,
     shard_scope_id,
     validate_committed_result,
 )
@@ -72,11 +75,11 @@ from daydream.hunk_index import write_hunk_index
 from daydream.immutable_review import HISTORICAL_CONTEXT_MAX_BYTES, ImmutableReviewInput
 from daydream.json_utils import canonical_json, validate_json_schema
 from daydream.observability.spans import record_budget_stop
-from daydream.prompt_budget import SanctionedInputUnavailable
+from daydream.prompt_budget import SanctionedInputUnavailable, truncate_utf8_to_budget
 from daydream.prompts.grounding import REPOSITORY_SEARCH_GUIDANCE
 from daydream.redaction import redact_text
 from daydream.review_budget import BudgetDimension, BudgetLedger, review_scale_for_diff
-from daydream.review_profile import ASSIGNMENT_POLICIES, ResolvedProfile, build_default_profile, resolve_from_runconfig
+from daydream.review_profile import ResolvedProfile, build_default_profile, resolve_from_runconfig
 from daydream.review_result import (
     AnalyzedRevision,
     PlannedScope,
@@ -86,17 +89,12 @@ from daydream.review_result import (
     reason_for_budget,
     reason_for_exception,
 )
-from daydream.review_source_refs import (
-    SOURCE_SELECTORS_SCHEMA,
-    SourceSelectorRejected,
-    _SubmissionSources,
-    source_id,
-)
+from daydream.review_source_refs import SOURCE_SELECTORS_SCHEMA, SourceSelectorRejected, _SubmissionSources
 from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
-from daydream.run_config import RunConfig, _resolved_backend_name
+from daydream.run_config import FrozenAuthorDescription, RunConfig, _resolved_backend_name
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 from daydream.runner import _resolve_backend
-from daydream.trajectory import DaydreamPhase, DaydreamRunFlow
+from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, phase_scope
 from daydream.trajectory.lifecycle import maybe_fork
 from daydream.workspace import WorkContext, open_workspace
 
@@ -121,7 +119,7 @@ _UNDECIDED_REASON = "unsubmitted: no admitted decision before this review ended;
 _CURSOR = re.compile(r"c1\.([0-9a-f]{12})\.([0-9]{1,12})")
 _CONTINUATION_NOTICE = "[Ordered continuation: this is a partial hunk; see assignment mapping.]\n"
 _RESPONSIBILITY_PAGE = 256
-# Same workflow fan-out ceiling as deep per-stack review; the backend hint may lower it.
+# Workflow fan-out ceiling; the backend hint may lower it.
 _FANOUT_CEILING = 10
 # One investigation start plus the protected structured_output start.
 _MIN_WORK_CALLS = 2
@@ -199,14 +197,7 @@ class Review:
         self._shard_of = {part["target_id"]: index for index, shard in enumerate(self._shards) for part in shard}
         # Fragment-only evidence has no source range; its summarized complete-line span
         # admits claim lines without changing the canonical fragment identity.
-        self._fragment_spans: dict[str, tuple[int, int]] = {}
-        for part in self.assignments:
-            if part["kind"] == "continuation":
-                summary = part["source_summary"][0]
-                for ref in part["source_refs"]:
-                    span = summary.get(ref["side"]) if ref["side"] in {"old", "new"} else None
-                    if span is not None:
-                        self._fragment_spans[source_id(ref)] = (span["start"], span["end"])
+        self._fragment_spans = fragment_spans(self.assignments)
         self._decisions: dict[str, dict[str, Any]] = {}
         self._claims: dict[str, dict[str, Any]] = {}
         self._sealed = False
@@ -250,6 +241,12 @@ class Review:
         return sources.canonicalize(selectors, (ref for part in parts for ref in part["source_refs"]),
                                     require_assigned=required)
 
+    def _covers(self, ref: dict[str, Any], payload: dict[str, Any]) -> bool:
+        return reference_covers(ref, payload, self._fragment_spans)
+
+    def head_line(self, claim: dict[str, Any]) -> int | None:
+        return head_line(claim, self._fragment_spans)
+
     def _holds(self, work_id: str, uid: str, revision: int) -> bool:
         """A revision is this work's own, or an unowned revision it authored; never another's."""
         return self._claim_owner.get((uid, revision), work_id) == work_id
@@ -262,16 +259,7 @@ class Review:
         if payload["file"] not in self._by_file:
             raise HostToolRejected("claim.payload.file: choose a file from the complete changed-target inventory")
 
-        def covers(ref: dict[str, Any]) -> bool:
-            if ref["path"] != payload["file"]:
-                return False
-            bounds = ref["source_range"]
-            if bounds is not None:
-                return bool(bounds["start"] <= payload["line"] <= bounds["end"])
-            span = self._fragment_spans.get(source_id(ref)) if ref["role"] == "assigned" else None
-            return span is not None and span[0] <= payload["line"] <= span[1]
-
-        if payload["line"] is not None and not any(covers(ref) for ref in payload["evidence_refs"]):
+        if payload["line"] is not None and not any(self._covers(ref, payload) for ref in payload["evidence_refs"]):
             raise HostToolRejected("claim.payload.line: choose a line covered by its canonical source references")
         if not set(claim["source_uids"]) <= self._claims.keys():
             raise HostToolRejected("claim.source_uids: use retained predecessor UIDs, or [] for no predecessors")
@@ -781,7 +769,16 @@ class Review:
             }
         return context
 
-    def seal(self, settings: dict[str, Any]) -> dict[str, Any]:
+    @property
+    def coverage(self) -> ReviewCoverage:
+        """The run's only coverage record; sealing freezes it exactly once."""
+        return self._coverage
+
+    def findings(self) -> list[dict[str, Any]]:
+        """Copies of the retained claims whose current revision a fresh challenge confirmed."""
+        return deepcopy([c for c in self._claims.values() if c["disposition"] == "confirmed"])
+
+    def seal(self, settings: dict[str, Any], *, projection_valid: bool = True) -> dict[str, Any]:
         """Called after native contexts/host callbacks have quiesced; current work decides completion."""
         if self._sealed:
             raise ValueError("Review is already sealed")
@@ -848,7 +845,7 @@ class Review:
         unfinished = global_reasons.union(*(failures.get(r["work_id"], set()) for r in current))
         pipeline = ("cancelled" if ReasonCode.INTERRUPTION.value in attempted
                     else "failed" if unfinished else "completed")
-        terminal = coverage.finalize(pipeline)
+        terminal = coverage.finalize(pipeline, projection_valid=projection_valid)
         result = {
             "schema_version": RESULT_VERSIONS["committed"],
             "run_id": self.run_id,
@@ -857,7 +854,7 @@ class Review:
             "planned_work_id": planned_work_id(self.inputs.revision, self.assignments),
             "work": records,
             "claims": list(self._claims.values()),
-            "findings": [c for c in self._claims.values() if c["disposition"] == "confirmed"],
+            "findings": self.findings(),
             "terminal_result": terminal,
             "settings": settings,
             "execution": self.execution,
@@ -958,6 +955,170 @@ def _instruction_json(value: Any) -> str:
     return text
 
 
+def _context_bytes(text: str) -> int:
+    """The documented bound counts the description JSON-escaped twice."""
+    return len(canonical_json(_instruction_json(text)).encode())
+
+
+def bounded_author_description(config: RunConfig) -> FrozenAuthorDescription | None:
+    """Refuse embedder-supplied author text over its encoded bound before any source preparation."""
+    author = config.frozen_author_description
+    if author is not None and _context_bytes(author.description) > HISTORICAL_CONTEXT_MAX_BYTES["context"]:
+        raise ValueError("frozen author description exceeds its encoded UTF-8 bound")
+    return author
+
+
+def fit_author_context(text: str) -> str:
+    """Keep the longest prefix of host-fetched author text that fits the encoded bound, saying what was kept.
+
+    A pull request's author cannot avoid review with a long description: it is cut, never refused.
+    """
+    total = len(text.encode())
+
+    def kept(budget: int) -> str:
+        prefix = truncate_utf8_to_budget(text, budget)
+        return (f"{prefix}\n[author description truncated by the host: first {len(prefix.encode())} of "
+                f"{total} UTF-8 bytes]")
+
+    if _context_bytes(text) <= HISTORICAL_CONTEXT_MAX_BYTES["context"]:
+        return text
+    low, high = 0, total
+    while low < high:
+        middle = (low + high + 1) // 2
+        if _context_bytes(kept(middle)) <= HISTORICAL_CONTEXT_MAX_BYTES["context"]:
+            low = middle
+        else:
+            high = middle - 1
+    return kept(low)
+
+
+def review_settings(config: RunConfig) -> dict[str, Any]:
+    """Validate the resolved profile's allowances; return the recorded settings."""
+    profile = config.review_profile = config.review_profile or resolve_from_runconfig(config)
+    pipeline = profile.profile.pipeline
+    investigation_s, wall_s = pipeline.reviewer_investigation_budget_s, pipeline.review_wall_budget_s
+    tool_calls = pipeline.reviewer_tool_call_budget
+    if (
+        any(type(t) not in {int, float} or not math.isfinite(t) for t in (investigation_s, wall_s))
+        or type(tool_calls) is not int
+    ):
+        raise ValueError("committed review requires finite profile time and integer tool allowances")
+    if min(investigation_s + _FINALIZATION_S, wall_s) <= _FINALIZATION_S:
+        raise ValueError("profile investigation and wall allowances cannot preserve finalization capacity")
+    if tool_calls < 2:
+        raise ValueError("pipeline.reviewer_tool_call_budget must preserve both discovery and challenge "
+                         "submission capacity")
+    strategies = build_default_profile().strategies | profile.profile.strategies
+    return {
+        "profile_name": profile.name,
+        "profile_digest": profile.digest,
+        "profile_source": profile.source_kind,
+        "permissions": "read_only",
+        "limits": {
+            "investigation_s": investigation_s,
+            "finalization_s": _FINALIZATION_S,
+            "tool_calls": tool_calls,
+        },
+        "native_contexts": {},
+        "navigation": {
+            "lookup_tool": LOOKUP_TOOL, "admission_tool": ADMIT_TOOL,
+            "catalog_page_max_bytes": CATALOG_PAGE_MAX_BYTES, "lookup_page_max_bytes": LOOKUP_PAGE_MAX_BYTES,
+            "submission_max_bytes": COMMITTED_SUBMISSION_MAX_BYTES,
+            "coverage_shard_targets": COVERAGE_SHARD_TARGETS, "coverage_max_shards": COVERAGE_MAX_SHARDS,
+        },
+        "strategies": {
+            "discovery": strategies["discovery.generic_fallback"].content,
+            "challenge": strategies["challenge"].content,
+        },
+    }
+
+
+# Each required kind of work and the configuration phase that selects its backend.
+REVIEW_PHASES = (("discovery", "review"), ("challenge", "arbiter"))
+
+
+def host_tools_refusal(kind: str, name: str) -> str:
+    return (f"committed review {kind} requires a backend with native host tools (pi, claude or codex); "
+            f"{name!r} does not serve them")
+
+
+def bind_native_context(settings: dict[str, Any], kind: str, phase: str, name: str, backend: Any,
+                         source: Path) -> None:
+    """Refuse a backend without host tools, else record its opaque native configuration identity."""
+    if not getattr(backend, "supports_host_tools", False):
+        raise ValueError(host_tools_refusal(kind, name))
+    settings["native_contexts"][kind] = {"backend": name, **backend.bind_review_context(source), "phase": phase}
+
+
+@dataclass
+class ReviewProgram:
+    """Planned review work on a caller-owned workspace, artifact session, recorder and backends."""
+
+    review: Review
+    schedule: _Schedule
+    settings: dict[str, Any]
+    backends: dict[str, Any]
+    finish: float
+
+    async def dispatch(self, recorder: Any) -> None:
+        if self.review.inputs.stack.files:
+            await self.schedule.run(recorder)
+
+    async def quiesce(self) -> None:
+        """Stop every native context before sealing; a failed cleanup is retained as unfinished evidence."""
+        for backend in self.backends.values():
+            with anyio.CancelScope(shield=True):
+                try:
+                    await backend.cancel()
+                except Exception:
+                    self.review.execution.append(_host_entry("cleanup", ReasonCode.BACKEND_FAILURE.value,
+                                                             cleanup_complete=False))
+
+    def fail(self, assignment: str, reason: ReasonCode) -> None:
+        """Retain a run-wide host failure; every scope it could affect stays unfinished."""
+        self.review.execution.append(_host_entry(assignment, reason.value))
+
+    def seal(self, *, projection_valid: bool = True) -> dict[str, Any]:
+        """Freeze coverage once; a captured source that changed makes every scope unfinished."""
+        captured = self.review.inputs.captured_source
+        if captured is not None:
+            try:
+                captured.validate()
+            except (git_ops.GitError, OSError):
+                self.fail("source_integrity", ReasonCode.EVIDENCE_INCOMPLETE)
+        return self.review.seal(self.settings, projection_valid=projection_valid)
+
+
+async def plan_review(
+    config: RunConfig, work: WorkContext, backends: dict[str, Any], settings: dict[str, Any], *,
+    run_id: str, revision: dict[str, Any], diff_path: Path, index_path: Path, files: list[str],
+    started: float, allowed_tools: frozenset[str] | None = None, immutable_input: ImmutableReviewInput | None = None,
+) -> ReviewProgram:
+    """Plan the complete target population, its allowances and its schedule before any model work."""
+    profile = config.review_profile
+    assert profile is not None
+    pipeline = profile.profile.pipeline
+    # Full captured-source checks run off-loop so host-tool timers are never starved.
+    inputs = await anyio.to_thread.run_sync(lambda: StageInputFactory(
+        backends["discovery"], work, StackAssignment("committed", files),
+        change=CanonicalChange.capture(diff_path, index_path, work.captured_source),
+        revision=revision, read_only=True,
+    ))
+    # Both allowances grow with the change by the factor the staged reviewer used. Only the default profile's
+    # wall grows, with the diff tier: any other profile's wall is the ceiling it states.
+    tier = review_scale_for_diff(inputs.change.text)
+    scale = max(tier, math.ceil(len(inputs.assignment_batches) / REVIEWER_BATCHES_PER_ALLOWANCE))
+    tool_calls = pipeline.reviewer_tool_call_budget * scale
+    settings["limits"].update(scale=scale, effective_tool_calls=tool_calls)
+    finish = started + min(pipeline.reviewer_investigation_budget_s * scale + _FINALIZATION_S,
+                           pipeline.review_wall_budget_s * (tier if profile.source_kind == "default" else 1))
+    review = await anyio.to_thread.run_sync(lambda: Review(inputs, run_id, allowed_tools=allowed_tools,
+                                                           immutable_input=immutable_input))
+    schedule = _Schedule(review, backends, tool_calls, settings, started=started,
+                         deadline=finish - _FINALIZATION_S)
+    return ReviewProgram(review, schedule, settings, backends, finish)
+
+
 async def run_committed_review(request: CommittedReviewRequest) -> CommittedReviewResult:
     """Review selected local/committed source or a validated trusted immutable envelope."""
     started = clock.monotonic()
@@ -1025,52 +1186,10 @@ async def _run_committed_review(
         raise ValueError(
             "committed review uses its run-owned bundle; external export routes belong to entry integration"
         )
-    author = config.frozen_author_description
-    # The documented bound counts the description JSON-escaped twice.
-    if author is not None and len(canonical_json(_instruction_json(author.description)).encode()) > (
-            HISTORICAL_CONTEXT_MAX_BYTES["context"]):
-        raise ValueError("frozen author description exceeds its encoded UTF-8 bound")
-    profile = config.review_profile = config.review_profile or resolve_from_runconfig(config)
-    pipeline = profile.profile.pipeline
-    investigation_s, wall_s = pipeline.reviewer_investigation_budget_s, pipeline.review_wall_budget_s
-    tool_calls = pipeline.reviewer_tool_call_budget
-    if (
-        any(type(t) not in {int, float} or not math.isfinite(t) for t in (investigation_s, wall_s))
-        or type(tool_calls) is not int
-    ):
-        raise ValueError("committed review requires finite profile time and integer tool allowances")
-    if pipeline.assignment_policy not in ASSIGNMENT_POLICIES:
-        raise ValueError(f"pipeline.assignment_policy must be one of {sorted(ASSIGNMENT_POLICIES)}")
-    if min(investigation_s + _FINALIZATION_S, wall_s) <= _FINALIZATION_S:
-        raise ValueError("profile investigation and wall allowances cannot preserve finalization capacity")
-    if tool_calls < 2:
-        raise ValueError("pipeline.reviewer_tool_call_budget must preserve both discovery and challenge "
-                         "submission capacity")
-    strategies = build_default_profile().strategies | profile.profile.strategies
+    author = bounded_author_description(config)
+    settings = review_settings(config)
     backends: dict[str, Any] = {}
     inputs_by_kind: dict[str, BackendExecutionInput] = {}
-    settings: dict[str, Any] = {
-        "profile_name": profile.name,
-        "profile_digest": profile.digest,
-        "profile_source": profile.source_kind,
-        "permissions": "read_only",
-        "limits": {
-            "investigation_s": investigation_s,
-            "finalization_s": _FINALIZATION_S,
-            "tool_calls": tool_calls,
-        },
-        "native_contexts": {},
-        "navigation": {
-            "lookup_tool": LOOKUP_TOOL, "admission_tool": ADMIT_TOOL,
-            "catalog_page_max_bytes": CATALOG_PAGE_MAX_BYTES, "lookup_page_max_bytes": LOOKUP_PAGE_MAX_BYTES,
-            "submission_max_bytes": COMMITTED_SUBMISSION_MAX_BYTES,
-            "coverage_shard_targets": COVERAGE_SHARD_TARGETS, "coverage_max_shards": COVERAGE_MAX_SHARDS,
-        },
-        "strategies": {
-            "discovery": strategies["discovery.generic_fallback"].content,
-            "challenge": strategies["challenge"].content,
-        },
-    }
     if hosted is not None:
         settings["hosted_policy"] = {
             "name": "pi-read-only-v2", "backend": hosted.backend, "provider": hosted.provider,
@@ -1081,20 +1200,16 @@ async def _run_committed_review(
         settings["historical_context"] = {
             key: provenance[key] for key in ("title", "body", "context")
         }
-    for kind, phase in [("discovery", "review"), ("challenge", "arbiter")]:
+    for kind, phase in REVIEW_PHASES:
         name = _resolved_backend_name(config, phase)
-        refusal = (f"committed review {kind} requires a backend with native host tools (pi, claude or codex); "
-                   f"{name!r} does not serve them")
         try:
             inputs_by_kind[kind] = (hosted_input if hosted_input is not None
                                     else BackendExecutionInput.from_environment(dict(os.environ), backend=name))
         except ValueError:
-            raise ValueError(refusal) from None
+            raise ValueError(host_tools_refusal(kind, name)) from None
         backend: Any = _resolve_backend(config, phase, cwd=source, execution_input=inputs_by_kind[kind])
-        if not getattr(backend, "supports_host_tools", False):
-            raise ValueError(refusal)
+        bind_native_context(settings, kind, phase, name, backend, source)
         backends[kind] = backend
-        settings["native_contexts"][kind] = {"backend": name, **backend.bind_review_context(source), "phase": phase}
         if hosted is not None:
             await backend.validate_hosted_policy()
     if prepared_source is not None:
@@ -1181,32 +1296,19 @@ async def _run_committed_review(
         index_path = write_hunk_index(diff_path.parent, diff)
         files = (list(work.captured_source.files) if work.captured_source is not None else
                  git_ops.diff_name_only_strict(captured_root, original.base_sha, original.head_sha))
-        # Full captured-source checks run off-loop so host-tool timers are never starved.
-        inputs = await anyio.to_thread.run_sync(lambda: StageInputFactory(
-            backends["discovery"], work, StackAssignment("committed", files),
-            change=CanonicalChange.capture(diff_path, index_path, work.captured_source), shared_paths={},
-            revision=revision,
-            artifact_session=session, allow_standalone=False, read_only=True,
-        ))
-        # Both allowances grow with the change by the staged reviewer's factor. Only the default profile's
-        # wall grows, with the diff tier: any other profile's wall is the ceiling it states.
-        tier = review_scale_for_diff(diff)
-        scale = max(tier, math.ceil(len(inputs.assignment_batches) / REVIEWER_BATCHES_PER_ALLOWANCE))
-        tool_calls *= scale
-        settings["limits"].update(scale=scale, effective_tool_calls=tool_calls)
-        finish = started + min(investigation_s * scale + _FINALIZATION_S,
-                               wall_s * (tier if profile.source_kind == "default" else 1))
-        review = await anyio.to_thread.run_sync(lambda: Review(
-            inputs, run_id, allowed_tools=None if hosted is None else HOSTED_PI_TOOLS,
-            immutable_input=request.immutable_input,
-        ))
-        schedule = _Schedule(review, backends, tool_calls, settings, started=started, deadline=finish - _FINALIZATION_S,
-                             adaptive=pipeline.assignment_policy == "adaptive")
+        program = await plan_review(
+            config, work, backends, settings, run_id=run_id, revision=revision, diff_path=diff_path,
+            index_path=index_path, files=files, started=started,
+            allowed_tools=None if hosted is None else HOSTED_PI_TOOLS, immutable_input=request.immutable_input,
+        )
+        finish = program.finish
         recorder = _open_recorder(
             config=config, target_dir=captured_root, work=work,
             flow_kind=DaydreamRunFlow.CUSTOM, run_artifacts=artifacts,
             immutable_input=None if request.immutable_input is None else request.immutable_input.to_dict(),
         )
+        profile = config.review_profile
+        assert profile is not None
         recorder.record_profile(
             schema_version=profile.profile.schema_version, name=profile.name,
             source_kind=profile.source_kind, digest=profile.digest,
@@ -1215,8 +1317,7 @@ async def _run_committed_review(
         unsupported: UnsupportedHostedPolicy | None = None
         try:
             async with recorder:
-                if files:
-                    await schedule.run(recorder)
+                await program.dispatch(recorder)
         except asyncio.CancelledError as exc:
             # Recorder exit retains interrupted native evidence before
             # finalization. The caller still receives its cancellation.
@@ -1226,20 +1327,9 @@ async def _run_committed_review(
             # outcomes before surfacing the actionable support blocker.
             unsupported = exc
         finally:
-            for backend in backends.values():
-                with anyio.CancelScope(shield=True):
-                    try:
-                        await backend.cancel()
-                    except Exception:
-                        review.execution.append(_host_entry("cleanup", ReasonCode.BACKEND_FAILURE.value,
-                                                            cleanup_complete=False))
+            await program.quiesce()
         try:
-            if work.captured_source is not None:
-                try:
-                    work.captured_source.validate()
-                except (git_ops.GitError, OSError):
-                    review.execution.append(_host_entry("source_integrity", ReasonCode.EVIDENCE_INCOMPLETE.value))
-            payload = review.seal(settings)
+            payload = program.seal()
             output_error: str | None = None
             installed = False
             capture_state = (
@@ -1319,7 +1409,7 @@ class _Schedule:
     """
 
     def __init__(self, review: Review, backends: dict[str, Backend], tool_calls: int,
-                 settings: dict[str, Any], *, started: float, deadline: float, adaptive: bool) -> None:
+                 settings: dict[str, Any], *, started: float, deadline: float) -> None:
         self.review, self.backends, self.settings = review, backends, settings
         self.ledger = BudgetLedger("committed", deadline=deadline, limit=tool_calls, investigation=True,
                                    start_floor=1)
@@ -1329,8 +1419,7 @@ class _Schedule:
         cross_calls = max(_MIN_WORK_CALLS, investigation_calls // 4)
         # One conversation holds at most one base allowance of batches. Decompose only into
         # assignments that each retain a usable allocation.
-        self.decompose = len(self.batches) > 1 and (
-            adaptive or len(self.batches) > REVIEWER_BATCHES_PER_ALLOWANCE) and (
+        self.decompose = len(self.batches) > REVIEWER_BATCHES_PER_ALLOWANCE and (
             investigation_calls - cross_calls >= _MIN_WORK_CALLS * len(self.batches))
         cross_deadline = started + window / 2
         local_deadline = started + window * (3 / 8 if self.decompose else 1 / 2)
@@ -1355,7 +1444,7 @@ class _Schedule:
                 "protected_cross_assignment_s": cross_deadline - local_deadline} if self.decompose else {}),
         )
         settings["assignment_policy"] = {
-            "name": "adaptive" if adaptive else "broad", "decomposed": self.decompose,
+            "name": "broad", "decomposed": self.decompose,
             "planned_assignments": len(self.batches) if self.decompose else 1,
             "cross_assignment": "required" if self.decompose else "not_applicable",
         }
@@ -1488,20 +1577,23 @@ class _Schedule:
                 content = returned.pop("content")
                 prompt += (f"\n{token} Supplied target, as review_source returns it:"
                            f"\n{token} {_instruction_json(returned)}\n{content}")
-            _, _, stopped = await agent.run_agent(
-                backend,
-                repo,
-                prompt,
-                phase=DaydreamPhase.VERIFY if kind == "challenge" else DaydreamPhase.REVIEW,
-                output_schema=schema,
-                result_schema=receipt_schema(kind),
-                read_only=True,
-                persist_session=False,
-                budget=budget,
-                review_system_instructions=instructions,
-                review_stage_scope_id=work_id,
-                host_tools=binding,
-            )
+            phase = DaydreamPhase.VERIFY if kind == "challenge" else DaydreamPhase.REVIEW
+            # Each work item is its own phase interval, so its invocation's time is attributed to its phase.
+            async with phase_scope(phase, stage=f"committed-{kind}"):
+                _, _, stopped = await agent.run_agent(
+                    backend,
+                    repo,
+                    prompt,
+                    phase=phase,
+                    output_schema=schema,
+                    result_schema=receipt_schema(kind),
+                    read_only=True,
+                    persist_session=False,
+                    budget=budget,
+                    review_system_instructions=instructions,
+                    review_stage_scope_id=work_id,
+                    host_tools=binding,
+                )
             settled = stopped is None and binding.native_settled
             if stopped is not None:
                 try:

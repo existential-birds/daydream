@@ -5,6 +5,7 @@ deep and shallow flows.
 
 from __future__ import annotations
 
+import copy
 import json
 import sqlite3
 import sys
@@ -22,9 +23,8 @@ from daydream.backends import (
     ResultEvent,
     TextEvent,
 )
-from daydream.config_file import DaydreamFileConfig
 from daydream.dataset import LocalRecordStore
-from daydream.run_config import RunConfig
+from daydream.run_config import RunConfig, _resolved_model
 from daydream.runner import run
 from daydream.training.labeler_signals import local_commit_applied_signal
 from tests.deep_orchestrator.support import _only_archived_run
@@ -38,7 +38,7 @@ from tests.harness.stub_backend import (
     silence,
 )
 from tests.harness.trajectory import diff_adding
-from tests.test_deep_orchestrator import _merge_item, _noop_commit, _ok
+from tests.test_deep_orchestrator import _noop_commit, _ok
 
 
 def _deep_run_config(target: Path, **overrides: Any) -> RunConfig:
@@ -77,8 +77,8 @@ def _install_deep_capture_backend(
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     if real_internal_phases:
         stub = _ArchiveCaptureBackend(multi_stack_target)
-        monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub,)
-    stub.merge_items = [_merge_item(1, "api.py", "high")]
+        # One instance per resolved phase backend, as the real factory builds them; the copies share the script.
+        monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: copy.copy(stub))
     if not real_internal_phases:
         monkeypatch.setattr("daydream.deep.fix_steps.phase_test_and_heal", lambda *a, **k: _ok(**k),)
         monkeypatch.setattr("daydream.deep.fix_steps.phase_commit_push", _noop_commit)
@@ -99,27 +99,26 @@ async def _run_real_phases_deep(
     no_ci_remote.connect(multi_stack_target, remote)
     stub = _install_deep_capture_backend(multi_stack_target, monkeypatch, real_internal_phases=True)
     stub.fix_edit_line = fix_edit_line
-    if dataset_store is not None:
-        assert stub.merge_items is not None
-        stub.merge_items[0]["source_uids"] = ["python:1"]
+    stub.review_claims = [{"title": "Sample issue", "file": "api.py", "line": 1}]
     if untracked_fix is not None:
         stub.fix_new_generated = untracked_fix
-        assert stub.merge_items is not None
-        stub.merge_items[0]["related_files"] = [untracked_fix]
         (multi_stack_target / "notes.txt").write_text("pre-existing\n")
     exit_code = await run(_deep_run_config(
-            multi_stack_target, pr_number=no_ci_remote.pr_number, pr_repo=pr_repo or no_ci_remote.base_repository,
+            multi_stack_target, backend="pi", review_backend="codex",
+            pr_number=no_ci_remote.pr_number, pr_repo=pr_repo or no_ci_remote.base_repository,
             dataset_capture=dataset_store is not None, dataset_store_path=dataset_store,
             dump_artifacts=None if dump_path is None else str(dump_path),
-            file_config=DaydreamFileConfig(verify_all=True),
         )
     )
+    # Review context stays on the reviewer's own instances: no turn that may edit the checkout runs on one.
+    assert {call["review_bound"] for call in stub.calls if call["review_instructions"]} == {True}
+    assert {call["review_bound"] for call in stub.calls if not call["read_only"]} == {False}
     return remote, exit_code
 
 
 async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_phase_state(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, no_ci_remote: NoCIRemote,
-    tmp_path: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Archive and push tracked/generated fixes while leaving pre-existing notes untracked."""
     head_before = git_ops.head_sha(multi_stack_target)
@@ -128,9 +127,10 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     store = LocalRecordStore(archive_dir.parent / "records")
     dump_dir = tmp_path / "uploaded-artifacts"
     remote, exit_code = await _run_real_phases_deep(
-        multi_stack_target, monkeypatch, archive_dir, no_ci_remote, dataset_store=store.root, dump_path=dump_dir,
-        untracked_fix="migrations/0002_add_x.sql")
+        multi_stack_target, monkeypatch, archive_dir, no_ci_remote, dataset_store=store.root, dump_path=dump_dir)
     assert exit_code == 0
+    join = capsys.readouterr().out.split("Verdict Join", 1)[1].split("Total", 1)[0]
+    assert "Matched" in join and "Structural" not in join
     head_after = git_ops.head_sha(multi_stack_target)
     assert head_after != head_before
     assert git(remote, "rev-parse", "refs/heads/feature") == head_after
@@ -142,7 +142,7 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     manifest = json.loads((run_dir / "manifest.json").read_text())
     trajectory = json.loads((run_dir / "trajectory.json").read_text())
     siblings = [json.loads(path.read_bytes()) for path in (run_dir / "trajectories").glob("*.json")]
-    assert len(siblings) >= 2
+    assert len(siblings) >= 1
     for document in (trajectory, *siblings):
         assert document["session_id"] == manifest["session_id"]
         assert atif_validate(document, validate_images=False)
@@ -154,6 +154,13 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     verdict = json.loads((multi_stack_target / ".daydream/deep/test-verdict.json").read_text())
     assert verdict["passed"] and all(attempt["kind"] == "host" for attempt in verdict["attempts"])
 
+    # Stored records name the reviewer that ran: discovery on the review phase's backend, not on a phase
+    # table this build ignores. The keys are the stored ones.
+    review_model = _resolved_model(RunConfig(backend="pi", review_backend="codex"), "review")
+    assert trajectory["extra"]["review_backend"] == "codex"
+    recorded = manifest["run"]
+    assert (recorded["review_backend"], recorded["per_stack_review_backend"], recorded["per_stack_review_model"]) == (
+        "codex", "codex", review_model)
     metrics = manifest["metrics"]
     assert "grounding_rate" not in metrics
     assert metrics["total_findings"] is not None
@@ -179,27 +186,32 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert recommended_text != diff_text
     assert "# daydream recommended change" in recommended_text
     assert "# daydream recommended change" not in diff_text
-    assert "migrations/0002_add_x.sql" in recommended_text
-    assert "notes.txt" not in recommended_text
-    committed = git(remote, "ls-tree", "-r", "--name-only", "refs/heads/feature").splitlines()
-    assert "migrations/0002_add_x.sql" in committed
-    assert "notes.txt" not in committed
-    assert "notes.txt" in git(multi_stack_target, "status", "--porcelain")
-    for filename in ("manifest.json", "trajectory.json", "diff.patch", "evaluation.json"):
+    # The sealed result lives beside the other deep artifacts, so the archive and the dump retain it.
+    for filename in ("manifest.json", "trajectory.json", "diff.patch", "evaluation.json", "deep/committed-review.json"):
         assert (dump_dir / filename).is_file()
         assert (dump_dir / filename).read_bytes() == (run_dir / filename).read_bytes()
+    assert json.loads((run_dir / "deep/committed-review.json").read_text())["run_id"] == manifest["session_id"]
     captured = read_records(store).runs[0]
+    # The record lists the phases that ran, each with what it resolved to; a phase no run has is absent.
+    resolved = captured["provenance"]["resolved_phases"]
+    assert sorted(resolved) == ["arbiter", "fix", "review", "test", "verify"]
+    assert (resolved["review"]["backend"], resolved["review"]["model"]) == ("codex", review_model)
+    assert resolved["arbiter"]["backend"] == "pi" and resolved["fix"]["backend"] == "pi"
     task = captured["original_task"]["value"]
     assert (task["analyzed_revision"]["head_sha"], task["analyzed_revision"]["merge_base_sha"]) == (
         head_before, base_before)
     assert task["diff"] == original_diff and captured["final_state"]["value"]["head_sha"] == head_after
     assert captured["recommended_patch"]["value"]["patch"] == recommended_text
     item = captured["findings"]["value"]["items"][0]
-    assert item["item_uid"] and item["source_uids"]
+    assert item["item_uid"] and item["source_uids"] == [item["uid"]]
+    assert item["description"] == "Sample issue" and "severity" not in item
     verification = captured["verification"]["value"]
     verdicts = verification["recommendation-verdicts.json"]
     assert verdicts["selection"]["decisions"][0]["item_uid"] == item["item_uid"]
     assert verdicts["selection"]["mode"] == "verify_all"
+    # The stored counters and the per-decision flag keep their keys though nothing is skipped or carried over.
+    assert (verdicts["selection"]["skipped"], verdicts["selection"]["reused"]) == (0, 0)
+    assert verdicts["selection"]["decisions"][0]["verdict_reused"] is False
     assert verdicts["verdicts"][0]["issue_id"] == item["id"]
     assert verification["fix-outcomes.json"]["outcomes"][item["item_uid"]]["verdict"] == "resolved"
     assert captured["scoring"]["value"]["persisted_breakdown"]["correctness_per_finding"] == [1.0]

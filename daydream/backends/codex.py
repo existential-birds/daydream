@@ -444,7 +444,6 @@ class CodexLifecycleError(CodexError):
     """Host lifecycle failure with a trusted closed-field review projection."""
 
     def __init__(self, failure: BackendLifecycleFailure):
-        self.lifecycle_failure = failure
         super().__init__(lifecycle_failure_diagnostic(failure) or "Codex lifecycle diagnostic unavailable",
                          category="TIMEOUT",
                          retryable=not failure.terminal_received if failure.stage == "process_reap" else False)
@@ -455,15 +454,6 @@ class CodexUnsubmittedTurn(CodexError):
 
     max_retries = 1
     reason_code = "missing_output"
-
-
-def codex_lifecycle_diagnostic(error: BaseException) -> str | None:
-    """Project only this adapter's exact host error; reject polymorphic payloads.
-
-    The projection admits only an exact ``BackendLifecycleFailure`` and never raises."""
-    if type(error) is not CodexLifecycleError:
-        return None
-    return lifecycle_failure_diagnostic(getattr(error, "lifecycle_failure", None))
 
 
 def _file_change_events(

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import html
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,20 @@ def _code(value: object) -> str:
     return '<code>' + html.escape(str(value)) + '</code>'
 
 
+def allowance_sentence(reason_codes: list[str], code: Callable[[object], str] = _code) -> str:
+    """Name the profile keys that raise a spent allowance, from sealed reason codes; empty when none was spent."""
+    keys = [code(key) for reason, names in _ALLOWANCE_KEYS.items() if reason in reason_codes for key in names]
+    if not keys:
+        return ''
+    wall = 'host_wall_budget_exhaustion' in reason_codes
+    return ('The review used up its allowance before it finished; raise ' + ' and '.join(keys)
+            + f" under {code('[pipeline]')} in the review profile. The review multiplies "
+            + f"{code('reviewer_tool_call_budget')} and {code('reviewer_investigation_budget_s')} by the "
+            + f"{code('scale')} its {code('settings.limits')} record"
+            + (f"; {code('review_wall_budget_s')} caps the whole review and grows with the diff in the "
+               "default profile only." if wall else "."))
+
+
 def render_committed_review(payload: Mapping[str, Any]) -> str:
     """Present retained claims without treating an empty list as completed work."""
     terminal = payload['terminal_result']
@@ -32,16 +46,8 @@ def render_committed_review(payload: Mapping[str, Any]) -> str:
     ]
     if terminal['reason_codes']:
         lines.append('Unfinished work: ' + ', '.join(_code(reason) for reason in terminal['reason_codes']) + '.')
-    keys = [_code(key) for reason, names in _ALLOWANCE_KEYS.items() if reason in terminal['reason_codes']
-            for key in names]
-    if keys:
-        wall = 'host_wall_budget_exhaustion' in terminal['reason_codes']
-        lines.append('The review used up its allowance before it finished; raise ' + ' and '.join(keys)
-                     + f" under {_code('[pipeline]')} in the review profile. The review multiplies "
-                     + f"{_code('reviewer_tool_call_budget')} and {_code('reviewer_investigation_budget_s')} by the "
-                     + f"{_code('scale')} its {_code('settings.limits')} record"
-                     + (f"; {_code('review_wall_budget_s')} caps the whole review and grows with the diff in the "
-                        "default profile only." if wall else "."))
+    if sentence := allowance_sentence(terminal['reason_codes']):
+        lines.append(sentence)
     lines.extend(['', '## Findings', ''])
     if not payload['findings']:
         lines.append('No confirmed findings.')
@@ -72,13 +78,11 @@ def render_committed_review(payload: Mapping[str, Any]) -> str:
 
 
 def write_committed_review_output(
-    session: ArtifactSession, payload: dict[str, Any], *,
-    report_path: Path | None = None, result_path: Path | None = None,
+    session: ArtifactSession | None, payload: dict[str, Any], *, report_path: Path, result_path: Path,
 ) -> None:
-    """Stage the report first; the session owns conflict-safe final publication."""
+    """Stage the report first; an owning session supplies conflict-safe final publication."""
     validate_committed_result(payload)
-    if payload['run_id'] != session.layout.session_id:
+    if session is not None and payload['run_id'] != session.layout.session_id:
         raise ValueError('committed review output differs from its artifact run')
-    report = render_committed_review(payload).encode('utf-8')
-    atomic_write_bytes(report_path or session.review_output, report)
-    atomic_write_json(result_path or session.daydream_dir / 'committed-review.json', payload, trailing_newline=True)
+    atomic_write_bytes(report_path, render_committed_review(payload).encode('utf-8'))
+    atomic_write_json(result_path, payload, trailing_newline=True)

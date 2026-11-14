@@ -20,12 +20,9 @@ from daydream.agent import run_agent
 from daydream.backends import (
     CostEvent,
     DiagnosticEvent,
-    GenerationEndEvent,
-    GenerationStartEvent,
     MetricsEvent,
     RequestEvent,
     ResultEvent,
-    TextChoicePart,
     TextEvent,
     ThinkingEvent,
     ToolResultEvent,
@@ -38,10 +35,9 @@ from daydream.observability.config import (
 )
 from daydream.observability.privacy import PrivacyPolicy, diagnostic_scope
 from daydream.observability.runtime import current_run_trace_id, current_session, record_local_trace, trace_run
-from daydream.observability.spans import agent_scope, attempt_scope, stack_scope, step_scope
-from daydream.trajectory import DaydreamPhase, dispatch_scope, phase_scope
+from daydream.observability.spans import agent_scope, attempt_scope, step_scope
+from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
-from tests.harness.trajectory import make_recorder
 
 
 def _memory_tracing() -> tuple[InMemorySpanExporter, Registry]:
@@ -51,18 +47,6 @@ def _memory_tracing() -> tuple[InMemorySpanExporter, Registry]:
     registry.register_trace_exporter("memory", lambda _: exporter)
     return exporter, registry
 
-
-def _observe_generation(attempt: Any, *, text: bool = False, metrics: bool = False) -> None:
-    """Emit the canonical generation start/end pair shared by the generation tests."""
-    attempt.observe(GenerationStartEvent(generation_id="gen-1", observed_at_unix_ns=1788690314289000000))
-    attempt.observe(GenerationEndEvent(
-            generation_id="gen-1", native_started_at_unix_ms=1788690314289, ended_at_unix_ns=1788690709621000000,
-            end_source="host_observed_message_end", choice_parts=(TextChoicePart(text="hello"),) if text else (),
-            response_id="resp-1", model_name="pi-model", provider_name="pi", finish_reason="stop",
-        )
-    )
-    if metrics:
-        attempt.observe(MetricsEvent("", 10, 2, None, 0.001, generation_id="gen-1"))
 
 @pytest.mark.anyio
 async def test_attempt_records_scrubbed_diagnostic_events_in_observed_order(monkeypatch: pytest.MonkeyPatch,) -> None:
@@ -357,70 +341,6 @@ async def test_run_trace_identity_and_delivery_failures_never_block_the_run(
     assert "Trace processor flush failed" in caplog.text
     assert caplog.text.count("Local trace evidence write failed (NotADirectoryError); the review continues") == 1
     assert str(tmp_path) not in caplog.text and not blocked.exists()
-
-
-@pytest.mark.anyio
-async def test_stack_binding_preserves_precedence_and_restores_context_on_every_exit(tmp_path: Path) -> None:
-    """Spanless attribution restores the caller after a normal exit and after a cancelled reviewer."""
-    for inherited_stack, exit_path in ((None, "normal"), ("", "cancellation")):
-        exporter, registry = _memory_tracing()
-        async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
-            with step_scope("review", stack=inherited_stack, iteration=0):
-                with anyio.CancelScope() as cancellation:
-                    with stack_scope("react"):
-                        with stack_scope("generic"):
-                            with agent_scope("bound", backend="pi"):
-                                async with attempt_scope(1) as attempt:
-                                    _observe_generation(attempt)
-                        if exit_path == "cancellation":
-                            cancellation.cancel()
-                            await anyio.sleep(0)
-                with agent_scope("restored", backend="pi"):
-                    async with attempt_scope(1) as attempt:
-                        _observe_generation(attempt)
-
-        spans = exporter.get_finished_spans()
-        assert len(spans) == 8, exit_path  # run + step + two agent/attempt/generation subtrees, no binding spans
-        generations = [span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "generation"]
-        assert len(generations) == 2, exit_path
-        bound, restored = generations
-        expected = inherited_stack if inherited_stack is not None else "react"
-        assert (bound.attributes or {})["daydream.stack"] == expected, exit_path
-        if inherited_stack is None:
-            assert "daydream.stack" not in (restored.attributes or {})
-        else:
-            assert (restored.attributes or {})["daydream.stack"] == inherited_stack, exit_path
-        assert all((span.attributes or {})["daydream.iteration"] == 0 for span in generations)
-
-    # Spans inside a fork carry its trajectory id; phase and dispatch scopes add events to the enclosing span.
-    exporter, registry = _memory_tracing()
-    root = make_recorder(tmp_path)
-    async with root, trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
-        with step_scope("deep", stack=None, iteration=0), pytest.raises(RuntimeError):
-            async with (
-                phase_scope(DaydreamPhase.DEEP) as phase,
-                dispatch_scope(root, phase=DaydreamPhase.DEEP, descriptors=("stack-python",)) as dispatch,
-                root.fork("stack-python", dispatch=dispatch) as child,
-            ):
-                async with phase_scope(DaydreamPhase.REVIEW) as review:
-                    with step_scope("review", stack=None, iteration=0):
-                        pass
-                raise RuntimeError
-    by_name = {span.name: span for span in exporter.get_finished_spans()}
-    step = by_name["daydream.step.review"]
-    assert (step.attributes or {})["daydream.trajectory.descriptor"] == "stack-python"
-    assert (step.attributes or {})["daydream.trajectory.id"] == child.trajectory_id == "test:dispatch:1:fork:1"
-    assert (phase.scope_id, review.scope_id) == ("test:phase:1", "test:dispatch:1:fork:1:phase:1")
-    deep = {"daydream.phase": "deep", "daydream.phase_scope.id": phase.scope_id}
-    nested = {"daydream.phase": "review", "daydream.phase_scope.id": review.scope_id}
-    fanout = {"daydream.dispatch.id": "test:dispatch:1"}
-    assert [(event.name, dict(event.attributes or {})) for event in by_name["daydream.step.deep"].events] == [
-        ("daydream.phase.start", deep), ("daydream.dispatch.start", fanout), ("daydream.phase.start", nested),
-        ("daydream.phase.end", {**nested, "daydream.phase_scope.status": "succeeded"}),
-        ("daydream.dispatch.end", fanout),
-        ("daydream.phase.end", {**deep, "daydream.phase_scope.status": "failed",
-                                "daydream.phase_scope.reason_code": "uncaught_exception"}),
-    ]
 
 
 async def test_codex_lifecycle_export_retains_exit_without_creating_usage() -> None:

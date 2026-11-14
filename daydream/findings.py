@@ -267,6 +267,21 @@ def build_findings_artifact(
     return artifact
 
 
+def committed_finding_item(finding: dict[str, Any]) -> dict[str, Any]:
+    """Project one confirmed committed claim onto a canonical item, inventing no severity, confidence or lens."""
+    semantic = finding['payload']
+    rationale = '\n\n'.join([semantic['claim'], *(
+        f'**{label}:** {semantic[key]}'
+        for key, label in (('trigger', 'Trigger'), ('consequence', 'Consequence'),
+                           ('grounds', 'Supporting grounds'))
+    )])
+    return {
+        'id': finding['id'], 'uid': finding['uid'], 'item_uid': finding['item_uid'],
+        'source_uids': list(finding['source_uids']), 'file': semantic['file'], 'line': semantic['line'],
+        'description': finding['title'], 'rationale': rationale,
+    }
+
+
 def build_committed_findings_artifact(
     target_dir: Path, payload: dict[str, Any], *, snapshot_diff: str,
 ) -> dict[str, Any]:
@@ -276,7 +291,7 @@ def build_committed_findings_artifact(
     session. Unresolved concerns and native diagnostics remain in the paired
     committed result; this handoff retains confirmed findings and typed coverage.
     """
-    from daydream.committed_review_model import RESULT_VERSIONS, validate_committed_result
+    from daydream.committed_review_model import RESULT_VERSIONS, fragment_spans, head_line, validate_committed_result
 
     validate_committed_result(payload)
     if payload['schema_version'] != RESULT_VERSIONS['immutable']:
@@ -288,24 +303,21 @@ def build_committed_findings_artifact(
     owner, repo = original['repository'].split('/', 1)
     pr = PRInfo(original['pr_number'], original['head_sha'], original['comparison_base_sha'],
                 '', '', owner, repo, '')
+    spans = fragment_spans(payload['assignments'])
     return build_findings_artifact(
-        target_dir, pr, [_committed_issue(finding) for finding in payload['findings']],
+        # Placement reads the line as a head line, so a location only the old side has carries none.
+        target_dir, pr, [_committed_issue(finding, head_line(finding, spans)) for finding in payload['findings']],
         run_info=f"Committed review {payload['run_id']}",
         terminal_result=payload['terminal_result'], snapshot_diff=snapshot_diff, immutable_input=immutable,
     )
 
 
-def _committed_issue(claim: dict[str, Any]) -> ParsedIssue:
-    semantic = claim['payload']
-    body = '\n\n'.join([semantic['claim'], *(
-        f'**{label}:** {semantic[key]}'
-        for key, label in (('trigger', 'Trigger'), ('consequence', 'Consequence'),
-                           ('grounds', 'Supporting grounds'))
-    )])
+def _committed_issue(claim: dict[str, Any], line: int | None) -> ParsedIssue:
+    item = committed_finding_item(claim)
     return ParsedIssue(
-        path=semantic['file'], line=semantic['line'], title=claim['title'], body=body,
+        path=item['file'], line=line, title=item['description'], body=item['rationale'],
         severity=None, confidence=None, is_cross_stack=False,
-        fingerprint=pr_review.compute_fingerprint(semantic['file'], claim['title'], body),
+        fingerprint=pr_review.compute_fingerprint(item['file'], item['description'], item['rationale']),
     )
 
 
@@ -328,7 +340,7 @@ def committed_export_bytes(coverage: dict[str, Any], immutable_input: dict[str, 
     }
     provenance = (immutable_input or {}).get('provenance', {})
     posted = 10**10 - 1
-    issues = [_committed_issue(claim) for claim in claims]
+    issues = [_committed_issue(claim, claim['payload']['line']) for claim in claims]
     for issue in issues:
         pr_review._note_relocation(issue, posted)
     artifact = {

@@ -42,15 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exercised. `uvicorn` is now a direct dependency
   ([#1646](https://github.com/existential-birds/daydream/issues/1646)).
 - Committed review (`run_committed_review`) no longer ignores
-  `RunConfig.frozen_author_description` on a request without hosted policy, so an embedder
-  that already sets the field for the default reviewer now supplies it on this route too.
+  `RunConfig.frozen_author_description` on a request without hosted policy.
   The reviewer receives non-blank text as captured untrusted context
-  (`historical_context`), which the sealed result's `settings` record. Unlike the default
-  reviewer's intent step, it is context with no authority: nothing gives a stated intent
-  precedence over a finding. A description bound to a `head_sha` other than the analyzed
+  (`historical_context`), which the sealed result's `settings` record. It is context
+  with no authority: nothing gives a stated intent precedence over a finding. A
+  description bound to a `head_sha` other than the analyzed
   head is refused, and so is one whose encoded size (JSON-escaped twice, as a native
-  argument carries it) exceeds 65536 UTF-8 bytes; both refusals precede any model work,
-  and the default reviewer applies no size bound. An accepted description beside a large
+  argument carries it) exceeds 65536 UTF-8 bytes; both refusals precede any model
+  work. An accepted description beside a large
   catalog and many challenge claims can still exceed a platform's single-argument size on
   Claude or Codex, and that assignment fails to start with the adapter's own error.
   Assignment JSON now escapes DEL, U+0085, U+2028 and U+2029, and quoted text that repeats
@@ -73,6 +72,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** one reviewer serves every route. `daydream`, `--review`, `--comment`,
+  `--findings-out`, selected fixing (`--fix`), embedded `runner.run` and the packaged bot
+  producer now run the [committed-review program](docs/runtime.md#committed-review-requestresult)
+  as the `review` step of the `deep` flow; it writes the canonical items and coverage that
+  posting, the findings export, capture, diagrams, the embedded result callback and the fix
+  cycle already read, plus `.daydream/deep/committed-review.json`. Findings schema 2, the dataset
+  record and the embedded callback keep their formats. What changes for callers
+  ([#1641](https://github.com/existential-birds/daydream/issues/1641)):
+  - Findings carry no `severity`, `confidence`, `lens`, `evidence` or `related_files`.
+    `--approve-on-clean` approves only a complete review with no findings: a finding
+    without severity withholds approval on every route. A fix may no longer create a
+    file the reviewer named; the fix footprint is the reviewed change and the finding's file.
+  - A finding's line is carried only when a new-side source reference of its file covers
+    it. A location that only the old side has is placed on the file, with its text intact.
+    `build_committed_findings_artifact` applies the same rule to a sealed result, so its
+    artifact no longer places such a finding inline on an unrelated head line.
+  - Exit status: a review whose analysis is `failed` (no usable evidence, or an unusable
+    findings projection) exits 1 on review, comment, fixing and findings export, after its
+    report, notice or artifact has been published. An `incomplete` review keeps exit 0 and
+    says what was not finished. Every review prints one outcome line when it is sealed,
+    before any fix gate: complete, incomplete or failed, the number of confirmed findings
+    it delivers (with the reviewer's own count when an extension step changed it, so the
+    line agrees with the report) and, when unfinished, the scopes or phases left with
+    their reason codes.
+    A cancelled review seals and publishes the claims and coverage it had before the
+    cancellation propagates; an embedded result callback is not called for it and no
+    `--findings-out` artifact is written.
+  - `--shallow`, `--stack`, `--precision`, `--latency-profile`, `--no-review-cache` and
+    `--start-at` are usage errors that say what replaces them; the same values on an
+    embedded `RunConfig` are refused before any work, and `--shallow`,
+    `--no-review-cache` and `--start-at` are refused on `--diagram-only` runs too. Every
+    review starts fresh. Repository settings that no longer select anything
+    (`precision_mode`, `latency_profile`, `shallow_fanout_threshold`, `deep_shard_*`,
+    `review_cache_*`, `verify_all` and the `intent`, `merge`, `parse`, `per_stack_review`,
+    `supervise`, `suppression` and `wonder` phase tables) are
+    named in one warning and ignored.
+  - The reviewer's model and reasoning effort now come from the `review` (discovery) and
+    `arbiter` (challenge) phase tables; the `per_stack_review` table no longer selects
+    anything. With defaults this changes what runs. On Claude the bulk of the review moves
+    from the middle model tier, which per-stack reviews used, to the top tier that
+    `review` and `arbiter` default to. On Codex the model is unchanged and the challenge
+    runs at `high` effort. On Pi the model still comes from Pi's own settings, but the
+    `medium` effort that per-stack reviews pinned is gone and Pi's own default applies. To
+    keep the earlier tier, set `model` or `reasoning_effort` under `[phases.review]`
+    (and `[phases.arbiter]` for the challenge) to what your `per_stack_review` table or
+    its default used.
+  - The findings supervisor (`supervisor = "rules"` or `"llm"`) is refused before any work
+    until the setting is removed; an extension step in the `deep` flow can rewrite the
+    canonical items instead.
+  - The pull request description reaches the reviewer as untrusted context and never
+    overrides a finding. A description over the context bound is cut to the longest prefix
+    that fits, with an in-text marker saying how many bytes were kept. Embedder-supplied
+    `frozen_author_description` over the bound, or frozen for another head than the
+    approved one, is refused before any work.
+  - A review whose review or arbiter backend serves no native host tools (Osprey) is
+    refused before any work.
+  - Extension API 10: extensions must declare `DAYDREAM_EXT_API = 10`, and one that
+    declares an earlier version is rejected before any work. The staged review phases
+    are no longer registered, so a flow that names one fails before any work, and only
+    the `deep` flow plans the `review` phase.
+    Insert steps into `deep` with `set_flow`; review profiles carry strategy text and
+    budgets.
+  - The artifact dump and the archive no longer contain per-stack records, intent or
+    alternatives files. Both retain the sealed result as `deep/committed-review.json`; the
+    dataset record does not carry it.
+
 - **Changed defaults (0.y.z):** committed review's allowances grow with the change the
   way the staged reviewer's did. The profile's `reviewer_tool_call_budget` and
   `reviewer_investigation_budget_s` are multiplied by the larger of the diff tier (3, 6
@@ -88,28 +153,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a hard outer deadline must set `review_wall_budget_s` to it. Every sealed result
   now records `scale` and `effective_tool_calls` in `settings.limits` beside the
   profile's own values, for small changes too, and the profile shown to the reviewer in
-  each assignment carries them; the profile digest does not change. A report that names
+  each assignment carries them; scaling itself does not change the profile digest (the
+  removed profile keys below do). With the default profile a change of more than four
+  batches in the first tier, or one with a scale of at least 6, 12 or 17 in tiers 3, 6
+  and 9, gets a review window as long as the flow's outer review deadline, so diagrams
+  generated after a review that used all of it are left about 120 s. A report that names
   the profile keys raising a spent allowance now also says that the review multiplies
   `reviewer_tool_call_budget` and `reviewer_investigation_budget_s` by that `scale` and,
   for spent time, that `review_wall_budget_s` grows with the diff in the default profile
   only
   ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
-- A change of more than four batches is reviewed as one discovery assignment per batch
-  under both `broad` and `adaptive`, followed by the cross-assignment and the challenge.
-  They run ten at a time on Pi and eight on Claude and Codex by default;
+- A change of more than four batches is reviewed as one discovery assignment per batch,
+  followed by the cross-assignment and the challenge, when the allowance leaves every
+  batch two starts. They run ten at a time on Pi and eight on Claude and Codex by default;
   `DAYDREAM_FANOUT_CONCURRENCY` changes that, up to ten. Such a change can no longer be
-  reviewed in one conversation under `broad`, and
-  `settings.assignment_policy.decomposed` can be `true` there; the two policies now differ
-  only for changes of two to four batches. A change of at most four batches whose diff is
-  in the first tier is planned under `broad` exactly as before
-  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
+  reviewed in one conversation, and `settings.assignment_policy.decomposed` can be `true`
+  while its `name` is `broad`. A change of at most four batches is one assignment; when
+  its diff is in the first tier it is planned exactly as before
+  ([#1836](https://github.com/existential-birds/daydream/issues/1836),
+  [#1838](https://github.com/existential-birds/daydream/issues/1838)).
 - A split discovery or follow-up assignment receives each of its targets in its first
   message as `review_source` returns it, instead of fetching each with a charged call,
   so its prompt and recorded trajectory are larger. Because those bytes are untrusted
   and now sit in a message of the host's, each header and description line of a supplied
   target begins with a random token that the message's first line announces, and the
-  instructions of such an assignment say that only those lines are host-authored. This
-  includes `adaptive` reviews of two to four batches
+  instructions of such an assignment say that only those lines are host-authored
   ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 - Trace agent spans record each retry-ladder stop as a `daydream.retry.stop` event carrying
   the trajectory's `agent_budget_stop` fields as `daydream.retry.*`, with or without a
@@ -179,15 +247,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer apply fixes. To migrate, add `--fix` (`daydream --fix .`, or
   `daydream --fix --yes .` for an unattended run); embedded callers pass
   `output_mode="loop"`. An embedded caller that relied on the old default now gets a
-  review that exits 0, with or without `assume="yes"`. Flags that act on a fixing run are
-  usage errors without `--fix`, and each error names what to use: `--yes`, `--start-at`
-  and a bare `--shallow`. A custom `--flow` keeps `--yes` and `--start-at`; an explicit
-  `--review`, `--comment` or `--diagram-only` still accepts and ignores `--shallow`, as
-  before. `--flow shallow` is a usage error (use `--fix --shallow`); `--flow deep` is now
-  the default review and rejects `--yes` and `--start-at` (use `--fix`). An embedded
-  `flow_name="shallow"` or `shallow=True` without `output_mode="loop"` is a full
-  multi-stack review. A review cannot be resumed into fixing: to fix what a review
-  reported, rerun with `--fix`. A fixing request that could only end as a review used to
+  review that exits 0, with or without `assume="yes"`. `--yes` acts on a fixing run and
+  is a usage error without `--fix`, naming what to use; a custom `--flow` keeps it.
+  `--flow deep` is now the default review and rejects `--yes` (use `--fix`). To fix what
+  a review reported, rerun with `--fix`; `--shallow` no longer exists and `--start-at` is
+  refused outside a custom `--flow`, which still reads its own start point (see the
+  removed staged reviewer below). A fixing request that could only end as a review used to
   exit 0 and is now refused: `--fix --non-interactive` without `--yes`, `--fix` with
   `--findings-out` and `--flow` with `--fix` are usage errors, and the runner returns 1
   before any work for `output_mode="loop"` whose fix gate cannot be confirmed (no
@@ -202,9 +267,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attribute and a custom step's `config.output_mode` read `review` instead of `loop`
   unless the caller sets a mode, and a caller that explicitly passes a non-fixing mode to
   one of them now records `review_only` as false and, for a custom flow, gets its `.env`
-  and `--copy` files in an operational worktree. The recorded `deep` label is now false
-  only when the single-stack fixing mode ran, so a review requested with `--shallow` is
-  recorded as the full review it runs; see
+  and `--copy` files in an operational worktree. See
   [fixing selection](docs/runtime.md#validation-and-repair)
   ([#1641](https://github.com/existential-birds/daydream/issues/1641)).
 - **Breaking (0.y.z):** Time and tool-call budgets live on one host ledger per
@@ -222,22 +285,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
 - **Breaking (0.y.z):** Committed review reads its limits from the review profile
   only: `[pipeline] reviewer_investigation_budget_s`, `review_wall_budget_s` and
-  `reviewer_tool_call_budget`, plus a fixed 120 s finalization reserve.
+  `reviewer_tool_call_budget`, which the size of the change scales (see the changed
+  defaults above), plus a fixed 120 s finalization reserve.
   `CommittedReviewRequest.limits` and `HostedReviewPolicy.limits` are removed. With the
-  default profile the committed review window grows from about 600 s to about 2520 s
+  default profile the window of a review in the first diff tier, of at most four
+  batches, grows from about 600 s to about 2520 s
   ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
-- **Breaking (0.y.z):** Committed review's assignment policy is selected by the review
-  profile: `[pipeline] assignment_policy`, `"broad"` (the default) or `"adaptive"`, from
-  `RunConfig.review_profile_path`, `DAYDREAM_REVIEW_PROFILE`, a repository
-  `review_profile`, `RunConfig.review_profile` or a hosted operator profile. Any other
-  value is refused before any review work. `CommittedReviewRequest.assignment_policy` is
-  removed (no known caller); set the profile key instead. No CLI route reaches committed
-  review until [#1641](https://github.com/existential-birds/daydream/issues/1641), so
-  `--review-profile` does not select the policy yet; other review routes do not act on
-  the key. The profile digest covers the key, so every profile's digest changes once, the
-  default included, and review cache entries keyed on it miss once after upgrade; see
-  [assignment policy](docs/runtime.md#assignment-policy-and-work)
-  ([#1686](https://github.com/existential-birds/daydream/issues/1686)).
+- **Breaking (0.y.z):** Committed review no longer takes an assignment policy, and the
+  `adaptive` policy is gone. `CommittedReviewRequest.assignment_policy` is removed (no
+  known caller) and nothing replaces it: every review splits a change of more than four
+  batches and keeps a smaller one whole
+  ([assignment policy](docs/runtime.md#assignment-policy-and-work)). A review profile that
+  sets `[pipeline] assignment_policy`, which unreleased builds accepted, is refused before
+  any review work with a message naming the key as removed, as are the staged reviewer's
+  profile keys (see the removal of the staged reviewer below). `settings.assignment_policy`
+  keeps its shape; its `name` is always `broad`. The profile digest covers no policy: a
+  digest recorded by an unreleased build that had the key differs from the one computed
+  now for the same profile, the default included, while against 0.34.0 the key changes
+  no digest ([#1686](https://github.com/existential-birds/daydream/issues/1686),
+  [#1838](https://github.com/existential-birds/daydream/issues/1838)).
 - **Breaking (0.y.z):** `DAYDREAM_FANOUT_CONCURRENCY` now sets the fan-out limit for
   every backend. Unset, each backend keeps its default: Pi 10, Claude and Codex 8,
   Osprey 4 ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
@@ -245,8 +311,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remaining amount at dispatch and reserved calls once on the trace: as
   `daydream.budget.*` attributes on the agent span it ends, or as a
   `daydream.budget.stop` span event for a review-finalization turn's stop and a
-  dispatch refused before any agent runs. Staged review's coverage diagnostic also
-  leads with those numbers. A Pi read cut
+  dispatch refused before any agent runs. A Pi read cut
   short by the deadline now stops as `wall_budget_exceeded` instead of a retryable
   idle stall that advised widening `DAYDREAM_STREAM_IDLE_TIMEOUT_S`
   ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
@@ -262,14 +327,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Claude SDK still fails before any work in runs that use Claude
   ([#1713](https://github.com/existential-birds/daydream/issues/1713),
   [#1762](https://github.com/existential-birds/daydream/pull/1762)).
-- Each staged reviewer's default tool-call budget rises from 48 to 120, still
-  scaled by diff size and batch count. The whole-change structure review spends
-  about 1.5 calls per changed file just reading its inputs, so reviews of about 15
-  or more files often ran out before submitting. `[pipeline]
+- The default reviewer tool-call budget rises from 48 to 120. `[pipeline]
   reviewer_tool_call_budget` in a review profile still overrides it
   ([#1762](https://github.com/existential-birds/daydream/pull/1762)).
 
 ### Removed
+
+- **Breaking (0.y.z):** The staged reviewer is removed; the committed-review program
+  above is the only reviewer. This is a breaking change released as the next minor
+  version under the `0.y.z` policy. No stored format is converted. A fresh review
+  rebuilds its own `.daydream/deep/` working directory, as every fresh run did, so the
+  previous run's files there are replaced, including the staged reviewer's. Everything
+  else an earlier build wrote is left as it is: the review cache
+  (`.daydream/review-cache/`, never read again), exploration output and earlier runs'
+  records; archive indexes and dataset stores keep their schemas. An older build run
+  after this one does the same to this build's `deep/` files. What ends, and what to do
+  instead
+  ([#1687](https://github.com/existential-birds/daydream/issues/1687),
+  [#1641](https://github.com/existential-birds/daydream/issues/1641)):
+  - Passes: intent (and its interactive confirmation), design alternatives, per-language
+    stack reviews, the structural lens, parse, arbiter, suppression, cross-stack merge,
+    automatic sharding, latency profiles and risk-raised effort. Review depth, time and
+    tool allowances come from the review profile's `[pipeline]` table; `[phases.review]`
+    and `[phases.arbiter]` select the discovery and challenge backends.
+  - Shallow mode and stack routing: no single-stack run, forced stack, stack detection for
+    review or docs-only stack. Drop `--shallow` and `--stack`, including `--shallow` on a
+    `--diagram-only` command line, where it used to be accepted and ignored.
+  - Resume and review reuse: no run continues an earlier review or fix run and no
+    completed review unit is reused. Rerun the review; delete `.daydream/exploration/`
+    to force a fresh diagram-only pre-scan.
+  - Diagrams requested with a review are generated after it, not alongside it, so such a
+    run takes longer by the diagram time.
+  - The exploration pre-scan runs only for `--diagram-only`. A review, the fix step and a
+    diagram requested with a review no longer receive its affected-file index or test map.
+  - The fixer no longer receives a confirmed-intent file, and earlier verifier verdicts
+    are never carried over. Every finding is verified before a fix, because no reviewer
+    certifies a finding as routine: the `verify_all` repository setting is ignored and
+    named in the same warning as the other replaced settings, so remove it. The verdicts
+    artifact always records mode `verify_all`, each selected decision carries reason
+    `verify_all`, and its `skipped` and `reused` counters stay at zero.
+  - Extensions: the prompt names `intent`, `alternatives`, `per-stack`, `structural`,
+    `generic-fallback`, `arbiter`, `supervise`, `suppression` and `merge` are no longer
+    seeded, and overriding one fails registration and `daydream ext validate`, naming the
+    removed prompt; an extension's own prompt names still register. The step names `intent`,
+    `per-stack-reviews`, `per-stack-parse`, `arbiter`, `cross-stack-merge`,
+    `single-stack-merge` and `supervise` fail preflight, and `exploration` is a step of
+    the diagram-only flow only; the flow data keys `stacks`, `single_stack_mode`,
+    `latency_route`, `risk_summary`, `reuse_cache`, `record_pool`, `intent_path`,
+    `alts_path`, `intent_authoritative` and `intent_summary` are gone. Put review
+    guidance in a review profile and rewrite findings in a flow step after `load-items`.
+    A `held` list that a step writes beside the canonical items is no longer rendered as
+    `## Held Findings` (an undocumented key, no known caller): keep a finding in `items`
+    to have it reported, or report what the step withholds from the step itself.
+  - Review profiles: the keys only the staged reviewer read are refused when a profile is
+    parsed, before any review work, with one message naming each key as removed:
+    `[pipeline]` `structural_enabled`, `arbitration_enabled`, `arbitration_min_severity`,
+    `arbitration_contested_location`, `suppression_enabled`,
+    `suppression_severity_classes` and `suppression_confidence_classes`, and the strategies
+    `intent`, `alternatives`, `discovery.per_stack`, `discovery.structural`,
+    `suppression`, `merge`, `supervision` and `arbitration`. A profile that sets
+    `strategies.arbitration` is refused until the key is dropped; steer the challenge
+    with `strategies.challenge`. The packaged default no longer carries them
+    and the digest no longer covers them, so every profile's digest changes, the
+    default's included, against 0.34.0 and earlier unreleased builds alike.
+    `review_profile.Arbitration`, `Suppression`, `Pipeline`'s
+    `structural_enabled`, `arbitration` and `suppression` fields and the
+    `INTENT_STRATEGY_JUDGMENT_MARKER`, `ALTERNATIVES_STRATEGY_JUDGMENT_MARKER` and
+    `FOLDED_ALTERNATIVES_INSTRUCTION` constants are removed (no known caller).
+  - Artifacts no run writes any more: `deep/intent.md`, `deep/alternatives.json`,
+    `deep/stack-*-records.json`, `deep/stack-*-review.md`, per-scope report context
+    files, the arbiter, suppression, dedup and adjudication files,
+    `deep/latency-routing.json` and `.daydream/review-cache/`. Still written:
+    `deep/merged-items.json`, `deep/review-coverage.json`, `deep/review-output.md`,
+    `deep/diff-key`, the report context and `deep/committed-review.json`.
+  - Records: dataset records keep `provenance.latency_profile`, `latency_route` and
+    `latency_routing` with null values, and `findings.claims` and `derivation` are
+    empty. `provenance.resolved_phases` lists the phases that run (`review`, `arbiter`,
+    `verify`, `fix`, `test`); the rows for `intent`, `wonder`, `per_stack_review`, `parse`
+    and `merge` are gone. The archive's `per_stack_review_backend` and
+    `per_stack_review_model` columns keep their names and record the `review` phase.
+    Archive rows carry no latency profile and empty per-lens and stack metrics.
+    The recorded outcome follows the exit status. A provider failure after the reviewer
+    accepted a submission now ends as an incomplete review that exits 0 and is recorded
+    as `success` with incomplete coverage, where the staged reviewer raised and recorded
+    `failed`; read the terminal coverage for the analysis state. A run that cannot
+    publish because its source directory was lost or replaced exits 1 and is recorded as
+    `failed`.
+  - Tools: `python -m daydream.eval.latency_report` and the two staged-reviewer
+    measurement scripts are deleted with their notes.
+  - The staged pipeline's preflight notice (agent count and stages) and the
+    `[stage 5/5]` banner are gone; a review prints one notice.
+  - Python API with no known caller: `run_agent` no longer accepts
+    `advisory_tool_call_target`, `review_evidence` or `schema_rejection_guard`;
+    `phase_fix_parallel` and `phase_fix` no longer accept `intent_path`;
+    `BudgetLedger.from_limits` is removed (construct `BudgetLedger` directly);
+    `phase_verify_recommendations` no longer accepts `selection`;
+    `FlowContext.backend_for_effort` is removed (use `backend_for`) and
+    `review_limits_for_scope` no longer accepts `stages`;
+    `daydream.phases.PER_STACK_RECORD_SCHEMA` and `review_budget.STAGED_REVIEW_GUIDANCE`
+    are removed; and the modules of the staged phases are deleted.
+    `daydream.deep.detection.detect_stacks` no longer returns the `structure` meta-stack,
+    which repeated every changed file for the structural lens; take the union of the
+    returned stacks' files instead.
+  - Improve: the report no longer lists `structure` under `## Stacks`, and the closing
+    "Improve audit complete" line counts one stack fewer. No step audited that stack; the
+    files Improve partitions and audits are unchanged.
 
 - **Breaking (0.y.z):** Turn limits: `max_turns` on `run_agent`, the backend protocol,
   `EffectiveRequestConfig` and every adapter, `MaxTurnsError` and its salvage path.
@@ -298,8 +460,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Repository content can no longer turn a posted review into an approval. A leftover
   key is ignored without a warning
   ([#1680](https://github.com/existential-birds/daydream/issues/1680)).
-- **Breaking (0.y.z):** Extension API 9: extensions must declare `DAYDREAM_EXT_API = 9`,
-  and one that declares 8 is rejected before any work. Removed, with no known caller:
+- **Breaking (0.y.z):** Extension API 9, which API 10 above supersedes in this release.
+  Removed, with no known caller:
   `Registry.insert_before`, `insert_after` and `remove` (edit the list
   `registry.flow(name)` returns and pass it to `set_flow`); fork stack rules
   (`StackRule`, `Registry.add_stack`, `Registry.stack_rules` and the `registry`
@@ -312,9 +474,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   could only name categories that are always verified; `resolve_selection_config`,
   `UnknownRiskCategoryError` and `validate_extra_categories`;
   `SelectionConfig.extra_categories`; and `selection.extra_categories` in
-  `recommendation-verdicts.json`. No known caller. `verify_all` still works: set it in
-  `[tool.daydream]` or `.daydream.toml`, or pass
-  `file_config=DaydreamFileConfig(verify_all=True)`. A leftover `extra_risk_categories`
+  `recommendation-verdicts.json`. No known caller. A leftover `extra_risk_categories`
   key is ignored without a warning, so a misspelled category no longer stops a fix run
   ([#1631](https://github.com/existential-birds/daydream/issues/1631)).
 - **Breaking (0.y.z):** `RunConfig.test_required_suites`, which nothing set. No known
@@ -359,9 +519,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `literal_command_error`. `improve_dir`, `filter_scope`, `enumerate_repository_commands`,
   `issue_body` and other Improve helpers now require the arguments every caller already
   passed. No known caller ([#1637](https://github.com/existential-birds/daydream/issues/1637)).
-- Resuming with `--start-at per-stack` or `--start-at merge` no longer restores the
-  earlier run's completed diagrams; they are generated again, and `diagram-complete.json`
-  is no longer written. Diagram internals nothing read also go: the reason-code sets
+- `diagram-complete.json` is no longer written. Diagram internals nothing read also go: the reason-code sets
   `REASON_CODES` and `OMIT_REASONS`, `DiagramInputs.settings`, and the
   `diagram_comment_kinds`, `render_diagram_comment_body` and `post_diagram_comment_to_pr`
   re-exports from `daydream.pr_review` (all three remain in `daydream.reviews.diagrams`).
@@ -391,10 +549,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   high-severity or contested findings, named tools some backends lack, and forbade the new
   claims a challenge may submit. The default profile has a new `strategies.challenge`
   entry that describes the challenge as it runs on every backend, and committed review reads
-  it. A profile that overrides `strategies.arbitration` no longer changes committed review's
-  challenge (it still steers the staged arbiter); override `strategies.challenge` instead. The
-  default profile's digest changes, so staged reviews cached under the previous default profile
-  are not reused ([#1845](https://github.com/existential-birds/daydream/issues/1845)).
+  it. A profile that sets `strategies.arbitration` is now refused (see the removal of the
+  staged reviewer above); override `strategies.challenge` instead. The default profile's
+  digest changes
+  ([#1845](https://github.com/existential-birds/daydream/issues/1845)).
 - Committed review now delivers the challenged findings of a large change. Before, challenge
   verdicts counted against the same fixed capacity of 128 claims in 128 KiB that discovery
   had filled, so on a change with a few dozen claims the challenge's verdicts were refused
@@ -490,10 +648,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `review_source` description no longer tells the reviewer to omit arguments its schema
   requires ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
 - When a committed review ends unfinished because current work ran out of tool calls or
-  time, its report now says so in one sentence under "Unfinished work" and names the
-  `[pipeline]` profile keys that raise the allowance: `reviewer_tool_call_budget`, or
-  `reviewer_investigation_budget_s` with `review_wall_budget_s`, which caps the review
-  window ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+  time, it now says so in one sentence and names the `[pipeline]` profile keys that raise
+  the allowance: `reviewer_tool_call_budget`, or `reviewer_investigation_budget_s` with
+  `review_wall_budget_s`, which caps the review window. The sentence appears once under
+  "Unfinished work" in `run_committed_review`'s report, and once each in the console
+  outcome line, the report's "Review outcome" and the pull request notice of every
+  other review route ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
 - Committed review no longer rejects a reviewed target submitted with empty
   `evidence_refs` when the target has more than four sources. The host expanded `[]` to
   every source of the target and then refused its own expansion ("supply at most four

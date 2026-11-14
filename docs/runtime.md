@@ -23,24 +23,24 @@ prove correspondence, not understanding, reads, or executed checks.
 Publish findings and typed coverage atomically, bound to the captured run, head,
 merge base, diff key, and scope inventory. Preserve admitted partial findings and
 failure reasons. Incomplete/failed results can post COMMENT notices but cannot
-approve or resolve stale threads. When a complete review with no findings has
+approve or resolve stale threads. A `failed` analysis exits 1 on review, comment,
+fixing and findings export, after its report, notice or artifact is published; an
+`incomplete` analysis exits 0 and names what was not finished. When a complete review with no findings has
 nothing else to post and approval is not enabled, it posts a COMMENT saying it is
 complete if the latest Daydream review on its head or an ancestor, by the same login
 and carrying the Daydream footer, is such a notice. Earlier reviews are never
 edited, dismissed or minimized.
-Cache/resume must validate the same identities and current typed target
-attribution; missing/damaged proofs restart review.
 If the expected source becomes unavailable, terminal export retains validated
 findings and coverage using the bound captured diff, with conservative file/body
-placement instead of live-source line resolution. This does not resume review
-or establish completeness.
+placement instead of live-source line resolution. This does not establish
+completeness.
 
 Approval requires explicit opt-in and no blocking severity among all retained
-findings, including deduplication matches. Immutable schema-3 findings without
-severity block approval; new findings post as COMMENT, while an all-matched review
-may post nothing. Complete-empty immutable reviews remain eligible for approval
-when coverage and warning checks permit it. Ordinary schema-2 omitted-severity
-behavior and classified-severity policy are unchanged.
+findings, including deduplication matches. A finding without severity blocks
+approval under every findings schema, and the reviewer assigns none, so only a
+complete review with no findings is approved. New findings post as COMMENT, while
+an all-matched review may post nothing. Complete-empty reviews remain eligible for
+approval when coverage and warning checks permit it.
 
 Retained source attribution has an 8 MiB run allocation, with the existing
 512-decision/256 KiB per-scope and four-reference/8192-byte per-decision bounds.
@@ -84,8 +84,8 @@ It reaches the reviewer in each assignment's first message, never in the system 
 
 The complete planned population is computed from the full captured patch before
 any prompt bounding. Host-dispatched investigation work, followed by host-scheduled
-fresh challenge, navigates it under the profile's
-[assignment policy](#assignment-policy-and-work):
+fresh challenge, navigates it under the
+[assignment rule](#assignment-policy-and-work):
 
 - System instructions, which native compaction never summarizes, carry only host text:
   committed review's policy, the kind's paragraph and the profile's strategy for the kind,
@@ -229,7 +229,7 @@ Claude's SDK resolves its own authentication and user settings live; its opaque 
 covers only the selected model, effort and pinned SDK. Codex likewise keeps its own
 authentication and configuration live; its identity covers the selected model and effort.
 Investigation work takes the profile's `strategies."discovery.generic_fallback"` and challenge its
-`strategies.challenge` (never the staged arbiter's `strategies.arbitration`); neither can disable host obligations.
+`strategies.challenge`; neither can disable host obligations.
 
 The run's artifact session stages the report then atomically writes the
 [versioned](#captured-local-source) `committed-review.json`: claims/challenge evidence, work records, typed coverage,
@@ -238,8 +238,11 @@ run/source and complete planned-work identity. Prior/competing bytes survive pub
 and `capture_state` report installation and trajectory independently. Admission,
 native settlement/cleanup, completeness, output, capture and delivery are separate.
 Explicit unsupported exports fail before dispatch. Immutable PR exports use the
-same artifact session as described below. Ordinary CLI routing/default cutover
-and external delivery remain separate integration work.
+same artifact session as described below. The ordinary CLI, embedded and bot
+routes run this program as the review step of the `deep` flow and write its sealed
+result to `.daydream/deep/committed-review.json`, where the archive and
+`--dump-artifacts` retain it; `run_committed_review` keeps publishing
+`.daydream/committed-review.json`. External delivery remains separate integration work.
 
 ### Assignment policy and work
 
@@ -250,25 +253,20 @@ One conversation holds at most four batches, the batches one base allowance cove
 per batch when:
 
 ```text
-split  <=>  B > 1  and  (adaptive or B > 4)  and  I - X >= 2 * B
+split  <=>  B > 4  and  I - X >= 2 * B
 ```
 
 `B` is the number of batches; `I` and `X` are the discovery and cross-assignment
-allowances defined below. The run's resolved review profile selects the policy
-with `[pipeline] assignment_policy`, whichever source supplied the profile: `"broad"`
-(the default) keeps a change of at most four batches in one discovery work over every
-target, and `"adaptive"` splits from two batches. With one batch, and above four, both
-give the same plan. A profile too small to leave every batch two starts runs one broad
-assignment. Split work runs concurrently under
+allowances defined below. Otherwise one discovery work covers every target: a change
+of at most four batches, or one whose profile is too small to leave every batch two
+starts. No setting selects another rule. The `[pipeline] assignment_policy` profile key
+is removed, and a profile that still sets it is refused before any review work with a
+message naming the key. Split work runs concurrently under
 `anyio.CapacityLimiter(effective_fanout_concurrency(10, backend))`, by default ten at a
 time on Pi and eight on Claude and Codex, each in a forked trajectory;
-`DAYDREAM_FANOUT_CONCURRENCY` sets a lower or higher hint, up to ten. Any other policy
-value fails the profile, and committed review refuses a profile built in code with one
-before dispatching work. No CLI route reaches committed review
-until #1641. Other review routes do not act on the key, but it still changes the profile
-digest, so their cached reviews miss. `settings.assignment_policy` records `name`,
-`decomposed` (which can be `true` under `broad`), `planned_assignments` and
-`cross_assignment` (`required` or `not_applicable`).
+`DAYDREAM_FANOUT_CONCURRENCY` sets a lower or higher hint, up to ten.
+`settings.assignment_policy` records `name` (always `broad`), `decomposed`,
+`planned_assignments` and `cross_assignment` (`required` or `not_applicable`).
 
 Split discovery and follow-up work holds at most one batch, so its first message
 supplies each of its targets as a `review_source` call returns it: the target's
@@ -323,6 +321,11 @@ in the export, so a challenge can always record its verdicts. The export of an a
 review therefore always fits and installs, and no claim is lost after admission. No count
 bounds a review's claims beyond that; a batch still holds at most 128. A sealed result can
 therefore hold more than 128 claims and findings, which a reader on an older release rejects.
+The `deep` flow's `--findings-out` artifact is another export: it also carries run
+information, warnings, the review context and diagrams, which this bound does not count.
+Its writer drops review context to fit 1 MiB but nothing else, so a review whose claims
+nearly fill the bound can fail to write it; the sealed result and the report keep every
+finding.
 
 All work draws on one [budget ledger](#budget-ledger) for the review window; each
 dispatch runs on its own child ledger carved from it, so parallel siblings never share a
@@ -339,12 +342,25 @@ I      = T' // 2                                    discovery; challenge keeps T
 X      = max(2, I // 4)                             cross-assignment, when split
 ```
 
-`scale` is the staged reviewer's factor, computed once per review. The profile keys are
+`scale` is the factor the staged reviewer of 0.34.0 used, computed once per review when
+it is planned, on every route. The profile keys are
 the bases it multiplies, so a review of a large change uses more tool calls, time and
 tokens than the keys state. `review_wall_budget_s` grows with the tier only in the
 default profile; in every other profile, whatever supplied it, it is a fixed ceiling on
 the whole review, so set it to the longest review you accept. An embedder with a hard
 outer deadline must set `review_wall_budget_s` to it. The 120 s are a fixed finalization reserve.
+`finalization_s` is always reserved: review work stops that long before the window
+closes, on every route. `run_committed_review` also refuses to stage or install output
+once its window has closed. The `deep` flow reserves the allowance when it plans the
+review and applies no such refusal: the steps that follow the review (diagrams,
+extension steps, sealing, the fix cycle) are not bounded by the review window.
+Diagrams generated after the review share the flow's outer review deadline with it:
+`review_wall_budget_s`, times the tier in the default profile, from when the flow
+starts its steps. When `INV * scale + 120` reaches it, the review window equals that
+deadline, and a review that runs to its end leaves them about the 120 s finalization
+reserve. With the default profile that is any change of more than four batches in the
+first tier and a scale of at least 6, 12 or 17 in tiers 3, 6 and 9. Nothing extends the
+deadline for them.
 `settings.limits` records the profile's `tool_calls` and `investigation_s` beside
 `scale`, `effective_tool_calls` (`T'`) and `effective_investigation_s` (`W`). For
 example, a change of 134 batches under the default profile (120 calls, 2,400 s, wall
@@ -375,13 +391,20 @@ responsible for them; required phases are `challenge` and `cross_assignment`.
 Superseded failed work whose responsibilities were transferred and accepted elsewhere
 remains evidence but does not make the review incomplete. When the sealed reason codes
 hold `host_tool_budget_exhaustion` or `host_wall_budget_exhaustion`, which only current
-work contributes, the report adds one sentence under "Unfinished work" naming the
-`[pipeline]` profile keys that raise that allowance: `reviewer_tool_call_budget`, or
-`reviewer_investigation_budget_s` with `review_wall_budget_s`, which caps the review
-window. A second sentence says that the review multiplies the first two by the `scale`
-recorded in `settings.limits` and, for spent time, that `review_wall_budget_s` grows
-with the diff in the default profile only. The staged deep path keeps
-its own rule ([stage-aware builders](extensions.md#stage-aware-review-builders)).
+work contributes, one sentence names the `[pipeline]` profile keys that raise that
+allowance: `reviewer_tool_call_budget`, or `reviewer_investigation_budget_s` with
+`review_wall_budget_s`, which caps the review window. A second sentence says that the
+review multiplies the first two by the `scale` recorded in `settings.limits` and, for
+spent time, that `review_wall_budget_s` grows with the diff in the default profile only.
+They appear once in each place that reports the outcome: under "Unfinished work" in
+`run_committed_review`'s report, and on the `deep` flow in the console outcome line,
+the report's "Review outcome" and the pull request notice.
+
+The reviewer's assignments come from one canonical change: the full diff and its hunk
+index are captured once with their identities, revalidated before every admission,
+and split into whole parts sized to the transport's assignment allowance
+([review assignments](../daydream/review_stage_inputs.py)). Changed canonical bytes
+are refused, never re-read.
 
 ### Captured local source
 
@@ -436,7 +459,7 @@ body reads; the resolver closes before one complete capture/canonical-input chec
 Only then does Review synchronously recheck original authority/deadline and install.
 Empty selectors and sibling callbacks get the same final guard. Standalone/stored
 reference checks, preparation, and terminal validation remain independent; no
-validation success survives a callback. Stack and stage preparation validate on a
+validation success survives a callback. Review preparation validates on a
 worker thread because a full check on the shared loop starves sibling invocations'
 host-tool setup timers. The writable capture is not a sandbox.
 
@@ -471,7 +494,7 @@ Full history still consumes private disk, up to the physical object-store limits
 in [Immutable PR inputs](#immutable-pr-inputs). Python payload buffers are
 fixed-size; Git may reconstruct a whole admitted blob, and concurrent readers
 multiply native memory. Manifest/diff memory remains bounded by its existing
-policies. See the [measurements and reproduction commands](performance/captured-source.md).
+policies.
 
 Local `AnalyzedRevision.head_sha` remains real HEAD provenance. `source_id` binds
 the accepted before/after contents, modes, eligible population and exclusions;
@@ -491,15 +514,9 @@ results 7, immutable results 8 and their committed terminal version 1 stay disti
 Results 1–3 predate bounded navigation and sharded per-target coverage, and 4–6 predate
 work records; they are rejected with a restart instruction rather than converted.
 Mismatched versions/identities and local-to-PR relabeling are explicitly rejected.
-Private stage/cache contract 17 invalidates older cache entries. Captured review
-paths reject `--start-at` and do not restore judgment shards: a complete shard
-marker does not establish that its enclosing review completed. Stopped reviews
-restart; retained evidence cannot restore assignment authority. Replace incompatible
-inputs by starting a new review; no historical converter is provided. This changes
-local review semantics under the current `0.y.z` policy and requires release notes;
-package version bumps remain release work. Queued-scope admission and the shared
-canonical change follow the
-[stage-aware review contract](extensions.md#stage-aware-review-builders).
+Every review starts fresh: `--start-at` is refused and nothing restores a stopped
+review, because retained evidence cannot restore assignment authority. Replace
+incompatible inputs by starting a new review; no historical converter is provided.
 
 Run-record capture keeps `head_sha` as real provenance and retains local `source_id`
 in the task and final state. `captured_working` identifies its population policy;
@@ -665,14 +682,12 @@ authorize a successful candidate or delivery.
 This is an additive minor feature under the current `0.y.z` policy. Immutable
 request 1, committed result 2 and findings 3 must be consumed together; ordinary
 result 1/findings 2 retain their existing contracts. The bounded
-Harbor adapter consumes this API; broader Harbor/native migration (#1639), and
-ordinary CLI/bot migration with supported-default cutover (#1641), remain
+Harbor adapter consumes this API; broader Harbor/native migration (#1639) remains
 separately owned. This contract does not claim other-backend or large-plan parity.
 
 ## Budget ledger
 
-Each budget owner (an invocation, a staged scope or stage such as
-`stage:python/integration`, or committed work such as `committed:challenge`) has one
+Each budget owner (an invocation, or committed work such as `committed:challenge`) has one
 [`BudgetLedger`](../daydream/review_budget.py): an absolute `clock.monotonic()` deadline
 and one charged tool-call count. `run_agent` takes it as `budget=` and has no other
 time, tool-call or turn limit; no backend receives a turn limit. A relative `wall_s` is
@@ -697,7 +712,7 @@ host acceptance still permits no retry. A Codex turn that completes with nothing
 is retried under this rule only as the invocation's first retry, and the outage circuit
 records it as a completed turn, never as a failure ([Codex host tools](#codex-host-tools)).
 Apart from that rejected submission, paths that do not retry are never refunded,
-including a staged schema re-dispatch and a committed challenge re-dispatch. Committed
+including a committed challenge re-dispatch. Committed
 batches admitted before a provider failure stay installed while that attempt's starts
 are refunded with the rest of the attempt.
 
@@ -705,8 +720,7 @@ Every budget stop records its owner, dimension (`time` or `tool_calls`), limit, 
 spent, amount remaining at dispatch and calls reserved for later work, as durations and
 counts only, and appears on the trace once
 ([observability](observability.md#budget-stops)), including a finalization turn's stop
-and a dispatch refused before any agent runs. Staged review also leads its coverage
-diagnostic with those numbers. A read cut short by the ledger deadline and a binding's
+and a dispatch refused before any agent runs. A read cut short by the ledger deadline and a binding's
 deadline or allocation failure are budget stops (`wall_budget_exceeded`,
 `tool_call_budget_exceeded`), not `StreamStalledError`; idle, setup, drain and cleanup
 timeouts remain liveness checks.
@@ -719,7 +733,7 @@ to the captured source while native configuration and its trust policy remain
 rooted in the original source.
 Existing private artifact/sanctioned-input owners furnish frozen diff parts and
 source context.
-Every staged review backend selects assigned source IDs or supporting
+Every review backend selects assigned source IDs or supporting
 path/side/LF ranges; the host constructs canonical `evidence_refs` from the full
 assignment inventory and pinned regular Git blobs with the same admission code for
 all backends. Exact continuation fragments retain their null source ranges and
@@ -968,17 +982,63 @@ one JSON-encoded content array, so captured bytes are JSON-escaped there; later 
 pass each block as its own text. A real provider and model, both authentication modes
 and macOS are not yet exercised.
 
+## Replaced reviewer options
+
+Committed review is the only reviewer. It reviews the whole change in one program, so
+the options and settings of the staged reviewer it replaced select nothing.
+
+- **Refused before any work**, as a usage error on the CLI (exit 2) and by `runner.run`
+  (exit 1) with the same guidance: `--shallow` and the `shallow` flow alias, `--stack`/`-s`,
+  `--precision`, `--latency-profile`, `--no-review-cache`, and `--start-at` with any value
+  other than `review`. `--shallow`, `--no-review-cache` and `--start-at` are refused on
+  `--diagram-only` runs too. A custom flow reads its own options.
+- **Ignored with one printed notice** naming each key: the repository settings
+  `latency_profile`, `shallow_fanout_threshold`, `precision_mode`, `deep_shard_enabled`,
+  `deep_shard_max_files`, `deep_shard_max_bytes`, `deep_shard_fanout_cap`,
+  `deep_shard_frontier_max`, `review_cache_enabled`, `review_cache_max_entries`,
+  `review_cache_max_bytes`, `review_cache_max_age_days`, `verify_all`, and the phase tables
+  `intent`, `merge`, `parse`, `per_stack_review`, `supervise`, `suppression` and `wonder`.
+  Every finding is verified before a fix, so `verify_all` selects nothing.
+  `[phases.review]` configures discovery and `[phases.arbiter]` configures the challenge.
+- **Refused:** `supervisor = "rules"` or `"llm"`. The findings supervisor ended with the
+  staged reviewer; an extension flow step can rewrite the canonical items, and
+  `--ignore-path` excludes paths. `tool_supervisor` is unaffected.
+- **Refused:** a review or challenge backend without native host tools. Pi, Claude and
+  Codex serve them; Osprey does not and cannot run a review.
+- **Refused when a review profile is parsed**, before any work, with one message naming
+  each key as removed: every key in `review_profile.REMOVED_PROFILE_KEYS`. These are the
+  `[pipeline]` keys `assignment_policy`, `structural_enabled`, `arbitration_enabled`,
+  `arbitration_min_severity`, `arbitration_contested_location`, `suppression_enabled`,
+  `suppression_severity_classes` and `suppression_confidence_classes`, and the strategies
+  `intent`, `alternatives`, `discovery.per_stack`, `discovery.structural`, `suppression`,
+  `merge`, `supervision` and `arbitration`. The packaged default carries none of them, so
+  none counts in a profile digest. A profile that sets `strategies.arbitration` to steer the
+  challenge is refused until the key is dropped; set `strategies.challenge` instead.
+
+No stored format is converted. A fresh review rebuilds its own `.daydream/deep/`
+working directory, as every fresh run did, so the previous run's files there are
+replaced, including the staged reviewer's; an older build run after this one does the
+same to this build's `deep/` files. Everything else an earlier build wrote is left as it
+is: an existing `.daydream/review-cache/` is preserved and never read, and exploration
+output and earlier runs' records stay. Archive indexes, dataset stores, findings
+artifacts and repair checkpoints keep their own
+[refuse-or-read rules](#artifacts-and-recovery).
+
+Findings carry head-side lines only. A finding whose location exists only on the old
+side of the diff is published without a line and, like any finding without one, may be
+anchored by the placement search. An author description longer than the bound is
+cut to the longest prefix that fits, with an in-text marker. Diagrams requested with a
+review are generated after it.
+
 ## Validation and repair
 
 A review ends with findings. Fixing is selected explicitly: `--fix` on the CLI,
 `output_mode="loop"` for embedded callers. `--yes` (`assume="yes"`) answers the gates
-of a selected fixing run or a custom flow and never selects fixing. `--shallow` narrows
-a fixing run and `--start-at` resumes one. Without `--fix` the CLI rejects a bare
-`--shallow`, `--flow shallow` and, except on a custom `--flow`, `--yes` and
-`--start-at`, naming the replacement; an explicit `--review`, `--comment` or
-`--diagram-only` still accepts and ignores `--shallow`. An embedded
-`flow_name="shallow"` or `shallow=True` without `output_mode="loop"` is a full
-multi-stack review. A review cannot be resumed into fixing: to fix what it reported,
+of a selected fixing run or a custom flow and never selects fixing; without `--fix` the
+CLI rejects it except on a custom `--flow`. There is no shallow mode and no resume:
+`--shallow`, `--flow shallow`, `flow_name="shallow"`, `shallow=True` and `--start-at`
+are refused before any work, on diagram-only runs too
+([replaced options](#replaced-reviewer-options)). To fix what a review reported,
 rerun with `--fix`.
 
 A fixing request that could only end as a review is refused before any work: one whose

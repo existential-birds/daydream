@@ -1,7 +1,7 @@
 """Workspace, extension registry, and flow dispatch for one run.
 
-``run`` binds the per-run registry and opens the workspace. Explicit ``review``,
-``shallow``, and ``deep`` aliases, plus review/comment/diagram/loop output modes,
+``run`` binds the per-run registry and opens the workspace. Explicit ``review``
+and ``deep`` aliases, plus review/comment/diagram/loop output modes,
 use ``deep.orchestrator.run_deep``. ``improve`` opens a read-only audit workspace;
 other registered flow names use the custom-flow preamble.
 """
@@ -47,7 +47,6 @@ from daydream.backends import (
 )
 from daydream.config import (
     BUDGET_CLEANUP_GRACE_S,
-    DEEP_PHASE_DEFAULT_EFFORT,
     EFFORT_TIERS,
     REVIEW_OUTPUT_FILE,
 )
@@ -93,6 +92,9 @@ from daydream.run_config import (
     _resolved_backend_name,
     _resolved_model,
     _resolved_reasoning_effort,
+    ignored_review_settings,
+    replaced_review_options,
+    runs_review,
 )
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context, resolve_gate
 from daydream.trajectory import DaydreamRunFlow
@@ -145,21 +147,11 @@ def _resolve_backend(
     cwd: Path | None = None,
     audit_workspace: AuditWorkspace | None = None,
     execution_input: BackendExecutionInput | None = None,
-    effort_override: str | None = None,
 ) -> Backend:
-    """Resolve and optionally cache a phase backend.
-
-    ``effort_override`` is a per-group arbiter override, gated by the same backend
-    support as latency profiles. The resolved effort participates in the cache key,
-    so a tuned arbiter cannot reuse the default-effort instance.
-    """
+    """Resolve and optionally cache a phase backend; the resolved effort participates in the cache key."""
     backend_name = _resolved_backend_name(config, phase)
     resolved_model = _resolved_model(config, phase)
-    resolved_effort = (
-        effort_override
-        if effort_override is not None and phase in DEEP_PHASE_DEFAULT_EFFORT.get(backend_name, {})
-        else _resolved_reasoning_effort(config, phase)
-    )
+    resolved_effort = _resolved_reasoning_effort(config, phase)
     audit_root = (
         audit_workspace.repo.resolve(strict=True)
         if audit_workspace is not None
@@ -294,7 +286,7 @@ def _run_posts_to_github(config: RunConfig) -> bool:
     if config.output_mode in ("comment", "diagram"):
         return True
 
-    return config.output_mode == "loop" and not config.shallow
+    return config.output_mode == "loop"
 
 
 def _fix_request_refusal(config: RunConfig) -> str | None:
@@ -306,6 +298,33 @@ def _fix_request_refusal(config: RunConfig) -> str | None:
     if resolve_gate(assume=config.assume, interactive=_resolve_interactive(config), safe_default=False) is False:
         return ('The fix gate cannot be confirmed: the run is unattended or assumes "no". '
                 'Pass --yes (assume="yes"), or drop --fix (output_mode="loop") to review only.')
+    return None
+
+
+def _review_refusal(config: RunConfig) -> str | None:
+    """Explain why the reviewer cannot serve this request, before any workspace or GitHub call."""
+    replaced = replaced_review_options(config)
+    if replaced:
+        return ("These options belonged to the replaced staged reviewer and no longer apply. "
+                + "; ".join(replaced) + ".")
+    if not runs_review(config):
+        return None
+    if _file_config_or_empty(config).supervisor in {"rules", "llm"}:
+        return ('The findings supervisor (supervisor = "rules" or "llm") ended with the staged reviewer; its deny '
+                "rules would no longer hold findings back. Remove the setting; an extension flow step can "
+                "rewrite the canonical items, and --ignore-path excludes paths from review.")
+    from daydream.committed_review import REVIEW_PHASES, bounded_author_description, host_tools_refusal
+
+    for kind, phase in REVIEW_PHASES:
+        name = _resolved_backend_name(config, phase)
+        if name == "osprey":
+            return host_tools_refusal(kind, name)
+    try:
+        author = bounded_author_description(config)
+        if author is not None and config.approved_head_sha is not None:
+            author.for_head(config.approved_head_sha)
+    except ValueError as exc:
+        return f"The supplied author description cannot be used: {exc}."
     return None
 
 
@@ -325,6 +344,14 @@ async def run(
     if refusal is not None:
         print_error(console, "Fix Not Possible", refusal)
         return 1
+    refusal = _review_refusal(config)
+    if refusal is not None:
+        print_error(console, "Review Not Possible", refusal)
+        return 1
+    ignored = ignored_review_settings(config)
+    if ignored:
+        print_warning(console, "Repository settings of the replaced staged reviewer are ignored; remove them: "
+                               + ", ".join(ignored))
     if config.dataset_capture_disabled:
         config = replace(config, dataset_capture=False)
     else:
@@ -341,12 +368,11 @@ async def run(
 
         def create_for_context(
             flow_config: RunConfig, phase: str, cache: BackendCache,
-            cwd: Path, audit: AuditWorkspace | None, effort_override: str | None,
+            cwd: Path, audit: AuditWorkspace | None,
         ) -> Backend:
             return _resolve_backend(
                 flow_config, phase, cache, cwd=cwd, audit_workspace=audit,
                 execution_input=execution.backends.get(_resolved_backend_name(flow_config, phase), backend_execution),
-                effort_override=effort_override,
             )
 
         backend_factory = create_for_context
@@ -373,7 +399,7 @@ async def run(
                 config, private_roots=private_roots, run_context=run_context,
                 backend_factory=backend_factory,
                 backend_execution=(None if execution is None else execution.backends.get(
-                    _resolved_backend_name(config, "per_stack_review"), execution.backend)),
+                    _resolved_backend_name(config, "review"), execution.backend)),
                 github_execution=None if execution is None else execution.github,
             )
         except anyio.get_cancelled_exc_class():
@@ -445,7 +471,7 @@ async def _run_with_context(
     try:
         observability = config.observability if config.observability is not None else resolve_observability_config()
         async with trace_run(
-            observability, registry, flow=config.flow_name or ("shallow" if config.shallow else "deep"),
+            observability, registry, flow=config.flow_name or "deep",
         ) as observed:
             observed.attrs({"daydream.output_mode": config.output_mode})
             try:
@@ -694,9 +720,6 @@ async def _capture_review_workspace(
             or (mode not in {"review", "comment"} and config.findings_out is None)):
         yield work
         return
-    if config.start_at not in (None, "review"):
-        raise GitError("Captured reviews cannot resume retained judgments; "
-                       "rerun without --start-at for a fresh review.")
     assert work.head_sha is not None and work.base_sha is not None
     committed = mode == "comment" or config.findings_out is not None
     pinned_pr = None
@@ -750,7 +773,7 @@ async def _capture_review_workspace(
 def _require_reviewable_branch(work: WorkContext, config: RunConfig) -> None:
     """Raise WrongBranchError when a base-branch loop would review itself.
 
-    cli.main renders the same actionable error for default, deep, and shallow flows.
+    cli.main renders the same actionable error for the default and deep flows.
     """
     if (
         config.branch is None
@@ -768,11 +791,6 @@ def _require_reviewable_branch(work: WorkContext, config: RunConfig) -> None:
         )
 
 
-# Built-in deep-flow mode aliases (review / shallow / deep all route to the
-# single deep flow in different modes, #330). Kept as a module constant so
-# downstream consumers (e.g. archive manifest tier gate) share the same list.
-
-
 async def _dispatch_selected_flow(
     work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
     run_context: RunContext,
@@ -781,7 +799,7 @@ async def _dispatch_selected_flow(
 ) -> int:
     """Resolve built-in aliases before registered flows.
 
-    Review/shallow/deep aliases share the deep flow. Unknown names raise
+    The review and deep aliases share the deep flow. Unknown names raise
     ``UnresolvedExtensionError`` for ``run`` to render as an Extension Error.
     """
     name = config.flow_name
@@ -791,7 +809,7 @@ async def _dispatch_selected_flow(
     # routing wins over the "not registered" error.
     if name in DEEP_FLOW_ALIASES:
         # A review or comment run arrives captured, with the base commit as base_branch, so this never binds it.
-        if name in ("shallow", "deep"):
+        if name == "deep":
             _require_reviewable_branch(work, config)
         return await _run_loop_deep(
             work, config, run_artifacts, run_context=run_context, github_execution=github_execution,

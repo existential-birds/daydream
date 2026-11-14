@@ -48,7 +48,6 @@ os.environ.update({
 })
 
 
-
 def _fsync_without_durability(fd: Any) -> None:
     """Keep fsync's bad-descriptor failure; no test can observe power-loss durability."""
     os.fstat(fd if isinstance(fd, int) else fd.fileno())
@@ -240,29 +239,8 @@ def multi_stack_target(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def sibling_frontier_target(tmp_path: Path) -> Path:
-    """Thirteen changed Python files with parseable cross-shard import edges.
-
-    Twelve spokes import core_helper, forcing the sibling frontier to supply
-    context when the Python stack is split across shards."""
-    before = {
-        f"mod{i}.py": f"from core import core_helper\ndef mod{i}_fn(): return core_helper() + {i}\n"
-        for i in range(12)
-    }
-    before["core.py"] = "def core_helper():\n    return 1\n"
-    after = {f"mod{i}.py": (
-            f"from core import core_helper\ndef mod{i}_fn() -> int: return core_helper() + {i}\n# v2\n"
-            + ("# extra0\n# extra1\n# extra2\n# extra3\n# extra4\n# extra5\n" if i == 5 else "")
-        )
-        for i in range(12)
-    }
-    after["core.py"] = "def core_helper():\n    return 1\n# v2\n"
-    return _feature_repo(tmp_path, "canary", before, after)
-
-
-@pytest.fixture
 def tiny_diff_target(tmp_path: Path) -> Path:
-    """Two-language diff small enough to combine stacks and skip merge/arbiter."""
+    """Two-language diff of two small files."""
     return _feature_repo(tmp_path, "tiny_diff", {
         "api.py": "def hello():\n    return 'world'\n",
         "App.tsx": 'import React from "react"; export const App = () => <div>hello</div>;\n',

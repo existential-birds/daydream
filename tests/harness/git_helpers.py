@@ -69,40 +69,6 @@ def seeded_commit(repo: Path, message: str) -> str:
     return commit(repo, message, env=SEED_ENV)
 
 
-def seed_pr_origin(tmp_path: Path, *, repo_name: str = "local_wt", bare_name: str = "origin_local.git",
-    feature_body: str = "FEATURE = 1\n",
-    feature_message: str = "feature", number: int = 101,
-) -> tuple[str, str, str]:
-    """Build a real local bare origin whose base/head are the PR's SHAs."""
-    import shutil as _sh
-
-    repo = tmp_path / repo_name
-    if repo.exists():
-        _sh.rmtree(repo)
-    repo.mkdir()
-    git(repo, "init", "-b", "main")
-    write_and_stage(repo, "readme.txt", "base1\n")
-    seeded_commit(repo, "base1")
-    write_and_stage(repo, "base.py", "BASE = 2\n")
-    base_sha = seeded_commit(repo, "base2")
-    write_and_stage(repo, "beyond.py", "BEYOND = 3\n")
-    seeded_commit(repo, "base3")
-    git(repo, "checkout", "--detach", base_sha)
-    (repo / "base.py").write_text("BASE = 20\n")
-    git(repo, "add", "base.py")
-    write_and_stage(repo, "feature.py", feature_body)
-    head_sha = seeded_commit(repo, feature_message)
-    bare = tmp_path / bare_name
-    if bare.exists():
-        _sh.rmtree(bare)
-    bare.mkdir()
-    git(bare, "init", "--bare")
-    git(repo, "remote", "add", "origin", str(bare))
-    git(repo, "push", "origin", "main:main")
-    git(repo, "push", "origin", f"{head_sha}:refs/pull/{number}/head", check=False)
-    return str(bare), base_sha, head_sha
-
-
 def init_repo(repo: Path) -> None:
     repo.mkdir(parents=True, exist_ok=True)
     git(repo, "init", "-b", "main")

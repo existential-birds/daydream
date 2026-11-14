@@ -4,15 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-# User-visible pipeline stages (exploration is a pre-stage banner, not counted).
-_PIPELINE_STAGE_NAMES: list[str] = [
-    "TTT intent",
-    "TTT alternative-review",
-    "per-stack reviews",
-    "cross-stack merge",
-    "optional fix gate",
-]
-
 # Merge and diagram steps share this heading for idempotent replacement.
 _DIAGRAMS_HEADING = "## Diagrams"
 _REVIEW_HEADING = "# Review"
@@ -20,7 +11,8 @@ _REVIEW_HEADING = "# Review"
 
 def _finding_line(item: dict[str, Any], *, prefix: str = "") -> str:
     """Render the canonical id and location as an unbolded numbered finding line."""
-    return f"{item['id']}. {prefix}[{item['file']}:{item['line']}] {item['description']}"
+    location = item['file'] if item.get('line') is None else f"{item['file']}:{item['line']}"
+    return f"{item['id']}. {prefix}[{location}] {item['description']}"
 
 
 def _is_heading(line: str) -> bool:
@@ -120,18 +112,11 @@ def render_report(
     ]
 
     for lens, title, prefix in lens_sections:
-        rows = [i for i in items if i.get("lens") == lens]
+        # A finding that asserts no lens is listed with the plain issues.
+        rows = [i for i in items if (i.get("lens") or "per-stack") == lens]
         if rows:
             body = "\n".join(_finding_line(i, prefix=prefix) for i in rows)
             sections.append(f"{title}\n{body}")
 
     text = "\n\n".join(sections) + "\n"
     return text
-
-
-def render_held_section(held: list[dict[str, Any]]) -> str:
-    """Render findings withheld from the actionable report."""
-    if not held:
-        return ""
-    body = "\n".join(_finding_line(item) for item in held)
-    return f"## Held Findings\n{body}"

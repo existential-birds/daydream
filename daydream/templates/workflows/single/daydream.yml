@@ -239,7 +239,7 @@ jobs:
       # The gate's matched `command` selects the run. `review` runs the DEFAULT
       # deep-review pipeline (not --review); in --non-interactive the deep run
       # auto-declines the post/fix gates, so it still only produces a findings
-      # artifact — the deep multi-stack reviewer just feeds it. `sequence` /
+      # artifact — the reviewer just feeds it. `sequence` /
       # `flowchart` run a diagram-only pass over the same approved head, whose
       # artifact carries one grounded diagram and no findings. An unrecognized
       # value fails closed rather than silently falling back to a different

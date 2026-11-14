@@ -492,16 +492,6 @@ class TrajectoryRecorder:
             partial_edit_handling=partial_edit_handling,
         )
 
-    def emit_supervisor_verdict(self, finding_id: int, action: str, reason: str) -> None:
-        """Record a findings supervisor verdict in the deep phase."""
-        self._emit_phase_event(
-            DaydreamPhase.DEEP,
-            "supervisor_verdict",
-            finding_id=finding_id,
-            action=action,
-            reason=reason,
-        )
-
     def emit_tool_veto(self, tool_name: str, reason: str, *, phase: DaydreamPhase = DaydreamPhase.FIX) -> None:
         """Record a tool-supervisor veto in the firing phase."""
         self._emit_phase_event(phase, "tool_veto", tool_name=tool_name, reason=reason)
@@ -717,7 +707,6 @@ class TrajectoryRecorder:
         if "prompt_tokens" in usage and "completion_tokens" in usage:
             usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
         return usage
-
 
     def _build_final_metrics(self, total_steps: int) -> FinalMetrics:
         """Keep ATIF and embedded result usage on the same billing projection."""

@@ -186,7 +186,6 @@ async def test_fix_steps_stop_closed_on_fix_scope_verify_and_configuration_failu
     def fresh(name: str) -> tuple[Any, Any]:
         ctx = _direct_fix_context(_base_repo(tmp_path, name), items, changed_files={"a.py"})
         ctx.config = replace(ctx.config, file_config=DaydreamFileConfig(quality_gate_enabled=False))
-        ctx.data["intent_path"] = ctx.data["dd"] / "intent.md"
         return ctx, _direct_fix_state(ctx, items, {"a.py"})
 
     async def failed_fix(*_a: Any, **_k: Any) -> dict[str, str]:

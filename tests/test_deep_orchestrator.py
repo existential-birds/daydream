@@ -8,26 +8,18 @@ import sys
 from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from daydream import git_ops
 from daydream.backends import AgentEvent
-from daydream.deep.artifacts import (
-    DeepArtifact,
-    diff_key,
-)
 from daydream.phases import TestAndHealResult, TestAttemptEvidence
 from daydream.pr_review import PRInfo
-from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE, PR_DESCRIPTION_UNTRUSTED_FRAMING
 from daydream.review_profile import ResolvedProfile, build_default_profile, parse_profile
 from daydream.run_config import RunConfig
 from daydream.runner import run
-from daydream.workspace import _resolve_base
 from tests.harness.git_helpers import (
-    commit as _commit,
-    git as _git,
     seed_feature_branch,
 )
 from tests.harness.stub_backend import StubBackend, force_interactive, install_stub_backend, silence
@@ -78,12 +70,6 @@ def _merge_item(item_id: int, file: str, severity: str, *, desc: str | None = No
         "rationale": "rationale", "evidence": f"{file}:1", "related_files": None, "source_uids": None,
     }
 
-def _add_to_reviewed_diff(target: Path, files: list[str]) -> None:
-    """Commit *files* to the branch for tests that need reviewed-diff fixtures."""
-    for name in files:
-        (target / name).touch()
-    _git(target, "add", *files)
-    _commit(target, f"test: add {' '.join(files)} to the reviewed diff")
 
 def _migration_project(tmp_path: Path, name: str) -> tuple[Path, Path]:
     """Build a feature-branch fixture with one historical migration."""
@@ -104,67 +90,6 @@ def _migration_project(tmp_path: Path, name: str) -> tuple[Path, Path]:
     )
     return project, project / migration_rel
 
-def _record(**overrides: Any) -> dict[str, Any]:
-    """Build one on-disk per-stack record (the shape a merge resume reads back)."""
-    record: dict[str, Any] = {"id": 1, "description": "issue", "file": "api.py", "line": 1,
-                              "severity": "medium", "confidence": "MEDIUM",
-                              "rationale": "fixture defect", "evidence": "api.py:1"}
-    record.update(overrides)
-    return record
-
-def _write_matching_diff_key(target: Path, deep: Path) -> None:
-    """Key primed resume artifacts to the current diff, matching the deep preamble."""
-    base = _resolve_base(target, None, None)
-    diff = git_ops.diff(target, base)
-    DeepArtifact.DIFF_KEY.at(deep).write_text(diff_key(diff or ""), encoding="utf-8")
-
-def _prime_merge_resume(
-    target: Path, *, python: list[dict[str, Any]] | None = None, react: list[dict[str, Any]] | None = None,
-    generic: list[dict[str, Any]] | None = None, structure: list[dict[str, Any]] | None = None,
-) -> Path:
-    """Write required intent/alternative artifacts and optional stack records.
-
-    None deliberately omits a stack file to exercise the missing-record guard.
-    Return the deep artifact directory.
-    """
-    deep = target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    # Mirror a fresh run: the key marks the beginning of artifact production, so
-    # every primed prerequisite must be newer than it.
-    _write_matching_diff_key(target, deep)
-    (deep / "intent.md").write_text("primed intent")
-    (deep / "alternatives.json").write_text("[]")
-    from daydream.deep.artifacts import persist_review_coverage
-    from daydream.deep.diff import _diff_changed_files
-    from daydream.deep.orchestrator import _prepare_review_stacks
-    from daydream.deep.records import stamp_record_uids
-    from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
-    from tests.harness.review_result import frozen_target_decisions
-
-    config = RunConfig(target=str(target), start_at="merge", cleanup=False)
-    base = _resolve_base(target, None, None)
-    diff = git_ops.diff(target, base) or ""
-    head = git_ops.head_sha(target)
-    merge_base = git_ops.resolve_diff_merge_base(target, base, head)
-    stacks, _, _ = _prepare_review_stacks(config, _diff_changed_files(diff), diff, target, "deep")
-    coverage = ReviewCoverage("primed-review-fixture", AnalyzedRevision(head, merge_base, diff_key(diff)),
-                              [PlannedScope(stack.stack_name, stack.stack_name.split("#", 1)[0],
-                                            files=tuple(sorted(stack.files))) for stack in stacks],
-                              ("intent", "alternatives", "merge"))
-    coverage.record_phase("intent", "complete")
-    coverage.record_phase("alternatives", "complete", noop=True)
-    for stack, records in (("python", python), ("react", react), ("generic", generic), ("structure", structure)):
-        if records is not None:
-            stamp_record_uids(records, stack)
-            envelope = {"issues": records, "scope_id": stack, "analyzed_revision": coverage.revision.to_dict(),
-                        "originating_run_id": coverage.run_id}
-            (deep / f"stack-{stack}-records.json").write_text(json.dumps(envelope))
-            if stack in coverage.scopes:
-                assignment = next(assignment for assignment in stacks if assignment.stack_name == stack)
-                coverage.record_scope(stack, "complete", target_decisions=frozen_target_decisions(
-                    target, assignment, coverage.revision, diff))
-    persist_review_coverage(deep, coverage)
-    return deep
 
 async def _ok(*_a: Any, **kwargs: Any) -> Any:
     """Always-passing async test phase shared with archive data-capture tests."""
@@ -210,17 +135,6 @@ def _build_scope_creep_target(tmp_path: Path, name: str) -> Path:
         changed={"api.py": "def hello():\n    return 'galaxy'\n"},
     )
 
-def _sanctioned_inputs(prompt: str) -> dict[str, Path]:
-    """The label -> path map the rendered sanctioned-inputs block enumerates."""
-    lines = prompt.splitlines()
-    start = lines.index("Sanctioned phase inputs (read only these exact files):") + 1
-    sanctioned: dict[str, Path] = {}
-    for line in lines[start:]:
-        if not line.startswith("- "):
-            break
-        label, path = line.removeprefix("- ").split(": ", 1)
-        sanctioned[label] = Path(path)
-    return sanctioned
 
 class _ExtraEditBackend(_StubBackend):
     """Make a fix turn also edit a second file, optionally creating it."""
@@ -245,48 +159,3 @@ def _fix_prompts(stub: _StubBackend) -> list[str]:
     return [c["prompt"] for c in stub.calls if c["prompt"].startswith(("Fix this issue", "Fix these"))]
 
 PR_SENTINEL = "DELIBERATE_RATIO_PASS_THROUGH_IS_INTENTIONAL"
-
-def _intent_calls(stub: _StubBackend) -> list[dict[str, Any]]:
-    """Recover the intent-phase calls by their stable instruction text."""
-    return [c for c in stub.calls if "understand the intent of these changes" in c["prompt"].lower()]
-
-def _intent_prompt(stub: _StubBackend) -> str:
-    """Recover the intent-phase prompt by its stable instruction text."""
-    return cast(str, next(c["prompt"] for c in _intent_calls(stub)))
-
-def _review_prompts_by_kind(stub: _StubBackend) -> dict[str, list[str]]:
-    """Classify finding-producing prompts by their stable role-opening phrases."""
-    by_kind: dict[str, list[str]] = {
-        "per-stack": [], "generic-fallback": [], "structural": [], "arbiter": [], "merge": [],
-    }
-    for c in stub.calls:
-        pl = c["prompt"].lower()
-        if "you are reviewing the generic-fallback stack" in pl:
-            by_kind["generic-fallback"].append(c["prompt"])
-        elif "you are reviewing the " in pl:
-            by_kind["per-stack"].append(c["prompt"])
-        elif "you are the structural reviewer" in pl:
-            by_kind["structural"].append(c["prompt"])
-        elif "you are the arbiter" in pl:
-            by_kind["arbiter"].append(c["prompt"])
-        elif "cross-stack merge agent" in pl:
-            by_kind["merge"].append(c["prompt"])
-    return by_kind
-
-def _assert_authoritative_rule_gated(stub: _StubBackend, *, expect_present: bool) -> None:
-    """Assert the precedence rule AND the #579 untrusted framing are present/absent
-    in every finding-producing prompt."""
-    by_kind = _review_prompts_by_kind(stub)
-    missing = [k for k, prompts in by_kind.items() if not prompts]
-    assert not missing, f"expected prompts for all five kinds, missing: {missing}"
-    gated_constants = {"AUTHORITATIVE_INTENT_RULE": AUTHORITATIVE_INTENT_RULE,
-        "PR_DESCRIPTION_UNTRUSTED_FRAMING": PR_DESCRIPTION_UNTRUSTED_FRAMING,
-    }
-    for kind, prompts in by_kind.items():
-        for name, constant in gated_constants.items():
-            assert all((constant in p) == expect_present for p in prompts), (
-                f"{kind}: expected {name} {'in' if expect_present else 'absent from'} every prompt"
-            )
-
-_TWIN_DESCRIPTION = "The staging cache URL does not match the documented shared instance"
-

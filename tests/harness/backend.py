@@ -3,7 +3,7 @@
 Each execute consumes one scripted turn; the final turn repeats. Turns contain
 events and exceptions, allowing partial output before failure. Schema matching
 and responders support fan-out independent of completion order. Prompt-based
-review/fix routing belongs to PhaseDispatchBackend."""
+review/fix routing belongs to StubBackend."""
 
 from __future__ import annotations
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, cast
 
 import pytest
 
@@ -12,14 +11,12 @@ from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.runner import run
 from tests.harness.execution import host_test_command
 from tests.harness.git_helpers import git as _git
-from tests.harness.review_profile import independent_alternatives_profile
 from tests.test_deep_orchestrator import (
     MakeConfig,
     Mute,
     _add_bare_remote,
     _force_interactive,
     _install_stub_backend,
-    _run_deep,
     _silence,
 )
 
@@ -48,9 +45,12 @@ async def test_embedded_fixing_is_selected_explicitly_and_persists_the_suite_ver
     _silence(monkeypatch, prompts=False)
     _force_interactive(monkeypatch)
     asked: list[str] = []
+    declines: list[str] = []
 
     def answer(_console: object, message: str, *_args: object, **_kwargs: object) -> str:
         asked.append(message)
+        if any(question in message for question in declines):
+            return "n"
         return "3" if ignored and "Choice" in message else "y"
 
     monkeypatch.setattr("daydream.run_context._prompt_user", answer)
@@ -76,19 +76,32 @@ async def test_embedded_fixing_is_selected_explicitly_and_persists_the_suite_ver
                               {"assume": "yes", "findings_out": str(suite_dir / "findings.json")})
         ]
     assert (codes, refusals, stub.calls) == ([1] * 4, ["Fix Not Possible"] * 4, [])
-    # Without output_mode="loop" a request ends with findings, the shallow flow included: this operator would
-    # accept a fix gate, and none is offered.
-    for flow_name in (None, "shallow"):
-        code = await run(make_config(tiny_diff_target, non_interactive=False, test_command=command,
-                                     flow_name=flow_name))
-        assert (
-            code, "## Issues" in (tiny_diff_target / REVIEW_OUTPUT_FILE).read_text(),
-            [question for question in asked if "Apply fixes" in question], (suite_dir / "suite-count.txt").exists(),
-            _git(tiny_diff_target, "status", "--porcelain", "--untracked-files=no"),
-        ) == (0, True, [], False, ""), flow_name
+    # The default request ends with findings: this operator would accept a fix gate, and none is offered.
+    code = await run(make_config(tiny_diff_target, non_interactive=False, test_command=command))
+    assert (
+        code, "### 1. Sample issue" in (tiny_diff_target / REVIEW_OUTPUT_FILE).read_text(),
+        [question for question in asked if "Apply fixes" in question], (suite_dir / "suite-count.txt").exists(),
+        _git(tiny_diff_target, "status", "--porcelain", "--untracked-files=no"),
+    ) == (0, True, [], False, "")
     config = make_config(tiny_diff_target, output_mode="loop", assume=None if ignored else "yes",
                          non_interactive=False, test_command=command)
+    # A selected fixing run with nothing to fix, or whose operator declines the gate, ends cleanly unfixed.
+    def fix_turns() -> int:
+        return sum(call["prompt"].lower().startswith(("fix this issue", "fix these")) for call in stub.calls)
+    claims, stub.review_claims = stub.review_claims, []
+    assert (await run(config), fix_turns()) == (0, 0)
+    stub.review_claims = claims
+    declines.append("Apply fixes")
+    assert (await run(config), fix_turns(), (suite_dir / "suite-count.txt").exists()) == (0, 0, False)
+    declines.clear()
+    # A fixing run after an unfinished review says so before it asks to apply anything.
+    stub.review_undecided = 1
+    monkeypatch.setattr("daydream.deep.review_terminal.print_warning", lambda _console, message: asked.append(message))
+    asked.clear()
     assert await run(config) == exit_code
+    outcome = next(index for index, line in enumerate(asked)
+                   if line.startswith("Review incomplete: 1 confirmed finding. Not finished:"))
+    assert outcome < next(index for index, line in enumerate(asked) if "Apply fixes" in line)
     path = tiny_diff_target / ".daydream" / "deep" / "test-verdict.json"
     assert path.is_file(), "suite verdict must survive both successful completion and an early failure return"
     verdict = json.loads(path.read_text())
@@ -114,63 +127,3 @@ async def test_embedded_fixing_is_selected_explicitly_and_persists_the_suite_ver
         assert not (tiny_diff_target / ".fixed-api_py").exists()
         assert (suite_dir / "suite-count.txt").read_text() == "1"
         assert stub.test_suite_calls == 0
-
-
-async def test_intent_artifact_survives_wonder_failure(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.fail_alternatives = True
-    with pytest.raises(RuntimeError, match="alternatives blew up"):
-        await _run_deep(multi_stack_target, review_profile=independent_alternatives_profile())
-    intent_md = multi_stack_target / ".daydream" / "deep" / "intent.md"
-    assert intent_md.read_text().strip(), "intent.md must survive the wonder failure"
-    # The wonder half never ran, so its artifact is legitimately absent.
-    assert not (multi_stack_target / ".daydream" / "deep" / "alternatives.json").exists()
-
-
-def test_coverage_persistence_keeps_the_primary_failure_and_resume_fails_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A secondary evidence-write error annotates the original failure; foreign evidence never resumes.
-
-    Runner resume tests only delete the coverage file; these owner checks bind the revision and
-    target-decision gates and the primary-error rule without a review run.
-    """
-    from daydream.deep import artifacts
-    from tests.harness.review_result import review_coverage
-
-    stored = review_coverage(scope_ids=('python',))
-    stored.record_scope('python', 'complete')
-
-    def fail_write(*_args: Any, **_kwargs: Any) -> None:
-        raise OSError('coverage disk full')
-
-    with monkeypatch.context() as patch:
-        patch.setattr(artifacts, 'atomic_write_json', fail_write)
-        primary = RuntimeError('original stage failure')
-        artifacts.persist_review_coverage(tmp_path, stored, error=primary)
-        assert primary.__notes__ == ['Review coverage persistence failed: OSError']
-        with pytest.raises(OSError, match='coverage disk full'):
-            artifacts.persist_review_coverage(tmp_path, stored)
-    artifacts.persist_review_coverage(tmp_path, stored)
-    restore = cast(Any, artifacts.restore_review_coverage)
-    for current, message in ((review_coverage(scope_ids=('python',), head_sha='f' * 40), 'revision'),
-                             (review_coverage(scope_ids=('python',)), 'target decisions are unavailable')):
-        with pytest.raises(ValueError, match=message):
-            restore(tmp_path, current, backend=None, work=None, stacks=[], registry=None,
-                    artifact_session=None, allow_standalone=True)
-
-
-def test_alternatives_prompt_points_at_the_diff_file_when_no_bounded_copy_is_inlined() -> None:
-    """An over-budget diff is read from disk; the prompt never claims an inline copy it lacks.
-
-    The runner journeys inline bounded diffs, so the file-pointer branch is otherwise unreached.
-    """
-    from daydream.phases.review_prompts import build_alternative_review_prompt
-
-    strategy = 'Intent: {intent_summary}\nRead the diff file at {diff_path} and evaluate it.'
-    prompt = build_alternative_review_prompt(strategy=strategy, intent_summary='Fix greeting', diff_path='d.patch')
-    assert 'Intent: Fix greeting\nRead the diff file at d.patch and evaluate it.' in prompt
-    assert 'inlined below' not in prompt and 'do NOT re-Read' not in prompt

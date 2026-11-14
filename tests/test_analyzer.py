@@ -14,7 +14,7 @@ from daydream import _tree_sitter_safety as safety
 from daydream.artifact_visibility import ArtifactEvidenceProvenance, ArtifactVisibilityError
 from daydream.artifacts.ownership import CodeWorkspace
 from daydream.backends import MetricsEvent, ResultEvent, TextEvent
-from daydream.deep.records import RECORD_SOURCE_UIDS_KEY, mint_record_uid
+from daydream.deep.records import RECORD_SOURCE_UIDS_KEY
 from daydream.eval import quality as quality_mod
 from daydream.eval.analyzer import (
     _agent_label,
@@ -687,10 +687,10 @@ def test_quality_parser_failure_keeps_scope_without_metrics(tmp_path: Path, monk
 
 
 def seed_stack_records(deep: Path, stack_name: str, *, n: int) -> None:
-    """Seed HIGH records with host UIDs using 1-based birth ordinals.
+    """Seed an earlier build's HIGH stack records, whose host UIDs use 1-based birth ordinals.
 
     Reviewer ids deliberately remain 0-based: display ids are not record identity."""
-    records: list[dict[str, Any]] = [{"id": i, "confidence": "HIGH", "uid": mint_record_uid(stack_name, i + 1)}
+    records: list[dict[str, Any]] = [{"id": i, "confidence": "HIGH", "uid": f"{stack_name}:{i + 1}"}
         for i in range(n)
     ]
     (deep / f"stack-{stack_name}-records.json").write_text(json.dumps({"issues": records}))

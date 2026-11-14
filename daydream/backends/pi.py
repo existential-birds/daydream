@@ -267,7 +267,8 @@ WORK STRATEGY:
   unknown, use targeted grep/find/ls to locate it before opening files.
 - Batch related reads. Don't read files one at a time in a loop when a single
   grep would surface every relevant location.
-{starting_method}
+- Read the diff first. If a diff file or git output is in your context, start
+  there; only explore files referenced by the diff or their direct imports.
 - Don't re-read what you've already read. If a file's content is already in
   your context, reuse it for understanding. For staged reviews, diff or prompt
   contents are enough when they support a decision; use ordinary file tools or
@@ -290,7 +291,7 @@ Be concise in your responses. Do not narrate exploration step by step; report
 findings and conclusions."""
 
 
-def render_pi_preamble(wall_budget_s: float | None, tool_call_budget: int | None, *, staged: bool = False) -> str:
+def render_pi_preamble(wall_budget_s: float | None, tool_call_budget: int | None) -> str:
     """Render the preamble with the invocation's actual allowances.
 
     Requirement 17: the numbers are rendered, never hardcoded, and the tool-call
@@ -311,39 +312,8 @@ def render_pi_preamble(wall_budget_s: float | None, tool_call_budget: int | None
             "Each call counts, including failed calls, parallel batch members and structured submissions. "
             "Reserve one call for structured_output when native submission is required."
         )
-    return _PI_PREAMBLE_TEMPLATE.format(allowance=allowance, starting_method=(
-        '- Follow the active stage method and persistent exact access guide when choosing where to start.'
-        if staged else '- Read the diff first. If a diff file or git output is in your context, start\n'
-        '  there; only explore files referenced by the diff or their direct imports.'))
+    return _PI_PREAMBLE_TEMPLATE.format(allowance=allowance)
 
-
-
-def _pi_submission_assignment(review_instructions: str | None) -> dict[str, Any] | None:
-    """Project only the stage builder's explicit assignment, never conversation history.
-
-    Oversized or malformed metadata is omitted whole: full original assignments
-    remain in the system instructions, and identities are never truncated.
-    """
-    prefix = "Daydream final-submission assignment: "
-    lines = [line[len(prefix):] for line in (review_instructions or "").splitlines() if line.startswith(prefix)]
-    if len(lines) != 1 or len(lines[0].encode("utf-8")) > 4096:
-        return None
-    try:
-        value = json.loads(lines[0])
-    except (ValueError, RecursionError):
-        return None
-    if not isinstance(value, dict) or set(value) != {"objective", "target_ids", "candidate_ids"}:
-        return None
-    objective = value["objective"]
-    if not isinstance(objective, str) or not objective or len(objective) > 256:
-        return None
-    for field in ("target_ids", "candidate_ids"):
-        identities = value[field]
-        if (not isinstance(identities, list) or len(identities) > 128
-                or any(not isinstance(identity, str) or not identity or len(identity) > 256
-                       for identity in identities)):
-            return None
-    return value
 
 
 _PI_FINALIZATION_PREAMBLE = """\
@@ -969,7 +939,7 @@ class PiBackend:
             if finalization
             else render_pi_preamble(
                 None if budget_deadline is None else max(0.0, budget_deadline - clock.monotonic()),
-                tool_call_budget, staged=bool(review_instructions and "Staged review contract:" in review_instructions))
+                tool_call_budget)
         )
         if review_instructions and not finalization:
             system_prompt += (
@@ -1306,9 +1276,6 @@ class PiBackend:
                     packet["host_tools"] = host_server.packet()
                 if tool_call_budget is not None:
                     packet["tool_call_budget"] = tool_call_budget
-                    assignment = _pi_submission_assignment(review_instructions)
-                    if assignment is not None:
-                        packet["submission_assignment"] = assignment
                 extensions.append(("DAYDREAM_PI_OUTPUT_PACKET", "pi_structured_output.ts", packet))
             for variable in ("DAYDREAM_PI_HOST_PACKET", "DAYDREAM_PI_OUTPUT_PACKET"):
                 child_env.pop(variable, None)

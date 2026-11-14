@@ -3,37 +3,20 @@
 from __future__ import annotations
 
 import shutil
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rich.markup import escape as escape_markup
 
-from daydream import git_ops
+from daydream import clock, git_ops
 from daydream.agent import console
 from daydream.artifact_visibility import ArtifactVisibilityError, artifact_dir_for, artifact_session_active
-from daydream.config import (
-    DEFAULT_DEEP_SHARD_ENABLED,
-    DEFAULT_DEEP_SHARD_FANOUT_CAP,
-    DEFAULT_DEEP_SHARD_FRONTIER_MAX,
-    DEFAULT_DEEP_SHARD_MAX_BYTES,
-    DEFAULT_DEEP_SHARD_MAX_FILES,
-    REVIEW_OUTPUT_FILE,
-    STRUCTURE_STACK_NAME,
-)
+from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.deep import review_steps
-from daydream.deep.adjudication_steps import _step_arbiter
-from daydream.deep.artifacts import (
-    DeepArtifact,
-    check_deep_artifacts,
-    deep_dir,
-    diff_key,
-    per_stack_records_path,
-)
+from daydream.deep.artifacts import DeepArtifact, deep_dir, diff_key
 from daydream.deep.dependency import build_import_graph
-from daydream.deep.detection import GENERIC_STACK, StackAssignment, base_stack_name, detect_stacks
 from daydream.deep.diagram_steps import _diagram_mode_for, _resolved_diagram_mode, _step_diagram, _step_post_diagram
-from daydream.deep.diagram_work import diagram_work_scope
 from daydream.deep.diff import _diff_changed_files, bound_deep_diff
 from daydream.deep.fix_steps import (
     _perform_cleanup,
@@ -44,41 +27,23 @@ from daydream.deep.fix_steps import (
     _step_test,
     _step_verify,
 )
-from daydream.deep.latency import diff_signals, route_for, summarize_risk
 from daydream.deep.merge_steps import (
-    _step_cross_stack_merge,
     _step_findings_out,
     _step_load_items,
     _step_post_review,
-    _step_single_stack_merge,
-    _step_supervise,
-    _supervisor_mode,
 )
 from daydream.deep.remote_ci_steps import _step_remote_ci
-from daydream.deep.render import _PIPELINE_STAGE_NAMES
-from daydream.deep.reuse_store import build_reuse_cache
 from daydream.deep.review_steps import (
     _step_exploration,
-    _step_intent,
-    _step_per_stack_parse,
-    _step_wonder_and_per_stack,
 )
-from daydream.deep.routing_record import write_routing_record
-from daydream.deep.settings import (
-    _resolve_config_value,
-    _resolve_non_negative_int,
-    fold_default_alternatives,
-    fresh_ttt,
-)
-from daydream.deep.sharding import shard_stacks
+from daydream.deep.review_terminal import _step_committed_review
 from daydream.deep.state import DeepState
 from daydream.extensions import get_registry
 from daydream.extensions.api import FlowStep
 from daydream.flows.engine import BackendFactory, FlowContext, run_flow
 from daydream.github_app import GitHubExecutionInput
 from daydream.phases import PushReceipt
-from daydream.review_budget import review_deadline_scope, review_scale_for_diff
-from daydream.review_profile import Pipeline, build_default_profile, resolve_pipeline
+from daydream.review_budget import review_deadline_scope
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.test_execution import (
     RecipeConfinementError,
@@ -86,129 +51,13 @@ from daydream.test_execution import (
     resolve_test_recipe,
 )
 from daydream.trajectory import DaydreamRunFlow
-from daydream.ui import print_error, print_info, print_preflight_notice, print_warning
+from daydream.ui import print_error, print_info, print_warning
 from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
     from daydream.pr_review import PRInfo
     from daydream.run_artifacts import _RunArtifacts
     from daydream.run_config import RunConfig
-
-
-def total_agent_count(stack_count: int) -> int:
-    """Estimate two TTT calls, one reviewer per assignment, merge and conditional arbiter.
-
-    Always budget the arbiter in preflight; user-gated fix agents are excluded.
-    """
-    return 2 + stack_count + 1 + 1
-
-
-# Tiny diffs collapse language fan-out and bypass merge/arbiter.
-DEFAULT_SHALLOW_FANOUT_THRESHOLD = 2
-
-
-def _single_stack_agent_count(stack_count: int) -> int:
-    """Estimate two TTT calls plus one reviewer per surviving assignment, without merge or arbiter."""
-    return 2 + stack_count
-
-
-def _config_pipeline(config: RunConfig) -> Pipeline:
-    """Resolve the profile pipeline before a FlowContext exists."""
-    return resolve_pipeline(config.review_profile)
-
-
-def _shallow_fanout_threshold(config: RunConfig) -> int:
-    """Resolve the tiny-diff short-circuit threshold (issue #172, AC7).
-
-    ``0`` disables the short-circuit.
-    """
-    return _resolve_config_value(config, "shallow_fanout_threshold", DEFAULT_SHALLOW_FANOUT_THRESHOLD)
-
-
-def _supervise_enabled(ctx: FlowContext) -> bool:
-    """Run supervision on fresh flows, not on a fix-only resume."""
-    return _supervisor_mode(ctx.config) in {"rules", "llm"} and ctx.config.start_at != "fix"
-
-
-def _deep_shard_enabled(config: RunConfig, *, diff: str = "", useful_shards: bool = False) -> bool:
-    """Resolve overrides before automatic aggregate-size or assignment-overload activation."""
-    explicit = config.deep_shard_enabled
-    if explicit is None and config.file_config is not None:
-        explicit = config.file_config.deep_shard_enabled
-    if explicit is not None:
-        return explicit
-    return DEFAULT_DEEP_SHARD_ENABLED or review_scale_for_diff(diff) >= 4 or useful_shards
-
-
-def _deep_shard_max_files(config: RunConfig) -> int:
-    """Resolve the per-shard max file-count bound (issue #731)."""
-    return _resolve_non_negative_int(config, "deep_shard_max_files", DEFAULT_DEEP_SHARD_MAX_FILES)
-
-
-
-def _collapse_stacks_for_tiny_diff(
-    stacks: list[StackAssignment],
-    changed_files: list[str],
-    *,
-    threshold: int,
-) -> tuple[list[StackAssignment], bool]:
-    """Collapse language fan-out when 0 < changed-file count <= threshold.
-
-    Keep structure separate. One real language absorbs generic/docs files; multiple
-    real languages collapse to generic. A sole non-structural assignment is unchanged.
-    Return the stacks and whether the gate is active; threshold 0 disables it.
-    """
-    if not (0 < len(changed_files) <= threshold):
-        return stacks, False
-
-    non_structural = [s for s in stacks if s.stack_name != STRUCTURE_STACK_NAME]
-    structural = [s for s in stacks if s.stack_name == STRUCTURE_STACK_NAME]
-
-    # Automatic collapse must retain framework fallback decisions. Explicit
-    # shallow/stack choices still collapse below through their own user routing.
-    if len(non_structural) >= 2 and any(
-        s.stack_name == GENERIC_STACK and any(
-            Path(f).suffix.lower() in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
-            or Path(f).name in {"package.json", "tsconfig.json"}
-            for f in s.files
-        )
-        for s in non_structural
-    ):
-        return stacks, False
-
-    # Absorb generic files into a sole language; multiple languages collapse to generic.
-    if len(non_structural) >= 2:
-        combined_files = sorted({f for s in non_structural for f in s.files})
-        real_language = [s for s in non_structural if s.stack_name != GENERIC_STACK]
-        stack_name = real_language[0].stack_name if len(real_language) == 1 else GENERIC_STACK
-        combined = StackAssignment(
-            stack_name=stack_name,
-            files=combined_files,
-            is_docs_only=False,
-        )
-        return [*structural, combined], True
-
-    # 0 or 1 non-structural stacks: nothing to collapse (lever 1 is a no-op), but
-    # the gate is still active so the caller applies lever 2 (skip merge+arbiter).
-    return stacks, True
-
-
-def _stack_preflight_line(stack: StackAssignment) -> str:
-    """Format one review-assignment line for the pre-flight notice (skill-free, M2)."""
-    docs_suffix = " (docs-only)" if stack.is_docs_only else ""
-    return f"{stack.stack_name}: {len(stack.files)} file(s){docs_suffix}"
-
-
-def _preflight_stage_names(stacks: list[StackAssignment], *, folded_alternatives: bool = False) -> list[str]:
-    """Return user-facing stages, including the structural review when active."""
-    stages = list(_PIPELINE_STAGE_NAMES)
-    if folded_alternatives:
-        stages[1] = "design alternatives (included in structural review)"
-    if any(stack.stack_name == STRUCTURE_STACK_NAME for stack in stacks):
-        stages.insert(3, "structural review (parallel with per-stack reviews)")
-    return stages
-
-
 
 
 def _has_non_daydream_worktree_changes(status: str) -> bool:
@@ -279,35 +128,13 @@ def _remote_ci_enabled(ctx: FlowContext) -> bool:
     return isinstance(deep_state.push_receipt, PushReceipt)
 
 
-def _fresh_ttt(ctx: FlowContext) -> bool:
-    # Verbatim resume gate: --start-at per-stack/merge/fix skips the TTT phases.
-    return fresh_ttt(ctx.config)
-
-
-def _before_fix_resume(ctx: FlowContext) -> bool:
-    # Verbatim resume gate: --start-at fix skips everything up to the fix gate.
-    # For post-review, this also keeps the non-idempotent GitHub write off the
-    # resume path (duplicate inline reviews on reruns).
-    return ctx.config.start_at != "fix"
-
-
-def _multi_stack_merge_enabled(ctx: FlowContext) -> bool:
-    deep_state = DeepState(ctx.data)
-    return ctx.config.start_at != "fix" and not deep_state.single_stack_mode
-
-
-def _single_stack_merge_enabled(ctx: FlowContext) -> bool:
-    deep_state = DeepState(ctx.data)
-    return ctx.config.start_at != "fix" and deep_state.single_stack_mode
-
-
 def _diagram_enabled(ctx: FlowContext) -> bool:
-    """Run diagram eligibility checks unless mode is off or this is a fix-only resume.
+    """Run diagram eligibility checks unless mode is off.
 
     No eligible diagram means zero agent calls, but the step still records why.
     Diagram-only flows always pass this gate.
     """
-    return _before_fix_resume(ctx) and _resolved_diagram_mode(ctx) != "off"
+    return _resolved_diagram_mode(ctx) != "off"
 
 
 def _findings_out_enabled(ctx: FlowContext) -> bool:
@@ -319,19 +146,14 @@ def _findings_out_enabled(ctx: FlowContext) -> bool:
 def _resolve_mode(config: RunConfig) -> str:
     """Map a RunConfig onto the single deep-flow mode key (#330).
 
-    ``review`` / ``comment`` replace the review flow (stop after post-review);
-    ``shallow`` replaces the shallow flow (single-stack deep); ``diagram``
-    (issue #1113) reuses the spine's preamble but runs the two-step ``diagram``
-    flow. Only ``output_mode="loop"`` selects the fixing modes ``loop`` and ``shallow``.
+    ``review`` / ``comment`` stop after post-review; ``diagram`` (issue #1113) reuses the
+    spine's preamble but runs the two-step ``diagram`` flow. Only ``output_mode="loop"``
+    selects the fixing mode ``loop``.
     """
     if config.flow_name == "review":
         return "review"
-    # Issue #1113: checked before ``shallow`` so ``--diagram-only`` is never
-    # reinterpreted as a shallow review by an unrelated flag combination.
     if config.output_mode in ("diagram", "review", "comment"):
         return config.output_mode
-    if config.shallow or config.flow_name == "shallow":
-        return "shallow"
     return "loop"
 
 
@@ -342,13 +164,13 @@ def _mode_of(ctx: FlowContext) -> str:
 
 
 def _fix_cycle_enabled(ctx: FlowContext) -> bool:
-    """The apply-fix gate + verify/fix/test/commit run in loop + shallow modes."""
-    return _mode_of(ctx) in ("loop", "shallow")
+    """The apply-fix gate + verify/fix/test/commit run in loop mode only."""
+    return _mode_of(ctx) == "loop"
 
 
 def _cleanup_applies(ctx: FlowContext) -> bool:
     """Return whether this mode writes ``.review-output.md``."""
-    return _mode_of(ctx) in ("loop", "shallow", "review", "comment")
+    return _mode_of(ctx) in ("loop", "review", "comment")
 
 
 def _cleanup_should_run(ctx: FlowContext, exit_code: int) -> bool:
@@ -372,8 +194,6 @@ def _flow_kind_for_mode(mode: str) -> DaydreamRunFlow:
     pipeline state -- and diagram runs deliberately leave those artifacts on
     disk.
     """
-    if mode == "shallow":
-        return DaydreamRunFlow.NORMAL
     if mode == "diagram":
         return DaydreamRunFlow.DIAGRAM
     if mode in ("review", "comment"):
@@ -385,7 +205,7 @@ def _flow_name_for_mode(mode: str) -> str:
     """The registered flow name a mode runs (issue #1113).
 
     Every PR-process mode runs the ``deep`` flow; only ``diagram`` has its own.
-    ``loop`` / ``comment`` / ``review`` / ``shallow`` are modes, not registered
+    ``loop`` / ``comment`` / ``review`` are modes, not registered
     flow names, so the raw mode string must never be passed to ``run_flow``.
     """
     return "diagram" if mode == "diagram" else "deep"
@@ -394,25 +214,12 @@ def _flow_name_for_mode(mode: str) -> str:
 # Cleanup follows every successful flow exit, including an early declined gate.
 # Failures retain evidence.
 STEPS: tuple[FlowStep, ...] = (
-    FlowStep(name="exploration", run=_step_exploration),
-    FlowStep(name="intent", run=_step_intent, enabled=_fresh_ttt),
-    FlowStep(
-        name="per-stack-reviews",
-        run=_step_wonder_and_per_stack,
-        config_phase="per_stack_review",
-    ),
-    FlowStep(name="per-stack-parse", run=_step_per_stack_parse, config_phase="parse", enabled=_before_fix_resume),
-    FlowStep(name="arbiter", run=_step_arbiter, enabled=_multi_stack_merge_enabled),
-    FlowStep(
-        name="cross-stack-merge", run=_step_cross_stack_merge, config_phase="merge", enabled=_multi_stack_merge_enabled
-    ),
-    FlowStep(name="single-stack-merge", run=_step_single_stack_merge, enabled=_single_stack_merge_enabled),
+    FlowStep(name="review", run=_step_committed_review),
     FlowStep(name="load-items", run=_step_load_items),
-    FlowStep(name="supervise", run=_step_supervise, config_phase="supervise", enabled=_supervise_enabled),
     FlowStep(name="diagram", run=_step_diagram, config_phase="diagram", enabled=_diagram_enabled),
     FlowStep(name="findings-out", run=_step_findings_out, enabled=_findings_out_enabled),
-    FlowStep(name="post-review", run=_step_post_review, enabled=_before_fix_resume),
-    # Fix cycle: loop + shallow modes only (review/comment stop after post-review).
+    FlowStep(name="post-review", run=_step_post_review),
+    # Fix cycle: loop mode only (review/comment stop after post-review).
     FlowStep(name="fix-gate", run=_step_fix_gate, enabled=_fix_cycle_enabled),
     FlowStep(name="verify", run=_step_verify, enabled=_fix_cycle_enabled),
     FlowStep(name="fix", run=_step_fix, enabled=_fix_cycle_enabled),
@@ -427,109 +234,9 @@ STEPS: tuple[FlowStep, ...] = (
 # Keep diagram-only publication outside STEPS: builtins derives the ordinary deep
 # flow from that tuple, where post-diagram would cause an unintended GitHub write.
 DIAGRAM_STEPS: tuple[FlowStep, ...] = (
+    FlowStep(name="exploration", run=_step_exploration),
     FlowStep(name="post-diagram", run=_step_post_diagram),
 )
-
-
-def _collapse_stacks_for_shallow(
-    stacks: list[StackAssignment],
-    changed_files: list[str],
-    config: RunConfig,
-) -> tuple[list[StackAssignment], bool]:
-    """Combine non-structural files into one assignment, retaining structure separately.
-
-    An explicit stack wins; otherwise preserve a sole real language (absorbing
-    generic/docs files), or use generic for multiple/no real languages.
-    Return the assignments and True for single-stack mode.
-    """
-    structural = [s for s in stacks if s.stack_name == STRUCTURE_STACK_NAME]
-    combined_files = sorted({f for s in stacks for f in s.files}) or changed_files
-
-    real_language = [s for s in stacks if s.stack_name not in (STRUCTURE_STACK_NAME, GENERIC_STACK)]
-
-    if config.stack is not None:
-        stack_name = config.stack
-    elif len(real_language) == 1:
-        # Scope preservation: a sole real-language stack survives unchanged,
-        # absorbing any generic/docs files.
-        stack_name = real_language[0].stack_name
-    else:
-        # Multiple real-language stacks (one agent cannot cover two per-language
-        # scopes) or no real language at all: the combined assignment uses the
-        # native generic-fallback scope.
-        stack_name = GENERIC_STACK
-    combined = StackAssignment(
-        stack_name=stack_name,
-        files=combined_files,
-        is_docs_only=False,
-    )
-    return [*structural, combined], True
-
-
-def _prepare_review_stacks(
-    config: RunConfig,
-    changed_files: list[str],
-    diff: str,
-    target_dir: Path,
-    mode: str,
-) -> tuple[list[StackAssignment], bool, dict[str, set[str]]]:
-    """Resolve review scopes, optional shards, and the diagram import graph."""
-    stacks = detect_stacks(changed_files, target_dir=target_dir)
-    # Apply the resolved structural gate before collapsing or sharding assignments.
-    if not _config_pipeline(config).structural_enabled:
-        stacks = [s for s in stacks if s.stack_name != STRUCTURE_STACK_NAME]
-    # Recompute tiny-diff collapse on resumes so they follow the same merge/arbiter bypass.
-    stacks, single_stack_mode = _collapse_stacks_for_tiny_diff(
-        stacks, changed_files, threshold=_shallow_fanout_threshold(config)
-    )
-    # Issue #330 — ``--shallow`` forces the single-stack assignment regardless
-    # of diff size, so no arbiter / cross-stack merge runs.
-    if mode == "shallow":
-        stacks, single_stack_mode = _collapse_stacks_for_shallow(stacks, changed_files, config)
-
-    # Shard after collapse and before publishing scopes; use full persisted diff bytes.
-    # Single-stack and sharding-off runs retain their assignments.
-    import_graph: dict[str, set[str]] = {}
-    max_files = _deep_shard_max_files(config)
-    max_bytes = _resolve_non_negative_int(config, "deep_shard_max_bytes", DEFAULT_DEEP_SHARD_MAX_BYTES)
-    fanout_cap = _resolve_non_negative_int(config, "deep_shard_fanout_cap", DEFAULT_DEEP_SHARD_FANOUT_CAP)
-    frontier_max = _resolve_non_negative_int(config, "deep_shard_frontier_max", DEFAULT_DEEP_SHARD_FRONTIER_MAX)
-    graph_free_stacks = stacks
-    if not single_stack_mode and _resolve_config_value(config, "deep_shard_enabled", True):
-        graph_free_stacks = shard_stacks(
-            stacks, diff, max_files=max_files, max_bytes=max_bytes,
-            fanout_cap=fanout_cap, frontier_max=frontier_max,
-        )
-    # The existing planner owns overload and cap feasibility. An oversized
-    # singleton or a plan coarsened to one role per stack cannot add capacity.
-    useful_shards = len(graph_free_stacks) > len(stacks)
-    sharding_enabled = _deep_shard_enabled(config, diff=diff, useful_shards=useful_shards)
-    shard_this_run = sharding_enabled and not single_stack_mode
-    # Build one import graph for sharding and diagram eligibility. The guard also
-    # catches unsafe tree-sitter versions that can escape the fail-open builder.
-    diagram_needs_graph = (
-        config.start_at != "fix" and _diagram_mode_for(config, mode) != "off"
-    )
-    if (shard_this_run and useful_shards) or diagram_needs_graph:
-        try:
-            import_graph = build_import_graph(changed_files, target_dir)
-        except Exception:
-            import_graph = {}
-    if shard_this_run:
-        if import_graph:
-            stacks = shard_stacks(
-                stacks,
-                diff,
-                max_files=max_files,
-                max_bytes=max_bytes,
-                fanout_cap=fanout_cap,
-                frontier_max=frontier_max,
-                graph=import_graph,
-            )
-        else:
-            stacks = graph_free_stacks
-
-    return stacks, single_stack_mode, import_graph
 
 
 @bind_resolved_run_context
@@ -543,13 +250,12 @@ async def run_deep(
     backend_factory: BackendFactory | None = None,
     allow_standalone: bool = False,
 ) -> int:
-    """Prepare and execute the registered deep flow for review, comment, shallow or loop.
+    """Plan the review, then execute the registered deep flow for review, comment, fixing or diagram-only.
 
-    Resolve diff, stacks, routing and preflight before dispatch. start_at supports
-    TTT, per-stack, merge and fix resumes. Runner-managed calls supply run_artifacts;
-    standalone calls require explicit allow_standalone=True and no active session.
-    Return the pipeline exit code.
+    Every review starts fresh. Runner-managed calls supply run_artifacts; standalone calls
+    require explicit allow_standalone=True and no active session. Return the pipeline exit code.
     """
+    started = clock.monotonic()
     run_context = resolve_run_context(run_context)
     if run_artifacts is None and not allow_standalone:
         raise ArtifactVisibilityError("standalone deep flow requires allow_standalone=True")
@@ -557,20 +263,15 @@ async def run_deep(
         raise ArtifactVisibilityError("standalone deep flow cannot run inside an active artifact session")
     artifact_session = None if run_artifacts is None else run_artifacts.session
     mode = _resolve_mode(config)
-    if work.captured_source is not None and config.start_at not in (None, "review"):
-        print_error(console, "Captured Review Restart",
-                    "Captured reviews cannot resume retained judgments; rerun without --start-at for a fresh review.")
-        return 1
     github_execution = github_execution or GitHubExecutionInput()
     # Late imports to avoid circular dependency with runner.
     from daydream.git_ops import GitError, GitTimeoutError
     from daydream.hunk_index import write_hunk_index
     from daydream.phases.inputs import (
         _git_branch,
-        _git_log,
     )
     from daydream.run_artifacts import _open_recorder, _resolve_review_profile
-    from daydream.run_config import _default_backend_name, _resolved_latency_profile
+    from daydream.run_config import _default_backend_name
 
     target_dir = work.repo
 
@@ -578,7 +279,7 @@ async def run_deep(
     # capture the target once, before any work happens, and diff explicit SHA
     # endpoints. Diagram mode captures the same identity but keeps its own
     # two-dot diff selection below.
-    from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
+    from daydream.review_result import AnalyzedRevision
 
     captured_pr = work.review_pr
     pr_base_sha = None if captured_pr is None else captured_pr.pr_base_sha
@@ -644,7 +345,6 @@ async def run_deep(
             )
         except Exception as exc:
             print_warning(console, f"Original run evidence could not be retained ({type(exc).__name__}).")
-    log = _git_log(target_dir)
     branch = work.head_branch or _git_branch(target_dir)
 
     if diff is None:
@@ -666,12 +366,9 @@ async def run_deep(
     diff_path.write_text(diff)
     # Persist the hunk index immediately after the diff bytes, so the run-time
     # authority (changed file/line ranges) is available to every later step
-    # (reviews, arbiter, merge) and never predates the patch.
-    write_hunk_index(daydream_dir, diff)
-    # Diff is immutable from here on; compute the tiering verdict once and reuse
-    # it at both the exploration step's gate and the alternatives step's gate.
-    # The latency route is resolved from this full immutable diff before prompt
-    # bounding, so prompt capacity cannot hide changed-code surface signals.
+    # and never predates the patch.
+    index_path = write_hunk_index(daydream_dir, diff)
+    # Diff is immutable from here on; the diagram-only pre-scan reads this tier.
     tier = review_steps.select_tier(review_steps.count_changed_files(diff))
     dd = deep_dir(
         target_dir,
@@ -681,9 +378,7 @@ async def run_deep(
     current_diff_sha = diff_key(diff)
     # Diagram-only runs preserve prior deep-review artifacts and write no diff-key,
     # because they do not produce the review artifacts that key attests.
-    if mode != "diagram" and config.start_at not in ("per-stack", "merge", "fix"):
-        # Fresh run only: a resume must NOT rewrite the key it is checked
-        # against, or the staleness gate would self-heal and pass every time.
+    if mode != "diagram":
         shutil.rmtree(dd, ignore_errors=True)
         dd.mkdir(parents=True, exist_ok=True)
         DeepArtifact.DIFF_KEY.at(dd).write_text(current_diff_sha, encoding="utf-8")
@@ -707,80 +402,15 @@ async def run_deep(
 
         changed_files = (list(work.captured_source.files) if work.captured_source is not None
                          else _diff_changed_files(diff))
-        stacks, single_stack_mode, import_graph = _prepare_review_stacks(
-            config, changed_files, diff, target_dir, mode
-        )
-
-        required_phases = ["no_diff"] if no_diff else ["intent", "alternatives", "merge"]
-        if not no_diff and _supervisor_mode(config) in {"rules", "llm"}:
-            required_phases.append("supervision")
-        coverage = None if mode == "diagram" else ReviewCoverage(
-            recorder.session_id,
-            AnalyzedRevision(captured_head, captured_base, current_diff_sha,
-                             pr_base_sha, source_id=source_id),
-            [PlannedScope(stack.stack_name, base_stack_name(stack.stack_name),
-                          files=tuple(sorted(stack.files)),
-                          shard=int(stack.stack_name.split("#", 1)[1]) if "#" in stack.stack_name else None)
-             for stack in stacks] if not no_diff else [],
-            required_phases,
-        )
-
-        # Resume gate (D-34, D-36, D-37) + diff-freshness gate.
-        if config.start_at in ("per-stack", "merge", "fix"):
+        # One changed-file import graph for diagram eligibility. The guard also
+        # catches unsafe tree-sitter versions that can escape the fail-open builder.
+        import_graph: dict[str, set[str]] = {}
+        if _diagram_mode_for(config, mode) != "off":
             try:
-                check_deep_artifacts(
-                    config.start_at, dd, current_diff_sha=current_diff_sha,
-                    record_paths=[per_stack_records_path(dd, stack.stack_name) for stack in stacks],
-                )
-                if _has_non_daydream_worktree_changes(git_ops.status_porcelain(target_dir)):
-                    raise FileNotFoundError(
-                        f"Cannot resume at stage '{config.start_at}' -- the worktree has changed "
-                        "since the review artifacts were generated.\n\n"
-                        "Resuming would review stale findings against changed code.\n"
-                        "Re-run without --start-at to regenerate them."
-                    )
-            except (FileNotFoundError, ValueError) as exc:
-                print_error(console, "Unusable Deep Artifacts", str(exc))
-                return 1
-        # Pre-flight notice (D-30). Agent count reflects the tiny-diff collapse
-        # when single_stack_mode is active (issue #172): merge+arbiter are
-        # skipped, so the estimate uses ``_single_stack_agent_count``.
-        stack_lines = [
-            _stack_preflight_line(stack)
-            for stack in stacks
-        ]
-        notice_agent_count = (
-            _single_stack_agent_count(len(stacks))
-            if single_stack_mode
-            else total_agent_count(len(stacks))
-        )
-        default_profile = build_default_profile()
-        profile = config.review_profile.profile if config.review_profile is not None else default_profile
-        alternatives_strategy = profile.strategies.get("alternatives", default_profile.strategies["alternatives"])
+                import_graph = build_import_graph(changed_files, target_dir)
+            except Exception:
+                import_graph = {}
         registry = get_registry()
-        folded_alternatives = fold_default_alternatives(
-            stacks, alternatives_strategy.content, structural_prompt_builder=registry.prompt("structural"),
-        )
-        if folded_alternatives:
-            notice_agent_count -= 1
-        # Issue #1113: a diagram-only flow does not execute the review pipeline,
-        # so its preamble must not display the review stages or agent estimate.
-        if mode != "diagram":
-            print_preflight_notice(
-                console,
-                stages=_preflight_stage_names(stacks, folded_alternatives=folded_alternatives),
-                stack_lines=stack_lines,
-                agent_count=notice_agent_count,
-                exploration_available=review_steps.EXPLORATION_AVAILABLE,
-                conditional_arbiter=not single_stack_mode,
-            )
-
-        # Risk describes the captured change, independently of prompt retention.
-        latency_signals = diff_signals(
-            diff=diff, changed_files=len(changed_files), stack_count=len(stacks)
-        )
-        # The context shares backends and bounded inline diff text. The full patch is
-        # already persisted and remains the source for exploration, keys, and archival.
         bounded_diff, bound_info = bound_deep_diff(diff)
         if bound_info.truncated:
             dropped = (
@@ -800,45 +430,6 @@ async def run_deep(
                 f"({bound_info.retained_blocks}/{bound_info.total_blocks} blocks retained"
                 f"{dropped}{oversize})",
             )
-        # Publish one risk-escalated route before any phase resolves effort. Later stages
-        # append their decisions through the same routing-record writer.
-        latency_resolution = _resolved_latency_profile(config)
-        latency_summary = summarize_risk(latency_signals)
-        latency_route = route_for(latency_resolution.profile, latency_summary)
-        config.latency_route = latency_route
-        write_routing_record(
-            dd,
-            {
-                "profile": {
-                    "selected": latency_resolution.profile,
-                    "requested": latency_resolution.requested,
-                    "source": latency_resolution.source,
-                    "fail_safe": latency_resolution.fail_safe,
-                    "reason": latency_resolution.reason,
-                },
-                "risk": {
-                    "signals": asdict(latency_signals),
-                    "floors": list(latency_summary.floors),
-                    "size_score": latency_summary.size_score,
-                    "breadth_score": latency_summary.breadth_score,
-                },
-                "diff_population": {
-                    "diff_key": current_diff_sha,
-                    "full_patch": {
-                        "bytes": latency_signals.diff_bytes,
-                        "lines": latency_signals.diff_lines,
-                        "blocks": bound_info.total_blocks,
-                    },
-                    "retained_patch": {
-                        "bytes": bound_info.retained_bytes,
-                        "blocks": bound_info.retained_blocks,
-                    },
-                    "bounded_prompt_diff": {"bytes": len(bounded_diff.encode("utf-8"))},
-                    "truncated": bound_info.truncated,
-                    "dropped_blocks": bound_info.total_blocks - bound_info.retained_blocks,
-                },
-            },
-        )
         ctx = FlowContext(
             config=config,
             work=work,
@@ -851,51 +442,47 @@ async def run_deep(
             _backend_factory=backend_factory,
             data={
                 "mode": mode,
-                "review_coverage": coverage,
+                "review_coverage": None,
                 "analyzed_pr": captured_pr,
                 "snapshot_diff": diff,
                 "diff": bounded_diff,
-                # Carry reviewed origins for footprint enforcement; resumes can recover them
-                # from the diff. Canonical finding paths have independent authorization.
+                # Carry reviewed origins for footprint enforcement. Canonical finding paths
+                # have independent authorization.
                 "changed_files": set(changed_files),
                 "diff_path": diff_path,
                 "diff_truncated": bound_info.truncated,
                 "diff_truncation": bound_info,
                 "tier": tier,
-                # Issue #732: the resolved route plus the summary it was picked
-                # from, so a later step (wonder, arbiter) can state its decision
-                # and the risk floors that forced it without recomputing.
-                "latency_route": latency_route,
-                "risk_summary": latency_summary,
                 "dd": dd,
-                "stacks": stacks,
                 # Issue #1113: the changed-file import graph, published so the
                 # diagram step's cross-module rule can read it. ``{}`` simply
                 # denies that rule; it never fails the run.
                 "import_graph": import_graph,
-                "single_stack_mode": single_stack_mode,
-                "intent_path": DeepArtifact.INTENT.at(dd),
-                "alts_path": DeepArtifact.ALTERNATIVES.at(dd),
-                "log": log,
-                "branch": branch,
             },
             allow_standalone_artifacts=allow_standalone,
         )
 
-        if config.start_at in ('per-stack', 'merge', 'fix') and coverage is not None:
-            from daydream.deep.artifacts import restore_review_coverage
+        coverage = None
+        if mode != "diagram":
+            from daydream.deep.review_terminal import plan_committed_review
+            from daydream.prompt_budget import SanctionedInputUnavailable
 
             try:
-                coverage = restore_review_coverage(dd, coverage,
-                    backend=ctx.backend_for('per_stack_review'), work=work, stacks=stacks, registry=registry,
-                    artifact_session=artifact_session, allow_standalone=allow_standalone)
-            except ValueError as exc:
-                print_error(console, 'Unusable Deep Artifacts', str(exc))
+                await plan_committed_review(
+                    ctx, run_id=recorder.session_id,
+                    revision=AnalyzedRevision(captured_head, captured_base, current_diff_sha, pr_base_sha,
+                                              source_id=source_id).to_dict(),
+                    index_path=index_path, files=changed_files, started=started,
+                )
+            except (ValueError, SanctionedInputUnavailable, GitError) as exc:
+                print_error(console, "Review Plan", str(exc))
                 return 1
-            ctx.data['review_coverage'] = coverage
-
-        # Publish one cache handle and its root so the next run can reuse completed units.
-        ctx.data["reuse_cache"] = build_reuse_cache(ctx)
+            coverage = DeepState(ctx.data).review_coverage
+            planned = ctx.data["committed_review"].settings["assignment_policy"]["planned_assignments"]
+            print_info(console, f"Review: {len(changed_files)} changed file(s) in {planned} discovery assignment(s), "
+                                "then a fresh challenge of every claim.")
+            if mode == "loop":
+                print_info(console, "Fixing is selected: confirmed findings go to the fix gate.")
 
         # Resolve and persist one test recipe for all host and prompt consumers.
         # Without package facts, direct configuration still requires readiness;
@@ -916,20 +503,17 @@ async def run_deep(
 
         # Finalization stays inside the recorder so frozen public/archive evidence agrees.
         from daydream.deep.review_terminal import finalize_review, refresh_review_report
-        from daydream.review_result import reason_for_exception
+        from daydream.review_result import ReasonCode, reason_for_exception
 
         if dirty_snapshot:
             # Diagram runs carry no coverage record, so the reject is reported
             # without a phase entry there; the gate itself is mode-independent.
             if coverage is not None:
-                coverage.require_phase("snapshot")
-                coverage.record_phase("snapshot", "failed", reasons=["dirty_snapshot"])
-                finalize_review(ctx, "failed")
+                finalize_review(ctx, "failed", reason=ReasonCode.DIRTY_SNAPSHOT)
             print_error(console, "Findings Artifact", "Commit-bound export requires a clean analyzed checkout")
             return 1
         if no_diff and coverage is not None:
-            coverage.record_phase("no_diff", "complete", noop=True)
-            return finalize_review(ctx, "completed", no_diff=True)
+            return finalize_review(ctx, "completed")
         try:
             with review_deadline_scope(
                 ctx.pipeline().review_wall_budget_s, diff=diff,
@@ -939,14 +523,16 @@ async def run_deep(
                 if mode == "diagram":
                     exit_code = await run_flow(ctx.registry, "diagram", ctx)
                 else:
-                    async with diagram_work_scope(ctx):
-                        exit_code = await run_flow(ctx.registry, _flow_name_for_mode(mode), ctx)
-        except Exception as exc:
+                    exit_code = await run_flow(ctx.registry, _flow_name_for_mode(mode), ctx)
+        except BaseException as exc:
             if coverage is not None and not coverage.is_finalized:
-                coverage.require_phase("pipeline")
-                coverage.record_phase("pipeline", "failed", reasons=[reason_for_exception(exc)])
                 try:
-                    finalize_review(ctx, "failed")
+                    if isinstance(exc, Exception):
+                        finalize_review(ctx, "failed", reason=reason_for_exception(exc))
+                    else:
+                        # A cancelled review seals what it admitted before the cancellation escapes;
+                        # the reviewer holds admissions in memory until then.
+                        finalize_review(ctx, "cancelled")
                 except Exception as final_exc:
                     exc.add_note(f"Terminal review finalization failed: {type(final_exc).__name__}")
                     print_warning(console, f"Terminal review finalization failed: {type(final_exc).__name__}")
@@ -965,7 +551,7 @@ async def run_deep(
                 return 1
             if final_status:
                 return final_status
-        elif coverage is not None and mode in {'loop', 'shallow'}:
+        elif coverage is not None and mode == 'loop':
             try:
                 refresh_review_report(ctx)
             except (OSError, ValueError, TypeError, RecursionError) as exc:

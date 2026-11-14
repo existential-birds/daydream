@@ -49,21 +49,14 @@ def diagram_run(monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., Any]
     silence(monkeypatch)
 
     async def _run(target: Path, *, diagram: str = "auto", specs: dict[str, list[dict[str, Any]]] | None = None,
-        session_id: str | None = None, fail: frozenset[str] = frozenset(), inline_transport: bool = False,
+        session_id: str | None = None, fail: frozenset[str] = frozenset(), exploration: bool = False,
         **config_overrides: Any,
     ) -> tuple[int, StubBackend]:
 
-        stub = install_stub_backend(monkeypatch, target, enable_exploration=inline_transport)
+        stub = install_stub_backend(monkeypatch, target, enable_exploration=exploration)
         stub.diagram_specs = specs or {}
         stub.diagram_session_id = session_id
         stub.diagram_fail = fail
-        if inline_transport:
-            # ``sandbox`` resolves the sanctioned-input transport to INLINE,
-            # independent of the disposable-clone read-only capability. The
-            # real pre-scan then writes the advisory exploration trio the
-            # selection has to budget, which is what an overflow diagnostic
-            # is made of; without it the INLINE candidate set is empty.
-            stub.sandbox = True
         config = make_config(target, output_mode="diagram", diagram=diagram, **config_overrides)
         return await run(config), stub
 
@@ -169,9 +162,13 @@ async def test_omitted_kind_posts_an_omission_notice_and_a_failed_kind_exits_one
     thin = dr.sequence_spec()
     thin["messages"] = thin["messages"][:2]
 
-    exit_code, _ = await diagram_run(target, diagram="sequence", specs={"sequence": [thin]})
+    exit_code, _ = await diagram_run(target, diagram="sequence", specs={"sequence": [thin]}, exploration=True)
 
     assert exit_code == 0, "an omission is a successful run, not a failure"
+    exploration = target / ".daydream" / "exploration"
+    assert "| `pkg_b/client.py` | modified | static |" in (exploration / "affected_files.md").read_text()
+    scanned = {path.name: path.stat().st_mtime_ns for path in exploration.iterdir()}
+    assert "cache-key" in scanned
     assert _artifact(target)["results"]["sequence"]["status"] == "omitted"
     body = _issue_comments(fake_gh)[0]["body"]
     assert SEQUENCE_HEADING not in body
@@ -181,9 +178,19 @@ async def test_omitted_kind_posts_an_omission_notice_and_a_failed_kind_exits_one
     assert end["status"] == "succeeded"
     assert "reason_code" not in end
     # In diagram-only mode the diagram is the deliverable: a failed kind fails the run.
-    exit_code, _ = await diagram_run(target, diagram="sequence", fail=frozenset({"sequence"}))
+    exit_code, _ = await diagram_run(target, diagram="sequence", fail=frozenset({"sequence"}), exploration=True)
     assert exit_code == 1
+    # The repeat run on the same head reuses the pre-scan: nothing under it is rewritten.
+    assert {path.name: path.stat().st_mtime_ns for path in exploration.iterdir()} == scanned
     assert _artifact(target)["results"]["sequence"]["status"] == "failed"
+    # A pre-scan stored under another key is not this change's grounding: it is dropped whole and scanned again.
+    key = (exploration / "cache-key").read_text()
+    (exploration / "cache-key").write_text("0" * len(key))
+    (exploration / "stale.md").write_text("left by an earlier scan")
+    exit_code, _ = await diagram_run(target, diagram="sequence", specs={"sequence": [thin]}, exploration=True)
+    assert exit_code == 0 and (exploration / "cache-key").read_text() == key
+    assert not (exploration / "stale.md").exists()
+    assert "| `pkg_b/client.py` | modified | static |" in (exploration / "affected_files.md").read_text()
 
 async def test_nothing_eligible_posts_an_explanatory_comment(
     tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any],

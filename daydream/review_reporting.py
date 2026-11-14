@@ -6,6 +6,7 @@ import json
 import re
 from typing import Any
 
+from daydream.committed_review_output import allowance_sentence
 from daydream.output_schema import strict_object
 from daydream.redaction import redact_structured_text
 from daydream.review_rationale import SOURCE_RATIONALE_SCHEMA
@@ -65,6 +66,8 @@ def render_github_review_context(
         lines.append(f'- {len(diagnostics) - 8} additional notices; see run artifacts.')
     if state not in {None, 'complete'} and not unfinished:
         lines.append('Review did not finish; see run artifacts.')
+    if terminal_result is not None and (sentence := allowance_sentence(terminal_result['reason_codes'])):
+        lines.append(sentence)
     return '\n\n'.join(lines)
 
 
@@ -104,12 +107,18 @@ def _host_attempt(attempt: Any) -> bool:
             and (identity['outcome'] == 'truncated' or attempt['passed'] == (identity['outcome'] == 'passed')))
 
 
+def _findings_line(terminal_result: dict[str, Any] | None, findings_count: int) -> str:
+    """Count the findings, or say that an unusable items projection left none to count."""
+    if terminal_result is not None and not terminal_result.get('projection_valid', True):
+        return 'The findings could not be read after the review; the sealed result keeps them.'
+    return 'No confirmed findings.' if not findings_count else f'Confirmed findings: {findings_count}.'
+
+
 def _render_review_context(
     context: dict[str, Any], terminal_result: dict[str, Any] | None = None, *, findings_count: int = 0,
 ) -> str:
     """Render host evidence and attributed assertions; missing facts remain unavailable."""
-    lines = ['## Review outcome',
-             'No confirmed findings.' if not findings_count else f'Confirmed findings: {findings_count}.']
+    lines = ['## Review outcome', _findings_line(terminal_result, findings_count)]
     if terminal_result is None:
         lines.append('Terminal completion is not yet available.')
     else:
@@ -129,6 +138,8 @@ def _render_review_context(
                          + ', '.join(_code(reason) for reason in scope['reason_codes']) + '.')
         if len(unfinished) > 64:
             lines.append(f'{len(unfinished) - 64} additional unfinished scopes omitted.')
+        if sentence := allowance_sentence(terminal_result['reason_codes']):
+            lines.append(sentence)
     lines.append('Completion records admitted assignment decisions; it does not independently prove semantic coverage.')
     lines.extend(['', '<details><summary>Reviewer source rationale</summary>', '',
                   'Reviewer assertions and source inspection are not executable verification.'])
@@ -256,7 +267,7 @@ def render_review_context(
         header = '\n\n'.join(rendered.split('\n\n')[:7])
     if len(header) > 8_000:
         header = ('## Review outcome\n\n'
-                  + ('No confirmed findings.' if not findings_count else f'Confirmed findings: {findings_count}.')
+                  + _findings_line(terminal_result, findings_count)
                   + '\n\n<pre>' + _escaped_excerpt(json.dumps(terminal_result, ensure_ascii=False), 7_500)
                   + '</pre>')
     verification = context.get('verification')

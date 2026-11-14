@@ -2,32 +2,35 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 from dataclasses import replace
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.console import Console
 
-from daydream import git_ops, json_utils, runner
-from daydream.backends import ResultEvent, ToolStartEvent
+from daydream import git_ops, json_utils, review_reporting, runner
 from daydream.dataset import LocalRecordStore
 from daydream.deep import review_terminal
 from daydream.findings import FindingsValidationError, load_findings_artifact
-from daydream.phases.review import ReviewOutputError
+from daydream.host_tools import HostToolRejected
+from daydream.pr_review import post_findings_from_artifact
 from daydream.review_result import ReviewCoverage
-from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.console import collapse_panel_text
 from tests.harness.dataset import read_records
-from tests.harness.fake_clock import FakeClock
+from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote, git, init_repo
 from tests.test_artifact_visibility import _Entry, _walk_entry
-from tests.test_deep_orchestrator import _pin_findings_pr, _record
+from tests.test_deep_orchestrator import _pin_findings_pr
 from tests.test_pr_review import _recording_fake_submit
 
 
@@ -61,15 +64,6 @@ def review(multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 def scopes(data: dict[str, Any]) -> dict[str, Any]:
     return {s['scope_id']: s for s in data['terminal_result']['stack_outcomes']}
-
-
-def record(line: int = 2) -> dict[str, Any]:
-    return _record(description='Grounded defect', file='api.py', line=line, severity='medium', confidence='MEDIUM',
-                   rationale='Boundary evidence', evidence=f'api.py:{line}')
-
-
-def reviewer(prompt: str) -> bool:
-    return 'you are reviewing the ' in prompt.lower() or 'you are the structural reviewer' in prompt.lower()
 
 
 async def test_comment_pins_pr_head_independently_and_excludes_local_edits(
@@ -114,8 +108,20 @@ async def test_comment_pins_pr_head_independently_and_excludes_local_edits(
 
     review.patch.setattr(review_terminal, 'finalize_review', corrupt_before_finalization)
     review.patch.setattr('daydream.pr_review.post_classified_review', _recording_fake_submit(plans))
-    assert await review.run(output_mode='comment', findings_out=None, approve_on_clean=True) == 0
+    # The summary of the terminal result cannot be rendered: the post falls back to the checked warnings.
+    summarize = review_reporting.render_github_review_context
+
+    def unrenderable(result: Any, **kwargs: Any) -> str:
+        if result is not None:
+            raise ValueError('summary cannot be rendered')
+        return summarize(result, **kwargs)
+
+    review.patch.setattr(review_reporting, 'render_github_review_context', unrenderable)
+    assert await review.run(output_mode='comment', findings_out=None, approve_on_clean=True,
+                            review_backend='codex') == 0
+    assert json.loads((review.tmp / 'trajectory.json').read_text())['extra']['review_backend'] == 'codex'
     plan = plans['plan']
+    assert plan.review_summary == summarize(None, review_warnings=plan.review_warnings) and plan.review_warnings
     assert plan.pr.head_sha == review.pr.head_sha != local_head
     assert plan.pr.base_sha == review.pr.base_sha and plan.pr.pr_base_sha == review.pr.base_sha
     assert plan.event is ReviewEvent.COMMENT
@@ -126,18 +132,22 @@ async def test_comment_pins_pr_head_independently_and_excludes_local_edits(
     patch = (review.repo / '.daydream/diff.patch').read_text()
     assert 'LOCAL_' not in patch and patch
     assert captured_roots and all(not root.exists() for root in captured_roots)
-    assert 'excludes local tracked and untracked edits' in collapse_panel_text(capsys)
+    panel = collapse_panel_text(capsys)
+    assert 'excludes local tracked and untracked edits' in panel
+    assert 'Review summary unavailable: ValueError' in panel
     assert git_ops.head_sha(review.repo) == local_head and (review.repo / '.git/index').read_bytes() == before
     assert (review.repo / 'api.py').read_text() == 'LOCAL_WORKING = True\n'
     assert (review.repo / 'untracked.py').read_text() == 'LOCAL_UNTRACKED = True\n'
 
 
 @pytest.mark.parametrize('case', ['dirty-no-diff', 'live'])
-async def test_snapshot_boundaries(review: ReviewRun, case: str) -> None:
+async def test_snapshot_boundaries(
+    review: ReviewRun, fake_gh: FakeGh, case: str, capsys: pytest.CaptureFixture[str],
+) -> None:
     """Analysis stays bound to the captured snapshot: dirty edits and a mid-run PR head advance never rebind it.
 
     'live' is a runner row: only a real review whose PR head moves after capture proves the pinned
-    head is still analyzed and placed, with one lookup.
+    head is still analyzed and placed, with one lookup. Its produced artifact then meets the poster.
     """
     if case == 'live':
         live, calls = review.pr, []
@@ -151,9 +161,10 @@ async def test_snapshot_boundaries(review: ReviewRun, case: str) -> None:
             live = replace(review.pr, head_sha=review.pr.base_sha)
 
         review.patch.setattr('daydream.pr_review.find_pr_by_number', lookup)
-        review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False,
-                                            review_by_stack={'structure': [record()]}, responder=advance)
+        review.backend = EmptyReviewBackend(review.repo, responder=advance)
+        review.backend.review_claims = [{'title': 'Grounded defect', 'file': 'api.py', 'line': 2}]
         assert await review.run() == 0
+        assert collapse_panel_text(capsys).count('Review complete: 1 confirmed finding.') == 1
         data = review.load()
         result = data['terminal_result']
         assert result['analysis_state'] == 'complete'
@@ -161,6 +172,65 @@ async def test_snapshot_boundaries(review: ReviewRun, case: str) -> None:
         assert git_ops.show(review.repo, live.head_sha, 'api.py') and len(calls) == 1
         assert (data['findings'][0]['placement'], data['findings'][0]['line']) == ('inline', 2)
         assert result['analyzed_revision']['pr_base_sha'] == review.pr.base_sha
+        # The poster takes that produced artifact only for the event it was produced for: a moved head, another
+        # repository or another pull request is refused before any GitHub call.
+        printed = StringIO()
+
+        def post(artifact: Path = review.output, **facts: Any) -> int:
+            return post_findings_from_artifact(review.repo, artifact, console=Console(file=printed, width=200), **{
+                'pr_number': 7, 'head_sha': review.pr.head_sha, 'repo': 'o/r', 'approve_on_clean': True, **facts})
+
+        produced = len(fake_gh.process_calls())
+        for changed in ({'head_sha': live.head_sha}, {'repo': 'o/other'}, {'pr_number': 8}):
+            assert post(**changed) == 1, changed
+        assert len(fake_gh.process_calls()) == produced
+        assert post() == 0
+        (posted,) = fake_gh.calls('POST', 'repos/o/r/pulls/7/reviews')
+        # A finding without severity withholds the opted-in approval.
+        assert (posted.payload['event'], posted.payload['commit_id']) == ('COMMENT', review.pr.head_sha)
+        assert [(comment['path'], comment['line']) for comment in posted.payload['comments']] == [('api.py', 2)]
+        # An incomplete review still exports its admitted finding with truthful coverage, and never approves.
+        # Discovery admits its claim and all but one decision, then calls tools until its allowance is spent.
+        review.backend.review_undecided = 1
+        scripted = review.backend._scripted_review
+
+        def exhaust(prompt: str, binding: Any) -> dict[str, Any]:
+            value = scripted(prompt, binding)
+            if 'verdicts' in value:
+                return value
+            binding.admit('admit', 'review_admit', value)
+            binding.call('admit', 'review_admit', value)
+            while True:
+                with contextlib.suppress(HostToolRejected):
+                    binding.admit(f'read-{binding.calls}', 'read', {})
+
+        review.patch.setattr(review.backend, '_scripted_review', exhaust)
+        live, partial = review.pr, review.tmp / 'incomplete.json'
+        capsys.readouterr()
+        assert await review.run(findings_out=str(partial)) == 0
+        # The console says the review is unfinished, with what was left and the profile key that raises the
+        # spent allowance, though the run exits 0; the report and the pull request notice say it once.
+        allowance = ('The review used up its allowance before it finished; raise {0}reviewer_tool_call_budget{1} '
+                     'under {0}[pipeline]{1} in the review profile. The review multiplies '
+                     '{0}reviewer_tool_call_budget{1} and {0}reviewer_investigation_budget_s{1} by the '
+                     '{0}scale{1} its {0}settings.limits{1} record.')
+        assert collapse_panel_text(capsys).count(
+            'Review incomplete: 1 confirmed finding. Not finished: challenge: evidence_incomplete; '
+            'committed:00000: evidence_incomplete, host_tool_budget_exhaustion. '
+            + allowance.format('', '')) == 1
+        assert (review.repo / '.review-output.md').read_text().count(allowance.format('<code>', '</code>')) == 1
+        exported = json.loads(partial.read_text())
+        assert exported['terminal_result']['analysis_state'] == 'incomplete'
+        assert [finding['title'] for finding in exported['findings']] == ['Grounded defect']
+        assert post(partial) == 0
+        notice = fake_gh.calls('POST', 'repos/o/r/pulls/7/reviews')[-1].payload
+        assert notice['event'] == 'COMMENT' and len(notice['comments']) == 1
+        body = notice['body']
+        assert '**Review incomplete.**\n\n- committed:00000: evidence_incomplete, host_tool_budget_exhaustion' in body
+        assert body.count(allowance.format('<code>', '</code>')) == 1
+        # A delivery GitHub does not confirm is reported as unconfirmed, never as posted.
+        fake_gh.set_response('POST', 'repos/o/r/pulls/7/reviews', {'__error__': 'HTTP 422: unprocessable'})
+        assert post() == 1 and 'Could not confirm the PR review was posted' in ' '.join(printed.getvalue().split())
         return
     prior = {'.daydream/deep/history.json': '{"prior": true}\n',
              '.daydream/deep/merged-items.json': '{"items": [{"item_uid": "item:old"}]}\n',
@@ -186,176 +256,40 @@ async def test_snapshot_boundaries(review: ReviewRun, case: str) -> None:
     assert (review.repo / '.daydream/deep/review-output.md').read_text() == report
 
 
-@pytest.mark.parametrize(('fault', 'owner'), [
-    ('corrupt', 'python'), *[(fault, 'structure') for fault in ('missing', 'shape', 'duplicate')],
-])
-async def test_loaded_artifact_faults(review: ReviewRun, fault: str, owner: str) -> None:
-    source = git(review.repo, 'diff', 'HEAD')
-    artifact_name = f'stack-{owner}-records.json'
-    write = Path.write_text
-    malformed = '{invalid' if fault == 'corrupt' else '{"issues": "invalid"}'
-    def faulty_write(path: Path, text: str, *args: Any, **kwargs: Any) -> int:
-        if path.name == artifact_name and fault in {'corrupt', 'shape'}:
-            text = malformed
-        if path.name == artifact_name and fault == 'duplicate':
-            payload = json.loads(text)
-            payload['issues'].append(dict(payload['issues'][0]))
-            text = json.dumps(payload)
-        count = write(path, text, *args, **kwargs)
-        if path.name == artifact_name and fault == 'missing':
-            path.unlink()
-        return count
-    review.patch.setattr(Path, 'write_text', faulty_write)
-    review.backend.review_by_stack = {'react': [_record(
-        description='Surviving sibling defect', file='App.tsx', line=1)]}
-    if fault == 'duplicate':
-        review.backend.review_by_stack['structure'] = [record()]
-    assert await review.run(dataset_capture=True, dataset_store_path=review.tmp / 'records') == 1
-    if fault in {'corrupt', 'shape'}:
-        raw = read_records(LocalRecordStore(review.tmp / 'records')).runs[0]
-        assert raw['outcome'] == 'failed' and raw['completeness']['artifact_acquisition'] == 'failed'
-        diagnostic = raw['provenance']['collection_diagnostics'][artifact_name]
-        assert diagnostic['reason'] == ('malformed_json' if fault == 'corrupt' else 'malformed_shape')
-        assert diagnostic.get('raw_text' if fault == 'corrupt' else 'raw_json') == (
-            malformed if fault == 'corrupt' else {'issues': 'invalid'})
-        scoring = raw['scoring']['value']
-        assert scoring['format_valid'] is (fault == 'shape')
-        assert scoring['persisted_breakdown']['correctness_per_finding'] is None
-        assert scoring['persisted_breakdown']['composite'] == (0.0 if fault == 'corrupt' else None)
-    data = review.load()
-    result, inventory = data['terminal_result'], scopes(data)
-    reason = 'missing_artifact' if fault == 'missing' else 'malformed_artifact'
-    assert (result['pipeline_state'], result['analysis_state'], result['projection_valid']) == (
-        'failed', 'incomplete' if fault != 'duplicate' else 'failed', fault != 'duplicate')
-    assert set(inventory) == {'python', 'react', 'generic', 'structure'} and reason in result['reason_codes']
-    assert {n: s['status'] for n, s in inventory.items()} == dict.fromkeys(inventory, 'complete') | {owner: 'failed'}
-    assert inventory[owner]['reason_codes'] == [reason]
-    if fault in {'missing', 'corrupt', 'shape'}:
-        assert [(f['title'], f['placement']) for f in data['findings']] == [('Surviving sibling defect', 'inline')]
-    else:
-        assert data['findings'] == []
-    assert not any('cross-stack merge agent' in c['prompt'].lower() for c in review.backend.calls)
-    assert git(review.repo, 'diff', 'HEAD') == source
-    if owner == 'structure':
-        folded = next(p for p in result['phase_outcomes'] if p['phase'] == 'alternatives')
-        assert (folded['status'], folded['reason_codes'], folded['noop'], folded['usable_evidence']) == (
-            'failed', [reason], False, False)
-        persisted = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
-        assert persisted['phase_outcomes'] == result['phase_outcomes']
-        assert persisted['stack_outcomes'] == result['stack_outcomes']
-        assert 'folded into Structure' in persisted['diagnostics']['phases']['alternatives']
-        assert not any('would you have done this differently' in c['prompt'].lower()
-                       or 'evaluate the implementation' in c['prompt'].lower() for c in review.backend.calls)
+@pytest.mark.parametrize('fault', ['absent-install', 'prior-install', 'staging', 'later-run-moved-checkout',
+                                   'later-run-private-store-lost', 'later-run-sealed-result-touched'])
+async def test_atomic_public_failure(
+    review: ReviewRun, fault: str, artifact_runtime_root: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A failed public install or staging leaves the destination absent or byte-identical to the prior export.
 
-
-@pytest.mark.parametrize(('phase', 'reason'), [('intent-empty', 'missing_output'), ('malformed', 'malformed_output')])
-async def test_required_phase_faults(review: ReviewRun, phase: str, reason: str) -> None:
-    """Required-phase output faults are typed; only post-admission faults keep admitted findings.
-
-    The supervisor row is a runner row: only real admission followed by a failed required
-    supervision phase proves that admitted findings survive with an incomplete analysis.
+    What one review publishes never refuses a later run in that checkout: not after the checkout moved,
+    the private store was lost, or the sealed result was rewritten in place.
     """
-    from tests.harness.review_profile import independent_alternatives_profile
-
-    def response(prompt: str) -> Any:
-        lower = prompt.lower()
-        if phase == 'intent-empty' and 'present your understanding concisely' in lower:
-            return [ResultEvent(structured_output=None, continuation=None)]
-        if phase == 'malformed' and 'supervisor adjudication' in lower:
-            return [ResultEvent(structured_output={'verdicts': [None]}, continuation=None)]
-    review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
-                                        review_by_stack={'structure': [record()]}, responder=response)
-    review.backend.merge_echo_records = True
-    if phase == 'intent-empty':
-        review.config = replace(review.config, review_profile=independent_alternatives_profile())
-    with pytest.raises(ReviewOutputError) as raised:
-        await review.run()
-    assert raised.value.reason_code == reason
-    data = review.load()
-    result = data['terminal_result']
-    admitted = phase == 'malformed'
-    assert (result['pipeline_state'], result['analysis_state']) == ('failed', 'incomplete' if admitted else 'failed')
-    assert reason in result['reason_codes']
-    assert [f['title'] for f in data['findings']] == (['Grounded defect'] if admitted else [])
-    if admitted:
-        outcome = next(p for p in result['phase_outcomes'] if p['phase'] == 'supervision')
-        assert (outcome['status'], outcome['reason_codes']) == ('failed', [reason])
-        assert any('supervisor adjudication' in c['prompt'].lower() for c in review.backend.calls)
-
-
-# Runner rows: only the real supervision investigation deadline decides whether a late result is admitted.
-@pytest.mark.parametrize(('late_event', 'offset'), [
-    ('legacy-result', 0), ('native-start', 1)], ids=['at-deadline-legacy-result', 'after-deadline-native-start'])
-async def test_late_supervision_events_cannot_supply_reserved_finalization_or_replace_prior_findings(
-    review: ReviewRun, ext_dir: ExtDir, late_event: str, offset: int) -> None:
-    import re
-
-    from daydream.backends import PiRequestConfig, RequestEvent
-    from daydream.phases.schemas import SUPERVISE_SCHEMA
-
-    fake = FakeClock().install(review.patch)
-    finalized: list[str] = []
-    marker = review.tmp / 'supervised-native-start.json'
-    ext_dir.write_module(
-        'from pathlib import Path\n'
-        'from daydream.extensions import ToolDecision\n'
-        'def supervise(name, tool_input, *, phase):\n'
-        '    if name == "structured_output":\n'
-        f'        Path({str(marker)!r}).write_text(name)\n'
-        '    return ToolDecision(veto=False)\n'
-        'def register(registry): registry.register_tool_supervisor(supervise)\n'
-    )
-    late_title = 'LATE_RESULT_MUST_NOT_REPLACE_PRIOR_FINDING'
-
-    def response(prompt: str) -> Any:
-        if prompt.startswith('INVESTIGATION HAS ENDED.'):
-            finalized.append(prompt)
-            assert late_title not in prompt
-            assert 'hidden evaluation' not in prompt
-            assert 'planted' not in prompt
-            assert 'an empty findings result can be successful when substantiated' in prompt
-            assert 'Do not call tools or obtain new evidence' in prompt
-            yield ResultEvent(structured_output={'verdicts': []}, continuation=None)
-        elif 'supervisor adjudication' in prompt.lower():
-            assert 'hidden evaluation' not in prompt
-            assert 'planted' not in prompt
-            assert 'Reopen a rejected candidate only when new evidence' in prompt
-            if late_event == 'native-start':
-                yield RequestEvent(prompt=prompt, output_schema=SUPERVISE_SCHEMA,
-                                   config=PiRequestConfig(schema_emulated=False, no_tools=False))
-            allowance = re.search(r'Investigation allowance: at most ([\d.e+-]+) seconds', prompt)
-            assert allowance is not None
-            fake.advance(float(allowance[1]) + offset)
-            proposal = {'verdicts': [{'id': 1, 'action': 'edit', 'reason': 'Late proposal',
-                                     'severity': None, 'confidence': None, 'description': late_title,
-                                     'rationale': None, 'evidence': None}]}
-            yield (ToolStartEvent(id='expired-native-submit', name='structured_output', input=proposal)
-                   if late_event == 'native-start' else ResultEvent(structured_output=proposal, continuation=None))
-
-    review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
-                                        review_by_stack={'structure': [record()]},
-                                        responder=lambda prompt: response(prompt) if (
-                                            prompt.startswith('INVESTIGATION HAS ENDED.')
-                                            or 'supervisor adjudication' in prompt.lower()) else None)
-    review.backend.merge_echo_records = True
-    assert await review.run() == 0
-    data = review.load()
-    assert [finding['title'] for finding in data['findings']] == ['Grounded defect']
-    assert len(finalized) == 1, 'A result arriving after expiry must not become the legacy fallback checkpoint'
-    outcome = next(phase for phase in data['terminal_result']['phase_outcomes'] if phase['phase'] == 'supervision')
-    assert outcome['status'] == 'incomplete' and outcome['reason_codes'] == ['host_wall_budget_exhaustion']
-    assert all(scope['status'] == 'complete' for scope in scopes(data).values())
-    if late_event == 'native-start':
-        assert marker.read_text() == 'structured_output'
-        trajectory = json.loads((review.tmp / 'trajectory.json').read_text())
-        starts = [call['tool_call_id'] for trace in [trajectory, *trajectory['extra']['subtrajectories']]
-                  for step in trace.get('steps', []) for call in step.get('tool_calls') or []]
-        assert starts.count('expired-native-submit') == 1
-
-
-@pytest.mark.parametrize('fault', ['absent-install', 'prior-install', 'staging'])
-async def test_atomic_public_failure(review: ReviewRun, fault: str) -> None:
-    """A failed public install or staging leaves the destination absent or byte-identical to the prior export."""
+    if fault.startswith('later-run'):
+        assert await review.run() == 0
+        (sealed,) = (review.repo / '.daydream').rglob('committed-review.json')
+        first = json.loads(sealed.read_text())['run_id']
+        repo = review.repo
+        if fault.endswith('moved-checkout'):
+            repo = review.tmp / 'moved-checkout'
+            review.repo.rename(repo)
+            review.backend._target = repo
+        elif fault.endswith('private-store-lost'):
+            shutil.rmtree(artifact_runtime_root.parent)
+        else:
+            sealed.write_text(sealed.read_text() + '\n')
+        calls = len(review.backend.calls)
+        assert await review.run(target=str(repo)) == 0
+        assert len(review.backend.calls) > calls
+        # Each run says how its review ended.
+        assert collapse_panel_text(capsys).count('Review complete: no confirmed findings.') == 2
+        (resealed,) = (repo / '.daydream').rglob('committed-review.json')
+        assert json.loads(resealed.read_text())['run_id'] != first
+        # Only a registered public name is published, so an earlier build meets nothing it would refuse either.
+        assert {path.name for path in (repo / '.daydream').iterdir()} <= {
+            'deep', 'runs', 'diff.patch', 'hunk-index.json'}
+        return
     if fault == 'prior-install':
         assert await review.run() == 0
     prior = review.output.read_bytes() if review.output.exists() else None
@@ -395,26 +329,22 @@ async def test_atomic_public_failure(review: ReviewRun, fault: str) -> None:
 
 # Source-loss and replacement-checkout rows are runner rows: only the real terminal export after
 # admission can lose its checkout, read retained bytes, and install privately.
-@pytest.mark.parametrize('fault', ['coverage', 'fix', 'salvage', 'source-loss-salvage',
+@pytest.mark.parametrize('fault', ['coverage', 'fix', 'projection', 'report', 'pipeline', 'source-loss',
                                    'placement-replacement-worktree'])
 async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str) -> None:
-    """Provider failure after admission publishes typed coverage atomically, never live or replaced Git."""
+    """A failure after admission publishes typed coverage atomically, never live or replaced Git."""
     force_worktree = fault.endswith('-worktree')
     if force_worktree:
         git(review.repo, 'remote', 'add', 'origin', str(bare_remote(review.tmp / 'origin.git')))
         git(review.repo, 'push', 'origin', 'main')
     error = RuntimeError('original provider error')
-    stage, write, read, allocate = json_utils._stage_bytes, Path.write_text, Path.read_text, tempfile.mkstemp
-    show = git_ops.show
-    state: dict[str, Any] = {'failed': False, 'merged': None, 'rejected': False, 'writes': [], 'export': None}
+    stage, read, allocate, show = json_utils._stage_bytes, Path.read_text, tempfile.mkstemp, git_ops.show
+    state: dict[str, Any] = {'failed': False, 'writes': [], 'export': None}
     staging_coverage = False
     real_run = subprocess.run
-    placement_fault = 'placement' in fault
     def fault_at_placement(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        if (placement_fault and state['failed']
+        if ('placement' in fault and state['failed'] and 'replacement_git' not in state
                 and args == ['git', 'diff', '--name-only', '-z', review.pr.base_sha, review.pr.head_sha]):
-            assert not state.get('dispatch_injected')
-            state['dispatch_injected'] = True
             review.repo.rename(review.tmp / 'removed-source')
             init_repo(review.repo)
             (review.repo / 'replacement.bin').write_bytes(b'replacement\x00\xff')
@@ -424,9 +354,9 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
     def observe_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
         nonlocal staging_coverage
         staging_coverage = path.name == 'review-coverage.json'
-        if path.name == 'review-coverage.json':
+        if staging_coverage:
             state['writes'].append((state['failed'], content))
-        if b'"terminal_result"' in content:
+        if b'"terminal_result"' in content and path.name != 'committed-review.json':
             state['export'] = (path, content)
         try:
             return stage(path, content, **kwargs)
@@ -436,43 +366,45 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         if fault == 'coverage' and staging_coverage:
             raise OSError('coverage staging failed')
         return allocate(*args, **kwargs)
-    def observe_write(path: Path, text: str, *args: Any, **kwargs: Any) -> int:
-        if path.name == 'merged-items.json':
-            state['merged'] = path
-        return write(path, text, *args, **kwargs)
     def faulty_read(path: Path, *args: Any, **kwargs: Any) -> str:
         text = read(path, *args, **kwargs)
-        if state['failed'] and fault == 'salvage' and path.name == 'stack-structure-records.json':
-            state['rejected'] = True
-            return '{"issues": "invalid"}'
-        return text
+        return '{"items": "invalid"}' if fault == 'projection' and path.name == 'merged-items.json' else text
     def retained_source_only(target: Path, *args: Any, **kwargs: Any) -> bytes:
-        if target == review.repo and fault == 'source-loss-salvage' and state['failed']:
+        if target == review.repo and fault == 'source-loss' and state['failed']:
             pytest.fail('terminal export attempted to read live Git after source loss')
         return show(target, *args, **kwargs)
-    def response(prompt: str) -> Any:
-        trigger = {'coverage': 'present your understanding concisely', 'fix': 'fix this issue'}.get(
-            fault, 'supervisor adjudication')
-        if trigger in prompt.lower() or (fault == 'fix' and prompt.lower().startswith('fix these')):
+    def fail_fix(prompt: str) -> Any:
+        if fault == 'fix' and prompt.lower().startswith(('fix this issue', 'fix these')):
             state['failed'] = True
-            if fault == 'salvage':
-                assert json.loads(state['merged'].read_text())['items']
-                state['merged'].unlink()
-            if fault == 'source-loss-salvage':
-                state['admitted'] = json.loads(state['merged'].read_text())['items'][0]
-                state['merged'].unlink()
-                review.repo.rename(review.tmp / 'removed-source')
             return [error]
+        return None
+    def after_acceptance(kind: str) -> None:
+        # The challenge's verdict is admitted; the native conversation then fails and the checkout is lost.
+        if kind == 'challenge' and fault in ('source-loss', 'placement-replacement-worktree'):
+            state['failed'] = True
+            if fault == 'source-loss':
+                review.repo.rename(review.tmp / 'removed-source')
+            raise error
     review.patch.setattr(json_utils, '_stage_bytes', observe_stage)
     review.patch.setattr(tempfile, 'mkstemp', fail_allocation)
-    review.patch.setattr(Path, 'write_text', observe_write)
     review.patch.setattr(Path, 'read_text', faulty_read)
     review.patch.setattr(git_ops, 'show', retained_source_only)
     review.patch.setattr('daydream.git_ops.process.subprocess.run', fault_at_placement)
-    stack = 'python' if force_worktree else 'structure'
-    review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False, forbid_merge=stack != 'python',
-                                       review_by_stack={stack: [record()]}, responder=response)
-    review.backend.merge_echo_records = True
+    review.backend = EmptyReviewBackend(review.repo, responder=fail_fix)
+    review.backend.review_claims = [{'title': 'Grounded defect', 'file': 'api.py', 'line': 2}]
+    review.backend.review_after_acceptance = after_acceptance
+    if fault == 'projection':
+        # The challenge calls tools until its allowance is spent, so the review is also unfinished.
+        scripted = review.backend._scripted_review
+
+        def exhaust_challenge(prompt: str, binding: Any) -> dict[str, Any]:
+            value = scripted(prompt, binding)
+            while 'verdicts' in value:
+                with contextlib.suppress(HostToolRejected):
+                    binding.admit(f'read-{binding.calls}', 'read', {})
+            return value
+
+        review.patch.setattr(review.backend, '_scripted_review', exhaust_challenge)
     if fault == 'fix':
         assert await review.run(output_mode='loop', findings_out=None, test_command=f'{sys.executable} -c pass') == 1
         saved_path = review.repo / '.daydream/deep/review-coverage.json'
@@ -480,73 +412,94 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         assert saved_path.read_bytes() == state['writes'][-1][1]
         saved = json.loads(saved_path.read_text())
         assert all(s['status'] == 'complete' for s in saved['stack_outcomes'] + saved['phase_outcomes'])
-        assert 'pipeline' not in saved['required_phases']
         return
-    with pytest.raises(RuntimeError) as raised:
-        await review.run(dataset_capture=fault == 'source-loss-salvage',
-                         dataset_store_path=review.tmp / 'records', force_worktree=force_worktree)
-    assert raised.value is error
-    if placement_fault:
-        assert state.get('dispatch_injected')
-    if placement_fault:
-        assert not review.output.exists()
-        assert state['export'] is not None
-        private_path, private_bytes = state['export']
-        assert private_path.read_bytes() == private_bytes
-        retained = json.loads(private_bytes)
-        assert retained['terminal_result']['analysis_state'] == 'incomplete'
-        assert retained['findings'][0]['title'] == 'Grounded defect'
-        assert 'Terminal review finalization failed' not in collapse_panel_text(capsys)
-        assert any('ArtifactVisibilityError' in note for note in error.__notes__)
-        after: list[_Entry] = []
-        _walk_entry(review.repo, review.repo / '.git', after)
-        assert after == state['replacement_git']
-        assert (review.repo / 'replacement.bin').read_bytes() == b'replacement\x00\xff'
+    if fault == 'report':
+        # A report that cannot be refreshed is a diagnostic: the sealed review and its export still stand.
+        def unavailable(*_a: Any, **_k: Any) -> Any:
+            raise OSError('report refresh failed')
+        review.patch.setattr(review_terminal, 'refresh_review_report', unavailable)
+        assert await review.run() == 0
+        assert 'Review report unavailable: OSError' in collapse_panel_text(capsys)
+        data = review.load()
+        assert [finding['title'] for finding in data['findings']] == ['Grounded defect']
+        assert data['terminal_result']['analysis_state'] == 'complete'
         return
-    if fault == 'source-loss-salvage':
-        assert not review.repo.exists()
-        assert not review.output.exists()
-        raw = read_records(LocalRecordStore(review.tmp / 'records')).runs
-        assert len(raw) == 1 and raw[0]['outcome'] == 'failed'
-        findings = raw[0]['findings']['value']
-        assert len(findings['items']) == 1
-        assert findings['items'][0]['description'] == 'Grounded defect'
-        assert findings['items'][0]['item_uid'] == state['admitted']['item_uid']
-        assert findings['items'][0]['source_uids'] == state['admitted']['source_uids']
-        coverage = findings['terminal_coverage']
-        assert coverage['run_id'] == raw[0]['run_id']
-        assert coverage['analyzed_revision']['head_sha'] == review.pr.head_sha
-        assert coverage['analyzed_revision']['merge_base_sha'] == review.pr.base_sha
-        assert coverage['analyzed_revision']['diff_key'] == raw[0]['original_task']['value']['diff_sha256']
-        assert all(scope['status'] == 'complete' for scope in coverage['stack_outcomes'])
-        assert state['export'] is not None, 'validated terminal findings were not installed privately'
-        export_path, exported_bytes = state['export']
-        assert export_path.read_bytes() == exported_bytes
-        exported = json.loads(exported_bytes)
-        assert len(exported['findings']) == 1 and exported['findings'][0]['title'] == 'Grounded defect'
-        assert (exported['findings'][0]['placement'], exported['findings'][0]['line']) == ('inline', 2)
-        result = exported['terminal_result']
-        assert result['stack_outcomes'] == coverage['stack_outcomes']
-        assert result['run_id'] == coverage['run_id']
-        assert result['analyzed_revision'] == coverage['analyzed_revision']
-        assert (result['pipeline_state'], result['analysis_state'], result['projection_valid']) == (
-            'failed', 'incomplete', True)
-        assert any('secondary base failure' in note for note in error.__notes__)
-        assert 'Terminal review finalization failed' not in collapse_panel_text(capsys)
+    if fault == 'pipeline':
+        # A flow step that fails after the review seals it as unfinished, with the failure retained run-wide.
+        def broken_step(*_a: Any, **_k: Any) -> Any:
+            raise RuntimeError('flow step failed')
+        review.patch.setattr('daydream.deep.merge_steps.review_output_path_for', broken_step)
+        with pytest.raises(RuntimeError, match='flow step failed'):
+            await review.run()
+        sealed = json.loads((review.repo / '.daydream/deep/committed-review.json').read_text())
+        result = sealed['terminal_result']
+        assert (result['analysis_state'], result['reason_codes']) == (
+            'incomplete', ['backend_failure', 'evidence_incomplete'])
+        assert [(entry['assignment'], entry.get('reason')) for entry in sealed['execution']][-1] == (
+            'pipeline', 'backend_failure')
+        assert [finding['title'] for finding in sealed['findings']] == ['Grounded defect']
+        # No allowance was spent, so neither the console, the report nor the notice names a key to raise.
+        panel = collapse_panel_text(capsys)
+        assert 'Review incomplete: 1 confirmed finding. Not finished: ' in panel
+        notice = review_reporting.render_github_review_context(result)
+        report = (review.repo / '.review-output.md').read_text()
+        assert '**Review incomplete.**' in notice and '## Review outcome' in report
+        assert all('used up its allowance' not in text for text in (panel, notice, report))
         return
+    # The reviewer retains its own failures, so every row ends as an exit status, never as an exception.
+    assert await review.run(dataset_capture=fault == 'source-loss', dataset_store_path=review.tmp / 'records',
+                            force_worktree=force_worktree) == 1
+    panel = collapse_panel_text(capsys)
     if fault == 'coverage':
-        assert state['writes'] and not review.output.exists()
-        assert 'Terminal review finalization failed: OSError' in collapse_panel_text(capsys)
+        assert state['writes'] and state['export'] is None and not review.output.exists()
+        assert 'Terminal review finalization failed: coverage staging failed' in panel
         with pytest.raises(FindingsValidationError):
             review.load()
-    else:
+        return
+    if fault == 'projection':
         data = review.load()
         result = data['terminal_result']
-        assert state['rejected'] and data['findings'] == []
+        assert data['findings'] == [] and result['reason_codes'] == [
+            'evidence_incomplete', 'host_tool_budget_exhaustion', 'malformed_artifact']
+        # The spent challenge fails the pipeline and alone leaves the analysis incomplete; the unreadable
+        # findings make it failed.
         assert (result['pipeline_state'], result['analysis_state'], result['projection_valid']) == (
             'failed', 'failed', False)
         assert all(s['status'] == 'complete' for s in scopes(data).values())
-        phases = {p['phase']: p for p in result['phase_outcomes']}
-        assert phases['supervision']['status'] == phases['findings']['status'] == 'failed'
-        assert (phases['supervision']['reason_codes'], phases['findings']['reason_codes']) == (
-            ['backend_failure'], ['malformed_artifact'])
+        # The report states the failure; it never calls a review with a sealed finding clean.
+        report = (review.repo / '.review-output.md').read_text()
+        assert 'No confirmed findings.' not in report
+        assert 'The findings could not be read after the review; the sealed result keeps them.' in report
+        assert report.count('The review used up its allowance before it finished; raise '
+                            '<code>reviewer_tool_call_budget</code>') == 1
+        return
+    assert not review.output.exists() and state['export'] is not None
+    private_path, private_bytes = state['export']
+    assert private_path.read_bytes() == private_bytes
+    retained = json.loads(private_bytes)
+    result = retained['terminal_result']
+    assert (result['analysis_state'], result['projection_valid']) == ('incomplete', True)
+    assert [(finding['title'], finding['placement'], finding['line']) for finding in retained['findings']] == [
+        ('Grounded defect', 'inline', 2)]
+    assert 'Terminal review finalization failed' not in panel
+    if fault == 'source-loss':
+        assert not review.repo.exists() and 'artifact source is unavailable' in panel
+        raw = read_records(LocalRecordStore(review.tmp / 'records')).runs
+        # The run exits 1 because its source is gone, so its record cannot say it succeeded.
+        assert len(raw) == 1 and raw[0]['outcome'] == 'failed'
+        assert raw[0]['completeness']['terminal_review'] == 'available'
+        findings = raw[0]['findings']['value']
+        assert [item['description'] for item in findings['items']] == ['Grounded defect']
+        coverage = findings['terminal_coverage']
+        assert coverage['run_id'] == raw[0]['run_id'] == result['run_id']
+        assert [(p['phase'], p['status'], p['reason_codes']) for p in coverage['phase_outcomes']] == [
+            ('challenge', 'incomplete', ['backend_failure']), ('cross_assignment', 'complete', [])]
+        assert coverage['analyzed_revision'] == result['analyzed_revision']
+        assert coverage['analyzed_revision']['head_sha'] == review.pr.head_sha
+        assert coverage['stack_outcomes'] == result['stack_outcomes']
+        return
+    assert 'artifact source directory identity changed' in panel
+    after: list[_Entry] = []
+    _walk_entry(review.repo, review.repo / '.git', after)
+    assert after == state['replacement_git']
+    assert (review.repo / 'replacement.bin').read_bytes() == b'replacement\x00\xff'

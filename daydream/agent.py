@@ -18,8 +18,7 @@ if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
     from rich.text import Text
 
-from daydream import clock, review_budget
-from daydream.agent_capacity import admit_agent
+from daydream import clock
 from daydream.agent_output import StructuredOutputFailure as StructuredOutputFailure, resolve_output
 from daydream.agent_retry import _plan_retry_delay, _resolve_retry_settings, _retry_hint, _RetryTelemetry
 from daydream.artifact_visibility import ArtifactVisibilityError, artifact_session_active, assert_model_cwd_clean
@@ -263,7 +262,6 @@ def is_environmental_failure(test_output: str) -> bool:
     return any(signature in output_lower for signature in infra_signatures)
 
 
-@admit_agent
 async def run_agent(
     backend: Backend,
     cwd: Path,
@@ -283,8 +281,6 @@ async def run_agent(
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext | None = None,
     review_limits: ReviewLimits | None = None,
-    advisory_tool_call_target: int | None = None,
-    review_evidence: ReviewEvidence | None = None, schema_rejection_guard: Callable[[Any], bool] | None = None,
     finalization_context: FinalizationContext | None = None,
     tools_disabled: bool = False,
     review_system_instructions: str | None = None,
@@ -318,7 +314,7 @@ async def run_agent(
         raise NotImplementedError(f"{type(backend).__name__} does not support tools_disabled")
     if review_system_instructions is not None:
         if not tools_disabled and not investigation:
-            raise ValueError("review_system_instructions requires tools_disabled=True or a staged investigation")
+            raise ValueError("review_system_instructions requires tools_disabled=True or an investigation ledger")
         if not investigation and not getattr(backend, "supports_review_instructions", False):
             raise NotImplementedError(f"{type(backend).__name__} does not support review_instructions")
     if sanctioned_inputs is not None:
@@ -329,8 +325,8 @@ async def run_agent(
             prompt = prompt.removesuffix(rendered_suffix)
     context = resolve_run_context(run_context)
     if investigation and review_limits is not None:
-        raise ValueError("staged investigation uses its ledger instead of review_limits")
-    evidence = review_evidence or (ReviewEvidence(output_schema) if review_limits is not None else None)
+        raise ValueError("an investigation ledger replaces review_limits")
+    evidence = ReviewEvidence(output_schema) if review_limits is not None else None
     review_instructions = review_system_instructions
     turn = budget
     hard_deadline = budget.deadline
@@ -341,10 +337,6 @@ async def run_agent(
             f"{budget.remaining_s() or 0.0:g} seconds until the absolute deadline; "
             f"current invocation allocation: {budget.remaining_tool_calls} tool calls. "
             "Future-stage reserves are already excluded from this allocation; do not subtract them again. "
-            + ("The advisory stage call target is a planning hint, not a ceiling. "
-               "Useful assigned work may continue within the invocation allocation and deadline. "
-               if advisory_tool_call_target is not None else "")
-            + ("\n\n" + review_budget.STAGED_REVIEW_GUIDANCE if not review_system_instructions else "")
         )
     if review_limits is not None:
         review_limits = review_limits_for_scope(review_limits)
@@ -406,7 +398,6 @@ async def run_agent(
                 sanctioned_inputs=sanctioned_inputs,
                 run_context=context,
                 review_evidence=evidence,
-                schema_rejection_guard=schema_rejection_guard,
                 review_instructions=review_instructions,
                 tools_disabled=tools_disabled,
                 review_stage_scope_id=review_stage_scope_id,
@@ -465,7 +456,7 @@ async def run_agent(
                 and hard_deadline == shared and clock.monotonic() >= shared):
             result = (result[0], result[1], "pipeline_budget_exceeded")
         if output_schema is not None and not investigation and not isinstance(result[0], str):
-            present_result(console, context.policy, progress_callback, result[0])
+            present_result(context.policy, result[0])
         observed.output(result[0])
         observed.finish(1 if result[2] else 0, reason=result[2])
         return result
@@ -518,7 +509,6 @@ async def _run_agent(
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext,
     review_evidence: ReviewEvidence | None = None,
-    schema_rejection_guard: Callable[[Any], bool] | None = None,
     review_instructions: str | None = None,
     finalization: bool = False,
     tools_disabled: bool = False,
@@ -1102,6 +1092,5 @@ async def _run_agent(
                        review_evidence.schema if investigation and review_evidence is not None
                        else output_schema), validate_structured_output=validate_structured_output,
         require_full_schema=require_full_schema, staged=investigation,
-        schema_rejection_guard=schema_rejection_guard,
     )
     return output, result_continuation, aborted_reason

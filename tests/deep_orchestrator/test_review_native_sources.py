@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import json
-import tracemalloc
 from pathlib import Path
 from typing import Any
 
@@ -14,19 +12,13 @@ from daydream import git_ops
 from daydream.deep import orchestrator
 from daydream.git_ops import queries
 from daydream.git_ops.models import GitError
-from daydream.git_ops.source import frozen_source
 from daydream.host_tools import HostToolFatal, HostToolRejected
 from daydream.review_source_refs import (
     canonicalize_source_selectors,
     source_id,
     validate_source_refs,
 )
-from tests.deep_orchestrator.test_review_completion import ReviewRun, record, scopes
-from tests.deep_orchestrator.test_review_investigation import (
-    InvestigationRun,
-    candidate,
-)
-from tests.deep_orchestrator.test_review_stage_reservations import NativeStageBackend
+from tests.deep_orchestrator.test_review_completion import ReviewRun
 from tests.harness.git_helpers import git, seed_feature_branch, tracked_source_state
 
 
@@ -61,117 +53,6 @@ async def test_local_capture_failures_refuse_dispatch_without_changing_the_sourc
     assert not review.output.exists()
     assert not (repo / '.review-output.md').exists()
     assert not (repo / '.daydream/deep/review-coverage.json').exists()
-
-
-async def test_oversized_renamed_source_is_omitted_without_buffering_the_blob(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    repo = tmp_path / 'oversized_renamed_source'
-    oversized = '#' + 'x' * (9 * 1024 * 1024)
-    seed_feature_branch(repo, base={'retired.py': oversized, 'consumer.py': 'VALUE = 0\n'},
-                        feature={'modern.py': oversized, 'consumer.py': 'VALUE = 1\n'})
-    git(repo, 'rm', 'retired.py')
-    git(repo, 'commit', '-m', 'rename oversized source')
-    base = git(repo, 'rev-parse', 'main')
-    tracemalloc.start()
-    try:
-        with pytest.raises(GitError, match='bounded retrieval limit'):
-            frozen_source(repo, base, 'retired.py')
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-    assert peak < 1024 * 1024
-    review = InvestigationRun(repo, tmp_path, monkeypatch)
-    review.backend = NativeStageBackend(repo)
-    omitted = False
-
-    @review.backend.script('python')
-    def respond(stage: dict[str, Any], output: dict[str, Any]) -> None:
-        nonlocal omitted
-        contexts = json.loads(stage['access_guide'])['contexts']
-        assert not any(item['label'].startswith('before-context-') for item in contexts)
-        assert any(status.get('file') == 'modern.py' and status['status'] == 'omitted'
-                   for status in stage['context_statuses'])
-        omitted = True
-
-    assert await review.run() == 0
-    assert scopes(review.load())['python']['status'] == 'complete'
-    assert omitted
-    assert not (repo / 'retired.py').exists()
-    assert (repo / 'modern.py').exists()
-
-
-async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A pure rename furnishes the removed side privately and binds its metadata-only decision to Git bytes."""
-    repo = tmp_path / 'before_source'
-    old_path = 'legacy.py'
-    old = ''.join(f'# Stable API contract context {index:02}\n' for index in range(30)) + (
-        'def hello():\n    return "world"\n')
-    base_consumer = 'EXPECTED_GREETING = "world"\n'
-    after = {'consumer.py': 'EXPECTED_GREETING = "universe"\n# Existing public contract retained.\n',
-             'modern.py': old}
-    seed_feature_branch(repo, base={old_path: old, 'consumer.py': base_consumer}, feature=after)
-    git(repo, 'rm', old_path)
-    git(repo, 'commit', '-m', 'remove old greeting path')
-    before = tracked_source_state(repo)
-    review = InvestigationRun(repo, tmp_path, monkeypatch)
-    review.backend = NativeStageBackend(repo)
-    title = 'Renamed greeting no longer satisfies the consumer contract'
-    submitted: dict[str, list[dict[str, Any]]] = {}
-
-    @review.backend.script('python')
-    def respond(stage: dict[str, Any], output: dict[str, Any]) -> None:
-        contexts = json.loads(stage['access_guide'])['contexts']
-        context, = [item for item in contexts if item['label'].startswith('before-context-')]
-        path = Path(context['path'])
-        captured = path.read_text()
-        assert context['label'] in stage['context_inputs']
-        assert f'# original_path: {old_path}' in captured and '# side: before' in captured
-        assert captured.endswith(old) and not path.is_relative_to(repo)
-        for target in output['targets']:
-            offered = stage['source_options'][target['target_id']]
-            if any(option['path'] in {old_path, 'modern.py'} for option in offered):
-                # A supported Pi subclass needs the same frozen before context.
-                # Submit only IDs; production callback admission must retain the
-                # rename, absent-side and metadata identities asserted below.
-                part = next(part for part in stage['assignment_parts'] if part['target_id'] == target['target_id'])
-                options = part['source_options']
-                assert options == offered
-                assert all(option['basis'] == 'supplied_diff' for option in options)
-                target['evidence_refs'] = [
-                    {'source_id': option['source_id'], 'basis': 'supplied_diff', 'source_range': None}
-                    for option in options]
-                submitted[target['target_id']] = copy.deepcopy(offered)
-        finding = dict(record(1), file='consumer.py', description=title,
-                       rationale='The retained consumer disagrees with the removed source contract.',
-                       evidence='consumer.py:1 expects universe; legacy.py:32 returned world.')
-        output['candidates'] = [candidate(disposition='confirmed', finding=finding, file='consumer.py', line=1,
-                                         trigger='Run the retained consumer against the greeting contract',
-                                         consequence='The greeting contract disagrees', grounds=finding['evidence'])]
-
-    data = await review.finish('python', findings=(title,))
-    assert submitted, 'the renamed source must produce an assigned source decision'
-    retained = {decision['target_id']: decision['evidence_refs']
-                for decision in scopes(data)['python']['target_decisions']}
-    # A metadata-only assignment has no source lines to cite. Bind the reference
-    # to independently known Git bytes, rather than echoing the offered selector.
-    metadata = (f'diff --git a/{old_path} b/modern.py\nsimilarity index 100%\n'
-                f'rename from {old_path}\nrename to modern.py\n').encode()
-    for target_id, options in submitted.items():
-        ref, = retained[target_id]
-        assert len(options) == 1
-        assert (ref['path'], ref['side'], ref['revision']) == ('modern.py', 'diff', review.pr.head_sha)
-        assert ref['part_sha256'] == hashlib.sha256(metadata).hexdigest()
-        assert ref['fragment'] == {'offset': 0, 'bytes': len(metadata),
-                                   'sha256': hashlib.sha256(metadata).hexdigest()}
-        assert ref['source_range'] is None and ref['role'] == 'assigned'
-    coverage = json.loads((repo / '.daydream/deep/review-coverage.json').read_text())
-    persisted = next(scope for scope in coverage['stack_outcomes'] if scope['scope_id'] == 'python')
-    assert persisted['target_decisions'] == scopes(data)['python']['target_decisions']
-    assert not (repo / old_path).exists() and (repo / 'modern.py').is_file()
-    assert tracked_source_state(repo) == before
 
 
 def test_source_selectors_construct_supporting_evidence_from_the_pinned_git_blob(
@@ -293,12 +174,11 @@ def test_source_selectors_construct_supporting_evidence_from_the_pinned_git_blob
     assert 'Changing the submission cannot resolve' in diagnostic and str(repo) not in diagnostic
 
 
-def test_stage_inputs_rebind_retained_decisions_and_refuse_changed_canonical_bytes(tmp_path: Path) -> None:
-    """Restored judgments must cite this frozen assignment; changed canonical bytes stop preparation.
+def test_stage_inputs_isolate_scopes_and_refuse_changed_canonical_bytes(tmp_path: Path) -> None:
+    """Scopes share one immutable change without sharing mutable inputs; changed canonical bytes stop dispatch.
 
-    Runner resume journeys restore only matching attribution, so the mismatch and late-change
-    refusals are proved directly at the stage-input owner. Scopes share one immutable change
-    without sharing the mutable inputs a reviewer's admission updates.
+    The reviewer revalidates the canonical change before every dispatch, so the late-change refusal is
+    proved directly at the stage-input owner.
     """
     from daydream.backends.pi import PiBackend
     from daydream.deep.detection import StackAssignment
@@ -320,8 +200,8 @@ def test_stage_inputs_rebind_retained_decisions_and_refuse_changed_canonical_byt
 
     def scope_inputs() -> StageInputFactory:
         return StageInputFactory(PiBackend(model='unexecuted'), work_context(repo, run_id='inputs'),
-            StackAssignment('python', ['api.py']), change=change, shared_paths={},
-            revision=revision, artifact_session=None, allow_standalone=True, read_only=True)
+            StackAssignment('python', ['api.py']), change=change,
+            revision=revision, read_only=True)
 
     factory, sibling = scope_inputs(), scope_inputs()
     pristine = copy.deepcopy((factory.parts[0].assignment, factory.index, factory._source_aliases))
@@ -331,18 +211,9 @@ def test_stage_inputs_rebind_retained_decisions_and_refuse_changed_canonical_byt
     assert (factory.parts[0].assignment, factory.index, factory._source_aliases) == pristine
     with pytest.raises(TypeError):
         change.index_entries['api.py'] = '{}'  # type: ignore[index]
-    part = factory.assignment_batches[0][0]
-    reference = next(ref for ref in part['source_refs'] if ref['side'] == 'new')
-    decision = {'target_id': part['target_id'], 'status': 'reviewed', 'reason': '', 'evidence_refs': [reference]}
-    factory.validate_retained_decisions([decision], complete=True)
-    with pytest.raises(ValueError, match='differ from frozen assignment inventory'):
-        factory.validate_retained_decisions([], complete=True)
-    forged = {**decision, 'evidence_refs': [{**reference, 'part_sha256': '0' * 64}]}
-    with pytest.raises(ValueError, match='source attribution differs'):
-        factory.validate_retained_decisions([forged], complete=True)
     diff_path.write_text(patch + '# changed after capture\n')
     with pytest.raises(SanctionedInputUnavailable, match='changed after capture'):
-        factory.prepare({'stage': 'triage', 'assigned_target_ids': []})
+        factory._revalidate_canonical()
 
 
 @pytest.mark.parametrize(('lines', 'to_symlink'), [(3, True), (3000, True), (3000, False)],
@@ -382,7 +253,7 @@ def test_type_changed_path_keeps_old_side_refs_under_each_block_header(
     revision = {'head_sha': head, 'merge_base_sha': base, 'diff_key': hashlib.sha256(patch.encode()).hexdigest()}
     factory = StageInputFactory(PiBackend(model='unexecuted'), work_context(repo, run_id='type-change'),
         StackAssignment('python', ['x']), change=CanonicalChange.capture(diff_path, write_hunk_index(root, patch)),
-        shared_paths={}, revision=revision, artifact_session=None, allow_standalone=True, read_only=True)
+        revision=revision, read_only=True)
     refs = [{(ref['side'], ref['path']) for ref in part.assignment['source_refs']} for part in factory.parts]
     if lines == 3:
         assert refs == [{('old', 'x'), ('new', 'x')}]

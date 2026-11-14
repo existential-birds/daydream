@@ -45,7 +45,7 @@ from daydream.observability.runtime import trace_run
 from daydream.pr_review import post_findings_from_artifact
 from daydream.prompts.grounding import REPOSITORY_SEARCH_GUIDANCE
 from daydream.review_budget import BudgetLedger, BudgetStop
-from daydream.review_profile import Pipeline, ResolvedProfile, Strategy, build_default_profile
+from daydream.review_profile import ResolvedProfile, build_default_profile
 from daydream.review_result import validate_terminal_result
 from daydream.review_source_refs import source_options
 from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
@@ -113,8 +113,8 @@ def _inputs(repo: Path, root: Path, files: list[str], patch: str | None = None) 
     revision = {"head_sha": head, "merge_base_sha": base, "diff_key": hashlib.sha256(patch.encode()).hexdigest()}
     return StageInputFactory(PiBackend(model="unexecuted-domain-test"), work_context(repo, run_id="domain"),
         StackAssignment("committed", files),
-        change=CanonicalChange.capture(diff_path, write_hunk_index(root, patch)), shared_paths={},
-        revision=revision, artifact_session=None, allow_standalone=True, read_only=True)
+        change=CanonicalChange.capture(diff_path, write_hunk_index(root, patch)),
+        revision=revision, read_only=True)
 
 
 def _selectors(inputs: StageInputFactory, file: str = "api.py") -> list[dict[str, Any]]:
@@ -1120,10 +1120,14 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
             refs = [{"source_id": part["source_options"][0]["source_id"], "source_range": None,
                      "basis": "supplied_diff"}]
             if assignment["kind"] == "discovery":
+                # The claim cites a line that only the old side of the change has.
+                removed = [{"source_id": next(option["source_id"] for option in part["source_options"]
+                                              if option["side"] == "old"),
+                            "source_range": None, "basis": "supplied_diff"}]
                 claim: dict[str, Any] = {"uid": "", "revision": 0, "source_uids": [], "title": "Captured zero",
                     "payload": {"claim": "Captured zero reaches division.", "trigger": "A caller divides.",
                         "consequence": "The caller fails.", "grounds": "Captured source retains zero.",
-                        "file": "api.py", "line": None, "evidence_refs": refs}}
+                        "file": "api.py", "line": 1, "evidence_refs": removed}}
                 value = {"targets": [{"target_id": part["target_id"], "status": "reviewed", "reason": "Inspected.",
                     "evidence_refs": refs}], "claims": [claim]}
                 if outcome == "install-failure":
@@ -1172,7 +1176,7 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     monkeypatch.setattr(os, "link", fail_install)
     review_request = CommittedReviewRequest(
         repo, envelope["materialization"]["requested_base_sha"], immutable_input=identity,
-        hosted_policy=replace(operator_policy, profile=_profile_with_pipeline(assignment_policy="adaptive")),
+        hosted_policy=operator_policy,
     )
     with monkeypatch.context() as analysis_boundaries:
         for owner, names in ((process, ("_run_gh", "_run_gh_async")),
@@ -1232,7 +1236,6 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
             value = json.loads(retained.read_text())
             validate_committed_result(value)
             assert value["immutable_input"] == envelope
-            assert value["settings"]["assignment_policy"]["name"] == "adaptive"  # The operator profile's choice.
             assert value["terminal_result"]["analysis_state"] == "complete"
             assert len(value["findings"]) == len(value["claims"]) > 40
             report, = frozen.glob(".explicit/*/review-output.md")
@@ -1249,6 +1252,12 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
                 expected_comparison_sha=envelope["provenance"]["comparison_base_sha"],
             )
             assert exported.terminal_result == value["terminal_result"]
+            # The sealed claim keeps its old-side line; the findings handoff gives it no head line to post on.
+            assert [(ref["side"], value["findings"][0]["payload"]["line"])
+                    for ref in value["findings"][0]["payload"]["evidence_refs"]] == [("old", 1)]
+            assert [(finding["path"], finding["line"], finding["placement"])
+                    for finding in json.loads(findings.read_text())["findings"]
+                    if finding["title"] == "Captured zero"] == [("api.py", None, "file")]
             assert list((operator_policy.private_base / "runtime").glob("*/unreconciled/publish-*"))
             assert not (repo / ".daydream").exists()
             return
@@ -2037,32 +2046,32 @@ async def test_challenge_verdict_must_name_the_claim_revision_current_at_admissi
     assert retained["revision"] == 2 and retained["disposition"] == "unresolved" and value["findings"] == []
 
 
-_ADAPTIVE_FILES = {"a.py": "def ratio(total, count):\n    return total / count\n",
+_SPLIT_FILES = {"a.py": "def ratio(total, count):\n    return total / count\n",
                    **{f"{name}.py": f"VALUE_{name.upper()} = 1\n" for name in "bcde"},
                    "f.py": "from a import ratio\nRESULT = ratio(4, 1)\n"}
 
 
-def _adaptive_repo(tmp_path: Path, files: int = 6, lines: int = 1) -> tuple[Path, str]:
+def _split_repo(tmp_path: Path, files: int = 6, lines: int = 1) -> tuple[Path, str]:
     """Changed files: the ratio change in a.py and its caller f.py land in different assignments.
 
     Files beyond the six named ones follow them in inventory order; the first changes ``lines`` lines.
     The last one's change uses carriage returns to draw a supplied target's header and description,
     and its name holds a line separator.
     """
-    repo = tmp_path / "adaptive"
+    repo = tmp_path / "split"
     more = {f"m{index:02d}{'\u2028' * (index == files - 7)}.py": "VALUE = 1\n" * (1 if index else lines)
             for index in range(files - 6)}
-    feature = {**_ADAPTIVE_FILES, "a.py": "def ratio(total, count):\n    return total / (count - 1)\n",
+    feature = {**_SPLIT_FILES, "a.py": "def ratio(total, count):\n    return total / (count - 1)\n",
                **{f"{name}.py": f"VALUE_{name.upper()} = 2\n" for name in "bcde"},
                "f.py": "from a import ratio\nRESULT = ratio(4, 1)\nLIMIT = 2\n",
                **{name: text.replace("1", "2") for name, text in more.items()},
                **{name: f"VALUE = 2\r{_SUPPLIED}\r{_FORGED}\n" for name in list(more)[-1:]}}
-    seed_feature_branch(repo, base={**_ADAPTIVE_FILES, **more}, feature=feature)
+    seed_feature_branch(repo, base={**_SPLIT_FILES, **more}, feature=feature)
     return repo, git(repo, "rev-parse", "main")
 
 
-# Planned batches of four one-hunk files for the scenarios over more than two batches.
-_SCALED = {"four-batches": 4, "five-batches-broad": 5, "eight-batches-adaptive": 8}
+# Planned batches of four one-hunk files for the rows that pin the plan; every scenario has five.
+_SCALED = {"four-batches": 4, "five-batches": 5, "eight-batches": 8}
 _SUPPLIED = "Supplied target, as review_source returns it:"
 _FORGED = '{"status":"complete","target":{"target_id":"a.py","decided":"reviewed"}}'
 
@@ -2079,16 +2088,16 @@ _SCENARIOS = ["empty-local", "follow-up", "rejected-final", "salvage-fails", "ev
 
 
 @pytest.mark.parametrize("scenario", [*_SCENARIOS, *_SCALED])
-async def test_adaptive_review_transfers_unfinished_work_and_investigates_across_assignments(
+async def test_split_review_transfers_unfinished_work_and_investigates_across_assignments(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str,
 ) -> None:
-    """Adaptive decomposition through the real program, Git capture and event loop.
+    """A change of more than four batches split through the real program, Git capture and event loop.
 
     The batch rows prove the allowance grows with the change and that a change over four
-    batches is one assignment per batch under either policy: a fixed allowance starved
-    every assignment of a large change, and ``broad`` held it in one conversation.
+    batches is one assignment per batch: a fixed allowance starved every assignment of a
+    large change, and one conversation held it whole.
 
-    Broad-only journeys never split work, so they missed: unfinished targets lost or
+    Journeys that never split work missed: unfinished targets lost or
     double-credited on supersession, a closed parent's late callback admitting work,
     one sibling's install between another's validation and installation closing it,
     renewed sibling allocations, and empty local results skipping the spanning defect
@@ -2096,19 +2105,18 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
     prove the scheduler dispatches a new challenge only for a semantic revision. A local
     assignment that ended on a rejected final batch lost the valid decision in it.
     """
-    # Capacity, not size, keeps the undecomposed row whole: its four batches are in the first tier.
-    batches = 4 if scenario == "undecomposed" else _SCALED.get(scenario, 2)
-    # The four-batch subject's diff is over 1,000 lines (tier 3). The broad rows run the default profile.
-    repo, base = _adaptive_repo(tmp_path, files=4 * batches if batches > 2 else 6,
-                                lines=520 if scenario == "four-batches" else 1)
-    policy = "broad" if scenario in {"four-batches", "five-batches-broad"} else "adaptive"
-    if scenario == "eight-batches-adaptive":
+    # Capacity, not size, keeps the undecomposed row whole: its five batches cannot each keep two starts.
+    batches = _SCALED.get(scenario, 5)
+    # The four-batch subject's diff is over 1,000 lines (tier 3). The batch rows but eight run the default profile.
+    repo, base = _split_repo(tmp_path, files=4 * batches, lines=520 if scenario == "four-batches" else 1)
+    default = scenario in {"four-batches", "five-batches"}
+    if scenario == "eight-batches":
         monkeypatch.setattr(committed_review, "_RESPONSIBILITY_PAGE", 4)  # The cross-assignment's eight work rows.
     split = scenario not in {"undecomposed", "four-batches"}
     dispatches: list[dict[str, Any]] = []
     stale: list[HostToolBinding] = []
     arrivals: dict[str, tuple[HostToolBinding, dict[str, Any]]] = {}
-    both, installed = asyncio.Event(), asyncio.Event()
+    arrived, installed = asyncio.Event(), asyncio.Event()
     sibling_receipt: dict[str, Any] = {}
 
     def spend(binding: HostToolBinding, count: int) -> None:
@@ -2146,7 +2154,7 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
         if work["kind"] == "challenge":
             claim = assignment["claims"][0]
             first_round = sum(d["kind"] == "challenge" for d in dispatches) == 1
-            if scenario == "eight-batches-adaptive":
+            if scenario == "eight-batches":
                 # The first planned challenge, which holds claim 1, fails twice. The one holding the spanning claim
                 # fails and then answers only unresolved, so a later round has a failure and no progress.
                 first = [d["work_id"] for d in dispatches if any(c["id"] == 1 for c in d["claims"])]
@@ -2176,7 +2184,7 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
                 assert (summary["admitted_targets"], summary["unfinished_targets"]) == (0, 0)
                 assert work["parents"] == ["work:1"] and work["targets"]["total"] == 4
                 assert work["retained_conclusions"]["claims"] == []
-            if scenario == "eight-batches-adaptive":
+            if scenario == "eight-batches":
                 # It reads no claim in full: one page of claim summaries within 16 KiB and of work rows, the rest
                 # counted.
                 conclusions = work["retained_conclusions"]
@@ -2194,7 +2202,7 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
                             "consequence": "ZeroDivisionError at import.", "grounds": "a.py uses count - 1.",
                             "file": "f.py", "line": None, "evidence_refs": refs}}]})
         value = {"targets": _decide(binding, targets), "claims": []}
-        if scenario == "eight-batches-adaptive" and work["kind"] == "discovery":
+        if scenario == "eight-batches" and work["kind"] == "discovery":
             # Nine claims of about 750 bytes per target: together more than 256 claims and 131,072 bytes.
             value["claims"] = [{"uid": "", "revision": 0, "source_uids": [], "title": f"{target} breaks {n}",
                                 "payload": {**dict.fromkeys(("claim", "trigger", "consequence", "grounds"), "x" * 20),
@@ -2209,10 +2217,14 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
                 _charged(binding, "review_admit", {"targets": _decide(binding, [foreign["target_id"]]),
                                                    "claims": []})
             arrivals[work_id] = (binding, value)
-            if len(arrivals) == 2:
-                both.set()
+            # Once every local assignment has arrived, no dispatch check reads on a worker thread while
+            # os.open is patched below.
+            if len(arrivals) == batches:
+                arrived.set()
             with anyio.fail_after(10):
-                await both.wait()
+                await arrived.wait()
+            if work_id not in {"work:1", "work:2"}:
+                return submit(binding, value)
             if work_id == "work:2":
                 with anyio.fail_after(10):
                     await installed.wait()
@@ -2289,9 +2301,8 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
             config=RunConfig(
                 backend="pi", output_mode="review",
                 frozen_author_description=FrozenAuthorDescription(git(repo, "rev-parse", "HEAD"), "Author context."),
-                review_profile=None if policy == "broad" else _profile_with_pipeline(
-                    reviewer_investigation_budget_s=90, reviewer_tool_call_budget=calls,
-                    assignment_policy=policy))))
+                review_profile=None if default else _profile_with_pipeline(
+                    reviewer_investigation_budget_s=90, reviewer_tool_call_budget=calls))))
     value = result.to_dict()
     validate_committed_result(value)
     # Follow-up, cross-assignment and challenge work receive the author's description like discovery.
@@ -2333,9 +2344,9 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
     limits = value["settings"]["limits"]
     scaled = {key: limits[key] for key in ("scale", "tool_calls", "effective_tool_calls", "investigation_s")}
     if not split:
-        # Capacity cannot give each assignment a usable allocation, or broad holds at most four batches:
-        # one broad assignment, no cross phase.
-        assert value["settings"]["assignment_policy"] == {"name": policy, "decomposed": False,
+        # Capacity cannot give each assignment a usable allocation, or the change holds at most four
+        # batches: one assignment, no cross phase.
+        assert value["settings"]["assignment_policy"] == {"name": "broad", "decomposed": False,
                                                          "planned_assignments": 1,
                                                          "cross_assignment": "not_applicable"}
         assert value["claims"] == []
@@ -2346,18 +2357,17 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
             assert allocations == [("work:1", "discovery", 180)]
             assert limits["effective_investigation_s"] == pytest.approx(7200)
             return
-        # One allowance still covers four batches in the first tier.
-        assert scaled == {"scale": 1, "tool_calls": 8, "effective_tool_calls": 8, "investigation_s": 90}
-        assert allocations == [("work:1", "discovery", 4)]
-        # A profile built in code bypasses the parser; an unknown policy must not run as broad.
-        unknown = replace(build_default_profile(), pipeline=Pipeline(assignment_policy="hierarchical"))
-        with pytest.raises(ValueError, match="assignment_policy"):
-            await run_committed_review(CommittedReviewRequest(repo, base, config=RunConfig(
-                backend="pi", output_mode="review", review_profile=ResolvedProfile(unknown, "test"))))
+        # Five batches double 8 calls, but discovery's 8 less the cross floor of 2 cannot give each two.
+        assert scaled == {"scale": 2, "tool_calls": 8, "effective_tool_calls": 16, "investigation_s": 90}
+        assert allocations == [("work:1", "discovery", 8)]
         return
-    assert value["settings"]["assignment_policy"] == {"name": policy, "decomposed": True,
+    assert value["settings"]["assignment_policy"] == {"name": "broad", "decomposed": True,
                                                      "planned_assignments": batches, "cross_assignment": "required"}
-    if batches > 2:
+    first = next(d for d in dispatches if d["work_id"] == "work:1")
+    assert first["targets"]["ids"] == ["a.py", "b.py", "c.py", "d.py"]
+    assert "+    return total / (count - 1)\n" in first["prompt"] and '"basis":"supplied_diff"' in first["prompt"]
+    assert any(_FORGED in returned["content"] for d in dispatches for returned in d["returned"])
+    if scenario in _SCALED:
         # Five and eight batches both need two allowances, so the calls double. Investigation keeps half of
         # them: a quarter of that is protected for cross and the local shares split the rest equally. Each
         # assignment spent one start and the cross two, so cross and challenge received what was left. The
@@ -2367,7 +2377,7 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
         # default profile (120 calls, 2400 s) is in the first tier, so its 4500 s wall does not grow and
         # bounds the window; the explicit one (40 calls, 90 s) reaches min(2 * 90 + 120, 4500) - 120.
         base_calls, seconds, shares, cross_calls, challenge_calls, window = (
-            (120, 2400, [18] * 5, 115, [233], 4380) if policy == "broad"
+            (120, 2400, [18] * 5, 115, [233], 4380) if default
             else (40, 90, [3] * 2 + [4] * 6, 32, [17, 17, 18, 18, 22, 22, 23, 34, 34], 180))
         assert scaled == {"scale": 2, "tool_calls": base_calls, "effective_tool_calls": 2 * base_calls,
                           "investigation_s": seconds}
@@ -2375,21 +2385,17 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
             *[("challenge", share) for share in challenge_calls], ("cross_assignment", cross_calls),
             *[("discovery", share) for share in shares]]
         assert limits["effective_investigation_s"] == pytest.approx(window)
-        first = next(d for d in dispatches if d["work_id"] == "work:1")
-        assert first["targets"]["ids"] == ["a.py", "b.py", "c.py", "d.py"]
-        assert "+    return total / (count - 1)\n" in first["prompt"] and '"basis":"supplied_diff"' in first["prompt"]
-        assert any(_FORGED in returned["content"] for d in dispatches for returned in d["returned"])
     else:
-        # 40 calls: investigation 20 = local 15 (shares 8/7) + protected cross 5; challenge keeps 20.
-        assert scaled == {"scale": 1, "tool_calls": 40, "effective_tool_calls": 40, "investigation_s": 90}
-        assert sorted(allocations[:2]) == [("work:1", "discovery", 8), ("work:2", "discovery", 7)]
+        # 40 calls doubled: investigation 40 = local 30 (five shares of 6) + protected cross 10; challenge keeps 40.
+        assert scaled == {"scale": 2, "tool_calls": 40, "effective_tool_calls": 80, "investigation_s": 90}
+        assert sorted(allocations[:5]) == [(f"work:{number}", "discovery", 6) for number in range(1, 6)]
     cross = next(r for r in value["work"] if r["kind"] == "cross_assignment")
     challenges = [d for d in dispatches if d["kind"] == "challenge"]
     if scenario == "empty-local":
-        assert allocations[2:] == [("work:3", "cross_assignment", 11), ("work:4", "challenge", 29)]
+        assert allocations[5:] == [("work:6", "cross_assignment", 30), ("work:7", "challenge", 68)]
         # Phase deadlines are carved from the one review window that settings record.
-        local_deadline, cross_deadline, challenge_deadline = (dispatches[i]["deadline"] for i in (0, 2, 3))
-        assert dispatches[1]["deadline"] == local_deadline
+        local_deadline, cross_deadline, challenge_deadline = (dispatches[i]["deadline"] for i in (0, 5, 6))
+        assert all(d["deadline"] == local_deadline for d in dispatches[1:5])
         assert cross_deadline - local_deadline == pytest.approx(limits["protected_cross_assignment_s"])
         assert challenge_deadline - cross_deadline == pytest.approx(limits["protected_challenge_s"])
     if scenario in {"follow-up", "rejected-final"}:
@@ -2397,13 +2403,13 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
         parent, follow = work["work:1"], next(r for r in value["work"] if r["kind"] == "follow_up")
         assert parent["state"] == "superseded" and follow["parents"] == ["work:1"]
         assert follow["targets"] == parent["targets"][1:] and parent["admitted_targets"] == parent["targets"][:1]
-        # 15 minus the charged sibling starts: two, and the lookup after the rejected final batch.
-        assert allocations[2] == ("work:3", "follow_up", 13 - (scenario == "rejected-final"))
+        # 30 minus the charged local starts: one for each assignment, and the lookup after the rejected final batch.
+        assert allocations[5] == ("work:6", "follow_up", 25 - (scenario == "rejected-final"))
     elif scenario == "native-capacity":
         halves = [r for r in value["work"] if r["kind"] == "follow_up"]
         assert [r["parents"] for r in halves] == [["work:1"], ["work:1"]]
         assert [r["targets"] for r in halves] == [work["work:1"]["targets"][:2], work["work:1"]["targets"][2:]]
-        assert sorted(a for _, kind, a in allocations if kind == "follow_up") == [7, 7]
+        assert sorted(a for _, kind, a in allocations if kind == "follow_up") == [13, 13]
     elif scenario in {"evidence-free", "salvage-fails"}:
         # No follow-up without progress: the required cross-assignment inherits exactly the unfinished targets.
         assert not any(r["kind"] == "follow_up" for r in value["work"])
@@ -2419,9 +2425,9 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
         assert cross["targets"] == [] and cross["parents"] == []
     # Every claim is delivered confirmed, and the large row retains more than one unscaled capacity of claims.
     *found, finding = value["findings"]
-    assert len(found) == len(value["claims"]) - 1 == (288 if scenario == "eight-batches-adaptive" else 0)
+    assert len(found) == len(value["claims"]) - 1 == (288 if scenario == "eight-batches" else 0)
     assert (len(json_utils.canonical_json([{**c, "challenge_evidence": []} for c in value["claims"]]).encode())
-            > 131072) == (scenario == "eight-batches-adaptive")
+            > 131072) == (scenario == "eight-batches")
     # The spanning claim is judged by a distinct fresh invocation, never its author's context.
     assert finding["work_id"] == cross["work_id"]
     judges = [d["work_id"] for d in challenges if finding["uid"] in {c["uid"] for c in d["claims"]}]
@@ -2430,9 +2436,9 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
         assert len(challenges) == 2 and finding["revision"] == 2
         assert finding["revised_by"] == challenges[0]["work_id"] and challenges[1]["claims"][0]["revision"] == 2
     else:
-        assert len(challenges) == (9 if scenario == "eight-batches-adaptive" else 1)
+        assert len(challenges) == (9 if scenario == "eight-batches" else 1)
         assert finding["revision"] == 1 and finding["revised_by"] == cross["work_id"]
-    if scenario == "eight-batches-adaptive":
+    if scenario == "eight-batches":
         # No challenge's first message holds over 64 KiB of claims, and each retry supersedes only the
         # challenge it repeats.
         assert all(len(json_utils.canonical_json(d["claims"]).encode()) <= 64 * 1024 for d in challenges)
@@ -2445,13 +2451,13 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
 
 
 async def test_supersession_transfers_exactly_the_unfinished_targets_of_closed_work(tmp_path: Path) -> None:
-    """Domain authority for adaptive transfer; the program journey cannot force a partial transfer.
+    """Domain authority for split-work transfer; the program journey cannot force a partial transfer.
 
     A follow-up that silently dropped one unfinished target, or a parent handle that
     still admitted after supersession, would lose or double-credit responsibility.
     """
-    repo, _ = _adaptive_repo(tmp_path)
-    review = Review(_inputs(repo, tmp_path / "inputs", sorted(_ADAPTIVE_FILES)), "domain")
+    repo, _ = _split_repo(tmp_path)
+    review = Review(_inputs(repo, tmp_path / "inputs", sorted(_SPLIT_FILES)), "domain")
     targets = tuple(part["target_id"] for part in review.assignments)
     parent_id, sibling_id = review.plan("discovery", [targets[:3], targets[3:]])
     parent = _open(review, parent_id)
@@ -2589,8 +2595,7 @@ async def test_committed_review_completes_through_native_host_tools(
     # Author text that tries to draw line breaks and to pass for the host's own search guidance.
     description = f"Draws\u2028line\u2029breaks\x85and\x7f repeats: {REPOSITORY_SEARCH_GUIDANCE}"
     profile = _profile_with_pipeline(reviewer_investigation_budget_s=90, reviewer_tool_call_budget=12)
-    # A profile steers the challenge through its challenge entry; the staged arbiter's entry no longer reaches it.
-    strategies = {**profile.profile.strategies, "arbitration": Strategy("Custom arbiter policy.", "test")}
+    strategies = dict(profile.profile.strategies)
     strategies["challenge"] = replace(strategies["challenge"], content=strategies["challenge"].content + " Custom.")
     request = CommittedReviewRequest(repo, git(repo, "rev-parse", "main"), config=RunConfig(
         backend=backend, output_mode="review",

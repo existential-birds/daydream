@@ -79,7 +79,6 @@ async def phase_fix_parallel(
     auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
     round_snapshot: git_ops.WorktreeRollbackSnapshot | None = None,
     limiter_size: int = 10,
-    intent_path: Path | None = None,
     group_max_wall_s: float = phase_config.DEFAULT_GROUP_MAX_WALL_S,
     group_max_serial_items: int = phase_config.DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     exploration_dir: Path | None = None,
@@ -90,8 +89,8 @@ async def phase_fix_parallel(
 
     Each group tries one batch turn, then individual findings on batch failure.
     Prompts receive group edit scope and run context. Backend concurrency, group
-    wall time, and serial-call count bound dispatch; intent, exploration, and
-    parsed test-map hints are forwarded to each turn.
+    wall time, and serial-call count bound dispatch; exploration and parsed
+    test-map hints are forwarded to each turn.
 
     Return file-to-reason failures. Exceptions and interrupted turns restore the
     group snapshot; budget stops before dispatch preserve completed edits. All
@@ -191,7 +190,6 @@ async def phase_fix_parallel(
                 edit_scope=edit_scope,
                 read_scope=footprint.run_allowed_paths,
                 console_lock=_console_lock,
-                intent_path=intent_path,
                 exploration_dir=exploration_dir,
                 test_map=test_map,
                 run_context=run_context,
@@ -269,7 +267,6 @@ async def phase_fix_parallel(
                                             edit_scope=edit_scope,
                                             read_scope=footprint.run_allowed_paths,
                                             console_lock=_console_lock,
-                                            intent_path=intent_path,
                                             exploration_dir=exploration_dir,
                                             test_map=test_map,
                                             run_context=run_context,

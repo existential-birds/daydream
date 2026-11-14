@@ -20,7 +20,6 @@ from tests.test_deep_orchestrator import (
     _ExtraEditBackend,
     _force_interactive,
     _install_stub_backend,
-    _merge_item,
     _migration_project,
     _silence,
 )
@@ -35,7 +34,6 @@ async def test_test_healing_guard_reverts_generated_migration_edit(
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
     mute_side_effects(heal=False)
     stub = _install_stub_backend(monkeypatch, project, pin_skill_availability=False)
-    stub.merge_items = [_merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix")]
     stub.heal_fix_generated = "migrations/0001_init.sql"
     stub.heal_fix_new_generated = "migrations/0002_add_x.sql"
     suite_dir = tmp_path / "suite"

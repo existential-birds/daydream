@@ -242,9 +242,8 @@ def _recorder_backend_names(
     those fields; the representative phase for each built-in is listed below.
     """
     representative, runs_fix, runs_test = {
-        DaydreamRunFlow.NORMAL: ("per_stack_review", True, True),
-        DaydreamRunFlow.DEEP: ("per_stack_review", True, True),
-        DaydreamRunFlow.TTT: ("per_stack_review", False, False),
+        DaydreamRunFlow.DEEP: ("review", True, True),
+        DaydreamRunFlow.TTT: ("review", False, False),
         DaydreamRunFlow.IMPROVE: ("recon", False, False),
         DaydreamRunFlow.DIAGRAM: ("diagram", False, False),
         DaydreamRunFlow.CUSTOM: ("review", False, False),
@@ -303,12 +302,11 @@ def capture_manifest_run_identity(
         runs_merge = True
     runs_per_stack_review = (
         (config.flow_name is None or config.flow_name in DEEP_FLOW_ALIASES)
-        and config.start_at not in ("merge", "fix")
         and flow_kind is not DaydreamRunFlow.DIAGRAM
     )
     phases = RunPhaseCapabilities(
         per_stack_review=runs_per_stack_review,
-        merge=runs_merge and config.start_at != "fix",
+        merge=runs_merge,
         fix=runs_fix,
         test=runs_test,
         push=flow_kind not in (DaydreamRunFlow.TTT, DaydreamRunFlow.PR) and "commit" in step_names,
@@ -317,8 +315,9 @@ def capture_manifest_run_identity(
     per_stack_backend: str | None = None
     per_stack_model: str | None = None
     if phases.per_stack_review:
-        per_stack_backend = _resolved_backend_name(config, "per_stack_review")
-        per_stack_model = _resolved_model(config, "per_stack_review")
+        # The stored names predate the single reviewer; their values name the review phase that runs.
+        per_stack_backend = _resolved_backend_name(config, "review")
+        per_stack_model = _resolved_model(config, "review")
         if per_stack_model is None and per_stack_backend == "pi":
             from daydream.backends.pi import _configured_pi_model
 
@@ -335,7 +334,7 @@ def capture_manifest_run_identity(
         per_stack_review_backend=per_stack_backend,
         per_stack_review_model=per_stack_model,
         review_only=flow_kind is DaydreamRunFlow.TTT and config.output_mode == "review",
-        deep=flow_kind is not DaydreamRunFlow.NORMAL,
+        deep=True,
         profile=None if profile is None else RunProfileIdentity(
             schema_version=profile.profile.schema_version,
             name=profile.name,
@@ -361,6 +360,12 @@ def _finalize_run_artifacts(
     from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
 
     outcomes = run_artifacts.outcomes
+    # Publication to a lost or replaced source fails after capture and ends the run non-zero,
+    # so the record captured below must not report that run as successful.
+    try:
+        run_artifacts.session.validate_source()
+    except ArtifactVisibilityError:
+        successful = False
     if config.dataset_capture:
         outcomes.capture = "not attempted"
         if config.trajectory_hub_repo:

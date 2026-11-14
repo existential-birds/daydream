@@ -15,7 +15,6 @@ from daydream.config import (
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     DEFAULT_GROUP_MAX_WALL_S,
     DEFAULT_QUALITY_GATE_ENABLED,
-    DEFAULT_VERIFY_ALL,
     REVIEW_OUTPUT_FILE,
 )
 from daydream.deep import fix_state
@@ -34,7 +33,6 @@ from daydream.deep.settings import (
     repair_job_policy,
 )
 from daydream.deep.state import DeepState
-from daydream.deep.verify_selection import SelectionConfig
 from daydream.extensions.api import BreakLoop, Stop
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.flows.engine import FlowContext
@@ -246,9 +244,8 @@ async def _step_verify(ctx: FlowContext) -> None:
     dd = deep_state.dd
     items: list[dict[str, Any]] = deep_state.items
 
-    # Accepted fresh and resumed fix gates verify recommendations; declined gates
+    # Accepted fix gates verify recommendations; declined gates
     # produce neither a verifier call nor its artifact.
-    selection = SelectionConfig(verify_all=_resolve_config_value(ctx.config, "verify_all", DEFAULT_VERIFY_ALL))
     async with phase_scope(DaydreamPhase.VERIFY):
         verdicts_file, verdicts_payload = await phase_verify_recommendations(
             ctx.backend_for("verify"),
@@ -256,7 +253,6 @@ async def _step_verify(ctx: FlowContext) -> None:
             merged_items_path=deep_state.items_file,
             deep_dir=dd,
             strategy=ctx.strategy("verification"),
-            selection=selection,
             run_context=ctx.run_context,
         )
     print_verification_summary(console, verdicts_file)
@@ -468,15 +464,12 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     exploration_dir = deep_state.exploration_dir_or_none
     exploration_dir = exploration_dir if isinstance(exploration_dir, Path) else None
     test_map_path = exploration_dir / "test-map.json" if exploration_dir else None
-    intent_p: Path = deep_state.intent_path
-    grounded = config.start_at not in ("per-stack", "merge", "fix")
     async with phase_scope(DaydreamPhase.FIX):
         try:
             failures = await phase_fix_parallel(
                 ctx.backend_for("fix"),
                 ctx.work,
                 items,
-                intent_path=intent_p if grounded and intent_p.exists() else None,
                 group_max_wall_s=_resolve_config_value(
                     config, "group_max_wall_s", DEFAULT_GROUP_MAX_WALL_S
                 ),

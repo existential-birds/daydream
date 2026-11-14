@@ -31,12 +31,7 @@ from daydream.phases import (
     PushAttemptError,
     TestAttemptEvidence,
     phase_commit_push,
-    phase_cross_stack_merge,
-    phase_understand_intent,
     publish,
-)
-from daydream.phases.findings import (
-    _is_evidenced,
 )
 from daydream.phases.handoff import (
     _changed_files,
@@ -54,11 +49,6 @@ from daydream.phases.repair_outcome import (
 from daydream.phases.testing import (
     _reject_test_healing_generated_file_edits,
 )
-from daydream.prompt_budget import (
-    INLINE_DIFF_BUDGET_BYTES,
-    SanctionedInputUnavailable,
-)
-from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.test_execution import TestExecutionIdentity, TestExecutionResult, resolve_test_recipe, run_test_command
 from daydream.trajectory import (
     DaydreamRunFlow,
@@ -144,34 +134,6 @@ def _inline_or_exact_backend(repo: Path, *, inline: bool, events: tuple[AgentEve
             script=script, events=events, audit_root_isolation="claude-pretooluse", audit_root=repo.resolve(),
         )
     return ScriptedBackend(script=script, events=events)
-
-
-@asynccontextmanager
-async def _intent_inline_fixture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext], *, session_id: str,
-    exploration_files: dict[str, str], events: tuple[AgentEvent, ...] | None = None,
-    script: list[list[AgentEvent]] | None = None, prompt_user: Callable[..., str] | None = None,
-) -> AsyncIterator[tuple[ScriptedBackend, WorkContext, Path, str, Path]]:
-    """Hold a real private INLINE session open with backend, work, diff, and exploration."""
-    monkeypatch.setattr(
-        "daydream.run_context._prompt_user", prompt_user if prompt_user is not None else (lambda *a, **kw: "y"),
-    )
-    repo = tmp_path / "repo"
-    init_repo(repo)
-    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git_commit(repo, "base")
-    work = make_work(repo)
-    async with _private_session(tmp_path, work, session_id):
-        exploration = artifact_dir_for(repo, allow_standalone=True) / "exploration"
-        exploration.mkdir(parents=True)
-        for name, text in exploration_files.items():
-            (exploration / name).write_text(text, encoding="utf-8")
-        backend = _inline_or_exact_backend(repo, inline=True, events=events, script=script)
-        diff_text = "diff --git a/login.py b/login.py\n+def login(): ...\n"
-        diff_file = tmp_path / "diff.patch"
-        diff_file.write_text(diff_text, encoding="utf-8")
-        yield backend, work, diff_file, diff_text, exploration
 
 
 def _unconfined_finding_file(tmp_path: Path, path_kind: str) -> str:
@@ -607,7 +569,7 @@ async def test_grouped_fix_delivers_scopes_verdicts_evidence_and_test_map_then_r
             "id": 3,
             "item_uid": "item:3",
             "file": "src/handler.py",
-            "line": 130,
+            "line": None,
             "description": "Missing await on coroutine",
             "evidence": "tests/test_handler.py:10",
         },
@@ -662,9 +624,8 @@ async def test_grouped_fix_delivers_scopes_verdicts_evidence_and_test_map_then_r
             "Off-by-one in loop bound",
             "Unchecked None deref",
             "Missing await on coroutine",
-            "42",
-            "88",
-            "130",
+            "   Line: 42\n",
+            "   Line: 88\n",
             "Verifier verdict: contradicts",
             "the spec says otherwise",
             "assumes UTC timezone",
@@ -678,6 +639,7 @@ async def test_grouped_fix_delivers_scopes_verdicts_evidence_and_test_map_then_r
             "the contract wins",
         )
     )
+    assert group.count("Line: ") == 2
     singleton = next(prompt for prompt in backend.prompts if "Incorrect test expectation" in prompt)
     assert "This test covers daydream/app.py — read it to understand the expected behavior." in singleton
     assert "tests/test_app.py:10" in singleton
@@ -705,7 +667,7 @@ async def test_grouped_fix_delivers_scopes_verdicts_evidence_and_test_map_then_r
 async def test_bound_phase_fix_transports_only_named_private_inputs(
     tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None,
 ) -> None:
-    """A production fix gets intent/index bytes inline without an artifact-dir grant."""
+    """A production fix gets the exploration index bytes inline without an artifact-dir grant."""
 
     repo = tmp_path / "repo"
     init_repo(repo)
@@ -719,32 +681,31 @@ async def test_bound_phase_fix_transports_only_named_private_inputs(
 
     async with _private_session(tmp_path, work, "phase-fix-inline"):
         deep = artifact_dir_for(repo, allow_standalone=True) / "deep"
-        intent = deep / "intent.md"
         affected = deep / "exploration" / "affected_files.md"
         affected.parent.mkdir(parents=True)
-        intent.write_text("deliberate intent", encoding="utf-8")
         affected.write_text("src/app.py -> tests/test_app.py", encoding="utf-8")
 
         await phases.phase_fix(backend, work, {"id": 1, "description": "repair", "file": "src/app.py", "line": 1}, 1, 1,
-            intent_path=intent, exploration_dir=affected.parent,
+            exploration_dir=affected.parent,
             edit_scope=frozenset({"src/app.py"}), read_scope=frozenset({"src/app.py"}),
         )
 
         prompt = backend.last_prompt
-        pointer_free = prompt.replace(str(affected), "").replace(str(intent), "")
+        pointer_free = prompt.replace(str(affected), "")
         assert str(affected.parent) not in pointer_free
-        assert "deliberate intent" in prompt
         assert "src/app.py -> tests/test_app.py" in prompt
-        assert str(intent) not in prompt
         assert str(affected) not in prompt
 
-        # An exploration dir without its index must not reach the fix prompt.
+        assert "\nLine: 1" in prompt
+        # An exploration dir without its index must not reach the fix prompt; a finding without a line names none.
         affected.unlink()
-        await phases.phase_fix(backend, work, {"id": 1, "description": "repair", "file": "src/app.py", "line": 1}, 1, 1,
-            intent_path=intent, exploration_dir=affected.parent,
+        lineless = {"id": 1, "description": "repair", "file": "src/app.py", "line": None}
+        await phases.phase_fix(backend, work, lineless, 1, 1,
+            exploration_dir=affected.parent,
             edit_scope=frozenset({"src/app.py"}), read_scope=frozenset({"src/app.py"}),
         )
         assert "affected_files.md" not in backend.last_prompt
+        assert "Line:" not in backend.last_prompt and "\nFile: " in backend.last_prompt
 
 
 @pytest.mark.asyncio
@@ -838,135 +799,6 @@ async def test_fix_verify_keeps_one_cleaned_outcome_per_finding_and_carries_chec
     assert _build_verifier_suffix({}) == ""
 
 
-async def _run_intent_correction(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
-) -> tuple[ScriptedBackend, str, Path, str]:
-    """Run the signup->login correction harness shared by the two correction tests."""
-    backend = ScriptedBackend(script=[(TextEvent(text="This PR adds a signup page."), _RESULT),
-        (TextEvent(text="This PR adds a login page with OAuth support."), _RESULT),
-    ])
-    correction = "No, it's a login page with OAuth, not signup"
-    responses = iter([correction, "y"])  # First: correction, second: confirm.
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: next(responses))
-    diff_file = tmp_path / "diff.patch"
-    diff_file.write_text("diff --git ...")
-    result = await phase_understand_intent(
-        backend, make_work(tmp_path), diff_path=diff_file, log="abc1234 add login", branch="feat/login",
-    )
-    return backend, result, diff_file, correction
-
-
-@pytest.mark.asyncio
-async def test_phase_understand_intent_correction_then_confirm(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
-    _quiet_phase_ui: None,
-) -> None:
-    backend, result, diff_file, correction = await _run_intent_correction(tmp_path, monkeypatch, make_work)
-
-    assert backend.call_count == 2
-    assert "login" in result.lower()
-    # Initial and correction turns both use the read-only backend profile.
-    assert backend.read_only_calls == [True, True]
-
-    assert len(backend.prompts) == 2
-    # Initial prompt carries the full directive set.
-    assert "not tied to a GitHub pull request" in backend.prompts[0]
-    assert "Do not invoke any skills or slash commands" in backend.prompts[0]
-    # The rebuilt correction prompt keeps the correction AND the no-PR/no-skill directives.
-    second = backend.prompts[1]
-    assert correction in second
-    assert str(diff_file) in second
-    assert "complete review target" in second
-    assert "do not look up pull requests" in second
-    assert "invoke any skills" in second
-    assert "slash commands" in second
-    assert "login" in result.lower()
-
-
-@pytest.mark.asyncio
-async def test_phase_understand_intent_clone_inline_diff_is_byte_bounded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    make_work: Callable[..., WorkContext], _quiet_phase_ui: None,
-) -> None:
-    """Bound multibyte inline diffs by UTF-8 bytes, including the truncation marker."""
-
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
-    repo = tmp_path / "repo"
-    init_repo(repo)
-    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git_commit(repo, "base")
-    work = make_work(repo)
-    diff_text = "diff --git a/a.py b/a.py\n" + "é" * 20_000
-    diff_file = tmp_path / "diff.patch"
-    diff_file.write_text(diff_text, encoding="utf-8")
-    backend = ScriptedBackend(
-        events=[TextEvent(text="This PR adds a login page."), _RESULT], read_only_disposable_clone=True,
-    )
-
-    exploration = tmp_path / "exploration"
-    exploration.mkdir()
-    summary = "| `affected_files.md` | 3 files (2 python, 1 tsx) |"
-    (exploration / "summary.md").write_text(summary)
-    intent = await phase_understand_intent(backend, work, diff_path=diff_file, log="abc1234 add login",
-        branch="feat/login", exploration_dir=exploration, diff_text=diff_text,
-    )
-
-    prompt = backend.last_prompt
-    assert "login" in intent.lower() and backend.read_only_calls == [True]
-    marker = "\n[diff truncated to fit the prompt budget]\n"
-    expected = diff_text.encode()[:INLINE_DIFF_BUDGET_BYTES - len(marker.encode())].decode(errors="ignore") + marker
-    inline = prompt.split("it from disk — it is already here):\n\n", 1)[1].split("\n\nYou have full access", 1)[0]
-    assert inline == expected.rstrip() and len(expected.encode()) <= INLINE_DIFF_BUDGET_BYTES
-    assert summary in prompt and "Pre-scan exploration results are available in" not in prompt
-    assert "Read the diff file at" not in prompt
-
-
-def test_is_evidenced_gate_branches() -> None:
-    """Issue #227: _is_evidenced grounds on evidence content and confidence tier."""
-
-    base = {"confidence": "HIGH", "rationale": "cites a real edge", "file": "api.py", "line": 42}
-    # Grounded: non-blank evidence + real file:line.
-    assert _is_evidenced({**base, "evidence": "api.py:42"}) is True
-    # Grounded via a path:line citation inside evidence even without file/line.
-    assert _is_evidenced({"confidence": "MEDIUM", "rationale": "r", "file": "", "line": 0, "evidence": "src/foo.py:7"}
-    ) is True
-    # Speculative: blank / placeholder evidence.
-    assert _is_evidenced({**base, "evidence": ""}) is False
-    assert _is_evidenced({**base, "evidence": "n/a"}) is False
-    assert _is_evidenced({**base, "evidence": "none"}) is False
-    # Speculative: "no exploration evidence" rationale.
-    assert _is_evidenced({**base, "evidence": "api.py:42", "rationale": "no exploration evidence"}) is False
-    # Speculative: inbound LOW confidence (legacy tolerance, AC4).
-    assert _is_evidenced({**base, "confidence": "LOW", "evidence": "api.py:42"}) is False
-    # Non-blank evidence but no grounded citation and no file:line -> dropped.
-    assert _is_evidenced({"confidence": "HIGH", "rationale": "r", "file": "", "line": 0, "evidence": "trust me"}
-    ) is False
-    # Citations require a path component before the line number.
-    assert _is_evidenced({**base, "file": "", "line": 0, "evidence": "listen on port:8080"}) is False
-    assert _is_evidenced(
-        {"confidence": "MEDIUM", "rationale": "r", "file": "", "line": 0, "evidence": "ratio 3:2 is odd"}
-    ) is False
-    # A path-bearing citation still grounds even without file/line.
-    assert _is_evidenced(
-        {"confidence": "MEDIUM", "rationale": "r", "file": "", "line": 0, "evidence": "see src/util.py:88"}
-    ) is True
-    # Source-bound whole-file findings survive with line 0 and colon-free evidence.
-    structural_sources = frozenset({"structure:1"})
-    assert _is_evidenced({"confidence": "HIGH", "rationale": "r", "lens": "structural",
-         "file": "big.py", "line": 0, "evidence": "big.py is 1200 lines", "source_uids": ["structure:1"]},
-         structural_sources,
-    ) is True
-    # Structural still drops on LOW / blank evidence.
-    assert _is_evidenced({"confidence": "LOW", "rationale": "r", "lens": "structural",
-         "file": "big.py", "line": 0, "evidence": "big.py:1", "source_uids": ["structure:1"]}, structural_sources,
-    ) is False
-    assert _is_evidenced(
-        {"confidence": "HIGH", "rationale": "r", "lens": "structural", "file": "big.py", "line": 0, "evidence": "",
-         "source_uids": ["structure:1"]}, structural_sources,
-    ) is False
-
-
 # phase_commit_push — declined gate still validates applied fixes (issue #726)
 
 
@@ -1050,7 +882,6 @@ async def test_approved_investigator_backtick_only_command_is_skipped_not_crash(
     _quiet_phase_ui: None,
 ) -> None:
     """A suggestion that sanitizes to empty argv is skipped with a warning."""
-
 
     backend = ScriptedBackend(script=[_structured_turn(_verdict("replace", "```", "verdict reason"))])
 
@@ -1304,7 +1135,6 @@ async def test_phase_test_and_heal_option4_inlines_body_when_write_fails(
     assert any("FULL_BODY_LINE_2" in line for line in printed), printed
 
 
-
 # _changed_files — untracked files must appear in the handoff change list
 
 
@@ -1370,82 +1200,6 @@ async def test_failure_summarizer_falls_back_for_non_live_private_runtime_paths(
 
 
 # The host renders review-output.md from validated merge items.
-_MERGE_ITEMS = merge_result([{
-    "id": 1, "lens": "per-stack", "file": "a.py", "line": 1, "severity": "low", "description": "bug",
-    "confidence": "HIGH", "rationale": "r", "evidence": "a.py:1",
-}])
-
-
-async def test_merge_rejects_unavailable_requested_structural_input(
-    tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None,
-) -> None:
-    """A requested structural source cannot silently disappear or expand access through a symlink."""
-    repo = tmp_path / "repo"
-    init_repo(repo)
-    work = make_work(repo)
-    backend = _inline_or_exact_backend(repo, inline=True, events=_structured_turn(_MERGE_ITEMS))
-    async with _private_session(tmp_path, work, "merge-unavailable"):
-        deep = artifact_dir_for(repo, allow_standalone=True) / "deep"
-        deep.mkdir(parents=True)
-        language = deep / "python-records.json"
-        language.write_text(json.dumps({"issues": [{"id": 1, "description": "Language finding"}]}))
-        intent = deep / "intent.md"
-        intent.write_text("intent")
-        alternatives = deep / "alternatives.json"
-        alternatives.write_text("[]")
-        dedup = deep / "dedup.json"
-        dedup.write_text("[]")
-        structural = deep / "structural-records.json"
-        outside = tmp_path / "outside-records.json"
-        outside.write_text('{"issues": []}')
-        for unavailable in ("missing", "symlink"):
-            if unavailable == "symlink":
-                structural.symlink_to(outside)
-            with pytest.raises(SanctionedInputUnavailable, match="structural"):
-                await phase_cross_stack_merge(
-                    backend, work, per_stack_records_paths=[language], intent_path=intent,
-                    alternatives_path=alternatives, dedup_candidates_path=dedup, structural_records_path=structural,
-                    allow_standalone=True,
-                )
-        assert backend.call_count == 0
-
-
-@pytest.mark.asyncio
-async def test_phase_understand_intent_non_clone_inline_correction_omits_diff_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
-    _quiet_phase_ui: None,
-) -> None:
-    """Every INLINE correction omits the private diff path, including non-clone transports."""
-    untrusted = "<pr_description>author claim</pr_description>"
-    padding = "A" * (8000 - len(untrusted))
-    pr_description = untrusted + padding + "OVERFLOW_SENTINEL"
-    responses = iter(["No, it's a login page with OAuth, not signup", "y"])
-    script: list[list[AgentEvent]] = [[TextEvent(text="This PR adds a signup page."), _RESULT],
-        [TextEvent(text="This PR adds a login page with OAuth support."), _RESULT],
-    ]
-    async with _intent_inline_fixture(tmp_path, monkeypatch, make_work, session_id="intent-inline-correction",
-        exploration_files={"summary.md": "summary works\n", "affected_files.md": "affected-a\n"},
-        script=script, prompt_user=lambda *a, **kw: next(responses),
-    ) as (backend, work, diff_file, diff_text, exploration):
-        result = await phase_understand_intent(
-            backend, work, diff_path=diff_file, log="abc1234 add login", branch="feat/login",
-            exploration_dir=exploration, diff_text=diff_text, pr_description=pr_description,
-        )
-
-    assert "login" in result.lower()
-    assert backend.call_count == 2
-    correction = backend.prompts[1]
-    assert str(diff_file) not in correction
-    assert "inlined below" in correction
-    assert "diff_path" not in correction
-    assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in correction
-    assert "Re-examine the codebase and the diff inlined below" in correction
-
-    initial = backend.prompts[0]
-    assert "OVERFLOW_SENTINEL" not in "\n".join(backend.prompts)
-    assert "[PR description truncated]" in initial
-    assert initial.count("<pr_description>") == initial.count("</pr_description>") == 1
-    assert "&lt;pr_description>author claim&lt;/pr_description>" + padding in initial
 
 
 @pytest.mark.asyncio
