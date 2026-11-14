@@ -1118,7 +1118,7 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
             refs = [{"source_id": part["source_options"][0]["source_id"], "source_range": None,
                      "basis": "supplied_diff"}]
             if assignment["kind"] == "discovery":
-                claim = {"uid": "", "revision": 0, "source_uids": [], "title": "Captured zero",
+                claim: dict[str, Any] = {"uid": "", "revision": 0, "source_uids": [], "title": "Captured zero",
                     "payload": {"claim": "Captured zero reaches division.", "trigger": "A caller divides.",
                         "consequence": "The caller fails.", "grounds": "Captured source retains zero.",
                         "file": "api.py", "line": None, "evidence_refs": refs}}
@@ -2143,8 +2143,9 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
             if scenario == "eight-batches-adaptive":
                 # The first planned challenge, which holds claim 1, fails twice. The one holding the spanning claim
                 # fails and then answers only unresolved, so a later round has a failure and no progress.
-                first, spanning = ([d["work_id"] for d in dispatches if any(held(c) for c in d["claims"])] for held in (
-                    lambda c: c["id"] == 1, lambda c: c["title"] == "Caller divides by zero"))
+                first = [d["work_id"] for d in dispatches if any(c["id"] == 1 for c in d["claims"])]
+                spanning = [d["work_id"] for d in dispatches
+                            if any(c["title"] == "Caller divides by zero" for c in d["claims"])]
                 if work_id in first[:2] + spanning[:1]:
                     raise PiError("native challenge failed")
                 if work_id in spanning[1:2]:
