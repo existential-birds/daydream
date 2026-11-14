@@ -568,7 +568,8 @@ class _CodexHostEndpoint(HostToolEndpoint):
             return types.ServerResult(types.ListToolsResult(tools=tools))
 
         async def call_tool(request: types.CallToolRequest) -> types.ServerResult:
-            failed, blocks = self._call(request.params.name, request.params.arguments or {})
+            name = request.params.name
+            failed, blocks = await self.admitted(name, lambda: self._call(name, request.params.arguments or {}))
             return types.ServerResult(types.CallToolResult(
                 content=[types.TextContent(type="text", text=text) for text in blocks], isError=failed))
 

@@ -2229,6 +2229,7 @@ async def test_committed_review_completes_through_native_host_tools(
         frozen_author_description=FrozenAuthorDescription(git(repo, "rev-parse", "HEAD"), description),
         review_profile=_profile_with_pipeline(reviewer_investigation_budget_s=90, reviewer_tool_call_budget=12)))
     systems: list[str] = []
+    capture_reads: list[bool] = []
     if backend == "claude":
         steps: dict[str, int] = {}
         claims: list[dict[str, Any]] = []
@@ -2293,7 +2294,16 @@ async def test_committed_review_completes_through_native_host_tools(
         monkeypatch.setenv("no_proxy", "proxied.invalid")
         monkeypatch.delenv("NO_PROXY", raising=False)
         monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: 0.0)
-        result = await run_committed_review(request)
+        real_open = os.open
+
+        def read(path: Any, *args: Any, **kwargs: Any) -> int:
+            if path == "caller.py":  # One native file stands for a read of the whole capture.
+                capture_reads.append(threading.current_thread() is threading.main_thread())
+            return real_open(path, *args, **kwargs)
+
+        with monkeypatch.context() as patching:
+            patching.setattr(os, "open", read)
+            result = await run_committed_review(request)
     value = result.to_dict()
     assert result.output_installed and result.capture_state == "complete"
     assert json.loads((repo / ".daydream/committed-review.json").read_text()) == value
@@ -2365,6 +2375,9 @@ async def test_committed_review_completes_through_native_host_tools(
         assert lookup[1].startswith("diff --git") and "choose a planned target" in rejected[0]
         assert '"admitted":{"decisions":0,"claims":[{' in admitted[0]
         assert "structured_output was accepted" in late[0]
+        # The host loop is held for a whole-capture read twice while capturing and once at sealing, never
+        # while an assignment runs: each submitted or admitted batch is read on a worker thread.
+        assert capture_reads.count(True) == 3
         # Each attempt's host facts join its Codex lifecycle record; the late call was never admitted.
         assert [[attempt["backend_lifecycle"][key] for key in (
             "backend", "host_authority_closed", "host_native_settled", "host_cleanup_complete",

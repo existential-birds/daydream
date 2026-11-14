@@ -344,6 +344,27 @@ validation success survives a callback. Stack and stage preparation validate on 
 worker thread because a full check on the shared loop starves sibling invocations'
 host-tool setup timers. The writable capture is not a sandbox.
 
+A committed review's complete check costs time in proportion to the repository, so its
+Pi and Codex endpoints order one admission (`review_admit` or the final submission)
+differently:
+
+1. When the request arrives, the endpoint runs the complete check on a worker thread;
+   the loop keeps serving other assignments.
+2. If it passed, the synchronous callback follows with no await in between: it resolves
+   the payload, checking each cited supporting blob and native entry as it reads them,
+   rechecks authority, deadline and identity, and installs, without a second complete
+   check.
+3. If it failed, the callback runs as in the paragraph above: it resolves, repeats the
+   complete check on the loop, and the admission fails `input_unavailable` with
+   nothing installed.
+
+So an admission is installed only after a complete check that began after its request
+arrived, where the paragraph above checks after resolving. The pass is good for that
+one callback only. Complete checks from all assignments run one at a time under one
+lock, because several at once take longer than the same number in a row. A lookup is
+not checked. Claude's in-process endpoint and direct callers keep the first order, on
+the loop.
+
 Full history still consumes private disk, up to the physical object-store limits
 in [Immutable PR inputs](#immutable-pr-inputs). Python payload buffers are
 fixed-size; Git may reconstruct a whole admitted blob, and concurrent readers
@@ -650,12 +671,9 @@ capacity with the same recovery semantics. Frames, arguments, results,
 items, request concurrency and cleanup are bounded; overflow rejects whole payloads.
 Frame, readiness and admission I/O keep their short transport allowance. Terminal
 source validation and submission use the original assignment deadline. A committed
-review re-reads its whole captured source for every `review_admit` and final
-submission, which takes time in proportion to the repository. The endpoint runs that
-read in a worker thread before the synchronous admission, so concurrent assignments'
-three-second control requests are still answered; if it fails, the admission repeats
-it and reports the failure as before. Claude and Codex admissions run it on the host
-loop. Native Pi
+review's whole-capture check runs on a worker thread before the synchronous admission
+([order](#captured-local-source)), so concurrent assignments' three-second control
+requests are still answered. Native Pi
 queries its remaining allowance through the authenticated status endpoint and
 subtracts the full round-trip time, without sharing clock origins or renewing
 authority. Lost receipts still prohibit replay and retain incomplete coverage.

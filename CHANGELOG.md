@@ -486,14 +486,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checked only under the fork's name, so the exclusion missed it and its findings could
   reach the corpus and training input
   ([#1684](https://github.com/existential-birds/daydream/issues/1684)).
-- Committed review on Pi no longer holds the host's event loop while it re-reads the
-  captured source for each `review_admit` and final submission. That read grows with the
-  repository (about 0.2 s for 700 files, 0.6 s for 5,000 and 2.7 s for 20,000 on the
-  measuring host), and with several assignments running at once it made the others'
-  three-second control requests time out, which aborted those assignments. The endpoint
-  now performs the read in a worker thread before the unchanged synchronous admission; a
-  failed read is repeated and reported by the admission as before
-  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
+- Committed review on Pi and Codex no longer holds the host's event loop while it
+  re-reads the captured source for each `review_admit` and final submission. That read
+  grows with the repository (about 0.2 s for 700 files, 0.6 s for 5,000 and 2.7 s for
+  20,000 on the measuring host), and with several Pi assignments running at once it made
+  the others' three-second control requests time out, which aborted those assignments.
+  The endpoint now performs the read on a worker thread when the request arrives, one
+  read at a time, and then runs the unchanged synchronous admission, which no longer
+  reads again after resolving the submission's references; a failed read is repeated and
+  reported by the admission as before. Claude's in-process admissions still read on the
+  loop ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 
 ## [0.34.0] - 2026-11-03
 

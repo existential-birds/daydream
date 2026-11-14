@@ -636,6 +636,22 @@ class HostToolEndpoint:
         self.closed = False
         self._closing = False
 
+    async def admitted[T](self, name: Any, callback: Callable[[], T]) -> T:
+        """Serve one call synchronously on the loop, after the binding's slow check for a mutating one.
+
+        The check runs on a worker thread, so the loop serves other requests meanwhile. A failed
+        check is left to the callback, which repeats and reports it.
+        """
+        tool = self.binding.host_tools.get(name) if isinstance(name, str) else None
+        if self.binding.validate is not None and (name == NATIVE_SUBMIT or tool is not None and tool.mutating):
+            with suppress(Exception):
+                await asyncio.to_thread(self.binding.validate)
+                self.binding.validated = True
+        try:
+            return callback()
+        finally:
+            self.binding.validated = False
+
     def host_schemas(self) -> dict[str, Any]:
         return {name: tool.schema for name, tool in sorted(self.binding.host_tools.items())}
 
