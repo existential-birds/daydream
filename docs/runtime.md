@@ -771,12 +771,13 @@ and macOS are not yet exercised.
 A review ends with findings. Fixing is selected explicitly: `--fix` on the CLI,
 `output_mode="loop"` for embedded callers. `--yes` (`assume="yes"`) answers the gates
 of a selected fixing run or a custom flow and never selects fixing. `--shallow` narrows
-a fixing run and `--start-at` resumes one. Without `--fix` the CLI rejects `--yes`,
-`--start-at`, a bare `--shallow` and `--flow shallow`, naming the replacement; an
-explicit `--review`, `--comment` or `--diagram-only` still accepts and ignores
-`--shallow`. An embedded `flow_name="shallow"` or `shallow=True` without
-`output_mode="loop"` is a full multi-stack review. A review cannot be resumed into
-fixing: to fix what it reported, rerun with `--fix`.
+a fixing run and `--start-at` resumes one. Without `--fix` the CLI rejects a bare
+`--shallow`, `--flow shallow` and, except on a custom `--flow`, `--yes` and
+`--start-at`, naming the replacement; an explicit `--review`, `--comment` or
+`--diagram-only` still accepts and ignores `--shallow`. An embedded
+`flow_name="shallow"` or `shallow=True` without `output_mode="loop"` is a full
+multi-stack review. A review cannot be resumed into fixing: to fix what it reported,
+rerun with `--fix`.
 
 A fixing request that could only end as a review is refused before any work: one whose
 fix gate cannot be confirmed (unattended without `--yes`, or `assume="no"`), and one

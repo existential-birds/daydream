@@ -790,6 +790,7 @@ async def _dispatch_selected_flow(
     # Built-in mode aliases: resolve before the registry lookup so the deep
     # routing wins over the "not registered" error.
     if name in DEEP_FLOW_ALIASES:
+        # A review or comment run arrives captured, with the base commit as base_branch, so this never binds it.
         if name in ("shallow", "deep"):
             _require_reviewable_branch(work, config)
         return await _run_loop_deep(
