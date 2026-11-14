@@ -439,6 +439,11 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
         verdicts = [_verdict(review_inputs, claim, grounds="g" * 3000) for claim in review.pending()]
         await _submit(review, "challenge", {"verdicts": verdicts, "claims": []})
         assert len(review.seal({})["findings"]) == 30
+        # The capacity grows with the review's scale only up to the findings export bound.
+        monkeypatch.setattr(committed_review, "MAX_ARTIFACT_BYTES", 131072)
+        with pytest.raises(HostToolRejected, match="shared byte capacity"):
+            await _submit(Review(review_inputs, "capped", scale=2), "discovery",
+                          {**_discovery(review_inputs), "claims": [_proposal(review_inputs), *update["claims"]]})
 
 
 @pytest.mark.parametrize("challenge", ["accepted-then-failed-bundle-stage", "cancelled", "hub-export"])
@@ -2111,6 +2116,11 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
         if work["kind"] == "challenge":
             claim = assignment["claims"][0]
             first_round = sum(d["kind"] == "challenge" for d in dispatches) == 1
+            spanning = [d["work_id"] for d in dispatches
+                        if any(c["title"] == "Caller divides by zero" for c in d["claims"])]
+            if scenario == "eight-batches-adaptive" and spanning == [work_id]:
+                # The split challenge holding the spanning claim fails; the next round takes only its claims.
+                raise PiError("native challenge failed")
             if scenario in {"revision", "title"} and first_round:
                 changed = {key: deepcopy(claim[key]) for key in ("uid", "revision", "source_uids", "title", "payload")}
                 changed["payload"]["evidence_refs"] = [_decide(binding, [t])[0]["evidence_refs"][0]
@@ -2120,7 +2130,7 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
                     return submit(binding, {"verdicts": [], "claims": [changed]})
                 changed["title"] = "**Caller** divides by zero"
                 return submit(binding, {"verdicts": [_verdict_for(claim)], "claims": [changed]})
-            return submit(binding, {"verdicts": [_verdict_for(claim)], "claims": []})
+            return submit(binding, {"verdicts": [_verdict_for(c) for c in assignment["claims"]], "claims": []})
         if work["kind"] == "cross_assignment":
             # Required even though no local work asked for it; it rereads original captured source.
             assert (cwd / "a.py").read_text().endswith("(count - 1)\n") and "ratio(4, 1)" in (cwd / "f.py").read_text()
@@ -2139,6 +2149,13 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
                             "consequence": "ZeroDivisionError at import.", "grounds": "a.py uses count - 1.",
                             "file": "f.py", "line": None, "evidence_refs": refs}}]})
         value = {"targets": _decide(binding, targets), "claims": []}
+        if scenario == "eight-batches-adaptive" and work["kind"] == "discovery":
+            # Five claims of about 1 KB per target: together more than 128 claims and 131,072 bytes.
+            value["claims"] = [{"uid": "", "revision": 0, "source_uids": [], "title": f"{target} breaks {n}",
+                                "payload": {**dict.fromkeys(("claim", "trigger", "consequence", "grounds"), "x" * 100),
+                                            "file": target, "line": None,
+                                            "evidence_refs": _decide(binding, [target])[0]["evidence_refs"]}}
+                               for target in targets for n in range(5)]
         if scenario == "contention":
             # The model-facing catalog names each sibling target's owner; deciding one is correctable.
             entries = _charged(binding, "review_source", {"target_id": None, "path": None, "cursor": None})["entries"]
@@ -2290,14 +2307,17 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
         # Five and eight batches both need two allowances, so the calls double. Investigation keeps half of
         # them: a quarter of that is protected for cross and the local shares split the rest equally. Each
         # assignment spent one start and the cross two, so cross and challenge received what was left. The
+        # eight batches' claims are challenged in four conversations on equal shares, and after one of them
+        # fails a fifth receives what the three that each submitted with one start left. The
         # default profile (120 calls, 2400 s) is in the first tier, so its 4500 s wall does not grow and
         # bounds the window; the explicit one (40 calls, 90 s) reaches min(2 * 90 + 120, 4500) - 120.
         base_calls, seconds, shares, cross_calls, challenge_calls, window = (
-            (120, 2400, [18] * 5, 115, 233, 4380) if policy == "broad" else (40, 90, [3] * 2 + [4] * 6, 32, 70, 180))
+            (120, 2400, [18] * 5, 115, [233], 4380) if policy == "broad"
+            else (40, 90, [3] * 2 + [4] * 6, 32, [17, 17, 18, 18, 67], 180))
         assert scaled == {"scale": 2, "tool_calls": base_calls, "effective_tool_calls": 2 * base_calls,
                           "investigation_s": seconds}
         assert sorted((e["assignment"], e["allocation"]) for e in value["execution"]) == [
-            ("challenge", challenge_calls), ("cross_assignment", cross_calls),
+            *[("challenge", share) for share in challenge_calls], ("cross_assignment", cross_calls),
             *[("discovery", share) for share in shares]]
         assert limits["effective_investigation_s"] == pytest.approx(window)
         first = next(d for d in dispatches if d["work_id"] == "work:1")
@@ -2342,7 +2362,11 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
                 stale[0].admit("after", "review_admit", {"targets": [], "claims": []})
     elif scenario != "contention":
         assert cross["targets"] == [] and cross["parents"] == []
-    finding, = value["findings"]
+    # Every claim is delivered confirmed, and the large row retains more than one unscaled capacity of claims.
+    *found, finding = value["findings"]
+    assert len(found) == len(value["claims"]) - 1 == (160 if scenario == "eight-batches-adaptive" else 0)
+    assert (len(json_utils.canonical_json([{**c, "challenge_evidence": []} for c in value["claims"]]).encode())
+            > 131072) == (scenario == "eight-batches-adaptive")
     # The spanning claim is judged by a distinct fresh invocation, never its author's context.
     assert finding["work_id"] == cross["work_id"]
     assert finding["challenge_evidence"][-1]["work_id"] == challenges[-1]["work_id"] != finding["revised_by"]
@@ -2350,7 +2374,13 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
         assert len(challenges) == 2 and finding["revision"] == 2
         assert finding["revised_by"] == challenges[0]["work_id"] and challenges[1]["claims"][0]["revision"] == 2
     else:
-        assert len(challenges) == 1 and finding["revision"] == 1 and finding["revised_by"] == cross["work_id"]
+        assert len(challenges) == (5 if scenario == "eight-batches-adaptive" else 1)
+        assert finding["revision"] == 1 and finding["revised_by"] == cross["work_id"]
+    if scenario == "eight-batches-adaptive":
+        # No challenge's first message holds over 64 KiB of claims, and the retry holds the failed one's alone.
+        assert all(len(json_utils.canonical_json(d["claims"]).encode()) <= 64 * 1024 for d in challenges)
+        failed, retry = (work[d["work_id"]] for d in challenges if finding["uid"] in {c["uid"] for c in d["claims"]})
+        assert (retry["parents"], retry["claims"]) == ([failed["work_id"]], failed["claims"])
     if scenario == "title":
         assert finding["title"] == "**Caller** divides by zero"
 

@@ -34,6 +34,7 @@ from daydream.committed_review_model import (
     ADMIT_TOOL,
     CATALOG_PAGE_MAX_BYTES,
     COMMITTED_BATCH_OUTPUT_BYTES,
+    COMMITTED_RESULT_SCHEMA,
     COMMITTED_SUBMISSION_MAX_BYTES,
     COVERAGE_MAX_SHARDS,
     COVERAGE_SHARD_TARGETS,
@@ -55,6 +56,7 @@ from daydream.committed_review_model import (
 from daydream.committed_review_output import write_committed_review_output
 from daydream.config import REVIEWER_BATCHES_PER_ALLOWANCE
 from daydream.deep.detection import StackAssignment
+from daydream.findings import MAX_ARTIFACT_BYTES
 from daydream.git_ops.captured_source import CapturedSource, capture_source
 from daydream.host_tools import (
     _MAX_REJECTION_BYTES,
@@ -184,8 +186,11 @@ class Review:
 
     def __init__(
         self, inputs: StageInputFactory, run_id: str, *, allowed_tools: frozenset[str] | None = None,
+        scale: int = 1,
     ) -> None:
         self.inputs, self.run_id = inputs, run_id
+        # Retained claims grow with the review's scale up to what the findings export holds.
+        self._claim_capacity = min(_MAX_RESULT_BYTES * scale, MAX_ARTIFACT_BYTES)
         self._allowed_tools = allowed_tools
         self.assignments = deepcopy([part.assignment for part in inputs.parts])
         self._index = {part["target_id"]: index for index, part in enumerate(self.assignments)}
@@ -508,7 +513,7 @@ class Review:
         kind = work.kind
         schema_kind = "challenge" if kind == "challenge" else "discovery"
         schema = assignment_schema(schema_kind, selectors=True)
-        retained_claims = assignment_schema(schema_kind, selectors=False, retained=True)["properties"]["claims"]
+        retained_claims = COMMITTED_RESULT_SCHEMA["properties"]["claims"]
         judged: set[str] = set()
 
         def admit(value: dict[str, Any], *, final: bool, salvage: bool = False) -> dict[str, Any]:
@@ -670,7 +675,7 @@ class Review:
                         raise HostToolRejected(
                             "claims: canonical retention limit exceeded; reduce optional proposals") from exc
                     if len(canonical_json([{**c, "challenge_evidence": []} for c in retained]).encode()) > (
-                            _MAX_RESULT_BYTES):
+                            self._claim_capacity):
                         raise HostToolRejected("retained claims exceed shared byte capacity; reduce optional material")
                     merged = {**self._decisions, **decisions}
                     updates = {shard_scope_id(index): self._shard_decisions(index, merged)
@@ -886,8 +891,8 @@ targets remain typed unfinished work. Empty findings are legitimate.
 Limits: a batch holds at most 128 targets or verdicts and 128 claims in 131072 bytes of arguments, and one
 evidence_refs array 8192 bytes. reason holds at most 1024 characters, an id 512 (a new claim's uid is empty),
 source_uids 128 unique ids and any other text 1 to 4096; a not_reviewed reason and verdict grounds are never
-blank. The review retains at most 128 claims; retained claims share one byte capacity and target reasons
-another. target_id is a catalog id: a file split into parts is decided by its part ids, never by its path.
+blank. Retained claims share one byte capacity that grows with the change, verdicts not counted, and target
+reasons another. target_id is a catalog id: a file split into parts is decided by its part ids, never by its path.
 A claim names a changed file. Non-empty evidence_refs of a reviewed target include one of its own
 source_ids; a claim's are never empty and, like a verdict's, include an assigned source_id. An assigned
 source_range only narrows the offered range. A supporting selector names a regular UTF-8 file of at most
@@ -1185,7 +1190,7 @@ async def _run_committed_review(
         finish = started + min(investigation_s * scale + _FINALIZATION_S,
                                wall_s * (tier if profile.source_kind == "default" else 1))
         review = await anyio.to_thread.run_sync(lambda: Review(
-            inputs, run_id, allowed_tools=None if hosted is None else HOSTED_PI_TOOLS,
+            inputs, run_id, allowed_tools=None if hosted is None else HOSTED_PI_TOOLS, scale=scale,
         ))
         schedule = _Schedule(review, backends, tool_calls, settings, started=started, deadline=finish - _FINALIZATION_S,
                              adaptive=pipeline.assignment_policy == "adaptive")

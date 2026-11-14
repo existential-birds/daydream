@@ -67,7 +67,7 @@ def _claim_schema(*, selectors: bool) -> dict[str, Any]:
     })
 
 
-def assignment_schema(kind: str, *, selectors: bool, retained: bool = False) -> dict[str, Any]:
+def assignment_schema(kind: str, *, selectors: bool) -> dict[str, Any]:
     """Use the same assignment shape for model selectors and canonical host output."""
     fields: dict[str, Any] = (
         {"target_id": _ID, "status": {"enum": ["reviewed", "not_reviewed"]},
@@ -79,7 +79,7 @@ def assignment_schema(kind: str, *, selectors: bool, retained: bool = False) -> 
     fields["evidence_refs"] = SOURCE_SELECTORS_SCHEMA if selectors else SOURCE_REFS_SCHEMA
     return strict_object({
         "targets" if kind == "discovery" else "verdicts": _array(strict_object(fields)),
-        "claims": _array(_RECORD_SCHEMA if retained else _claim_schema(selectors=selectors)),
+        "claims": _array(_claim_schema(selectors=selectors)),
     })
 
 
@@ -157,7 +157,7 @@ COMMITTED_RESULT_SCHEMA = strict_object({
             "source_refs": {"type": "array", "minItems": 1, "items": SOURCE_REF_SCHEMA},
         },
     }, COVERAGE_SHARD_TARGETS * COVERAGE_MAX_SHARDS),
-    **{key: _array(_RECORD_SCHEMA) for key in ("claims", "findings")},
+    **{key: {"type": "array", "items": _RECORD_SCHEMA} for key in ("claims", "findings")},
     "work": {"type": "array", "items": _WORK_SCHEMA},
     "terminal_result": TERMINAL_RESULT_SCHEMA,
     "settings": {"type": "object"},
