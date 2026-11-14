@@ -651,10 +651,10 @@ async def run_deep(
         print_error(console, "Git Error", "Unable to determine base branch for diff")
         return 1
     no_diff = not diff.strip()
-    if no_diff and mode == "diagram":
-        subject = "diagram" if mode == "diagram" else "review"
-        print_warning(console, f"No diff found -- nothing to {subject}")
-        return 0
+    if no_diff:
+        print_warning(console, f"No diff found -- nothing to {'diagram' if mode == 'diagram' else 'review'}")
+        if mode == "diagram":
+            return 0
 
     daydream_dir = artifact_dir_for(
         target_dir,

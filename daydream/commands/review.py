@@ -112,9 +112,8 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         "--flow",
         metavar="NAME",
         dest="flow_name",
-        help="Dispatch a registered flow by name (built-in: deep/shallow/review; "
-             "or a daydream_ext custom flow). Built-in names behave like their "
-             "dedicated flag." if full_help else argparse.SUPPRESS,
+        help="Dispatch a registered flow by name (built-in: deep/review, both the "
+             "default review; or a daydream_ext custom flow)." if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
         "--precision",
@@ -288,19 +287,19 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     if args.diagram is not None and args.diagram_only is not None:
         parser.error("--diagram cannot be combined with --diagram-only")
 
-    # ``--yes`` and ``--start-at`` act on a fixing run or a custom flow; neither selects fixing.
-    fixing_or_custom = args.fix or (args.flow_name is not None and args.flow_name not in DEEP_FLOW_ALIASES)
-    if args.assume == "yes" and not fixing_or_custom:
-        parser.error("--yes only answers the gates of a fixing run; add --fix to apply fixes")
-    if args.start_at != "review" and not fixing_or_custom:
-        parser.error(f"--start-at {args.start_at} resumes a fixing run; add --fix")
+    # Every message below names flags the parser accepts: unattended fixing must also confirm its gate.
+    fix = "--fix" if args.assume == "yes" or not args.non_interactive else "--fix --yes"
 
-    # Unattended, the fix gate declines: a requested fix would end as a successful review.
-    if args.fix and args.non_interactive and args.assume != "yes":
-        parser.error("--fix --non-interactive cannot confirm the fix gate; add --yes")
-
-    if args.findings_out is not None and output_mode not in ("review", "diagram"):
-        parser.error("--findings-out exports review or --diagram-only findings; it cannot follow --comment or --fix")
+    if args.flow_name == "shallow":
+        parser.error(
+            f"--flow shallow was the single-stack fix loop; use {fix} --shallow to fix, "
+            "or drop --flow shallow for a full review"
+        )
+    if args.flow_name is not None:
+        if args.fix or args.comment or args.review or args.diagram_only is not None:
+            parser.error("--flow cannot be combined with --fix/--review/--comment/--diagram-only")
+        if args.shallow:
+            parser.error("--flow cannot be combined with --shallow")
 
     # ttt/per-stack/merge are deep-pipeline resume stages; not valid for shallow.
     if args.shallow and args.start_at in ("ttt", "per-stack", "merge"):
@@ -312,14 +311,35 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         parser.error(
             f"--start-at {args.start_at} has no mapping in the unified pipeline "
             "(the legacy shallow-loop phases are gone); "
-            "use --start-at fix to resume after the merged report"
+            f"use {fix} --start-at fix to resume after the merged report"
         )
 
-    if args.flow_name is not None:
-        if args.fix or args.comment or args.review or args.diagram_only is not None:
-            parser.error("--flow cannot be combined with --fix/--review/--comment/--diagram-only")
-        if args.shallow:
-            parser.error("--flow cannot be combined with --shallow")
+    # ``--yes``, ``--start-at`` and ``--shallow`` act on a fixing run or a custom flow; none selects fixing.
+    review_only = (
+        "--comment" if args.comment else "--review" if args.review
+        else "--diagram-only" if args.diagram_only is not None
+        else "--flow review" if args.flow_name == "review"
+        else "--findings-out" if args.findings_out is not None else None
+    )
+    if not (args.fix or (args.flow_name is not None and args.flow_name not in DEEP_FLOW_ALIASES)):
+        hint = (
+            f"it does not apply to {review_only}" if review_only is not None
+            else f"use {fix} in place of --flow deep" if args.flow_name == "deep" else f"add {fix}"
+        )
+        if args.assume == "yes":
+            parser.error(f"--yes only answers the gates of a fixing run; {hint}")
+        if args.start_at != "review":
+            parser.error(f"--start-at {args.start_at} resumes a fixing run; {hint}")
+        # An explicit review mode never acted on --shallow; a bare run and a findings export did.
+        if args.shallow and review_only in (None, "--findings-out"):
+            parser.error(f"--shallow narrows a fixing run; {hint}")
+
+    # Unattended, the fix gate declines: a requested fix would end as a successful review.
+    if args.fix and args.non_interactive and args.assume != "yes":
+        parser.error("--fix --non-interactive cannot confirm the fix gate; add --yes")
+
+    if args.findings_out is not None and output_mode not in ("review", "diagram"):
+        parser.error("--findings-out exports review or --diagram-only findings; it cannot follow --comment or --fix")
 
     return common.config_from_args(
         parser, args, detect_pr=True, output_mode=output_mode,

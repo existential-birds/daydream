@@ -73,7 +73,7 @@ def _denied_observability(*a: Any, **k: Any) -> Any:
     """Injected failing observability resolver: the pre-config failure case."""
     raise RuntimeError("observability boom")
 
-def test_cli_main_wrong_branch_exits_1(
+def test_cli_main_only_fix_selects_fixing(
     git_repo: Path, tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Callable[..., None],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -93,13 +93,12 @@ def test_cli_main_wrong_branch_exits_1(
     monkeypatch.setattr("daydream.run_context._prompt_user", answer)
     target = (str(tiny_diff_target), "--no-archive", "--no-cleanup", "--test-command", f"{sys.executable} -c pass")
 
-    for unselected in ((), ("--flow", "shallow")):
-        code = _cli_main_exit(monkeypatch, *target, *unselected)
-        assert (
-            code, "## Issues" in (tiny_diff_target / ".review-output.md").read_text(),
-            [question for question in asked if "Apply fixes" in question],
-            git(tiny_diff_target, "status", "--porcelain", "--untracked-files=no"),
-        ) == (0, True, [], ""), unselected
+    code = _cli_main_exit(monkeypatch, *target)
+    assert (
+        code, "## Issues" in (tiny_diff_target / ".review-output.md").read_text(),
+        [question for question in asked if "Apply fixes" in question],
+        git(tiny_diff_target, "status", "--porcelain", "--untracked-files=no"),
+    ) == (0, True, [], "")
 
     capsys.readouterr()
     assert _cli_main_exit(monkeypatch, *target, "--yes") == 2
@@ -108,8 +107,16 @@ def test_cli_main_wrong_branch_exits_1(
     assert _cli_main_exit(monkeypatch, *target, "--fix", "--yes") == 0
     assert "# fixed by the selected loop" in (tiny_diff_target / "api.py").read_text()
 
+    # With nothing to review, a review and a selected fix loop both say so; the base-branch guard binds fixing only.
+    empty = (str(git_repo), "--no-archive")
+    capsys.readouterr()
+    assert (_cli_main_exit(monkeypatch, *empty), "No diff found" in capsys.readouterr().out) == (0, True)
     monkeypatch.setattr("daydream.cli.print_error", lambda *a, **kw: None)
-    assert _cli_main_exit(monkeypatch, str(git_repo), "--fix", "--yes") == 1
+    assert _cli_main_exit(monkeypatch, *empty, "--fix", "--yes") == 1
+    git(git_repo, "checkout", "-b", "unchanged")
+    assert (
+        _cli_main_exit(monkeypatch, *empty, "--fix", "--yes"), "No diff found" in capsys.readouterr().out,
+    ) == (0, True)
 
 def test_cli_main_confinement_valueerror_is_actionable_not_fatal(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],

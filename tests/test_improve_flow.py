@@ -251,7 +251,7 @@ async def test_custom_improve_survey_uses_compatible_two_pass_fallback(
     backend.recon_output_override = {
         "languages": ["python"], "commands": stub_recon_commands(), "conventions": [], "intent_docs": [],
     }
-    assert await _run_improve(make_config, repo, review_profile_path=profile) == 0
+    assert await _run_improve(make_config, repo, review_profile_path=profile, output_mode="loop") == 0
     discovery = [call for call in backend.calls if call["marker"] in {"repo-scan", "recon"}]
     assert [call["marker"] for call in discovery] == ["repo-scan", "recon"]
     assert "CUSTOM_SURVEY_INSTRUCTION" in discovery[0]["prompt"]
