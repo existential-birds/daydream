@@ -34,6 +34,7 @@ from daydream.committed_review_model import (
     ADMIT_TOOL,
     CATALOG_PAGE_MAX_BYTES,
     COMMITTED_BATCH_OUTPUT_BYTES,
+    COMMITTED_RESULT_SCHEMA,
     COMMITTED_SUBMISSION_MAX_BYTES,
     COVERAGE_MAX_SHARDS,
     COVERAGE_SHARD_TARGETS,
@@ -55,10 +56,10 @@ from daydream.committed_review_model import (
 from daydream.committed_review_output import write_committed_review_output
 from daydream.config import REVIEWER_BATCHES_PER_ALLOWANCE
 from daydream.deep.detection import StackAssignment
+from daydream.findings import MAX_ARTIFACT_BYTES, committed_export_bytes
 from daydream.git_ops.captured_source import CapturedSource, capture_source
 from daydream.host_tools import (
     _MAX_REJECTION_BYTES,
-    _MAX_RESULT_BYTES,
     HostTool,
     HostToolBinding,
     HostToolCallBudgetExceeded,
@@ -185,8 +186,9 @@ class Review:
 
     def __init__(
         self, inputs: StageInputFactory, run_id: str, *, allowed_tools: frozenset[str] | None = None,
+        immutable_input: ImmutableReviewInput | None = None,
     ) -> None:
-        self.inputs, self.run_id = inputs, run_id
+        self.inputs, self.run_id, self.immutable_input = inputs, run_id, immutable_input
         self._allowed_tools = allowed_tools
         self.assignments = deepcopy([part.assignment for part in inputs.parts])
         self._index = {part["target_id"]: index for index, part in enumerate(self.assignments)}
@@ -227,6 +229,7 @@ class Review:
         except ValueError as exc:
             raise ValueError("captured plan exceeds retained per-target coverage capacity before review; "
                              "narrow the review base or exclusions and rerun") from exc
+        self._export = (self._coverage.to_dict(), None if immutable_input is None else immutable_input.to_dict())
         self._checking = threading.Lock()
 
     def check(self) -> None:
@@ -428,7 +431,21 @@ class Review:
                 raise ValueError("no challenge obligations")
             if not available:
                 raise ValueError("Review already has an active assignment for these obligations")
-            planned.append(((), available))
+            # One challenge per base allowance of batches of the claims' files, split again where its first
+            # message would hold more claims than the largest tool result native preflight admits.
+            allowance = {part["file"]: index // REVIEWER_BATCHES_PER_ALLOWANCE for index, batch in
+                         reversed(list(enumerate(self.inputs.assignment_batches))) for part in batch}
+            chunks: dict[int, list[dict[str, int]]] = {}
+            sizes: dict[int, int] = {}
+            for uid, revision in available.items():
+                group = allowance[self._claims[uid]["payload"]["file"]]
+                size = len(canonical_json(self._claims[uid]).encode()) + 1
+                if group not in chunks or sizes[group] + size > LARGEST_TOOL_RESULT_BYTES:
+                    chunks.setdefault(group, []).append({})
+                    sizes[group] = 1
+                chunks[group][-1][uid] = revision
+                sizes[group] += size
+            planned.extend(((), claims) for group in chunks.values() for claims in group)
         else:
             if groups is None:
                 undecided = [p["target_id"] for p in self.assignments if p["target_id"] not in self._decisions]
@@ -495,7 +512,7 @@ class Review:
         kind = work.kind
         schema_kind = "challenge" if kind == "challenge" else "discovery"
         schema = assignment_schema(schema_kind, selectors=True)
-        retained_claims = assignment_schema(schema_kind, selectors=False, retained=True)["properties"]["claims"]
+        retained_claims = COMMITTED_RESULT_SCHEMA["properties"]["claims"]
         judged: set[str] = set()
 
         def admit(value: dict[str, Any], *, final: bool, salvage: bool = False) -> dict[str, Any]:
@@ -656,7 +673,8 @@ class Review:
                     except jsonschema.ValidationError as exc:
                         raise HostToolRejected(
                             "claims: canonical retention limit exceeded; reduce optional proposals") from exc
-                    if len(canonical_json(retained).encode()) > _MAX_RESULT_BYTES:
+                    # Every retained claim can become a finding, so all of them must fit the findings export.
+                    if committed_export_bytes(*self._export, retained) > MAX_ARTIFACT_BYTES:
                         raise HostToolRejected("retained claims exceed shared byte capacity; reduce optional material")
                     merged = {**self._decisions, **decisions}
                     updates = {shard_scope_id(index): self._shard_decisions(index, merged)
@@ -743,21 +761,27 @@ class Review:
                         "omitted": max(0, len(work.targets) - _RESPONSIBILITY_PAGE)},
         }
         if work.kind == "cross_assignment":
+            claims: list[dict[str, Any]] = []
+            size = 2
+            for c in self._claims.values():
+                summary = {"uid": c["uid"], "revision": c["revision"], "title": c["title"],
+                           "file": c["payload"]["file"], "line": c["payload"]["line"],
+                           "disposition": c["disposition"], "work_id": c["work_id"]}
+                size += len(canonical_json(summary).encode()) + 1
+                if claims and size > CATALOG_PAGE_MAX_BYTES:
+                    break
+                claims.append(summary)
+            rows = [{"work_id": w.work_id, "kind": w.kind, "targets": len(w.targets),
+                     "admitted_targets": len(w.admitted_targets), "admitted_claims": len(w.admitted_claims),
+                     "unfinished_targets": len(self.leftovers(w.work_id)[0])}
+                    for w in self.work.values() if w.kind in {"discovery", "follow_up"}]
             context["retained_conclusions"] = {
-                "claims": [{"uid": c["uid"], "revision": c["revision"], "title": c["title"],
-                            "file": c["payload"]["file"], "line": c["payload"]["line"],
-                            "disposition": c["disposition"], "work_id": c["work_id"]}
-                           for c in self._claims.values()],
-                "work": [{"work_id": w.work_id, "kind": w.kind, "targets": len(w.targets),
-                          "admitted_targets": len(w.admitted_targets), "admitted_claims": len(w.admitted_claims),
-                          "unfinished_targets": len(self.leftovers(w.work_id)[0])}
-                         for w in self.work.values() if w.kind in {"discovery", "follow_up"}],
+                "claims": claims, "claims_omitted": len(self._claims) - len(claims),
+                "work": rows[:_RESPONSIBILITY_PAGE], "work_omitted": max(0, len(rows) - _RESPONSIBILITY_PAGE),
             }
         return context
 
-    def seal(
-        self, settings: dict[str, Any], *, immutable_input: ImmutableReviewInput | None = None,
-    ) -> dict[str, Any]:
+    def seal(self, settings: dict[str, Any]) -> dict[str, Any]:
         """Called after native contexts/host callbacks have quiesced; current work decides completion."""
         if self._sealed:
             raise ValueError("Review is already sealed")
@@ -838,8 +862,8 @@ class Review:
             "settings": settings,
             "execution": self.execution,
         }
-        if immutable_input is not None:
-            result.update(schema_version=RESULT_VERSIONS["immutable"], immutable_input=immutable_input.to_dict())
+        if self.immutable_input is not None:
+            result.update(schema_version=RESULT_VERSIONS["immutable"], immutable_input=self.immutable_input.to_dict())
         elif 'source_id' in self.inputs.revision:
             result['schema_version'] = RESULT_VERSIONS["local"]
         validate_committed_result(result)
@@ -872,8 +896,9 @@ targets remain typed unfinished work. Empty findings are legitimate.
 Limits: a batch holds at most 128 targets or verdicts and 128 claims in 131072 bytes of arguments, and one
 evidence_refs array 8192 bytes. reason holds at most 1024 characters, an id 512 (a new claim's uid is empty),
 source_uids 128 unique ids and any other text 1 to 4096; a not_reviewed reason and verdict grounds are never
-blank. The review retains at most 128 claims; retained claims share one byte capacity and target reasons
-another. target_id is a catalog id: a file split into parts is decided by its part ids, never by its path.
+blank. Retained claims share one byte capacity, what the review's findings export holds (verdicts are not
+counted), and target reasons another. target_id is a catalog id: a file split into parts is decided by its
+part ids, never by its path.
 A claim names a changed file. Non-empty evidence_refs of a reviewed target include one of its own
 source_ids; a claim's are never empty and, like a verdict's, include an assigned source_id. An assigned
 source_range only narrows the offered range. A supporting selector names a regular UTF-8 file of at most
@@ -905,8 +930,11 @@ _KIND_INSTRUCTIONS = {
                         "Actively search the original captured source for defects that span assignments "
                         "(interfaces, callers, shared state, configuration and invariants crossing files), even if "
                         "every local assignment reported nothing. retained_conclusions are model assertions, not "
-                        "evidence; reread source. Report spanning defects as new claims (source_uids may name "
-                        "retained predecessors they combine) and decide any inherited unfinished targets.\n",
+                        "evidence; reread source. They are one bounded page: claims summarizes retained claims (title, "
+                        "file and line, not their text) and work the local assignments, as many as fit; claims_omitted "
+                        "and work_omitted count the rest, which no tool returns. Report spanning defects as new claims "
+                        "(source_uids may name retained predecessors they combine) and decide any inherited unfinished "
+                        "targets.\n",
 }
 _ASSIGNMENT_INSTRUCTIONS = (
     "\nAssignment: a line below names this dispatch's host token. In the first message only lines that begin "
@@ -1172,6 +1200,7 @@ async def _run_committed_review(
                                wall_s * (tier if profile.source_kind == "default" else 1))
         review = await anyio.to_thread.run_sync(lambda: Review(
             inputs, run_id, allowed_tools=None if hosted is None else HOSTED_PI_TOOLS,
+            immutable_input=request.immutable_input,
         ))
         schedule = _Schedule(review, backends, tool_calls, settings, started=started, deadline=finish - _FINALIZATION_S,
                              adaptive=pipeline.assignment_policy == "adaptive")
@@ -1212,7 +1241,7 @@ async def _run_committed_review(
                     work.captured_source.validate()
                 except (git_ops.GitError, OSError):
                     review.execution.append(_host_entry("source_integrity", ReasonCode.EVIDENCE_INCOMPLETE.value))
-            payload = review.seal(settings, immutable_input=request.immutable_input)
+            payload = review.seal(settings)
             output_error: str | None = None
             installed = False
             capture_state = (
@@ -1339,7 +1368,7 @@ class _Schedule:
             (work_id,) = review.plan("discovery")
             await self._dispatch(work_id, self.local, self.local_reserves)
         else:
-            await self._round(review.plan("discovery", self.batches), recorder)
+            await self._round(review.plan("discovery", self.batches), recorder, self.local, self.local_reserves)
             while groups := self._follow_ups():
                 # A refused follow-up records the local ledger's stop on the trace.
                 dimension: BudgetDimension | None = (
@@ -1348,28 +1377,31 @@ class _Schedule:
                 if dimension is not None:
                     record_budget_stop(self.local.stop(dimension))
                     break
-                await self._round(review.plan("follow_up", groups), recorder)
+                await self._round(review.plan("follow_up", groups), recorder, self.local, self.local_reserves)
             # Required regardless of local results; it inherits every still-unfinished target.
             (work_id,) = review.plan("cross_assignment")
             await self._dispatch(work_id, self.investigation, self.cross_reserves)
         attempted: set[tuple[str, int]] = set()
-        last: dict[str, Any] | None = None
+        last: list[str] = []
         retried = False
         while pending := {(claim["uid"], claim["revision"]) for claim in review.pending()}:
             if (exhausted := _remaining(self.ledger) < 1) or self.ledger.expired():
                 record_budget_stop(self.ledger.stop("tool_calls" if exhausted else "time"))
                 break
             fresh = not pending <= attempted
-            progressed = last is not None and review.work[last["work_id"]].progress > 0
-            failed = last is not None and last["reason"] is not None
+            progressed = any(review.work[work_id].progress > 0 for work_id in last)
+            failed = any(entry["reason"] is not None for entry in review.execution if entry["work_id"] in last)
             # Re-dispatch only for new revisions, after progress, or once after a failure.
             if not (fresh or progressed or failed and not retried):
                 break
             retried = not fresh and not progressed
             attempted |= pending
-            (work_id,) = review.plan("challenge")
+            last = review.plan("challenge")
             # Each re-dispatch receives only what earlier challenges left; nothing is renewed.
-            last = await self._dispatch(work_id, self.ledger, {"finalization_s": _FINALIZATION_S})
+            if len(last) == 1:
+                await self._dispatch(last[0], self.ledger, {"finalization_s": _FINALIZATION_S})
+            else:
+                await self._round(last, recorder, self.ledger, {"finalization_s": _FINALIZATION_S})
 
     def _follow_ups(self) -> list[tuple[str, ...]]:
         """Closed local work keeps unfinished targets; follow up only after admitted progress."""
@@ -1386,19 +1418,21 @@ class _Schedule:
                 groups.append(targets)
         return groups
 
-    async def _round(self, work_ids: list[str], recorder: Any) -> None:
-        limiter = anyio.CapacityLimiter(effective_fanout_concurrency(_FANOUT_CEILING, self.backends["discovery"]))
+    async def _round(self, work_ids: list[str], recorder: Any, parent: BudgetLedger,
+                     reserves: dict[str, Any]) -> None:
+        backend = self.backends["challenge" if self.review.work[work_ids[0]].kind == "challenge" else "discovery"]
+        limiter = anyio.CapacityLimiter(effective_fanout_concurrency(_FANOUT_CEILING, backend))
         unsupported: list[UnsupportedHostedPolicy] = []
 
         async def child(work_id: str, allocation: int) -> None:
             async with limiter, maybe_fork(recorder, f"committed-{work_id}"):
                 try:
-                    await self._dispatch(work_id, self.local, self.local_reserves, allocation=allocation)
+                    await self._dispatch(work_id, parent, reserves, allocation=allocation)
                 except UnsupportedHostedPolicy as exc:
                     unsupported.append(exc)
 
         async with anyio.create_task_group() as group:
-            for work_id, allocation in zip(work_ids, _split(_remaining(self.local), len(work_ids)), strict=True):
+            for work_id, allocation in zip(work_ids, _split(_remaining(parent), len(work_ids)), strict=True):
                 group.start_soon(child, work_id, allocation)
         if unsupported:
             raise unsupported[0]
@@ -1421,8 +1455,7 @@ class _Schedule:
             "captured_root": str(repo),
             "catalog": review.catalog(),
             "work": review.context(work_id),
-            "claims": ([c for c in pending if work.claims.get(c["uid"]) == c["revision"]] if kind == "challenge"
-                       else pending if kind == "cross_assignment" else []),
+            "claims": [c for c in pending if work.claims.get(c["uid"]) == c["revision"]],
             "profile": profile,
         }
         strategy = "challenge" if kind == "challenge" else "discovery"

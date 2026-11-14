@@ -386,6 +386,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Committed review now delivers the challenged findings of a large change. Before, challenge
+  verdicts counted against the same fixed capacity of 128 claims in 128 KiB that discovery
+  had filled, so on a change with a few dozen claims the challenge's verdicts were refused
+  and the review sealed with no finding; discovery also refused valid claims past about 54
+  of typical size, whatever the change's size. Verdicts no longer count against the
+  retained claims' capacity, which is now what the review's findings export can hold: a
+  batch is refused, correctably, when the 1 MiB export would overflow with every retained
+  claim as a finding, so an admitted review's export always installs. No count applies
+  beyond the per-batch 128. A review split across assignments challenges its claims in one
+  conversation per four planned batches of the claims' files, split again at 64 KiB of
+  claims so each fits Pi's capacity preflight, concurrently under the existing fan-out
+  bound on equal shares of the challenge allowance; a review with one such group keeps a
+  single challenge. The cross-assignment receives one bounded page instead of every pending
+  claim in full: summaries (title, file, line) of the claims that fit 16 KiB and rows for up
+  to 256 local assignments, with counts of the rest, which no tool returns.
+  What users lose: large reviews run more challenge conversations and cost more (about 25
+  on a change of 400 files); the cross-assignment no longer sees each claim's text and
+  names only the claims that fit its page (about 60 of typical size) and at most 256
+  assignments; a review retains at most what its findings
+  export holds (about 470 claims of typical size, fewer with a long pull request
+  description or on a very large change) and refuses the rest at discovery; a reader
+  on an older release rejects a sealed result with more than 128 claims
+  ([#1842](https://github.com/existential-birds/daydream/issues/1842)).
 - Committed review on Codex and Claude now starts the cross-assignment and every challenge
   of a large change. Before, each assignment travelled in the system instructions, which
   both pass as one command-line argument (131072 bytes on Linux): every pending claim, the

@@ -289,10 +289,15 @@ After the split, follow-up work inherits a closed local work's unfinished target
 only when that work admitted progress; work that failed native-capacity preflight
 without progress is split in two instead. The host then always dispatches one
 `cross_assignment` work over the original captured source and full catalog, even when
-local work found nothing. It inherits every unfinished target, receives compact
-`retained_conclusions` and pending claims as open concerns, and searches for defects
-spanning assignments. With one broad assignment the `cross_assignment` phase is a
-recorded host no-op.
+local work found nothing. It inherits every unfinished target and searches for defects
+spanning assignments. Its `retained_conclusions` are one bounded page: a summary of each
+claim (uid, revision, title, file, line, disposition and originating work) for as many
+claims as fit 16 KiB, as the catalog page is bounded, and a row for each of the first 256
+local works, with `claims_omitted` and `work_omitted` counting the rest. No tool returns a
+later page or a claim's text, and its instructions say so. This first message therefore
+stays bounded however many claims discovery admitted and however long their titles. It
+cannot revise retained claims and names them only as `source_uids` of new ones. With one
+broad assignment the `cross_assignment` phase is a recorded host no-op.
 
 Review keeps one host-owned record per work (result `work`: `work_id`, `kind` of
 `discovery`/`follow_up`/`cross_assignment`/`challenge`, `parents`, `state`, `targets`,
@@ -308,7 +313,15 @@ Siblings admit independently. Preparation validates a delta; installation, at on
 synchronous point, rechecks only touched identities (target still undecided and owned
 by this work, claim revision current, retained claim/coverage capacity) and then mints
 claim ordinals. A sibling conflict is a correctable rejection; closure or deadline
-remains fatal.
+remains fatal. Any retained claim can become a finding, so retained claims share what the
+review's findings export (`findings.json`, the hosted route's paired output) can hold:
+installation refuses, correctably, a batch after which that export would exceed its
+1 MiB bound with every retained claim as a relocated inline finding and every scope and phase
+unfinished. Target decisions are attribution the bound does not count, and verdicts are not
+in the export, so a challenge can always record its verdicts. The export of an admitted
+review therefore always fits and installs, and no claim is lost after admission. No count
+bounds a review's claims beyond that; a batch still holds at most 128. A sealed result can
+therefore hold more than 128 claims and findings, which a reader on an older release rejects.
 
 All work draws on one [budget ledger](#budget-ledger) for the review window; each
 dispatch runs on its own child ledger carved from it, so parallel siblings never share a
@@ -343,10 +356,18 @@ challenge for the rest. Otherwise discovery receives `I` and runs until 1/2. Wor
 local deadline cuts short or finds expired closes with `host_wall_budget_exhaustion`
 and keeps what it admitted; the cross-assignment inherits the rest. Earlier work cannot
 spend later reserves; unspent capacity carries forward. Challenge takes every pending
-revision not held by
-live work in a fresh context. It is re-dispatched for new revisions, after a round
-that resolved a verdict or changed a claim, or once after an evidence-free failure; an
-unresolved verdict keeps the revision with its work, so the next round supersedes it.
+revision not held by live work in fresh contexts: one per four planned batches of the
+claims' files (a file belongs to its first batch), split again where one would hold over
+64 KiB of claims, the preflight's largest-tool-result bound, so that with claims of typical
+size each first message fits a 131,072-token Pi window even with the largest author
+description. One challenge runs as a single dispatch; several run like split discovery,
+concurrently under the same fan-out bound, each on an equal share of the calls left and
+in a forked trajectory. A review with up to
+four batches and 64 KiB of claims keeps one challenge; a change of about 400 files can
+run about 25. A round is re-dispatched for new revisions, after any of its challenges
+resolved a verdict or changed a claim, or once after an evidence-free failure; an
+unresolved verdict keeps the revision with its work, so the next round supersedes it, and
+a claim whose challenge failed stays unresolved and unfinished, never a finding.
 
 Each shard's status derives from its targets and the current (non-superseded) work
 responsible for them; required phases are `challenge` and `cross_assignment`.
