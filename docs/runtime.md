@@ -514,7 +514,9 @@ dispatch whose remaining calls cannot fit its minimum work. Without host tools,
 ledger when it admits a native start (Pi's `/admit`, Claude's PreToolUse hook) before
 the start runs, and its deadline reads the ledger.
 Starts refused for the protected submission slot or over the limit are observed,
-never charged.
+never charged. A final submission rejected on that slot is charged and then refunded
+([protected submission](#pi-host-tool-lifetime-and-limits)), so a committed execution
+entry's `observed_starts` can exceed its `allocation` while its `overshoot` stays 0.
 
 Renewal rule: compaction or summarization never renews a budget. When a retryable
 provider failure leads to a retry, the failed attempt's tool calls are refunded when
@@ -524,7 +526,7 @@ attempt count, the absolute deadline and the outage circuit; a failure after pos
 host acceptance still permits no retry. A Codex turn that completes with nothing accepted
 is retried under this rule only as the invocation's first retry, and the outage circuit
 records it as a completed turn, never as a failure ([Codex host tools](#codex-host-tools)).
-Paths that do not retry are never refunded,
+Apart from that rejected submission, paths that do not retry are never refunded,
 including a staged schema re-dispatch and a committed challenge re-dispatch. Committed
 batches admitted before a provider failure stay installed while that attempt's starts
 are refunded with the rest of the attempt.
@@ -568,8 +570,8 @@ correctable payload rejection returns a correlated native error naming the
 field/selector, violated constraint and concrete correction. It changes no
 findings, decisions, notes or retention capacity. Correction uses the same
 conversation and [budget ledger](#budget-ledger). A rejected real tool start
-still consumes that allowance, except a protected-slot denial (below); exhausted
-capacity cannot invite another call.
+still consumes that allowance, except a protected-slot denial or a rejected protected
+submission (below); otherwise exhausted capacity cannot invite another call.
 Successful acceptance installs state once, returns canonical output and permits
 native termination; duplicate accepted callbacks cannot admit or charge retention
 again. Unbound structured calls retain their ordinary serializer behavior.
@@ -612,9 +614,13 @@ eight-call ceiling or hidden nested tool execution.
 Committed-review bindings set `protected_submission=True`: the last start belongs to
 `structured_output`. Any other start that would take it, ordinary or host tool and
 including parallel-batch members, is counted in `denied_starts` and refused with
-correctable `capacity_protected` without charging or closing authority; a bounded
-number of denials then fails closed. `capacity()` reports both counts; the ledger
-observes denied starts without charging them. Pi and Claude deny prospectively at admission,
+correctable `capacity_protected` without charging or closing authority. A
+`structured_output` charged on that last start and then rejected, for its schema, size or
+content, keeps the start: the charge is refunded, the rejection stays correctable and it
+counts as one more denied start. Past 32 denied starts the binding fails closed with
+`capacity_exhausted`, and the assignment deadline applies throughout; a binding without
+a protected start keeps the fatal outcome for a rejection on its last start.
+`capacity()` reports both counts; the ledger observes denied starts without charging them. Pi and Claude deny prospectively at admission,
 so a denied start is still observed and reported as [overshoot](observability.md#committed-review-evidence)
 that never reduces later reserves. Codex denies its host calls the same way, but the tools
 it runs itself have already run when they are observed

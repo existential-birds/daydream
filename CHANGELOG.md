@@ -355,6 +355,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generation that calls `review_source` or `review_admit` in order, so each is answered;
   the stock reads in such a generation no longer run concurrently
   ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+- A final `structured_output` batch that committed review rejects on its reserved last
+  tool start can now be corrected. Before, that rejection was fatal ("no calls remain
+  for correction") and every decision in the batch was lost. The start is kept: its
+  charge is refunded and the rejection stays correctable, up to the existing bound of 32
+  denied starts, which these rejections now share, and the assignment deadline. A
+  reviewer that keeps resubmitting a rejected batch is paid for until that bound, and an
+  execution entry's `observed_starts` can exceed its `allocation` while `overshoot` stays
+  0. Bindings without a reserved start keep the fatal outcome
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
 - Committed review no longer rejects a reviewed target submitted with empty
   `evidence_refs` when the target has more than four sources. The host expanded `[]` to
   every source of the target and then refused its own expansion ("supply at most four

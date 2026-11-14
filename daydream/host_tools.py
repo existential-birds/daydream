@@ -41,7 +41,7 @@ NATIVE_SUBMIT = "structured_output"
 BYTES_PER_TOKEN_ESTIMATE = 3
 # Pi 1.4.0 compaction defaults (dist/core/compaction) when native settings omit them.
 PI_DEFAULT_COMPACTION = {"reserve_tokens": 16384, "keep_recent_tokens": 20000}
-# Correctable denials of the protected submission start before the binding fails closed.
+# Correctable denials and rejected submissions of the protected start before the binding fails closed.
 PROTECTED_DENIAL_LIMIT = 32
 
 
@@ -197,8 +197,8 @@ class HostToolBinding:
         if not callable(accept):
             raise TypeError("host tools require a synchronous acceptance callback")
         self.budget = budget
-        # ``calls`` records every admitted native start identity once; ``denied_starts``
-        # are the subset refused because they would consume the protected submission start.
+        # ``calls`` records every admitted native start identity once; ``denied_starts`` are the
+        # subset refused to keep the protected submission start, or refunded as its rejected submission.
         self.calls = self.rejections = self.denied_starts = 0
         self.protected_submission = protected_submission
         self.authority_open = self.native_settled = self.cleanup_complete = False
@@ -296,6 +296,13 @@ class HostToolBinding:
                                           code="native_correlation", preacceptance=False))
         rejection = HostToolRejected(message, code=code)
         if self.budget.remaining_tool_calls == 0:
+            if self.protected_submission:
+                # Only the reserved start's own submission leaves a protected binding without calls:
+                # refund it so the rejection stays correctable, within the bound on denied starts.
+                self.denied_starts += 1
+                if self.denied_starts <= PROTECTED_DENIAL_LIMIT:
+                    self.budget.refund(self.budget.charged - 1)
+                    return rejection
             fatal = HostToolCallBudgetExceeded(
                 "Tool-call allocation exhausted; no calls remain for correction. "
                 f"Rejected submission: {rejection}", preacceptance=not self.possibly_accepted)
