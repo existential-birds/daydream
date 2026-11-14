@@ -115,9 +115,10 @@ _FANOUT_CEILING = 10
 _MIN_WORK_CALLS = 2
 # Bounded evidence finalization reserved after the review deadline.
 _FINALIZATION_S = 120
-# The [pipeline] profile key that raises the allowance behind each exhaustion reason.
-_ALLOWANCE_KEYS = {ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION.value: "reviewer_tool_call_budget",
-                   ReasonCode.HOST_WALL_BUDGET_EXHAUSTION.value: "reviewer_investigation_budget_s"}
+# The [pipeline] profile keys that raise the allowance behind each exhaustion reason; the wall caps the time.
+_ALLOWANCE_KEYS = {
+    ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION.value: "reviewer_tool_call_budget",
+    ReasonCode.HOST_WALL_BUDGET_EXHAUSTION.value: "reviewer_investigation_budget_s and review_wall_budget_s"}
 
 
 @dataclass
