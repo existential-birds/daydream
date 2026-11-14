@@ -228,7 +228,8 @@ rejects drift in opaque configuration identities, while credentials remain live.
 Claude's SDK resolves its own authentication and user settings live; its opaque identity
 covers only the selected model, effort and pinned SDK. Codex likewise keeps its own
 authentication and configuration live; its identity covers the selected model and effort.
-Profile discovery/arbitration strategies cannot disable host obligations.
+Investigation work takes the profile's `strategies."discovery.generic_fallback"` and challenge its
+`strategies.challenge` (never the staged arbiter's `strategies.arbitration`); neither can disable host obligations.
 
 The run's artifact session stages the report then atomically writes the
 [versioned](#captured-local-source) `committed-review.json`: claims/challenge evidence, work records, typed coverage,

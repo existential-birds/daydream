@@ -312,6 +312,17 @@ def build_default_profile() -> ReviewProfile:
             ),
             source="copied: daydream.deep.prompts.build_generic_fallback_prompt",
         ),
+        "challenge": Strategy(
+            content=(
+                "Challenge each claim in the assignment the first message carries under the host "
+                "token, independently of the reasoning that proposed it: seek counterevidence in "
+                "the captured source with your read/search tools and review_source. Give each "
+                "claim one verdict: confirmed if it survives, rejected on substantive "
+                "counterevidence, or unresolved. You may revise an assigned claim or propose a "
+                "new one; each is challenged again."
+            ),
+            source="authored: #1845 committed review challenge",
+        ),
         "arbitration": Strategy(
             content=(
                 "You are the arbiter. The cheaper per-stack reviewers flagged the "

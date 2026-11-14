@@ -386,6 +386,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Committed review's challenge no longer receives the staged reviewer's arbiter prompt as its
+  strategy. That text told every challenge that cheaper per-stack reviewers had flagged only
+  high-severity or contested findings, named tools some backends lack, and forbade the new
+  claims a challenge may submit. The default profile has a new `strategies.challenge`
+  entry that describes the challenge as it runs on every backend, and committed review reads
+  it. A profile that overrides `strategies.arbitration` no longer changes committed review's
+  challenge (it still steers the staged arbiter); override `strategies.challenge` instead. The
+  default profile's digest changes, so staged reviews cached under the previous default profile
+  are not reused ([#1845](https://github.com/existential-birds/daydream/issues/1845)).
 - Committed review now delivers the challenged findings of a large change. Before, challenge
   verdicts counted against the same fixed capacity of 128 claims in 128 KiB that discovery
   had filled, so on a change with a few dozen claims the challenge's verdicts were refused

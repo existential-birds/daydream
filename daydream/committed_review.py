@@ -1068,9 +1068,7 @@ async def _run_committed_review(
         },
         "strategies": {
             "discovery": strategies["discovery.generic_fallback"].content,
-            "challenge": strategies["arbitration"].content.replace(
-                "{arbiter_input_path}", "the assignment's captured-source claim inventory"
-            ),
+            "challenge": strategies["challenge"].content,
         },
     }
     if hosted is not None:
