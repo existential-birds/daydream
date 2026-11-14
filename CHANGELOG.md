@@ -388,8 +388,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Committed review's challenge no longer receives the staged reviewer's arbiter prompt as its
   strategy. That text told every challenge that cheaper per-stack reviewers had flagged only
-  high-severity or contested findings, named tools some backends lack, and forbade the revised
-  and new claims a challenge may submit. The default profile has a new `strategies.challenge`
+  high-severity or contested findings, named tools some backends lack, and forbade the new
+  claims a challenge may submit. The default profile has a new `strategies.challenge`
   entry that describes the challenge as it runs on every backend, and committed review reads
   it. A profile that overrides `strategies.arbitration` no longer changes committed review's
   challenge (it still steers the staged arbiter); override `strategies.challenge` instead. The
