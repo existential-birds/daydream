@@ -316,7 +316,7 @@ claim ordinals. A sibling conflict is a correctable rejection; closure or deadli
 remains fatal. Any retained claim can become a finding, so retained claims share what the
 review's findings export (`findings.json`, the hosted route's paired output) can hold:
 installation refuses, correctably, a batch after which that export would exceed its
-1 MiB bound with every retained claim as an inline finding and every scope and phase
+1 MiB bound with every retained claim as a relocated inline finding and every scope and phase
 unfinished. Target decisions are attribution the bound does not count, and verdicts are not
 in the export, so a challenge can always record its verdicts. The export of an admitted
 review therefore always fits and installs, and no claim is lost after admission. No count

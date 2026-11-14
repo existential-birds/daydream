@@ -1039,9 +1039,11 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     from daydream.git_ops import process
     repo = tmp_path / "source"
     attributes = "api.py filter=hostile\n"
+    # Unchanged lines past the hunk let the install-failure journey cite lines the export relocates.
+    unchanged = "PAD = 1\n" * 8 if outcome == "install-failure" else ""
     seed_feature_branch(
-        repo, base={"api.py": "VALUE = 1\n", ".gitattributes": attributes},
-        feature={"api.py": "VALUE = 0\n", ".gitattributes": attributes},
+        repo, base={"api.py": "VALUE = 1\n" + unchanged, ".gitattributes": attributes},
+        feature={"api.py": "VALUE = 0\n" + unchanged, ".gitattributes": attributes},
     )
     # The install-failure journey also captures from a maintained repository: packed refs,
     # a kept pack, bitmaps and a multi-pack index must not disturb immutable capture.
@@ -1133,9 +1135,11 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
                         batch = 4
                         while batch:
                             many = [{**claim, "title": "t" * size, "payload": {
-                                **claim["payload"], "evidence_refs": deepcopy(refs),
-                                **dict.fromkeys(("claim", "trigger", "consequence", "grounds"), "x" * size)}}
-                                    for _ in range(batch)]
+                                **claim["payload"], "line": 6, "evidence_refs": [*deepcopy(refs), {
+                                    "path": "api.py", "side": "new", "source_range": {"start": 6, "end": 6},
+                                    "basis": "source_inspection"}],
+                                **dict.fromkeys(("trigger", "consequence", "grounds"), "x" * size),
+                                "claim": "`PAD = 1` ".ljust(size, "x")}} for _ in range(batch)]
                             try:
                                 _charged(binding, "review_admit", {"targets": [], "claims": many})
                             except HostToolRejected as refusal:
@@ -1234,8 +1238,10 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
             report, = frozen.glob(".explicit/*/review-output.md")
             assert "Captured zero" in report.read_text()
             findings, = frozen.glob(".explicit/*/findings.json")
-            # Every admitted claim is a finding of an export that is full yet within its bound.
-            assert findings.stat().st_size > 1_000_000
+            # Every admitted claim is a finding of an export that is full yet within its bound, though the
+            # export relocates the line each filling claim cites.
+            assert findings.stat().st_size > 1_000_000 and sum(
+                "**Placement:**" in finding["body"] for finding in json.loads(findings.read_text())["findings"]) > 40
             exported = load_findings_artifact(
                 findings, expected_repo="captured/repository", expected_pr_number=1421,
                 expected_head_sha=envelope["provenance"]["head_sha"],

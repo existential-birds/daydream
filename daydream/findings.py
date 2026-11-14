@@ -313,7 +313,7 @@ def committed_export_bytes(coverage: dict[str, Any], immutable_input: dict[str, 
                            claims: list[dict[str, Any]]) -> int:
     """Counted bytes of a committed review's findings export if every claim became a finding.
 
-    An upper bound: each claim is an inline finding on a ten-digit line, and every scope and phase of
+    An upper bound: each claim is an inline finding relocated to a ten-digit line, and every scope and phase of
     ``coverage`` (unsealed, without target decisions, which the bound does not count) ends incomplete
     with every reason code.
     """
@@ -327,11 +327,15 @@ def committed_export_bytes(coverage: dict[str, Any], immutable_input: dict[str, 
         'uncovered_stacks': scopes, 'analysis_state': 'incomplete', 'reason_codes': reasons,
     }
     provenance = (immutable_input or {}).get('provenance', {})
+    posted = 10**10 - 1
+    issues = [_committed_issue(claim) for claim in claims]
+    for issue in issues:
+        pr_review._note_relocation(issue, posted)
     artifact = {
         'schema_version': IMMUTABLE_FINDINGS_SCHEMA_VERSION, 'repo': provenance.get('repository', 'r' * 256),
         'pr_number': provenance.get('pr_number', 2**63), 'head_sha': '0' * 64,
         'run_info': f"Committed review {coverage['run_id']}", 'kind': 'review', 'diagrams': None,
-        'findings': [_finding_dict(_committed_issue(claim), placement='inline', line=10**10 - 1) for claim in claims],
+        'findings': [_finding_dict(issue, placement='inline', line=posted) for issue in issues],
         'review_warnings': [], 'terminal_result': terminal,
         **({'immutable_input': immutable_input} if immutable_input is not None else {}),
     }
