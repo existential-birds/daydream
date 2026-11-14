@@ -1447,20 +1447,26 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
     The former 512-part refusal and whole inline inventory missed this regression:
     the population is computed before bounding, the system catalog is explicitly
     partial, and every frozen byte (including a multibyte line over 50 KB split into
-    continuation fragments) is reachable by charged lookups. A late discovery failure
-    keeps earlier admitted decisions and the challenged finding, types every
-    undecided target as unfinished, and cannot report complete coverage.
+    continuation fragments) is reachable by charged lookups. Discovery failures after
+    partial admissions keep the admitted decisions and the challenged finding, type
+    every undecided target as unfinished, and cannot report complete coverage.
 
     One conversation could not hold a change this size: under ``broad`` it is one
     assignment per batch, each handed its own targets' bytes, on an allowance and
-    a window that grow with the change up to the explicit profile's wall.
+    a window that grow with the change up to the operator profile's wall. Every third
+    assignment, and the one that holds the late marker, stops after admitting half
+    of its targets.
     """
     repo = tmp_path / "source"
-    # About 20k changed lines in more than 512 targets: each file's 36 hunks exceed one assignment and split.
+    # About 20k changed lines in more than 512 targets and 100 files: each of fifteen files' 36 hunks exceed
+    # one assignment and split, and 85 one-line files follow. Every dispatch re-reads the whole capture, so
+    # a population of several hundred files costs this test tens of seconds.
     base_files = {f"pkg/module_{index:02d}.py": "".join(f"BASE_{line} = 0\n" for line in range(288))
                   for index in range(15)}
     feature = {path: "".join(f"BASE_{line} = 0\n" + "".join(f"ITEM_{line}_{item} = {item}\n" for item in range(38))
                              * (line % 8 == 0) for line in range(288)) for path in base_files}
+    base_files.update({f"small/file_{index:02d}.py": "BASE = 0\n" for index in range(85)})
+    feature.update({f"small/file_{index:02d}.py": "BASE = 1\n" for index in range(85)})
     feature["zz_late/target.py"] = "LATE_MARKER = 'late'\n" + _LONG_LINE
     head = seed_feature_branch(repo, base=base_files, feature=feature)
     base = git(repo, "rev-parse", "main")
@@ -1504,19 +1510,23 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
                 observed.setdefault("supplied", []).append((prompt, [contents[target].decode() for target in own]))
                 value = {"targets": [{"target_id": target, "status": "reviewed", "reason": "", "evidence_refs": []}
                                      for target in own], "claims": []}
-                if late := [targets[target] for target in own if "LATE_MARKER" in contents[target].decode()]:
+                late = [targets[target] for target in own if "LATE_MARKER" in contents[target].decode()]
+                if late:
                     observed["late_refs"] = [{"source_id": next(option["source_id"]
                                                                 for option in late[0]["source_options"]
                                                                 if option["side"] == "new"),
                                               "basis": "supplied_diff", "source_range": None}]
-                    observed["unfinished"] = own[-1:]
-                    receipt = _charged(binding, "review_admit", {"targets": value["targets"][:-1], "claims": [{
+                    value["claims"] = [{
                         "uid": "", "revision": 0, "source_uids": [], "title": "Late marker value",
                         "payload": {"claim": "The late marker changes captured behavior.",
                                     "trigger": "Import the file.", "consequence": "The marker value is observed.",
                                     "grounds": "Late captured bytes.", "file": late[0]["file"], "line": None,
-                                    "evidence_refs": observed["late_refs"]}}]})
-                    assert receipt["progress"]["decided"] == len(own) - 1
+                                    "evidence_refs": observed["late_refs"]}}]
+                if late or int(assignment["work"]["work_id"].split(":")[1]) % 3 == 0:
+                    half = len(own) // 2
+                    observed.setdefault("unfinished", []).extend(own[half:])
+                    receipt = _charged(binding, "review_admit", {**value, "targets": value["targets"][:half]})
+                    assert receipt["progress"]["decided"] == half
                     raise PiError("native discovery failed after progressive admissions")
             binding.admit("final", "structured_output", value, terminal=True)
             accepted = binding.submit("final", value)
@@ -1560,16 +1570,26 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
     admitted = {e["target_id"] for e in entries} - set(observed["unfinished"])
     assert {t for t, d in decisions.items() if d["status"] == "reviewed"} == admitted
     undecided = [d for t, d in decisions.items() if t not in admitted]
-    assert undecided and all(d["status"] == "not_reviewed" and d["reason"].startswith("unsubmitted:")
-                             and d["evidence_refs"] == [] for d in undecided)
+    assert len(undecided) >= 100 and all(
+        d["status"] == "not_reviewed" and d["reason"].startswith("unsubmitted:") and d["evidence_refs"] == []
+        for d in undecided)
+    # Unfinished work is spread over most coverage scopes, each keeping what it admitted.
+    scopes = terminal["stack_outcomes"]
+    assert sum(scope["status"] == "incomplete" for scope in scopes) > len(scopes) / 2
     assert len(value["findings"]) == 1 and value["findings"][0]["payload"]["file"].endswith("target.py")
-    # The plan is one discovery assignment per batch under broad; the failed one is followed up.
+    # The plan is one discovery assignment per batch under broad. Each stopped assignment that admitted
+    # anything is followed up once; the follow-ups and the cross-assignment leave the rest undecided.
     local = [row for row in value["execution"] if row["assignment"] == "discovery"]
     assert value["settings"]["assignment_policy"] == {"name": "broad", "decomposed": True,
                                                      "planned_assignments": len(local), "cross_assignment": "required"}
+    stopped = [row for row in local if row["reason"]]
+    assert len(stopped) >= len(local) // 3 and all(
+        (row["reason"], row["accepted"]) == ("backend_failure", False) for row in stopped)
+    progressed = sum(record["kind"] == "discovery" and record["state"] == "superseded"
+                     and bool(record["admitted_targets"] or record["admitted_claims"]) for record in value["work"])
+    assert 20 <= progressed <= len(stopped)
     assert [e["assignment"] for e in value["execution"]] == [
-        *["discovery"] * len(local), "follow_up", "cross_assignment", "challenge"]
-    assert [(row["reason"], row["accepted"]) for row in local if row["reason"]] == [("backend_failure", False)]
+        *["discovery"] * len(local), *["follow_up"] * progressed, "cross_assignment", "challenge"]
     # Each first message supplies exactly its own targets' captured bytes, continuation fragments included.
     assert len(observed["supplied"]) == len(local)
     assert all(prompt.count(_SUPPLIED) == len(bodies) and all(body in prompt for body in bodies)
