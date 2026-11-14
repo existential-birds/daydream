@@ -205,6 +205,17 @@ digest, so their cached reviews miss. `settings.assignment_policy` records `name
 `decomposed` (which can be `true` under `broad`), `planned_assignments` and
 `cross_assignment` (`required` or `not_applicable`).
 
+Split discovery and follow-up work holds at most one batch, so its first message
+supplies each of its targets as a `review_source` call returns it: the target's
+description and `source_options` as JSON, then its captured change bytes, up to the
+first 32 KiB page with its `next_cursor`. Its starts go to investigation instead of
+fetching its own targets. The bytes are untrusted repository content exactly as a
+lookup result is, references to them keep `basis: "supplied_diff"`, and Pi's native
+capacity preflight counts them. They are not in the system instructions, which Codex
+and Claude deliver in [one argument](#codex-host-tools). One broad assignment, the
+cross-assignment and every challenge are supplied nothing and navigate with
+`review_source`.
+
 After the split, follow-up work inherits a closed local work's unfinished targets
 only when that work admitted progress; work that failed native-capacity preflight
 without progress is split in two instead. The host then always dispatches one

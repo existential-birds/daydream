@@ -59,6 +59,7 @@ from daydream.host_tools import (
     HostTool,
     HostToolBinding,
     HostToolCallBudgetExceeded,
+    HostToolEndpoint,
     HostToolFatal,
     HostToolRejected,
     NativeCapacityRequirement,
@@ -1326,6 +1327,13 @@ class _Schedule:
         settled = False
         try:
             await anyio.to_thread.run_sync(review.inputs._revalidate_canonical)
+            if self.decompose and kind in {"discovery", "follow_up"}:
+                # Split local work holds at most one batch: its targets fit the first message, in the
+                # blocks a review_source result has, so its share of starts goes to investigation.
+                for target in work.targets:
+                    prompt += "\n".join(["", "Supplied target, as review_source returns it:", *(
+                        HostToolEndpoint.result_blocks(review.lookup({"target_id": target, "path": None,
+                                                                      "cursor": None})))])
             _, _, stopped = await agent.run_agent(
                 backend,
                 repo,

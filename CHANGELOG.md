@@ -93,6 +93,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only for changes of two to four batches. A change of at most four batches whose diff is
   in the first tier is planned under `broad` exactly as before
   ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
+- A split discovery or follow-up assignment receives each of its targets in its first
+  message as `review_source` returns it, instead of fetching each with a charged call,
+  so its prompt and recorded trajectory are larger. This includes `adaptive` reviews of
+  two to four batches
+  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
 - Trace agent spans record each retry-ladder stop as a `daydream.retry.stop` event carrying
   the trajectory's `agent_budget_stop` fields as `daydream.retry.*`, with or without a
   trajectory recorder. The run span carries the run's GitHub repository and, when known,

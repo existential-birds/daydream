@@ -32,7 +32,7 @@ from daydream.committed_review_model import RESULT_VERSIONS, planned_work_id, va
 from daydream.deep.detection import StackAssignment
 from daydream.extensions.registry import Registry
 from daydream.git_ops.captured_source import capture_source
-from daydream.host_tools import HostToolBinding, HostToolFatal, HostToolRejected
+from daydream.host_tools import HostToolBinding, HostToolEndpoint, HostToolFatal, HostToolRejected
 from daydream.hosted_review import HostedReviewPolicy, UnsupportedHostedPolicy
 from daydream.hunk_index import write_hunk_index
 from daydream.immutable_review import ImmutableReviewInput
@@ -1395,8 +1395,8 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
     undecided target as unfinished, and cannot report complete coverage.
 
     One conversation could not hold a change this size: under ``broad`` it is one
-    assignment per batch, on an allowance and a window that grow with the change up
-    to the explicit profile's wall.
+    assignment per batch, each handed its own targets' bytes, on an allowance and
+    a window that grow with the change up to the explicit profile's wall.
     """
     repo = tmp_path / "source"
     # About 20k changed lines in more than 512 targets: each file's 36 hunks exceed one assignment and split.
@@ -1444,6 +1444,7 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
                 contents, targets = observed.setdefault("contents", {}), observed.setdefault("targets", {})
                 for target in own:
                     targets[target], contents[target] = _read_target(binding, target)
+                observed.setdefault("supplied", []).append((prompt, [contents[target].decode() for target in own]))
                 value = {"targets": [{"target_id": target, "status": "reviewed", "reason": "", "evidence_refs": []}
                                      for target in own], "claims": []}
                 if late := [targets[target] for target in own if "LATE_MARKER" in contents[target].decode()]:
@@ -1511,6 +1512,10 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
     assert [e["assignment"] for e in value["execution"]] == [
         *["discovery"] * len(local), "follow_up", "cross_assignment", "challenge"]
     assert [(row["reason"], row["accepted"]) for row in local if row["reason"]] == [("backend_failure", False)]
+    # Each first message supplies exactly its own targets' captured bytes, continuation fragments included.
+    assert len(observed["supplied"]) == len(local)
+    assert all(prompt.count(_SUPPLIED) == len(bodies) and all(body in prompt for body in bodies)
+               for prompt, bodies in observed["supplied"])
     # One allowance per four batches exceeds this diff's tier of 9: 8000 calls grow by it, discovery keeps
     # half and cross-assignment a quarter of that, and the rest is shared equally. The explicit profile's
     # 4500 s wall is a ceiling the 600 s window grows up to.
@@ -1771,6 +1776,7 @@ _SCENARIOS = ["empty-local", "follow-up", "evidence-free", "contention", "native
               "undecomposed"]
 # Planned batches of four one-hunk files for the scenarios over more than two batches.
 _SCALED = {"four-batches": 4, "five-batches-broad": 5, "five-batches-adaptive": 5}
+_SUPPLIED = "\nSupplied target, as review_source returns it:\n"
 
 
 @pytest.mark.parametrize("scenario", [*_SCENARIOS, *_SCALED])
@@ -1811,8 +1817,11 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
         work_id, targets = work["work_id"], work["targets"]["ids"]
         # Each dispatch's own ledger carries the host split; siblings never share a count.
         budget = kwargs["budget"]
+        lookup = binding.host_tools["review_source"].callback
         dispatches.append({**work, "binding": binding, "allocation": budget.limit, "deadline": budget.deadline,
-                           "claims": assignment["claims"],
+                           "claims": assignment["claims"], "prompt": prompt, "returned": [
+                               "\n".join(HostToolEndpoint.result_blocks(lookup(
+                                   {"target_id": target, "path": None, "cursor": None}))) for target in targets],
                            "author_context": assignment["profile"].get("historical_context")})
         if scenario == "native-capacity" and work_id == "work:1":
             # The assignment cannot fit the native model before provider work; the host splits it.
@@ -1934,6 +1943,9 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
     credited = [t for r in value["work"] for t in r["admitted_targets"]]
     assert sorted(credited) == sorted(p["target_id"] for p in value["assignments"])  # Each credited once.
     assert result.complete and value["terminal_result"]["required_phases"] == ["challenge", "cross_assignment"]
+    # Split local work is handed each of its targets as review_source returns it; no other work is.
+    assert [d["prompt"].split(_SUPPLIED)[1:] for d in dispatches] == [
+        d["returned"] if split and d["kind"] in {"discovery", "follow_up"} else [] for d in dispatches]
     limits = value["settings"]["limits"]
     scaled = {key: limits[key] for key in ("scale", "tool_calls", "effective_tool_calls", "investigation_s")}
     if not split:
@@ -1970,6 +1982,9 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
             allocations)
         # An explicit profile's wall is not reached: the window is min(2 * 90 + 120, 4500) - 120.
         assert limits["effective_investigation_s"] == pytest.approx(180)
+        first = next(d for d in dispatches if d["work_id"] == "work:1")
+        assert first["targets"]["ids"] == ["a.py", "b.py", "c.py", "d.py"]
+        assert "+    return total / (count - 1)\n" in first["prompt"] and '"basis":"supplied_diff"' in first["prompt"]
     else:
         # 40 calls: investigation 20 = local 15 (shares 8/7) + protected cross 5; challenge keeps 20.
         assert scaled == {"scale": 1, "tool_calls": 40, "effective_tool_calls": 40, "investigation_s": 90}
