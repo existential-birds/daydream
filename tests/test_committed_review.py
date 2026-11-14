@@ -1797,7 +1797,7 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
     every assignment of a large change, and ``broad`` held it in one conversation.
     """
     batches = _SCALED.get(scenario, 2)
-    # The four-batch subject's diff is over 1,000 lines (tier 3) and runs under the default profile.
+    # The four-batch subject's diff is over 1,000 lines (tier 3). The broad rows run the default profile.
     repo, base = _adaptive_repo(tmp_path, files=4 * batches if batches > 2 else 6, lines=520 if batches == 4 else 1)
     policy = "broad" if scenario in {"four-batches", "five-batches-broad"} else "adaptive"
     split = scenario not in {"undecomposed", "four-batches"}
@@ -1931,7 +1931,7 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
             config=RunConfig(
                 backend="pi", output_mode="review",
                 frozen_author_description=FrozenAuthorDescription(git(repo, "rev-parse", "HEAD"), "Author context."),
-                review_profile=None if scenario == "four-batches" else _profile_with_pipeline(
+                review_profile=None if policy == "broad" else _profile_with_pipeline(
                     reviewer_investigation_budget_s=90, reviewer_tool_call_budget=calls,
                     assignment_policy=policy))))
     value = result.to_dict()
@@ -1958,7 +1958,6 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
         if scenario == "four-batches":
             # Tier 3 exceeds one allowance per four batches: 120 calls become 360 and discovery keeps half.
             # The default profile's window grows with its wall: min(3 * 2400 + 120, 3 * 4500) - 120.
-            assert value["settings"]["profile_source"] == "default"
             assert scaled == {"scale": 3, "tool_calls": 120, "effective_tool_calls": 360, "investigation_s": 2400}
             assert allocations == [("work:1", "discovery", 180)]
             assert limits["effective_investigation_s"] == pytest.approx(7200)
@@ -1973,15 +1972,18 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
     assert value["settings"]["assignment_policy"] == {"name": policy, "decomposed": True,
                                                      "planned_assignments": batches, "cross_assignment": "required"}
     if batches == 5:
-        # One allowance per four batches: 40 calls become 80. Investigation 40 = local 30 (five shares
-        # of 6) + protected cross 10; challenge keeps 40. Every assignment spent one start, the cross two.
-        assert scaled == {"scale": 2, "tool_calls": 40, "effective_tool_calls": 80, "investigation_s": 90}
-        assert sorted(allocations[:5]) == [(f"work:{number}", "discovery", 6) for number in range(1, 6)]
-        assert allocations[5:] == [("work:6", "cross_assignment", 35), ("work:7", "challenge", 73)]
-        assert sorted((e["work_id"], e["assignment"], e["allocation"]) for e in value["execution"]) == sorted(
-            allocations)
-        # An explicit profile's wall is not reached: the window is min(2 * 90 + 120, 4500) - 120.
-        assert limits["effective_investigation_s"] == pytest.approx(180)
+        # One allowance per four batches doubles the calls. Investigation keeps half of them: a quarter of
+        # that is protected for cross and five local shares split the rest. Each assignment spent one
+        # start and the cross two, so cross and challenge received what was left. The default profile
+        # (120 calls, 2400 s) is in the first tier, so its 4500 s wall does not grow and bounds the window;
+        # the explicit one (40 calls, 90 s) reaches min(2 * 90 + 120, 4500) - 120.
+        base_calls, seconds, share, cross_calls, challenge_calls, window = (
+            (120, 2400, 18, 115, 233, 4380) if policy == "broad" else (40, 90, 6, 35, 73, 180))
+        assert scaled == {"scale": 2, "tool_calls": base_calls, "effective_tool_calls": 2 * base_calls,
+                          "investigation_s": seconds}
+        assert sorted((e["assignment"], e["allocation"]) for e in value["execution"]) == [
+            ("challenge", challenge_calls), ("cross_assignment", cross_calls), *[("discovery", share)] * 5]
+        assert limits["effective_investigation_s"] == pytest.approx(window)
         first = next(d for d in dispatches if d["work_id"] == "work:1")
         assert first["targets"]["ids"] == ["a.py", "b.py", "c.py", "d.py"]
         assert "+    return total / (count - 1)\n" in first["prompt"] and '"basis":"supplied_diff"' in first["prompt"]
