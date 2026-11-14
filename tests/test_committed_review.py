@@ -1589,8 +1589,9 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
     oversized batches are refused, and sealing types undecided targets per target.
     A final batch rejected on the reserved start was fatal, named one violation and lost
     every decision in it: a batch of that shape (128 decisions, 105 valid alone) is now
-    correctable, installs nothing while its work is live, and keeps its valid items only
-    once the work closes unaccepted, as a challenge's rejected final batch keeps its verdict.
+    correctable and installs nothing while its work is live. Once the work closes
+    unaccepted it keeps what it would have done unchanged: its valid items, without the
+    reviewed decision beside a refused claim, as a challenge's batch keeps its verdict.
     """
     review = Review(review_inputs, "domain")
     binding = _assign(review, "discovery")

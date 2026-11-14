@@ -504,7 +504,7 @@ class Review:
                 withdrawn: set[str] = set()
 
                 def each(check: Callable[[dict[str, Any]], None], name: str) -> None:
-                    """Check every item alone: a rejection names each violation, and salvage keeps the rest."""
+                    """Check every item alone: a rejection counts each violation, and salvage starts from the rest."""
                     for index, item in enumerate(canonical[name]):
                         identity = item.get("target_id") or item.get("uid") or f"{name}[{index}]"
                         try:
