@@ -156,7 +156,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attribute and a custom step's `config.output_mode` read `review` instead of `loop`
   unless the caller sets a mode, and a caller that explicitly passes a non-fixing mode to
   one of them now records `review_only` as false and, for a custom flow, gets its `.env`
-  and `--copy` files in an operational worktree; see
+  and `--copy` files in an operational worktree. The recorded `deep` label is now false
+  only when the single-stack fixing mode ran, so a review requested with `--shallow` is
+  recorded as the full review it runs; see
   [fixing selection](docs/runtime.md#validation-and-repair)
   ([#1641](https://github.com/existential-birds/daydream/issues/1641)).
 - **Breaking (0.y.z):** Time and tool-call budgets live on one host ledger per

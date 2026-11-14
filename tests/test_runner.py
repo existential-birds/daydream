@@ -845,3 +845,6 @@ def test_manifest_identity_preserves_mode_capabilities(tmp_path: Path, flow: Day
     assert identity.phases.merge is (flow in (DaydreamRunFlow.NORMAL, DaydreamRunFlow.DEEP, DaydreamRunFlow.TTT))
     assert identity.phases.push is runs_test
     assert identity.phases.remote_ci is runs_test
+    # The labels follow the mode that ran: a review requested with shallow=True is still the full review.
+    review = capture_manifest_run_identity(RunConfig(shallow=True), DaydreamRunFlow.TTT, build_registry(), tmp_path)
+    assert (review.deep, review.review_only) == (True, True)
