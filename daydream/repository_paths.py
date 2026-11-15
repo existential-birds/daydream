@@ -1,8 +1,9 @@
 """Shared path grammar, filesystem confinement, and lexical test-path detection.
 
 Model-produced paths are untrusted. Core review and improve share these rules;
-Git-observed paths, including a finding's file from the captured change, are only
-confined by ``git_observed_path_is_confined``: any legal Git name passes."""
+Git-observed paths, including a finding's file from the captured change, skip the
+grammar: ``git_observed_path_is_confined`` refuses only absolute, empty, dot, dot-dot
+or NUL spellings and symlink crossings (a leaf symlink only without allow_leaf_symlink)."""
 
 from __future__ import annotations
 
