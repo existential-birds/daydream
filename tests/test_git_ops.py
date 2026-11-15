@@ -1088,9 +1088,10 @@ def test_feature_history_diff_and_publication_follow_the_same_commit_window(tmp_
     assert " line 5\n" not in focused and " line 5\n" in broad
     full = git_ops.diff(repo, "main")
     excluded = git_ops.diff(repo, "main", exclude=["drop.txt"])
-    # Bytes that are not UTF-8 read as U+FFFD, the same in the hosted route's diff of the commits.
+    # Bytes that are not UTF-8 read as U+FFFD, the same in the hosted route's diff and in a path diff.
     assert "keep.txt" in full and "+keep caf\ufffd\n" in full and "drop.txt" in full
     assert "+keep caf\ufffd\n" in immutable.immutable_review_diff(repo, common, tip)
+    assert "+keep caf\ufffd\n" in git_ops.diff_paths(repo, "main", "HEAD", ["keep.txt"], merge_base_diff=True)
     assert "HEAD/module.py" in full and "+VALUE = 1" in full
     assert "keep.txt" in excluded and "drop.txt" not in excluded
     assert not git_ops.remote_contains_commit(repo, "feat/slash-name", tip)
