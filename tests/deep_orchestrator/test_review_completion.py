@@ -359,8 +359,8 @@ async def test_atomic_public_failure(
 
 # Source-loss and replacement-checkout rows are runner rows: only the real terminal export after
 # admission can lose its checkout, read retained bytes, and install privately.
-@pytest.mark.parametrize('fault', ['coverage', 'fix', 'projection', 'unconfined-path', 'report', 'pipeline',
-                                   'source-loss', 'placement-replacement-worktree', 'publication'])
+@pytest.mark.parametrize('fault', ['coverage', 'fix', 'projection', 'unconfined-path', 'retired-lens', 'report',
+                                   'pipeline', 'source-loss', 'placement-replacement-worktree', 'publication'])
 async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str) -> None:
     """A failure after admission publishes typed coverage atomically, never live or replaced Git."""
     force_worktree = fault.endswith('-worktree')
@@ -398,14 +398,17 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         return allocate(*args, **kwargs)
     def faulty_read(path: Path, *args: Any, **kwargs: Any) -> str:
         text = read(path, *args, **kwargs)
-        if path.name != 'merged-items.json' or fault not in ('projection', 'unconfined-path'):
+        if path.name != 'merged-items.json' or fault not in ('projection', 'unconfined-path', 'retired-lens'):
             return text
         if fault == 'projection':
             return '{"items": "invalid"}'
-        # An extension step rewrote the items onto paths outside the repository.
+        # An extension step rewrote the items onto paths outside the repository, or onto a retired lens.
         payload = json.loads(text)
         for item in payload['items']:
-            item['file'] = '../' + item['file']
+            if fault == 'retired-lens':
+                item['lens'] = 'wonder'
+            else:
+                item['file'] = '../' + item['file']
         return json.dumps(payload)
     def retained_source_only(target: Path, *args: Any, **kwargs: Any) -> bytes:
         if target == review.repo and fault == 'source-loss' and state['failed']:
@@ -506,8 +509,8 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         with pytest.raises(FindingsValidationError):
             review.load()
         return
-    if fault == 'unconfined-path':
-        # The confirmed finding is never delivered on an unconfined path; the sealed result keeps it.
+    if fault in ('unconfined-path', 'retired-lens'):
+        # The confirmed finding is never delivered on an unconfined path or a retired lens; the sealed result keeps it.
         data = review.load()
         result = data['terminal_result']
         assert data['findings'] == [] and result['reason_codes'] == ['malformed_artifact']
