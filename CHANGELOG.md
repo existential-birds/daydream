@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The committed-review tests now pin the immutable review envelope's UTF-8 byte bounds for
+  `title`, `body` and `context` (512, 8,192 and 65,536 bytes) from both sides, and every fault arm
+  of their case helpers is either exercised or deleted. Newly exercised rows cover refusals no
+  test protected before, including a review diff key that does not match the reconstructed diff
+  and blank hosted provider or model names. Test-only; no runtime behaviour changes
+  ([#1826](https://github.com/existential-birds/daydream/issues/1826),
+  [#1827](https://github.com/existential-birds/daydream/issues/1827)).
+
 ### Removed
 
 - This repository no longer runs its own Daydream review bot: its repository-only
