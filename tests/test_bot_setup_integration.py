@@ -1,16 +1,22 @@
 """Real Git/gh setup tests; only the live browser exchange is replaced."""
+import re
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import daydream
 from daydream import bot_manifest, bot_setup, config, git_ops
 from daydream.github_app import APP_ID_ENV, APP_PRIVATE_KEY_ENV, AppCredentials, GitHubAppError
-from daydream.templates import workflow_template_files
+from daydream.templates import render_workflow, workflow_template_files
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit as _commit, git as _git
 from tests.harness.rsa import generate_rsa_pem
 from tests.harness.scripts import cli_main
+
+# The running release's tag lookup and the commit it resolves to.
+_RELEASE_TAG = f"repos/existential-birds/daydream/commits/refs/tags/v{daydream.__version__}"
+_RELEASE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
 
 
 def _install_workflows(
@@ -24,7 +30,7 @@ def _install_workflows(
     workflows_dir = repo / ".github/workflows"
     workflows_dir.mkdir(parents=True)
     for template in workflow_template_files():
-        content = template.read_text()
+        content = render_workflow(template, _RELEASE_COMMIT)
         if drift is not None and template.name == drift[0]:
             if unique:
                 assert content.count(drift[1]) == 1, f"{template.name}: anchor no longer present"
@@ -75,10 +81,10 @@ def test_land_workflows_idempotent_returns_sentinel_when_all_present(fake_gh: Fa
     wf.mkdir(parents=True)
 
     for template in workflow_template_files():
-        (wf / template.name).write_text(template.read_text())
+        (wf / template.name).write_text(render_workflow(template, _RELEASE_COMMIT))
 
     default = git_ops.default_branch(repo_with_origin)
-    result = bot_setup.land_workflows(repo_with_origin, branch="daydream/setup-bot")
+    result = bot_setup.land_workflows(repo_with_origin, branch="daydream/setup-bot", commit=_RELEASE_COMMIT)
 
     assert result == bot_setup.WORKFLOWS_ALREADY_INSTALLED
     # Sentinel must be distinguishable from a PR URL; no branch/PR side effects.
@@ -91,10 +97,14 @@ def test_land_workflows_idempotent_returns_sentinel_when_all_present(fake_gh: Fa
 def test_verify_healthy_install_passes_all_checks(
     fake_gh: FakeGh, repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The real doctor reports each incomplete installation stage until external repair."""
+    """The real doctor reports each incomplete installation stage until external repair.
+
+    Workflows pinned to the running release's tag commit match; another release reads them as customized.
+    """
     pem = generate_rsa_pem()
     monkeypatch.setattr(bot_setup, "run_setup", lambda *a, **kw: pytest.fail("--verify must remain read-only"))
 
+    fake_gh.set_response("GET", _RELEASE_TAG, value={"sha": _RELEASE_COMMIT})
     fake_gh.serve_secret_list(["DAYDREAM_APP_ID", "ANTHROPIC_API_KEY"])
     fake_gh.serve_variable_list([])
     fake_gh.serve_installations([{"account": {"login": "o"}}])
@@ -125,9 +135,22 @@ def test_verify_healthy_install_passes_all_checks(
     result = bot_setup.run_verify(repo_with_origin, scope=bot_setup.Scope(repo="o/r"))
     assert result.ok is True
     assert all(c.passed for c in result.checks)
+    assert result.checks[-1].detail == "All workflow files match on 'main'."
     assert fake_gh.calls("GET", "/app/installations")
     assert fake_gh.secret_set_calls() == []
     assert fake_gh.variable_set_calls() == []
+
+    monkeypatch.setattr(daydream, "__version__", "0.1.0")
+    fake_gh.set_response(
+        "GET", "repos/existential-birds/daydream/commits/refs/tags/v0.1.0", value={"sha": "f" * 40},
+    )
+    other_release = bot_setup.run_verify(repo_with_origin, scope=bot_setup.Scope(repo="o/r"))
+    assert other_release.ok is True
+    assert other_release.checks[-1].detail == (
+        "Workflow file(s) on 'main' are customized variants: .github/workflows/daydream-post.yml, "
+        ".github/workflows/daydream-review.yml. Customization is intentionally unsupported — `daydream setup` "
+        "replaces them with the packaged templates."
+    )
 
 @pytest.mark.parametrize(("target", "old", "new"),
     [pytest.param("daydream-review.yml",
@@ -145,6 +168,7 @@ def test_verify_rejects_workflow_that_loosens_the_command_contract(
 ) -> None:
     """Reject automatic PR review, an unbounded command selector, and missing approved-head binding."""
 
+    fake_gh.set_response("GET", _RELEASE_TAG, value={"sha": _RELEASE_COMMIT})
     _install_workflows(repo_with_origin, drift=(target, old, new), message="add loosened workflows")
 
     result = bot_setup.run_verify(repo_with_origin, scope=bot_setup.Scope(repo="o/r"))
@@ -158,6 +182,7 @@ def test_verify_accepts_customized_workflow_with_intact_gate(fake_gh: FakeGh, re
     """A divergent-but-gated workflow (e.g. a different backend) passes with a warning."""
     fake_gh.serve_secret_list(list(config.SETUP_SECRET_NAMES))
     fake_gh.serve_variable_list([config.BOT_HANDLE_VAR])
+    fake_gh.set_response("GET", _RELEASE_TAG, value={"sha": _RELEASE_COMMIT})
 
     _install_workflows(repo_with_origin,
         # Backend-variant customization: the gate (approved_head_sha input,
@@ -194,12 +219,12 @@ def test_land_workflows_warns_before_overwriting_customized_workflow(
     fake_gh.set_response("pr-list", value=[])
 
     review_template = next(t for t in workflow_template_files() if t.name == "daydream-review.yml")
-    url = bot_setup.land_workflows(repo_with_origin, branch="daydream/setup-bot")
+    url = bot_setup.land_workflows(repo_with_origin, branch="daydream/setup-bot", commit=_RELEASE_COMMIT)
 
     assert url != bot_setup.WORKFLOWS_ALREADY_INSTALLED
     assert any("daydream-review.yml" in w and "intentionally unsupported" in w for w in warnings)
     # The customization was replaced by the packaged template on the branch.
-    assert (workflows_dir / "daydream-review.yml").read_text() == review_template.read_text()
+    assert (workflows_dir / "daydream-review.yml").read_text() == render_workflow(review_template, _RELEASE_COMMIT)
 
 
 
@@ -209,24 +234,39 @@ def test_setup_verb_full_auto_deposits_secrets_and_opens_pr(
 ) -> None:
     """Run the setup CLI with real Git/gh and a minted PEM; replace only the browser exchange."""
     pem = generate_rsa_pem()
-    monkeypatch.setattr(
-        "daydream.bot_setup.register_app_via_manifest", lambda repo, org=None: (AppCredentials(7, pem), "acme-bot"),
-    )
+    registered: list[Path] = []
+
+    def _register(repo: Path, org: str | None = None) -> tuple[AppCredentials, str]:
+        registered.append(repo)
+        return AppCredentials(7, pem), "acme-bot"
+
+    monkeypatch.setattr("daydream.bot_setup.register_app_via_manifest", _register)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
     # App already installed on the owner → the Install-click wait is satisfied.
     fake_gh.serve_installations([{"account": {"login": "o"}}])
     fake_gh.set_response("pr-list", value=[])
     fake_gh.set_response("pr-create", value="https://github.com/o/r/pull/5")
 
+    # A build whose version has no release tag refuses before registering or depositing anything.
+    assert cli_main(["setup", str(repo_with_origin), "--repo", "o/r"]) == 1
+    refused = " ".join(capsys.readouterr().out.replace("║", " ").split())
+    assert f"Could not resolve Daydream release tag v{daydream.__version__}" in refused
+    assert "run setup from a released Daydream" in refused
+    assert registered == [] and fake_gh.secret_set_calls() == []
+
+    fake_gh.set_response("GET", _RELEASE_TAG, value={"sha": _RELEASE_COMMIT})
     code = cli_main(["setup", str(repo_with_origin), "--repo", "o/r"])
 
-    assert code == 0
+    assert code == 0 and registered == [repo_with_origin]
     assert {c.name for c in fake_gh.secret_set_calls()} == set(config.SETUP_SECRET_NAMES)
     variable = fake_gh.variable_set_calls()[-1]
     assert variable.name == config.BOT_HANDLE_VAR
     assert variable.argv[variable.argv.index("--body") + 1] == "acme-bot"
     wf = repo_with_origin / ".github/workflows"
-    assert {p.name for p in wf.glob("*.yml")} == {"daydream-review.yml", "daydream-command.yml", "daydream-post.yml"}
+    # Producer and poster install the release that ran setup, at its tag's commit.
+    assert {p.name: re.findall(r"existential-birds/daydream@(\S+)", p.read_text()) for p in wf.glob("*.yml")} == {
+        "daydream-review.yml": [_RELEASE_COMMIT], "daydream-post.yml": [_RELEASE_COMMIT], "daydream-command.yml": [],
+    }
     # The bot goes live on merge: a reviewable PR was opened on a non-default branch.
     pr_calls = fake_gh.command_calls("pr create")
     assert len(pr_calls) == 1

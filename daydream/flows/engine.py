@@ -138,7 +138,7 @@ async def _run_step(step: FlowStep, ctx: FlowContext) -> Stop | BreakLoop | None
     if step.enabled is not None and not step.enabled(ctx):
         return None
     with step_scope(
-        step.name, phase=step.phase_key, iteration=ctx.data.get("iteration"), stack=ctx.config.stack,
+        step.name, phase=step.phase_key, iteration=ctx.data.get("iteration"),
     ) as observed:
         result = await step.run(ctx)
         observed.finish(result.exit_code if isinstance(result, Stop) else 0)

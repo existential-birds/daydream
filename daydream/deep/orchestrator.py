@@ -133,8 +133,6 @@ def _resolve_mode(config: RunConfig) -> str:
     spine's preamble but runs the two-step ``diagram`` flow. Only ``output_mode="loop"``
     selects the fixing mode ``loop``.
     """
-    if config.flow_name == "review":
-        return "review"
     if config.output_mode in ("diagram", "review", "comment"):
         return config.output_mode
     return "loop"

@@ -15,12 +15,18 @@ from typing import Any
 import yaml
 
 from daydream import config
+from daydream.templates import render_workflow
 from tests.harness.workflows import job_steps, load_workflow, workflow_triggers
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = _REPO_ROOT / "daydream" / "templates" / "workflows"
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
 _PINNED_ACTION_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
+_PINNED_INSTALL_RE = re.compile(
+    r"uv tool install --python 3\.14 git\+https://github\.com/existential-birds/daydream@([0-9a-f]{40})"
+)
+# Templates are checked as `daydream setup` renders them, pinned to a release commit.
+_RELEASE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
 _EVENT_INTERP = re.compile(r"\$\{\{[^}]*github\.event\.(comment|issue|pull_request|workflow_run|review)[^}]*\}\}")
 
 
@@ -73,21 +79,32 @@ def _assert_single_reject_funnel(run: str, *, label: str) -> None:
 
 
 def _assert_execution_policy(*workflows: dict[str, Any]) -> None:
-    """Each job in the bundle keeps hosted runners, pinned actions and env-only event input."""
+    """Each job in the bundle keeps hosted runners, pinned actions and env-only event input.
+
+    Every Daydream install, producer and poster alike, pins the full release commit.
+    """
+    pins: list[str] = []
     for workflow in workflows:
         for job in workflow["jobs"].values():
             assert job["runs-on"] == "ubuntu-24.04"
             assert not any(_EVENT_INTERP.search(step.get("run", "")) for step in job["steps"])
+            for step in job["steps"]:
+                if "uv tool install" in step.get("run", ""):
+                    install = _PINNED_INSTALL_RE.fullmatch(step["run"])
+                    assert install, step["run"]
+                    pins.append(install.group(1))
         for reference in _action_references(workflow):
             assert reference.startswith("./") or _PINNED_ACTION_RE.fullmatch(reference), reference
+    assert pins == [_RELEASE_COMMIT] * 2
 
 
 def test_split_bundle_binds_approval_review_artifacts_and_posting() -> None:
     """The packaged three-file bundle joins immutable approval to unprivileged review and App-only posting."""
-    texts = {role: (TEMPLATES_DIR / f"daydream-{role}.yml").read_text() for role in ("command", "review", "post")}
-    command, review, post = (
-        load_workflow(TEMPLATES_DIR / f"daydream-{role}.yml") for role in ("command", "review", "post")
-    )
+    texts = {
+        role: render_workflow(TEMPLATES_DIR / f"daydream-{role}.yml", _RELEASE_COMMIT)
+        for role in ("command", "review", "post")
+    }
+    command, review, post = (yaml.safe_load(texts[role]) for role in ("command", "review", "post"))
     _assert_execution_policy(command, review, post)
     assert {role: set(_SECRET_REF_RE.findall(text)) for role, text in texts.items()} == {
         "command": {"DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY"},
@@ -199,8 +216,8 @@ def test_split_bundle_binds_approval_review_artifacts_and_posting() -> None:
 
 def test_single_bundle_joins_gate_analyze_and_privileged_publication() -> None:
     path = TEMPLATES_DIR / "single" / "daydream.yml"
-    text = path.read_text()
-    wf = load_workflow(path)
+    text = render_workflow(path, _RELEASE_COMMIT)
+    wf = yaml.safe_load(text)
     _assert_execution_policy(wf)
     assert "pull_request" not in workflow_triggers(wf)
     # `daydream setup` provisions exactly the secrets and handle variable this template reads.

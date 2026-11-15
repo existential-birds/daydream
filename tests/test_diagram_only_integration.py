@@ -2,7 +2,7 @@
 
 Mock only the backend and gh subprocess boundaries. Cover preserved deep
 artifacts, honest manifest labels, empty/base-branch runs, and issue-comment
-publication. CLI --start-at rejection is covered in test_cli.py."""
+publication."""
 
 from __future__ import annotations
 
