@@ -30,6 +30,7 @@ RUNS_COLUMNS: tuple[RunColumn, ...] = (
     RunColumn("model", "TEXT"),
     RunColumn("backend", "TEXT NOT NULL DEFAULT 'claude'"),
     RunColumn("review_backend", "TEXT"),
+    RunColumn("review_model", "TEXT"),
     RunColumn("fix_backend", "TEXT"),
     RunColumn("test_backend", "TEXT"),
     RunColumn("review_only", "INTEGER NOT NULL DEFAULT 0"),

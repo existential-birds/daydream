@@ -149,7 +149,7 @@ def _scenario(forks: int, body_kb: int, turns: int, root_invocations: int) -> di
             render_run_info_block(collect_trajectory_paths(default_trajectory_path(frozen, SESSION).parent))
         (tmp / "source").mkdir()
         identity = ManifestRunIdentity(
-            model=None, backend="claude", review_backend=None, fix_backend=None, test_backend=None,
+            model=None, backend="claude", review_backend=None, review_model=None, fix_backend=None, test_backend=None,
             review_only=True, deep=True, profile=None,
             phases=RunPhaseCapabilities(merge=True, fix=False, test=False, push=False, remote_ci=False),
         )

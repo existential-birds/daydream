@@ -824,8 +824,10 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
 @pytest.mark.parametrize(
     'flow', [DaydreamRunFlow.PR, ]
 )
-def test_manifest_identity_preserves_mode_capabilities(flow: DaydreamRunFlow) -> None:
-    identity = capture_manifest_run_identity(RunConfig(fix_backend="codex", test_backend="pi"), flow, build_registry())
+def test_manifest_identity_preserves_mode_capabilities(tmp_path: Path, flow: DaydreamRunFlow) -> None:
+    identity = capture_manifest_run_identity(
+        RunConfig(fix_backend="codex", test_backend="pi"), flow, build_registry(), tmp_path,
+    )
     runs_fix = flow in (DaydreamRunFlow.NORMAL, DaydreamRunFlow.DEEP, DaydreamRunFlow.PR)
     runs_test = flow in (DaydreamRunFlow.NORMAL, DaydreamRunFlow.DEEP)
     assert identity.fix_backend == ("codex" if runs_fix else None)
@@ -836,5 +838,5 @@ def test_manifest_identity_preserves_mode_capabilities(flow: DaydreamRunFlow) ->
     assert identity.phases.push is runs_test
     assert identity.phases.remote_ci is runs_test
     # The labels follow the mode that ran.
-    review = capture_manifest_run_identity(RunConfig(), DaydreamRunFlow.TTT, build_registry())
+    review = capture_manifest_run_identity(RunConfig(), DaydreamRunFlow.TTT, build_registry(), tmp_path)
     assert (review.deep, review.review_only) == (True, True)

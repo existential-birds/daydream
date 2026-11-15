@@ -49,6 +49,7 @@ class ManifestRunIdentity:
     model: str | None
     backend: str
     review_backend: str | None
+    review_model: str | None
     fix_backend: str | None
     test_backend: str | None
     review_only: bool

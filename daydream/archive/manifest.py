@@ -79,9 +79,9 @@ def _omit_falsy(**fields: Any) -> dict[str, Any]:
 class Manifest:
     """Archive metadata with separate executable, repository, and workflow provenance.
 
-    ``backend`` is the general default. ``review_backend`` records an override
-    marker, which a CLI default may mask; fix/test fields record effective
-    backends only for executed phases.
+    ``backend`` is the general default. Review backend/model identify the review phase
+    that ran, including the Pi default, and are absent for flows without a review;
+    fix/test fields record effective backends only for executed phases.
 
     Missing metrics mean uncomputed or undefined, never an imputed zero.
     ``location_in_hunk_rate`` scores the originally cited line before snapping;
@@ -123,6 +123,7 @@ class Manifest:
     model: str | None = None
     backend: str = "claude"
     review_backend: str | None = None
+    review_model: str | None = None
     fix_backend: str | None = None
     test_backend: str | None = None
     review_only: bool = False
@@ -193,6 +194,7 @@ class Manifest:
                 "backend": self.backend,
                 **_omit_falsy(
                     review_backend=self.review_backend,
+                    review_model=self.review_model,
                     fix_backend=self.fix_backend,
                     test_backend=self.test_backend,
                 ),
@@ -278,6 +280,7 @@ def build_manifest_from_snapshot(
         model=identity.model,
         backend=identity.backend,
         review_backend=identity.review_backend,
+        review_model=identity.review_model,
         fix_backend=identity.fix_backend,
         test_backend=identity.test_backend,
         archive_status=status,

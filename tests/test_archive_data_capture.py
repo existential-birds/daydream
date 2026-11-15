@@ -155,11 +155,12 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert verdict["passed"] and all(attempt["kind"] == "host" for attempt in verdict["attempts"])
 
     # Stored records name the reviewer that ran: discovery on the review phase's backend, not on a phase
-    # table this build ignores. A version 3 manifest names no per-stack reviewer or skill.
+    # table this build ignores. A version 3 manifest and index name it as the review, with no per-stack name or skill.
     review_model = _resolved_model(RunConfig(backend="pi", review_backend="codex"), "review")
     assert trajectory["extra"]["review_backend"] == "codex"
     recorded = manifest["run"]
-    assert recorded["review_backend"] == "codex" and manifest["schema_version"] == "3.0"
+    assert (recorded["review_backend"], recorded["review_model"], manifest["schema_version"]) == (
+        "codex", review_model, "3.0")
     assert not {"skill", "per_stack_review_backend", "per_stack_review_model"} & recorded.keys()
     metrics = manifest["metrics"]
     assert "grounding_rate" not in metrics
@@ -168,8 +169,9 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert metrics["cost_per_finding_usd"] is not None
     assert metrics["erosion"] == metrics["verbosity"] == 0.0
     with closing(sqlite3.connect(archive_dir / "index.db")) as connection:
-        row = connection.execute("SELECT erosion, verbosity, total_findings, cost_per_finding_usd FROM runs").fetchone()
-    assert row == (0.0, 0.0, metrics["total_findings"], metrics["cost_per_finding_usd"])
+        row = connection.execute("SELECT erosion, verbosity, total_findings, cost_per_finding_usd, review_backend, "
+                                 "review_model FROM runs").fetchone()
+    assert row == (0.0, 0.0, metrics["total_findings"], metrics["cost_per_finding_usd"], "codex", review_model)
     assert (run_dir / "evaluation.json").is_file()
     assert manifest["phase_states"]["merge"] == {"ran": True, "status": "succeeded"}
     assert manifest["pipeline_status"] == "succeeded"

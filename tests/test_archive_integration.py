@@ -45,7 +45,7 @@ def _finalize_strict_archive(recorder: TrajectoryRecorder, snapshot: RunWriteSna
     finalize_archive_run(run=ArchiveRunSnapshot(recorder_provenance=archive_recorder_provenance_from_snapshot(
                 write_snapshot=snapshot, run_flow=recorder.run_flow,
             ),
-            identity=ManifestRunIdentity(model=None, backend="claude", review_backend=None,
+            identity=ManifestRunIdentity(model=None, backend="claude", review_backend=None, review_model=None,
                 fix_backend="claude" if recorder.run_flow is DaydreamRunFlow.NORMAL else None,
                 test_backend="claude" if recorder.run_flow is DaydreamRunFlow.NORMAL else None,
                 review_only=False,

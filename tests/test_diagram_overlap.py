@@ -135,3 +135,15 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
         assert await runner.run(stale, execution=execution, private_roots=roots) == 1
         assert "does not match analyzed HEAD" in " ".join(capsys.readouterr().out.replace("│", " ").split())
         assert len(backend.calls) == calls
+        # The archived reviewer model is read with the execution input of the backend that reviews.
+        pi_home = tmp_path / "pi-home"
+        (pi_home / ".pi/agent").mkdir(parents=True)
+        (pi_home / ".pi/agent/settings.json").write_text('{"defaultModel": "embedded-pi-default"}')
+        inputs["pi"] = BackendExecutionInput.from_environment({**environment, "HOME": str(pi_home)}, backend="pi")
+        monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(tmp_path / "archive"))
+        on_pi = replace(config, archive=True, file_config=DaydreamFileConfig(
+            backend="codex", phases={"review": {"backend": "pi"}}))
+        assert await runner.run(on_pi, execution=replace(execution, backends={"pi": inputs["pi"]}),
+                                private_roots=roots) == 0
+        (manifest,) = (tmp_path / "archive").glob("**/manifest.json")
+        assert json.loads(manifest.read_text())["run"]["review_model"] == "embedded-pi-default"

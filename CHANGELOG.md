@@ -109,16 +109,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     findings artifacts must accept the new versions and stop reading `is_cross_stack`.
   - Dataset run records move from `daydream.run.v1` to `daydream.run.v2`: `provenance` no
     longer has `latency_profile`, `latency_route` or `latency_routing`, and its
-    `effective_configuration` no longer has `skill`, `per_stack_review_backend`,
-    `per_stack_review_model` or `phases.per_stack_review`. A record store or Hub dataset
-    holding version 1 records is refused (`invalid_or_unknown_record_schema`,
+    `effective_configuration` no longer has `skill` or `phases.per_stack_review` and takes the
+    archive's renamed `review_backend` and `review_model` (below). A record store or Hub
+    dataset holding version 1 records is refused (`invalid_or_unknown_record_schema`,
     `invalid_or_unknown_manifest`); capture into a fresh store and Hub dataset.
-  - The archive index moves from schema 9 to 10 without the `skill`,
-    `per_stack_review_backend` and `per_stack_review_model` columns, and the run manifest from
-    `2.0` to `3.0` without the same fields under `run`. An existing index is refused with
-    `unsupported archive index schema ... use a fresh archive directory`; use one. The
-    archive no longer records the review phase's resolved model; the dataset record's
-    `provenance.resolved_phases` still does.
+  - The archive index moves from schema 9 to 10 and the run manifest from `2.0` to `3.0`. The
+    `skill` column and `run.skill` field are gone. `per_stack_review_backend` and
+    `per_stack_review_model`, which already held the review phase's resolved backend and model,
+    are renamed `review_backend` and `review_model`; `review_backend` therefore no longer holds
+    only an explicitly configured review backend, and both are empty for a run without a
+    review. An existing index is refused with `unsupported archive index schema ... use a
+    fresh archive directory`; use one.
   - The default model and reasoning-effort tables (`PHASE_DEFAULT_MODELS`,
     `DEEP_PHASE_DEFAULT_EFFORT`) lose their `parse`, `per_stack_review`, `intent`, `wonder`
     and `merge` rows; no phase with these names runs.
