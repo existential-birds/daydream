@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import anyio
-from rich.markup import escape as escape_markup
 
 from daydream import git_ops
 from daydream.agent import console
@@ -77,20 +76,11 @@ def _print_remote_ci_result(verdict: RemoteCIVerdict) -> None:
     if target is not None:
         print_info(
             console,
-            escape_markup(
-                f"Remote CI target: {target.base_repository} PR #{target.pr_number} "
-                f"at {target.pushed_sha}"
-            ),
+            f"Remote CI target: {target.base_repository} PR #{target.pr_number} at {target.pushed_sha}",
         )
-    print_info(
-        console,
-        escape_markup(f"Remote CI result: {verdict.status} — {verdict.reason}"),
-    )
+    print_info(console, f"Remote CI result: {verdict.status} — {verdict.reason}")
     if verdict.evidence_sha is not None:
-        print_info(
-            console,
-            escape_markup(f"Remote CI evidence SHA: {verdict.evidence_sha}"),
-        )
+        print_info(console, f"Remote CI evidence SHA: {verdict.evidence_sha}")
     if verdict.failing_contexts:
         print_warning(console, f"Failing CI: {', '.join(verdict.failing_contexts)}")
     if verdict.pending_contexts:
@@ -105,7 +95,7 @@ def _print_remote_ci_result(verdict: RemoteCIVerdict) -> None:
     if advisory:
         print_warning(console, f"Advisory CI not green: {', '.join(advisory)}")
     for url in verdict.urls:
-        print_info(console, escape_markup(f"CI details: {url}"))
+        print_info(console, f"CI details: {url}")
 
 
 async def _step_remote_ci(ctx: FlowContext) -> Stop | None:

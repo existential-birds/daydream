@@ -7,8 +7,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from rich.markup import escape as escape_markup
-
 from daydream import clock, git_ops
 from daydream.agent import console
 from daydream.artifact_visibility import ArtifactVisibilityError, artifact_dir_for, artifact_session_active
@@ -396,8 +394,7 @@ async def run_deep(
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Branch: {branch}")
         print_info(console, f"Default backend: {_default_backend_name(config)}")
-        # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
-        print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
+        print_info(console, f"GitHub identity: {config.identity}")
         console.print()
 
         changed_files = (list(work.captured_source.files) if work.captured_source is not None
