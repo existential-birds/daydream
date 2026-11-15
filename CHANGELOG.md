@@ -86,8 +86,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     hosted `findings.json`, the embedded callback items and the dataset record show it, and
     fixing takes findings in severity order. Findings carry no `confidence`, `lens`,
     `evidence` or `related_files`. `--approve-on-clean` approves a complete review whose
-    findings are all `low`; a `high` or `medium` finding, or one without severity, withholds
-    approval on every route. A fix may no longer create a file the reviewer named; the fix
+    findings are all `low`; any other finding, including one with an unknown severity or
+    none, withholds approval on every route. A fix may no longer create a file the reviewer named; the fix
     footprint is the reviewed change and the finding's file.
   - Committed/immutable/local results move to schemas 10/11/12: every claim revision's
     payload requires `severity`. Restart reviews; results with versions 7/8/9 are rejected.

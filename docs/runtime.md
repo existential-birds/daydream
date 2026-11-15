@@ -36,9 +36,9 @@ placement instead of live-source line resolution. This does not establish
 completeness.
 
 Approval requires explicit opt-in and no blocking severity among all retained
-findings, including deduplication matches: `high` and `medium` block, `low` does not,
-and a finding without severity blocks under every findings schema. A complete review
-whose findings are all `low` is approved. New findings post as COMMENT, while
+findings, including deduplication matches: only `low` does not block, so `high`,
+`medium`, an unknown severity and a finding without severity block under every findings
+schema. A complete review whose findings are all `low` is approved. New findings post as COMMENT, while
 an all-matched review may post nothing. Complete-empty reviews remain eligible for
 approval when coverage and warning checks permit it.
 
