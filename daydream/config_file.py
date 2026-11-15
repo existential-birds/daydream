@@ -64,7 +64,6 @@ class DaydreamFileConfig:
     quality_gate_verbosity_delta: float | None = None
     quality_gate_erosion_absolute: float | None = None
     quality_gate_verbosity_absolute: float | None = None
-    supervisor: str | None = None
     supervisor_deny_globs: list[str] = field(default_factory=list)
     tool_supervisor: str | None = None
     tool_bash_deny: list[str] = field(default_factory=list)
@@ -263,7 +262,6 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         quality_gate_verbosity_delta=_coerce_non_negative_float(take("quality_gate_verbosity_delta", None)),
         quality_gate_erosion_absolute=_coerce_non_negative_float(take("quality_gate_erosion_absolute", None)),
         quality_gate_verbosity_absolute=_coerce_non_negative_float(take("quality_gate_verbosity_absolute", None)),
-        supervisor=_coerce_choice(take("supervisor", None), {"off", "rules", "llm"}),
         supervisor_deny_globs=_coerce_string_list(take("supervisor_deny_globs", None)),
         tool_supervisor=_coerce_choice(take("tool_supervisor", None), {"off", "rules"}),
         tool_bash_deny=_coerce_string_list(take("tool_bash_deny", None)),

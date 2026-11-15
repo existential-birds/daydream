@@ -90,12 +90,14 @@ def _require_ok(proc: subprocess.CompletedProcess[Any], context: str) -> None:
         raise GitError(f"{context}: {os.fsdecode(proc.stderr).strip()}")
 
 
-def decode_diff(stdout: bytes) -> str:
+def decode_diff(stdout: bytes, *, strict: bool = False) -> str:
     """Read a diff as text-mode capture does, showing bytes that are not UTF-8 as U+FFFD.
 
     Identity stays with the raw Git objects; the text is only the view reviewers read.
+    ``strict`` raises ``UnicodeDecodeError`` instead, for callers that must match file bytes.
     """
-    return io.TextIOWrapper(io.BytesIO(stdout), encoding="utf-8", errors="replace").read()
+    errors = "strict" if strict else "replace"
+    return io.TextIOWrapper(io.BytesIO(stdout), encoding="utf-8", errors=errors).read()
 
 
 # --- Internal subprocess helpers --------------------------------------------

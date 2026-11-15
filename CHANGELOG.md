@@ -7,21 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- `daydream setup` now installs the Daydream version that ran it. The packaged bot workflows
-  carried a hard-coded commit that always lagged the release shipping them (the 0.35.2 templates
-  installed v0.35.1, and every release from 0.28 to 0.35.0 installed a 0.28.0-era commit). They now
-  carry a placeholder, and setup pins every Daydream install line, producer and poster alike, to
-  the full commit of the release tag `v<version>` of the Daydream running it, peeling an
-  annotated tag to its commit. A build whose version has no release tag (a development build)
-  refuses before registering or depositing anything. `daydream setup --verify` compares
-  installed workflows with the templates pinned to the running release, so workflows installed by
-  an earlier release read as customized: rerun `daydream setup` to move an existing install to
-  the release you run. **Breaking (0.y.z)** for manual copies only: replace the placeholder as
-  the [workflow README](daydream/templates/workflows/README.md#daydream-pin) describes
-  ([#1884](https://github.com/existential-birds/daydream/issues/1884)).
-
 ### Removed
 
 - This repository no longer runs its own Daydream review bot: its repository-only
@@ -29,6 +14,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pin they installed (`.github/workflows/package.json`) and that pin's Dependabot npm block are
   gone. Reviews of this repository come from the hosted review service. No package user is
   affected: `daydream setup` and the packaged templates it installs do not depend on them.
+- **Breaking (0.y.z):** The refusals that 0.35.0 kept only to name the replaced staged
+  reviewer's review-profile keys, findings supervisor and prompt names are deleted
+  ([#1859](https://github.com/existential-birds/daydream/issues/1859)):
+  - A review profile's former `[pipeline]` keys (`assignment_policy`, `structural_enabled`,
+    `arbitration_enabled`, `arbitration_min_severity`, `arbitration_contested_location`,
+    `suppression_enabled`, `suppression_severity_classes` and
+    `suppression_confidence_classes`) get the generic `pipeline: unknown key` error that
+    names the first one, instead of one naming each as removed.
+    `review_profile.REMOVED_PROFILE_KEYS` is deleted.
+  - The former strategy names (`intent`, `alternatives`, `discovery.per_stack`,
+    `discovery.structural`, `suppression`, `merge`, `supervision` and `arbitration`) are
+    accepted again, like any strategy name an extension step may read: they count in the
+    profile digest and steer nothing. A profile that set `strategies.arbitration` to steer
+    the challenge now loads silently; set `strategies.challenge` instead.
+  - The `supervisor` repository setting and its `DaydreamFileConfig.supervisor` field are no
+    longer recognized: a review no longer refuses `supervisor = "rules"` or `"llm"`, and the
+    key is handled like any other top-level key Daydream does not read.
+    `supervisor_deny_globs` and `tool_supervisor` are unchanged.
+  - `extensions.registry.REMOVED_PROMPTS` is deleted. Overriding one of the former prompt
+    names (`intent`, `alternatives`, `per-stack`, `structural`, `generic-fallback`,
+    `arbiter`, `supervise`, `suppression`, `merge`) registers like any extension prompt and
+    never runs; `daydream ext validate` no longer fails on it.
 - **Breaking (0.y.z):** The replaced staged reviewer's command-line options, flow aliases and
   `RunConfig` fields, which 0.35.0 kept only to refuse them with guidance, are deleted
   ([#1857](https://github.com/existential-birds/daydream/issues/1857)):
@@ -70,6 +77,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Phase tables still accept any phase name, for extension phases, so tables for the retired
     phases (`intent`, `merge`, `parse`, `per_stack_review`, `supervise`, `suppression` and
     `wonder`) are now ignored without notice.
+
+### Fixed
+
+- `daydream setup` now installs the Daydream version that ran it. The packaged bot workflows
+  carried a hard-coded commit that always lagged the release shipping them (the 0.35.2 templates
+  installed v0.35.1, and every release from 0.28 to 0.35.0 installed a 0.28.0-era commit). They now
+  carry a placeholder, and setup pins every Daydream install line, producer and poster alike, to
+  the full commit of the release tag `v<version>` of the Daydream running it, peeling an
+  annotated tag to its commit. A build whose version has no release tag (a development build)
+  refuses before registering or depositing anything. `daydream setup --verify` compares
+  installed workflows with the templates pinned to the running release, so workflows installed by
+  an earlier release read as customized: rerun `daydream setup` to move an existing install to
+  the release you run. **Breaking (0.y.z)** for manual copies only: replace the placeholder as
+  the [workflow README](daydream/templates/workflows/README.md#daydream-pin) describes
+  ([#1884](https://github.com/existential-birds/daydream/issues/1884)).
+- Test healing saves and restores a forbidden generated-file edit whose bytes are not UTF-8,
+  instead of stopping the fixing run with `UnicodeDecodeError`. Its recovery patch shows each
+  such byte as U+FFFD, as review diffs do; the smart-quote scrub still skips an attribution diff
+  that is not UTF-8 ([#1870](https://github.com/existential-birds/daydream/issues/1870)).
+- A changed path that fits the checkout but sits over the OS path limit at the capture
+  destination fails capture with the path, its length there and the limit, instead of
+  "captured native source population changed", which describes a concurrent change
+  ([#1870](https://github.com/existential-birds/daydream/issues/1870)).
+- A Pi committed-review turn that settles with nothing accepted and no host failure now raises
+  the shared `host_tools.UnsubmittedTurn`, as Claude and Codex do, instead of a retryable stream
+  truncation: it gets one fresh conversation (none after an earlier retryable provider failure)
+  and seals `missing_output` if that one ends unsubmitted too, and the outage circuit records it
+  as a completed turn. Before, it was retried up to the full attempt count and each try counted
+  as a provider failure, which could open the circuit for the whole run. A stream that ends
+  before it settles is still a truncation
+  ([#1872](https://github.com/existential-birds/daydream/issues/1872)).
+- A diagram can cite a route file such as `src/routes/[slug]/+page.ts` or
+  `app/routes/users.$userId.tsx`. Its spec's `file` fields no longer carry the model-path
+  pattern; grounding accepts a citation that exactly names a Git-observed path of the captured
+  change or the checked-out tree and holds every other path to the model grammar, so a bracket
+  path that names no such file is still refused. Posting reads each cited file from the head
+  tree by its exact name, percent-encoded on GitHub's contents API, and never expands it
+  ([#1879](https://github.com/existential-birds/daydream/issues/1879)).
+- A `--fix` run on a checkout with tracked uncommitted edits no longer presents the committed
+  head as the whole reviewed subject. It prints that those edits are reviewed with the commits
+  and committed with the fixes, and its review coverage and committed review result mark
+  `analyzed_revision` with `tracked_worktree_edits: true`. That coverage and terminal result use
+  the new version 3, and the committed review result the new schema 13
+  (`RESULT_VERSIONS["worktree"]`), which earlier builds reject; only schema 13 may carry the
+  marker. A clean checkout records and prints what it did before. A commit-bound findings
+  artifact refuses the marker as it refuses a captured `source_id`
+  ([#1828](https://github.com/existential-birds/daydream/issues/1828)).
+- An archived run whose base-to-head diff is empty now has pipeline status `succeeded` instead of
+  `partial`. It returns before any merge, fix or test phase, and the archive now accepts its sealed
+  no-diff review, bound to the same session, as the evidence that it finished
+  ([#1847](https://github.com/existential-birds/daydream/issues/1847)).
+- A run captured with `--capture-data` is no longer recorded, or uploaded, as `success` when
+  archive integrity or publication of its outputs then fails and the command exits 1. Capture
+  and upload now run after archive finalization and publication, and such a run is recorded as
+  `failed` ([#1853](https://github.com/existential-birds/daydream/issues/1853)).
 
 ## [0.35.2] - 2026-11-15
 

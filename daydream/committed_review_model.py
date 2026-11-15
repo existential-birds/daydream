@@ -122,7 +122,8 @@ def host_decision(part: dict[str, Any]) -> dict[str, Any]:
 
 
 # Work records, attribution, per-execution capacity evidence, the cross_assignment phase (#1628) and claim severity.
-RESULT_VERSIONS = {"committed": 10, "immutable": 11, "local": 12}
+# A committed result over tracked uncommitted edits (#1828) is its own variant, as a captured local source is.
+RESULT_VERSIONS = {"committed": 10, "immutable": 11, "local": 12, "worktree": 13}
 REQUIRED_PHASES = ["challenge", "cross_assignment"]
 # Investigation kinds decide owned targets and propose new concerns; challenge judges claim revisions.
 INVESTIGATION_KINDS = frozenset({"discovery", "follow_up", "cross_assignment"})
@@ -199,6 +200,9 @@ IMMUTABLE_COMMITTED_RESULT_SCHEMA = strict_object({
 LOCAL_REVIEW_RESULT_SCHEMA = strict_object({
     **COMMITTED_RESULT_SCHEMA['properties'], 'schema_version': {'const': RESULT_VERSIONS['local']},
 })
+WORKTREE_RESULT_SCHEMA = strict_object({
+    **COMMITTED_RESULT_SCHEMA['properties'], 'schema_version': {'const': RESULT_VERSIONS['worktree']},
+})
 
 
 def validate_committed_result(value: dict[str, Any]) -> None:
@@ -209,12 +213,14 @@ def validate_committed_result(value: dict[str, Any]) -> None:
             raise ValueError("unsupported committed review result version; restart review")
         validate_json_schema(value, {RESULT_VERSIONS["committed"]: COMMITTED_RESULT_SCHEMA,
                                     RESULT_VERSIONS["immutable"]: IMMUTABLE_COMMITTED_RESULT_SCHEMA,
-                                    RESULT_VERSIONS["local"]: LOCAL_REVIEW_RESULT_SCHEMA}[version])
+                                    RESULT_VERSIONS["local"]: LOCAL_REVIEW_RESULT_SCHEMA,
+                                    RESULT_VERSIONS["worktree"]: WORKTREE_RESULT_SCHEMA}[version])
     except jsonschema.ValidationError as exc:
         raise ValueError(f"invalid committed review at {exc.json_path}") from exc
     terminal = value["terminal_result"]
     revision = value["analyzed_revision"]
-    if ('source_id' in revision) != (version == RESULT_VERSIONS["local"]):
+    if (('source_id' in revision) != (version == RESULT_VERSIONS["local"])
+            or ('tracked_worktree_edits' in revision) != (version == RESULT_VERSIONS["worktree"])):
         raise ValueError('result version does not match captured source identity; restart review')
     if version == RESULT_VERSIONS["immutable"]:
         validate_immutable_input(value["immutable_input"])

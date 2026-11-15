@@ -8,6 +8,7 @@ transaction. The caller owns the destination and its cleanup.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -562,7 +563,17 @@ class CapturedSource:
             if native is None or native.mode != mode or native.oid != oid:
                 raise immutable._StorageConflict("captured native source integrity failed")
         actual: set[str] = set()
-        for directory, dirs, names in os.walk(self.root, followlinks=False):
+
+        def unlistable(exc: OSError) -> None:
+            # A directory too deep to list would otherwise read as missing files, a concurrent change.
+            if exc.errno == errno.ENAMETOOLONG:
+                directory = Path(exc.filename).relative_to(self.root).as_posix()
+                path = min((name for name in expected if name.startswith(directory + "/")), default=directory)
+                raise GitError(f"captured source path {path!r} is {len(os.fsencode(self.root / path))} bytes at "
+                               f"the capture destination, over the OS path limit of "
+                               f"{os.pathconf(self.root, 'PC_PATH_MAX')} bytes")
+
+        for directory, dirs, names in os.walk(self.root, onerror=unlistable, followlinks=False):
             parent = Path(directory)
             if parent == self.root:
                 dirs[:] = [name for name in dirs if name != ".git"]

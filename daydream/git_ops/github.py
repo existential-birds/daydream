@@ -20,7 +20,7 @@ from daydream.git_ops.models import (
     GraphQLUnavailableError,
     PathAbsentError,
 )
-from daydream.repository_paths import strip_dot_slash, valid_repository_file_path
+from daydream.repository_paths import valid_git_observed_path
 
 # --- gh wrappers -------------------------------------------------------------
 
@@ -530,8 +530,10 @@ def gh_file_at_ref(
 ) -> bytes:
     """Read immutable file bytes from GitHub without a checkout of the target repository.
 
-    Validate the explicit slug/ref and untrusted relative path, then percent-encode the
-    path. Only HTTP 404 or a response naming no file proves absence; all other malformed
+    Validate the explicit slug/ref and that the untrusted path is a legal relative Git
+    name, then percent-encode every reserved character (``[`` ``]`` ``$`` ``?`` ``#`` ...)
+    so the contents endpoint names exactly that path; nothing reaches a shell or glob.
+    Only HTTP 404 or a response naming no file proves absence; all other malformed
     inputs and request failures remain ``GitError``. ``repo`` supplies gh's cwd only.
     """
     owner_repo = queries.split_owner_repo(slug)
@@ -539,16 +541,15 @@ def gh_file_at_ref(
         raise GitError(f"invalid repository slug: {slug}")
     if _COMMIT_SHA_RE.fullmatch(ref) is None:
         raise GitError(f"invalid commit sha: {ref}")
-    if not valid_repository_file_path(path):
+    if not valid_git_observed_path(path):
         raise GitError("invalid repository file path")
     owner, name = owner_repo
-    relative = strip_dot_slash(path)
     base = f"repos/{owner}/{name}"
-    where = f"{slug}@{ref}:{relative}"
+    where = f"{slug}@{ref}:{path}"
     try:
         payload = gh_api(
             repo,
-            f"{base}/contents/{quote(relative)}?ref={ref}",
+            f"{base}/contents/{quote(path)}?ref={ref}",
             auth=auth,
             idempotent=True,
         )

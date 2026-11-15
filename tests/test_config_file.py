@@ -19,7 +19,7 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(tmp_pa
     dotfile = tmp_path / ".daydream.toml"
     dotfile.write_text(
         "scope_issue_filing = true\n"
-        'supervisor = "rules"\nsupervisor_deny_globs = ["vendor/**"]\n'
+        'supervisor_deny_globs = ["vendor/**"]\n'
         'tool_supervisor = "rules"\ntool_bash_deny = ["rm -rf"]\n'
         "quality_gate_erosion_delta = 0\nquality_gate_verbosity_delta = 0.05\n"
         "quality_gate_erosion_absolute = 100\nquality_gate_verbosity_absolute = 0.25\n"
@@ -31,7 +31,7 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(tmp_pa
     assert config.backend == "claude"
     assert config.phases == {"review": {"model": "pyproject-review"}, "fix": {"backend": "codex"}}
     assert config.scope_issue_filing is True
-    assert (config.supervisor, config.supervisor_deny_globs) == ("rules", ["vendor/**"])
+    assert config.supervisor_deny_globs == ["vendor/**"]
     assert (config.tool_supervisor, config.tool_bash_deny) == ("rules", ["rm -rf"])
     assert (
         config.quality_gate_erosion_delta,
@@ -46,7 +46,7 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(tmp_pa
 
     dotfile.write_text(
         "scope_issue_filing = 1\n"
-        'supervisor = "unknown"\nsupervisor_deny_globs = [1]\n'
+        "supervisor_deny_globs = [1]\n"
         'tool_supervisor = "unknown"\ntool_bash_deny = [1]\n'
         '[improve]\npartition-max-files = 0\nmax-partition-groups = "many"\n'
         "[improve.github]\npublish_issues = 1\n"
@@ -57,7 +57,7 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(tmp_pa
     degraded = load_file_config(tmp_path)
 
     assert degraded.scope_issue_filing is None
-    assert (degraded.supervisor, degraded.supervisor_deny_globs) == (None, [])
+    assert degraded.supervisor_deny_globs == []
     assert (degraded.tool_supervisor, degraded.tool_bash_deny) == (None, [])
     assert (degraded.improve_partition_max_files, degraded.improve_max_partition_groups) == (None, None)
     assert degraded.improve_github_publish_issues is False

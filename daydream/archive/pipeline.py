@@ -104,6 +104,16 @@ def _read_session_bound_json_artifact(
     return data
 
 
+def _sealed_no_diff(target_dir: Path, session_id: str | None) -> bool:
+    """Whether this session sealed a complete no-diff review, so it had nothing to merge, fix or test."""
+    from daydream.deep.artifacts import DeepArtifact
+
+    coverage = _read_json_artifact(DeepArtifact.REVIEW_COVERAGE.at(target_dir / ".daydream" / "deep"), dict)
+    return session_id is not None and coverage is not None and coverage.get("run_id") == session_id and (
+        coverage.get("required_phases"), coverage.get("phase_outcomes")) == (["no_diff"], [
+            {"phase": "no_diff", "status": "complete", "reason_codes": [], "noop": True, "usable_evidence": False}])
+
+
 def _manifest_state(
     *,
     target_dir: Path,
@@ -174,6 +184,7 @@ def _manifest_state(
             runs_merge=runs_merge,
             runs_fix=runs_fix,
             runs_test=runs_test,
+            no_diff=_sealed_no_diff(target_dir, session_id),
         ),
     }
 
@@ -793,6 +804,7 @@ def derive_pipeline_status(
     runs_merge: bool = False,
     runs_fix: bool = False,
     runs_test: bool = False,
+    no_diff: bool = False,
 ) -> str:
     """Aggregate pipeline outcome from the archive state + per-phase states.
 
@@ -806,7 +818,8 @@ def derive_pipeline_status(
     5. ``succeeded`` when every phase is succeeded or absent AND at least one
        phase actually ran (a flow that runs none of these phases surfaces no
        derivable phase signal, so an early-aborted/failed run must not be
-       archived as unqualified success).
+       archived as unqualified success). A sealed no-diff review (``no_diff``)
+       requires no local phase and is itself that positive evidence.
     6. else ``unknown``.
     """
     if archive_status == "partial" and not fix_failures:
@@ -821,10 +834,10 @@ def derive_pipeline_status(
         for name in ("merge", "fix", "test")
     ):
         return _PARTIAL
-    if (runs_merge and _phase(phase_states, "merge").get("ran") is False) or (
-        runs_test and _phase(phase_states, "test").get("ran") is False
-    ) or (
-        runs_fix and _phase(phase_states, "fix").get("ran") is False
+    if not no_diff and (
+        (runs_merge and _phase(phase_states, "merge").get("ran") is False)
+        or (runs_test and _phase(phase_states, "test").get("ran") is False)
+        or (runs_fix and _phase(phase_states, "fix").get("ran") is False)
     ):
         return _PARTIAL
     if any(
@@ -840,7 +853,7 @@ def derive_pipeline_status(
     # Only claim success when at least one derivable phase actually ran. A flow
     # with no derivable phase evidence cannot distinguish a clean profile from
     # an early aborted/failed run, so all-absent remains ``unknown``.
-    if any(
+    if no_diff or any(
         _phase(phase_states, name).get("status") == _SUCCEEDED
         for name in phase_names
     ):

@@ -68,6 +68,8 @@ def test_terminal_rejects_inconsistent_or_unknown_evidence() -> None:
         lambda r: r.update(completed_stacks=["structure"]),
         lambda r: r["stack_outcomes"][0].update(partial_evidence=True),
         lambda r: r.update(schema_version=2),
+        lambda r: r.update(schema_version=2) or r["analyzed_revision"].update(
+            source_id="a" * 64, tracked_worktree_edits=True),
         lambda r: r["planned_scopes"][0]["files"].reverse(),
         lambda r: r["stack_outcomes"][0].update(files=["a.py"]),
     ]
