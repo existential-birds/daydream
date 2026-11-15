@@ -227,22 +227,24 @@ def test_failed_commit_is_not_visible_and_abandoned_staging_recovers_privately(
     assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in (store.root / "runs").iterdir())
 
 
-def test_commit_keeps_its_own_stage_where_locks_never_exclude_the_holding_process(
+def test_where_locks_are_unenforced_recovery_spares_live_stages_and_reports_it(
     store: LocalRecordStore, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Docker Desktop's macOS bind mounts (virtiofs "fakeowner") grant flock to a second
-    descriptor in the process that already holds it, so the stage lock can't stop the
-    writer's own recovery from unlinking its live stage before publish (#1883)."""
+    """Docker Desktop's macOS bind mounts grant every lock to every process in a container,
+    so a writer's lock can't keep its live stage from recovery there (#1883)."""
     monkeypatch.setattr(fcntl, "flock", lambda descriptor, operation: None)
-    assert store.commit_run(run_record("bind-mount")).committed
+    result = store.commit_run(run_record("bind-mount"))
+    assert result.committed and result.diagnostics == ("store_locks_unenforced",)
 
     def documents() -> Iterator[dict[str, Any]]:
-        """While this stage is live, another commit recovers only the abandoned one."""
+        """While this stage is live, another commit recovers only a stale one."""
         live, = (store.root / "runs").glob("*.tmp")
-        abandoned = store.root / "runs" / "record-abandoned.tmp"
-        abandoned.write_bytes(b'{"partial":')
-        assert store.commit_run(run_record("concurrent")).diagnostics == ("recovered_interrupted_write",)
-        assert live.exists() and not abandoned.exists()
+        stale = store.root / "runs" / "record-abandoned.tmp"
+        stale.write_bytes(b'{"partial":')
+        os.utime(stale, (0, 0))
+        assert store.commit_run(run_record("concurrent")).diagnostics == (
+            "store_locks_unenforced", "recovered_interrupted_write")
+        assert live.exists() and not stale.exists()
         yield {"schema_version": "ATIF-v1.7", "session_id": "streamed", "trajectory_id": "streamed",
                "agent": {"name": "daydream", "version": "test"},
                "steps": [{"step_id": 1, "source": "user", "message": "review"}]}

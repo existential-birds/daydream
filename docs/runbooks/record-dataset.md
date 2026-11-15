@@ -62,6 +62,15 @@ secret values. Operators decide revocation, rotation, access restrictions, and
 remote history remediation. Never edit immutable evidence in place. Private
 harvest clones use `DAYDREAM_GIT_TOKEN` through child Git configuration, not URLs.
 
+## Stores on filesystems without file locks
+
+Some filesystems grant a file lock to every process at once, notably a Docker Desktop
+(macOS) bind mount, where every process in a container gets the lock. The store detects
+this and reports `store_locks_unenforced` in each commit's diagnostics. Commits still work,
+but the store lock no longer serializes writers or publishers that share such a mount, and
+an interrupted write's staged `*.tmp` file is removed only once it is an hour old. Keep one
+writer per store there, or put the store on the container's own disk and copy it out.
+
 ## Separate publication
 
 To keep Hub work out of review processes, run reviews with `--capture-data` and no

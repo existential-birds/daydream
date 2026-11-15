@@ -8,7 +8,7 @@ import os
 import re
 import stat
 import tempfile
-import threading
+import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
@@ -508,34 +508,41 @@ def record_name(identity: str) -> str:
     return _sha(identity.encode()) + ".jsonl"
 
 
-# Stages this process is still writing, by (st_dev, st_ino). A writer's stage lock keeps
-# other processes' recovery away, but some filesystems never refuse a lock to a second
-# descriptor in the holding process: on Docker Desktop's macOS bind mounts (virtiofs,
-# "fakeowner"), flock and OFD locks exclude other processes yet always succeed within one.
-# There the writer's own recovery pass would take its live stage for abandoned and unlink
-# it before publish (#1883), so recovery consults this set before the lock.
-_LIVE_STAGES: set[tuple[int, int]] = set()
-_LIVE_STAGES_GUARD = threading.Lock()
+# On a filesystem that grants a lock to a second descriptor while another holds it, a stage
+# can't be told live by its writer's lock, so recovery removes only a stage untouched this long.
+_UNLOCKED_STAGE_GRACE_SECONDS = 3600
 
 
-def _stage_key(metadata: os.stat_result) -> tuple[int, int]:
-    return metadata.st_dev, metadata.st_ino
+def _locks_enforced(lock: Path) -> bool:
+    """Whether a second descriptor is refused the store lock while the caller holds it.
+
+    Docker Desktop's macOS bind mounts (virtiofs "fakeowner") grant flock, OFD and POSIX
+    locks to every process in a container at once, so there a held lock proves nothing (#1883).
+    """
+    with os.fdopen(os.open(lock, os.O_RDWR | os.O_NOFOLLOW), "rb") as probe:
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:  # a lock refused for another reason proves no exclusion either
+            pass
+        return False
 
 
-def _abandoned(staged: Path) -> bool:
+def _abandoned(staged: Path, *, locks_enforced: bool) -> bool:
     """Whether a staged temp is still linked and no live writer holds it.
 
-    A stage this process is writing is live without asking the lock (see ``_LIVE_STAGES``);
-    another process's stage is live while its writer holds the stage lock.
+    Where locks are enforced, a writer holds its stage's lock until it publishes or removes
+    it. Where they aren't, only a stage untouched for ``_UNLOCKED_STAGE_GRACE_SECONDS`` counts.
     """
     try:
         handle = open(staged, "rb")
     except FileNotFoundError:
         return False
     with handle:
-        with _LIVE_STAGES_GUARD:
-            if _stage_key(os.fstat(handle.fileno())) in _LIVE_STAGES:
-                return False
+        if not locks_enforced:
+            metadata = os.fstat(handle.fileno())
+            return metadata.st_nlink > 0 and time.time() - metadata.st_mtime > _UNLOCKED_STAGE_GRACE_SECONDS
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -665,6 +672,9 @@ class LocalRecordStore:
                 os.fchmod(lock.fileno(), 0o600)
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 diagnostics: list[str] = []
+                locks_enforced = _locks_enforced(self.root / ".lock")
+                if not locks_enforced:
+                    diagnostics.append("store_locks_unenforced")
                 for staged in (path for name in _DIRECTORIES for path in (self.root / name).glob("*.tmp")):
                     try:
                         metadata = staged.lstat()
@@ -672,7 +682,7 @@ class LocalRecordStore:
                         continue
                     if not stat.S_ISREG(metadata.st_mode):
                         raise StoreError("unsafe_storage_path")
-                    if _abandoned(staged):
+                    if _abandoned(staged, locks_enforced=locks_enforced):
                         staged.unlink(missing_ok=True)
                         diagnostics.append("recovered_interrupted_write")
                 yield tuple(diagnostics)
@@ -710,18 +720,15 @@ class LocalRecordStore:
     def _commit_run(self, envelope: Record, documents: Iterable[Any] | None) -> CommitResult:
         """Stage one run record outside the store lock, then compare or publish it under the lock.
 
-        The stage is a ``*.tmp`` file created under the lock, locked by its writer and listed in
-        ``_LIVE_STAGES`` until it is published or removed, so interrupted-write recovery skips
-        it while the writer lives, even where locks never exclude the writer's own process.
+        The stage is a ``*.tmp`` file created under the lock and locked by its writer until
+        it is published or removed, so interrupted-write recovery skips it while the writer lives;
+        where the filesystem doesn't enforce locks, recovery skips any recently written stage.
         """
         identity = envelope["run_id"]
         path = self._shard("runs", identity)
         with self._locked() as recovered:
             stage = tempfile.NamedTemporaryFile("wb", dir=path.parent, suffix=".tmp", delete=False)
             fcntl.flock(stage, fcntl.LOCK_EX)
-            live = _stage_key(os.fstat(stage.fileno()))
-            with _LIVE_STAGES_GUARD:
-                _LIVE_STAGES.add(live)
         staged = Path(stage.name)
         digest = hashlib.sha256()
         size = 0
@@ -749,7 +756,7 @@ class LocalRecordStore:
                 recorded = digest.copy()
                 recorded.update(b"\n")
                 with self._locked() as also_recovered:
-                    diagnostics = recovered + also_recovered
+                    diagnostics = tuple(dict.fromkeys(recovered + also_recovered))
                     if path.exists():
                         if not self._holds(path, size + 1, recorded.hexdigest()):
                             raise StoreError("immutable_identity_conflict")
@@ -762,8 +769,6 @@ class LocalRecordStore:
                     return CommitResult(identity, digest.hexdigest(), True, diagnostics)
             finally:
                 staged.unlink(missing_ok=True)  # before closing the stage releases its lock
-                with _LIVE_STAGES_GUARD:
-                    _LIVE_STAGES.discard(live)
 
     @staticmethod
     def _holds(path: Path, size: int, sha256: str) -> bool:
