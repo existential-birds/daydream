@@ -23,7 +23,8 @@ async def test_pr_body_reaches_the_reviewer_as_bounded_untrusted_context(
 ) -> None:
     """The pinned PR's body reaches each assignment once, labelled untrusted; an oversized one is cut, never refused."""
     _silence(monkeypatch)
-    body = PR_SENTINEL
+    # Exactly the bound, mostly quotes: delivered whole.
+    body = PR_SENTINEL.ljust(HISTORICAL_CONTEXT_MAX_BYTES["context"], '"')
     view: dict[str, object] = {}
     monkeypatch.setattr("daydream.git_ops.gh_pr_view",
                         lambda repo, pr=None, **_kwargs: {"number": 7, "body": body, **view})
@@ -37,7 +38,7 @@ async def test_pr_body_reaches_the_reviewer_as_bounded_untrusted_context(
             (call["review_instructions"], call["prompt"]) for call in stub.calls if call.get("review_instructions")]
 
     context, delivered_texts = await delivered()
-    assert context == PR_SENTINEL and len(delivered_texts) == 2
+    assert context == body and len(delivered_texts) == 2
     # The description travels once in the first message; the instructions label it untrusted and never hold it.
     for instructions, prompt in delivered_texts:
         assert prompt.count(PR_SENTINEL) == 1 and PR_SENTINEL not in instructions
