@@ -387,6 +387,9 @@ async def test_publication_decisions_follow_review_state(tmp_path: Path, pr: PRI
     repeated, = pr_review.parsed_issues_from_items([{"file": "a.py", "line": 1, "description": "Same text",
                                                      "rationale": "Same text", "severity": "low"}])
     assert repeated.title == "Same text" and "Same text" not in repeated.body
+    # A legal Git name keeps its edge spaces through export and posting; only an empty path is skipped.
+    (edged,) = pr_review.parsed_issues_from_items([{"file": " notes.md ", "description": "d"}, {"file": ""}])
+    assert edged.path == " notes.md "
     with pytest.MonkeyPatch.context() as mp:
         warnings: list[str] = []
         mp.setattr(pr_review, "find_pr_by_number", lambda *_a, **_k: None)

@@ -28,7 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the check now only confines it as one (no absolute path, no empty, `.` or `..` part, no
   NUL byte, no symlinked parent directory), and every legal Git name passes. The fix flow
   accepts and edits these files, and every file path Daydream passes Git to diff or restore is
-  now a literal pathspec, never a glob that could also match a sibling file.
+  now a literal pathspec, never a glob that could also match a sibling file. The export and
+  posting keep a path with leading or trailing spaces exact instead of trimming it onto
+  another name.
   A finding on a path that is not confined (absolute, or with a `..` or `.` part such as a
   leading `./`), which only an extension step that rewrites the findings can produce, still
   fails the review: the sealed result keeps every confirmed finding
