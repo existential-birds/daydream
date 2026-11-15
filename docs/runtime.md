@@ -212,6 +212,11 @@ not. Each claim carries a required `severity` (`high`, `medium` or `low`, define
 consequence in the host instructions); the challenge judges it with the claim and corrects
 it only by revising the claim. Confirmed findings carry it to every consumer of the
 canonical items. Retain confirmed, substantively rejected and unresolved concerns separately.
+A confirmed claim that names predecessors in `source_uids` is delivered in their place: the sealed
+`findings`, which the report, the outcome line, the findings export, posting, approval and severity
+counts read, are the confirmed claims less every claim another confirmed claim names, so along a chain
+only its last claim is delivered. A rejected or unresolved synthesis leaves its confirmed predecessors
+delivered, and `claims` keep every claim with its disposition.
 Missing/failed challenge is unfinished work. Whole-submission admission rechecks authority,
 revisions and limits before installation; closure precedes cleanup and sealing.
 Cancellation installs interrupted coverage and retained concerns before propagating.

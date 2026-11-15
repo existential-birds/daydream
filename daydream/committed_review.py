@@ -48,6 +48,7 @@ from daydream.committed_review_model import (
     CommittedReviewResult,
     assignment_schema,
     coverage_shards,
+    delivered_findings,
     fragment_spans,
     head_line,
     planned_work_id,
@@ -775,8 +776,8 @@ class Review:
         return self._coverage
 
     def findings(self) -> list[dict[str, Any]]:
-        """Copies of the retained claims whose current revision a fresh challenge confirmed."""
-        return deepcopy([c for c in self._claims.values() if c["disposition"] == "confirmed"])
+        """Copies of the delivered claims: confirmed by a fresh challenge and not named by a confirmed synthesis."""
+        return deepcopy(delivered_findings(list(self._claims.values())))
 
     def seal(self, settings: dict[str, Any], *, projection_valid: bool = True) -> dict[str, Any]:
         """Called after native contexts/host callbacks have quiesced; current work decides completion."""
@@ -876,7 +877,8 @@ evidence_refs array holds at most four selectors, and evidence_refs=[] records u
 Report only concrete claims with trigger, consequence, location and supporting grounds. Severity is high when a
 claim breaks correctness, security or data and must be fixed before merge, medium for a real defect with limited
 reach, and low when minor. A new claim uses
-uid="", revision=0 and source_uids=[] unless it explicitly synthesizes retained predecessor UIDs.
+uid="", revision=0 and source_uids=[] unless it explicitly synthesizes retained predecessor UIDs. A confirmed
+claim is delivered in place of every claim its source_uids name, so name only predecessors it restates in full.
 A retained claim update echoes uid and current revision; changing any semantic payload creates a fresh
 challenge obligation. title is presentation only. Never claim an executed check unless it happened.
 Navigation: the assignment's catalog is a bounded first page of the complete population; its status and omitted

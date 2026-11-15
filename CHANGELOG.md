@@ -23,6 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can read the per-attempt callback secret; 0.169.0 does not expose it. The packaged
   templates do not install Codex.
 
+### Fixed
+
+- A review no longer delivers one defect twice when a later claim restates an earlier one.
+  When the challenge confirmed both a claim and a claim that names it in `source_uids` (a
+  cross-assignment claim that combines a discovery claim, for example), both were findings:
+  the pull request got two comments, and the outcome line, severity counts and
+  `--approve-on-clean` counted two. A confirmed claim now replaces every claim it names, so
+  along a chain only the last is delivered. The sealed result's `findings`, the report, the
+  outcome line, the findings export and posting all read that delivered set, on every route.
+  A rejected or unresolved synthesis leaves its predecessors delivered, and `claims` keep
+  every claim with its disposition. The result schema versions are unchanged
+  ([#1864](https://github.com/existential-birds/daydream/issues/1864)).
+
 ## [0.35.0] - 2026-11-15
 
 ### Added

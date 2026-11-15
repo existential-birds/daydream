@@ -2094,7 +2094,11 @@ def _decide(binding: HostToolBinding, targets: Sequence[str]) -> list[dict[str, 
 
 
 _SCENARIOS = ["empty-local", "follow-up", "rejected-final", "salvage-fails", "evidence-free", "contention",
-              "native-capacity", "revision", "title", "undecomposed"]
+              "native-capacity", "revision", "title", "synthesis", "undecomposed"]
+# Claims of the synthesis row: each discovery claim's file, and the predecessors each synthesis names.
+_PREDECESSORS = {"a.py ratio": "a.py", "b.py value": "b.py", "f.py limit": "f.py"}
+_SYNTHESES = {"Ratio and value": ["a.py ratio", "b.py value"], "Limit, restated": ["f.py limit"]}
+_REJECTED = {"b.py value", "Limit, restated"}
 
 
 @pytest.mark.parametrize("scenario", [*_SCENARIOS, *_SCALED])
@@ -2206,12 +2210,25 @@ async def test_split_review_transfers_unfinished_work_and_investigates_across_as
             catalog = _charged(binding, "review_source", {"target_id": None, "path": None, "cursor": None})
             refs = [_decide(binding, [e["target_id"]])[0]["evidence_refs"][0]
                     for e in catalog["entries"] if e["file"] in {"a.py", "f.py"}]
-            return submit(binding, {"targets": _decide(binding, targets), "claims": [{
+            crossing: dict[str, Any] = {
                 "uid": "", "revision": 0, "source_uids": [], "title": "Caller divides by zero",
                 "payload": {"claim": "ratio(4, 1) now divides by zero.", "trigger": "Import f.py.",
                             "consequence": "ZeroDivisionError at import.", "grounds": "a.py uses count - 1.",
-                            "file": "f.py", "line": None, "severity": "high", "evidence_refs": refs}}]})
+                            "file": "f.py", "line": None, "severity": "high", "evidence_refs": refs}}
+            if scenario == "synthesis":
+                # It admits the syntheses of retained claims first, then the spanning claim synthesizes the first.
+                retained = {c["title"]: c["uid"] for c in work["retained_conclusions"]["claims"]}
+                synthesized = _charged(binding, "review_admit", {"targets": [], "claims": [
+                    {**crossing, "title": title, "source_uids": [retained[name] for name in names],
+                     "payload": {**crossing["payload"], "claim": title}} for title, names in _SYNTHESES.items()]})
+                crossing["source_uids"] = [synthesized["admitted"]["claims"][0]["uid"]]
+            return submit(binding, {"targets": _decide(binding, targets), "claims": [crossing]})
         value = {"targets": _decide(binding, targets), "claims": []}
+        if scenario == "synthesis":
+            value["claims"] = [{"uid": "", "revision": 0, "source_uids": [], "title": title, "payload": {
+                **dict.fromkeys(("claim", "trigger", "consequence", "grounds"), title), "file": file, "line": None,
+                "severity": "medium", "evidence_refs": _decide(binding, [file])[0]["evidence_refs"]}}
+                for title, file in _PREDECESSORS.items() if file in targets]
         if scenario == "eight-batches" and work["kind"] == "discovery":
             # Nine claims of about 750 bytes per target: together more than 256 claims and 131,072 bytes.
             value["claims"] = [{"uid": "", "revision": 0, "source_uids": [], "title": f"{target} breaks {n}",
@@ -2301,7 +2318,8 @@ async def test_split_review_transfers_unfinished_work_and_investigates_across_as
         return submit(binding, value)
 
     def _verdict_for(claim: dict[str, Any]) -> dict[str, Any]:
-        return {"uid": claim["uid"], "revision": claim["revision"], "verdict": "confirmed",
+        return {"uid": claim["uid"], "revision": claim["revision"],
+                "verdict": "rejected" if claim["title"] in _REJECTED else "confirmed",
                 "grounds": "Counterevidence search found no guard before the division.", "evidence_refs": []}
 
     monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=execute, console=agent.console))
@@ -2433,9 +2451,21 @@ async def test_split_review_transfers_unfinished_work_and_investigates_across_as
                 stale[0].admit("after", "review_admit", {"targets": [], "claims": []})
     elif scenario != "contention":
         assert cross["targets"] == [] and cross["parents"] == []
-    # Every claim is delivered confirmed, and the large row retains more than one unscaled capacity of claims.
     *found, finding = value["findings"]
-    assert len(found) == len(value["claims"]) - 1 == (288 if scenario == "eight-batches" else 0)
+    if scenario == "synthesis":
+        # A confirmed synthesis is delivered in place of each claim it names, along a chain and whatever became
+        # of its other predecessors; a rejected one leaves its predecessor delivered. The sealed claims keep
+        # every claim and disposition, and the report's findings are the delivered ones.
+        titles = [*_PREDECESSORS, *_SYNTHESES, finding["title"]]
+        assert {c["title"]: c["disposition"] for c in value["claims"]} == {
+            title: "rejected" if title in _REJECTED else "confirmed" for title in titles}
+        assert [c["title"] for c in found] == ["f.py limit"]
+        report, _, rejected = (repo / ".review-output.md").read_text().partition("## Rejected concerns")
+        assert [title for title in titles if f". {title}\n" in report] == ["f.py limit", "Caller divides by zero"]
+        assert [title for title in titles if f". {title}\n" in rejected] == ["b.py value", "Limit, restated"]
+    else:
+        # Every claim is delivered confirmed, and the large row retains more than one unscaled capacity of claims.
+        assert len(found) == len(value["claims"]) - 1 == (288 if scenario == "eight-batches" else 0)
     assert (len(json_utils.canonical_json([{**c, "challenge_evidence": []} for c in value["claims"]]).encode())
             > 131072) == (scenario == "eight-batches")
     # The spanning claim is judged by a distinct fresh invocation, never its author's context.
