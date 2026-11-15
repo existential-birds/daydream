@@ -378,9 +378,9 @@ def diff(repo: Path, base: str, head: str = "HEAD", *, exclude: list[str] | None
     result = []
     for revision, label in ((f"{preferred_base}...{head}", f"{base}...{head}"), (head, head)):
         proc = process._run_git(
-            repo, ["diff", revision, *paths], timeout=30, error_context=f"git diff {label} failed"
+            repo, ["diff", revision, *paths], capture_bytes=True, timeout=30, error_context=f"git diff {label} failed"
         )
-        result.append(proc.stdout)
+        result.append(process.decode_diff(proc.stdout))
     return "".join(result)
 
 
@@ -416,8 +416,8 @@ def diff_paths(
     sep = "..." if merge_base_diff else ".."
     range_arg = f"{base}{sep}{head}"
     args = ["diff", f"--unified={unified}", range_arg, "--", *paths]
-    proc = process._run_git(repo, args, timeout=30, error_context=f"git diff {range_arg} failed")
-    return proc.stdout
+    proc = process._run_git(repo, args, capture_bytes=True, timeout=30, error_context=f"git diff {range_arg} failed")
+    return process.decode_diff(proc.stdout)
 
 
 def diff_worktree_against(repo: Path, ref: str, paths: list[str]) -> str:

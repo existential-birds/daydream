@@ -44,6 +44,9 @@ def render_committed_review(payload: Mapping[str, Any]) -> str:
         f"Captured head: {_code(revision['head_sha'])}; merge base: {_code(revision['merge_base_sha'])}.",
         f"Captured diff: {_code(revision['diff_key'])}.",
     ]
+    if binary := dict.fromkeys(part['file'] for part in payload['assignments'] if part.get('binary')):
+        lines.append('Decided by the host as binary changes with no text content: '
+                     + ', '.join(map(_code, binary)) + '.')
     if terminal['reason_codes']:
         lines.append('Unfinished work: ' + ', '.join(_code(reason) for reason in terminal['reason_codes']) + '.')
     if sentence := allowance_sentence(terminal['reason_codes']):

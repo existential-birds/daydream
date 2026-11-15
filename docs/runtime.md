@@ -184,10 +184,12 @@ evidence; models cite source IDs only to locate claims or add evidence. Every
 `evidence_refs` array holds at most four selectors, which the reviewer instructions
 state; a target's complete inventory stays in `assignments[].source_refs`.
 At sealing every planned target has exactly one typed decision: an admitted model
-decision or a host-authored `not_reviewed` decision whose reason starts with
-`unsubmitted:`. Coverage shards targets in inventory order into scopes of 12
-(`committed:NNNNN`, `shard` = index); a full shard of worst-case decisions (four
-references, 1024-character reasons) fits the 256 KiB scope bound. Review reserves
+decision, a host-authored `not_reviewed` decision whose reason starts with
+`unsubmitted:`, or the host's `reviewed` decision for a binary change (below). Coverage
+shards targets in inventory order into scopes of 12 (`committed:NNNNN`, `shard` =
+index); a full shard of worst-case decisions (four references, 1024-character reasons,
+target ids that are paths of up to 4096 bytes without control characters) fits the
+256 KiB scope bound. Review reserves
 that typed unfinished attribution before model work and refuses, before any model
 work, a plan whose minimal attribution exceeds the 8 MiB run allocation. Claim lines must fall inside a cited `source_range` or, for exact
 continuation fragments, inside that fragment's summarized complete-line span; the
@@ -263,11 +265,12 @@ per batch when:
 split  <=>  B > 4  and  I - X >= 2 * B
 ```
 
-`B` is the number of batches; `I` and `X` are the discovery and cross-assignment
-allowances defined below. Otherwise one discovery work covers every target: a change
-of at most four batches, or one whose profile is too small to leave every batch two
-starts. No setting selects another rule. The `[pipeline] assignment_policy` profile key
-is removed, and a profile that still sets it is refused before any review work with a
+`B` is the number of batches, which hold every target but binary changes (see below);
+`I` and `X` are the discovery and cross-assignment allowances defined below. Otherwise
+one discovery work covers every target: a change of at most four batches, or one whose
+profile is too small to leave every batch two starts. A change of only binary files has
+no batch and plans no assignment. No setting selects another rule. The
+`[pipeline] assignment_policy` profile key is removed, and a profile that still sets it is refused before any review work with a
 message naming the key. Split work runs concurrently under
 `anyio.CapacityLimiter(effective_fanout_concurrency(10, backend))`, by default ten at a
 time on Pi and eight on Claude and Codex, each in a forked trajectory;
@@ -420,7 +423,20 @@ The reviewer's assignments come from one canonical change: the full diff and its
 index are captured once with their identities, revalidated before every admission,
 and split into whole parts sized to the transport's assignment allowance
 ([review assignments](../daydream/review_stage_inputs.py)). Changed canonical bytes
-are refused, never re-read.
+are refused, never re-read. Review diffs show bytes that are not UTF-8 as U+FFFD, so
+such a file is reviewed as text; identity stays with the raw Git objects, and a
+supporting selector still requires a UTF-8 file. An unsplit file's target id is its
+path, and paths up to 4096 characters fit every coverage and result schema, as source
+references do. A path whose diff header alone cannot fit one assignment allowance is
+refused at planning by name.
+
+A changed file whose captured diff is binary (Git's `Binary files … differ`, with no
+text hunk) is decided by the host: its assignment carries `binary: true`, it stays in
+the catalog as decided, and no batch or work holds it. Its sealed decision is
+`reviewed` with the reason `binary change: no text content` and its assigned source,
+and the report names these files. A claim may still name or cite a binary file. A
+change of only binary files completes without a model. A host decision is not partial
+evidence, so a review whose model admitted nothing still fails.
 
 ### Captured local source
 

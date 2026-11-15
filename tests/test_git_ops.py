@@ -21,6 +21,7 @@ from daydream.git_ops import (
     GitError,
     NotAWorktreeError,
     github as git_github,
+    immutable,
     mutations as git_mutations,
     process as git_process,
     queries as git_queries,
@@ -1052,7 +1053,7 @@ def test_feature_history_diff_and_publication_follow_the_same_commit_window(tmp_
     feature = original.copy()
     feature[14] = "line 15 FEAT"
     write_and_stage(repo, "shared.txt", "\n".join(feature) + "\n")
-    write_and_stage(repo, "keep.txt", "keep\n")
+    write_and_stage(repo, "keep.txt", b"keep caf\xe9\n")  # Not UTF-8.
     write_and_stage(repo, "drop.txt", "drop\n")
     # A tracked path can share a revision's spelling. Every diff layer must
     # separate revisions from paths, including the tracked-working layer.
@@ -1087,7 +1088,10 @@ def test_feature_history_diff_and_publication_follow_the_same_commit_window(tmp_
     assert " line 5\n" not in focused and " line 5\n" in broad
     full = git_ops.diff(repo, "main")
     excluded = git_ops.diff(repo, "main", exclude=["drop.txt"])
-    assert "keep.txt" in full and "+keep" in full and "drop.txt" in full
+    # Bytes that are not UTF-8 read as U+FFFD, the same in the hosted route's diff and in a path diff.
+    assert "keep.txt" in full and "+keep caf\ufffd\n" in full and "drop.txt" in full
+    assert "+keep caf\ufffd\n" in immutable.immutable_review_diff(repo, common, tip)
+    assert "+keep caf\ufffd\n" in git_ops.diff_paths(repo, "main", "HEAD", ["keep.txt"], merge_base_diff=True)
     assert "HEAD/module.py" in full and "+VALUE = 1" in full
     assert "keep.txt" in excluded and "drop.txt" not in excluded
     assert not git_ops.remote_contains_commit(repo, "feat/slash-name", tip)

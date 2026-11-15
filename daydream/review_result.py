@@ -17,6 +17,7 @@ import jsonschema
 from daydream.json_utils import validate_json_schema
 from daydream.output_schema import strict_object
 from daydream.redaction import redact_structured_text, redact_text
+from daydream.repository_paths import REPOSITORY_FILE_PATH_MAX_LENGTH
 from daydream.retry_policy import FailureClass, classify_failure
 from daydream.review_source_refs import SOURCE_REFS_MAX_BYTES, SOURCE_REFS_SCHEMA, source_revision
 from daydream.run_context import current_run_context
@@ -90,11 +91,13 @@ def reason_for_budget(reason: str) -> ReasonCode:
 
 
 _TEXT = {'type': 'string', 'minLength': 1, 'maxLength': 512}
+# An unsplit file's target id is its path.
+_PATH = {'type': 'string', 'minLength': 1, 'maxLength': REPOSITORY_FILE_PATH_MAX_LENGTH}
 _REASONS = {'type': 'array', 'uniqueItems': True, 'maxItems': len(ReasonCode),
             'items': {'enum': [r.value for r in ReasonCode]}}
 _SCOPE_PROPERTIES = {
     'scope_id': _TEXT, 'stack': _TEXT,
-    'files': {'type': 'array', 'maxItems': 10000, 'uniqueItems': True, 'items': _TEXT},
+    'files': {'type': 'array', 'maxItems': 10000, 'uniqueItems': True, 'items': _PATH},
     'shard': {'type': ['integer', 'null'], 'minimum': 0},
     'scope_ref': {'type': ['string', 'null'], 'maxLength': 512},
 }
@@ -105,7 +108,7 @@ TARGET_DECISIONS_MAX_ITEMS = 512
 TARGET_DECISIONS_MAX_BYTES = 256 * 1024
 RUN_TARGET_DECISIONS_MAX_BYTES = 8 * 1024 * 1024
 _TARGET_DECISIONS_SCHEMA = {'type': 'array', 'maxItems': TARGET_DECISIONS_MAX_ITEMS, 'items': strict_object({
-    'target_id': _TEXT, 'status': {'enum': ['reviewed', 'not_reviewed']},
+    'target_id': _PATH, 'status': {'enum': ['reviewed', 'not_reviewed']},
     'reason': {'type': 'string', 'maxLength': TARGET_DECISIONS_MAX_BYTES},
     'evidence_refs': SOURCE_REFS_SCHEMA,
 })}

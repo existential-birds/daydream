@@ -255,6 +255,13 @@ class StageInputFactory:
                 reserved_targets.add(target_id)
                 part.assignment.update(target_id=target_id, part_index=index, part_count=len(pieces))
             result.extend(pieces)
+        # Git reports a binary change in place of any text hunk: the host decides it, no model owes it.
+        binary = {path for path, found in blocks.items() if (lines := lf_lines("".join(found)))
+                  and any(line.startswith("Binary files ") for line in lines)
+                  and not any(map(_HUNK_HEADER.match, lines))}
+        for part in result:
+            if part.assignment["file"] in binary:
+                part.assignment["binary"] = True
         return result
 
     def _split_file(self, path: str, blocks: list[str]) -> list[_Part]:
@@ -310,7 +317,8 @@ class StageInputFactory:
             # encoded prefix so multi-MB hunks are not re-encoded per fragment.
             low = len(inputs.truncate_utf8_to_budget(rest[:max(0, allowance)], max(0, allowance)))
             if low == 0:
-                raise inputs.SanctionedInputUnavailable("required change header exceeds the assignment allowance")
+                raise inputs.SanctionedInputUnavailable(
+                    f"required change header of {path[:160]!r} exceeds the assignment allowance")
             boundary = rest.rfind("\n", 0, low)
             take = boundary + 1 if boundary >= 0 else low
             chunk = rest[:take]
@@ -337,7 +345,7 @@ class StageInputFactory:
         return chunks
 
     def _batches(self) -> list[list[dict[str, Any]]]:
-        batches = _bounded_groups(self.parts,
+        batches = _bounded_groups([part for part in self.parts if not part.assignment.get("binary")],
             lambda parts: len({p.assignment['file'] for p in parts}) <= 4
             and self._remaining_bytes(self._render(parts), dispatch=True) >= 0,
             "required assignment exceeds the assignment allowance")
