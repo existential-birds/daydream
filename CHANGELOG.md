@@ -36,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails the review: the sealed result keeps every confirmed finding
   ([#1875](https://github.com/existential-birds/daydream/issues/1875)).
 - Console lines no longer drop bracketed text or crash on it. Info, success and dim lines,
-  and error titles, read their text as Rich markup: the posting line printed
+  and error titles, used to read their text as Rich markup: the posting line printed
   `PR #7: 2 inline on src/routes//+page.ts` for `src/routes/[slug]/+page.ts`, and a path
   with an unbalanced closing tag, such as `docs/notes[/x].md`, raised `MarkupError` and
   stopped the run before anything was posted. These lines now print their text exactly,
