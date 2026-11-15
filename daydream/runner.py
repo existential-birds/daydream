@@ -303,10 +303,6 @@ def _review_refusal(config: RunConfig) -> str | None:
     """Explain why the reviewer cannot serve this request, before any workspace or GitHub call."""
     if not runs_review(config):
         return None
-    if _file_config_or_empty(config).supervisor in {"rules", "llm"}:
-        return ('The findings supervisor (supervisor = "rules" or "llm") ended with the staged reviewer; its deny '
-                "rules would no longer hold findings back. Remove the setting; an extension flow step can "
-                "rewrite the canonical items, and --ignore-path excludes paths from review.")
     from daydream.committed_review import REVIEW_PHASES, bounded_author_description, host_tools_refusal
 
     for kind, phase in REVIEW_PHASES:
