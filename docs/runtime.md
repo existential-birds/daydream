@@ -321,7 +321,8 @@ synchronous point, rechecks only touched identities (target still undecided and 
 by this work, claim revision current, retained claim/coverage capacity) and then mints
 claim ordinals. A sibling conflict is a correctable rejection; closure or deadline
 remains fatal. A new claim whose canonical payload equals a retained claim's is refused,
-correctably, so an attempt that repeats an admitted claim cannot deliver it twice. Any retained claim can become a finding, so retained claims share what the
+correctably, so an attempt that repeats an admitted claim cannot deliver it twice. Any
+retained claim can become a finding, so retained claims share what the
 review's findings export (`findings.json`, the hosted route's paired output) can hold:
 installation refuses, correctably, a batch after which that export would exceed its
 1 MiB bound with every retained claim as a relocated inline finding and every scope and phase
