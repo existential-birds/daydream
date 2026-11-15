@@ -62,6 +62,14 @@ secret values. Operators decide revocation, rotation, access restrictions, and
 remote history remediation. Never edit immutable evidence in place. Private
 harvest clones use `DAYDREAM_GIT_TOKEN` through child Git configuration, not URLs.
 
+## Stores on Docker Desktop bind mounts
+
+A Docker Desktop (macOS) bind mount can grant a held file lock to another descriptor in the
+container. Commits work there: an interrupted write's staged `*.tmp` file is removed only once
+it is unlocked and an hour old, so no live write is mistaken for one. The store lock does not
+reliably serialize writers or publishers that share such a mount, so keep one writer per store
+there, or put the store on the container's own disk and copy it out.
+
 ## Separate publication
 
 To keep Hub work out of review processes, run reviews with `--capture-data` and no
