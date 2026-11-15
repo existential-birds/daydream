@@ -138,7 +138,8 @@ def test_e2e_deep_mode_aggregates_fork_files(tmp_path: Path) -> None:
     assert "- **Tokens:** 2,014,000 in (1,007,300 cached, 50% hit) → 1,003,000 out" in out
     assert "- **Steps / tool calls:** 5 / 5" in out
     assert "| Review | mixed | 2 | 2,008,000 (50%) | 1,001,500 | $12.30 |" in out
-    assert "| Parse Feedback | claude-sonnet-4-5 | 0 | 1,000 (80%) | 200 | $0.02 |" in out
+    # A stored phase that no current build emits renders under its own name, like any unknown phase.
+    assert "| Parse | claude-sonnet-4-5 | 0 | 1,000 (80%) | 200 | $0.02 |" in out
     assert "| Fix | claude-sonnet-4-5 | 3 | 5,000 (50%) | 1,300 | $0.07 |" in out
 
 
@@ -224,7 +225,7 @@ def test_report_duration_cells_use_phase_and_fork_timestamp_spans(tmp_path: Path
     assert "- **Cost:** $0.18" in report
     assert "- **Tokens:** 35,010 in (16,510 cached, 47% hit) → 1,705 out" in report
     assert "- **Steps / tool calls:** 8 / 0" in report
-    assert "| Understand Intent | gpt-5.5 | 0 | 10 (100%) | 5 | $0.01 | <1s |" in report
+    assert "| Intent | gpt-5.5 | 0 | 10 (100%) | 5 | $0.01 | <1s |" in report
     assert "| Review | gpt-5.5 | 0 | 20,000 (70%) | 1,000 | $0.07 | 59s |" in report
     assert "| Verify Recommendations | gpt-5.5 | 0 | 10,000 | 200 | $0.06 | 1h 1m |" in report
     latencies = {
@@ -233,9 +234,9 @@ def test_report_duration_cells_use_phase_and_fork_timestamp_spans(tmp_path: Path
         if line.startswith("| ") and not line.startswith("| Phase |")
     }
     assert latencies == {
-        "Understand Intent": "<1s",
+        "Intent": "<1s",
         "Review": "59s",
-        "Parse Feedback": "1m",
+        "Parse": "1m",
         "Fix": "1m 1s",
         "Test & Heal": "1h",
         "Verify Recommendations": "1h 1m",

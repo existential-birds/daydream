@@ -146,7 +146,10 @@ def test_incompatible_cli_flags_are_rejected_with_the_offending_flag(
         (["--fix", "--yes", "--findings-out", "f.json", "/tmp/repo"], "--findings-out exports"),
         (["--diagram", "both", "--diagram-only", "sequence", "/tmp/repo"], "--diagram-only"),
         (["--diagram-only", "sequence", "--yes", "/tmp/repo"], "it does not apply to --diagram-only"),
-        (["--fix-backend=claude-opus-5", str(tmp_path)], "[tool.daydream.phases.fix]"),
+        # Per-phase flags of earlier releases are ordinary unknown options, and no current option extends one.
+        *(([f"{flag}=x", str(tmp_path)], f"unrecognized arguments: {flag}=x") for flag in (
+            "--review-backend", "--fix-backend", "--test-backend", "--exploration-model", "--review-model",
+            "--arbiter-model", "--fix-model", "--test-model")),
     ]
     for argv, expected in rejected:
         with pytest.raises(SystemExit) as exc_info:

@@ -50,6 +50,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `mode`, `skipped`, `reused` and `rule_version`, or each decision's `provenance`,
     `content_digest` and `verdict_reused`. Each decision keeps `item_uid`, `item_id`,
     `selected`, `reason_code` and `reason`.
+- **Breaking (0.y.z):** Leftovers of the replaced reviewer's phases, flags and public
+  directories are deleted ([#1861](https://github.com/existential-birds/daydream/issues/1861)):
+  - `DaydreamPhase.PARSE`, `INTENT` and `ALTERNATIVES`, and the run-info labels "Parse
+    Feedback", "Understand Intent", "Alternatives" and "Merge Findings". No build emits these
+    phases; a stored trajectory that names one is rendered under its own name ("Parse"), like
+    any phase the renderer does not know.
+  - The refusals of `--review-backend`, `--fix-backend`, `--test-backend`,
+    `--exploration-model`, `--review-model`, `--arbiter-model`, `--fix-model` and
+    `--test-model` that named their configuration-table replacement. Each now gets the
+    parser's own usage error and exit 2, for example
+    `daydream: error: unrecognized arguments: --fix-backend=claude`; set
+    `[tool.daydream.phases.<phase>] backend` or `model` instead.
+  - The `intents` and `review-cache` public `.daydream/` directories. Nothing writes either
+    one. A run now deletes an existing `.daydream/review-cache/` from an earlier build when it
+    starts, instead of carrying it into its published outputs.
 
 ### Fixed
 

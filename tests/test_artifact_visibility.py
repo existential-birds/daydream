@@ -567,7 +567,6 @@ async def test_artifact_session_preserves_resume_mtimes_across_publication_and_r
     for prerequisite in (intent, alternatives):
         os.utime(prerequisite, ns=(prerequisite_mtime_ns, prerequisite_mtime_ns))
     (source / ".daydream/improve").mkdir()
-    (source / ".daydream/intents").mkdir()
     (source / ".daydream/recommended.patch").write_bytes(b"diff bytes\n")
     (source / ".daydream/.DS_Store").write_bytes(b"diff bytes\n")
     baseline = _manifest(source)
@@ -593,6 +592,10 @@ async def test_artifact_session_preserves_resume_mtimes_across_publication_and_r
     (dump / "unrelated.bin").write_bytes(b"preserve me")
     (dump / "replace.txt").write_bytes(b"old")
     unused_dump = tmp_path / "never-existed/out"
+    # An earlier build's review cache is no artifact of this one: the publishing run deletes it.
+    stale_cache = source / ".daydream/review-cache/entries/key.json"
+    stale_cache.parent.mkdir(parents=True)
+    stale_cache.write_bytes(b"{}")
     session_id = "mtime-first"
     payload = _payload(session_id)
     async with open_artifact_session(_work(source, repo=first), session_id=session_id, owner=owner) as session:
@@ -639,6 +642,7 @@ async def test_artifact_session_preserves_resume_mtimes_across_publication_and_r
     assert (dump / "replace.txt").read_bytes() == b"new" and (dump / "added.txt").read_bytes() == b"added"
     assert not unused_dump.exists() and not unused_dump.parent.exists()
     assert (source / ".daydream/deep/prior.md").read_bytes() == b"prior reasoning\n"
+    assert not (source / ".daydream/review-cache").exists()
     assert not any((owner.artifact_state_root / "transactions").iterdir())
     assert (source / ".daydream/runs" / session_id / "trajectory.json").read_bytes() == payload
     canonical = owner.artifact_state_root / "canonical"
@@ -708,7 +712,7 @@ async def test_artifact_session_open_rejects_unsafe_public_tree_untouched(
     cases: tuple[tuple[Callable[..., Any], dict[str, Any]], ...] = (
         (_artifact_session_rejects_tracked_public_collision_untouched_case, {"tracked": ".review-output.md"}),
         (_artifact_session_rejects_registered_public_anchor_with_wrong_type_case,
-         {"anchor": "intents", "make_wrong_type": lambda path: path.write_bytes(b"not a directory")}),
+         {"anchor": "partial-fixes", "make_wrong_type": lambda path: path.write_bytes(b"not a directory")}),
         (_public_validation_classifies_the_exact_manifested_tree_case,
          {"mutation": "static-kind", "message": "public artifact anchor has the wrong filesystem type"}),
         (_artifact_session_rejects_empty_unsupported_operational_root_case, {"namespace": "worktrees"}),
