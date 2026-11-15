@@ -46,9 +46,8 @@ def assemble_scoring_inputs(run_dir: Path) -> ScoringInputs:
         if isinstance(verdicts, list):
             verifier_verdicts = verdicts
     except FileNotFoundError:
-        # No structured verdicts; nothing failed to parse. Expected for a
-        # shallow run and, after the verify relocation, a declined deep run
-        # that skipped recommendation verification at the apply-fixes gate.
+        # No structured verdicts; nothing failed to parse. Expected for a run that
+        # did not fix, or declined the apply-fixes gate before verification.
         pass
     except json.JSONDecodeError:
         # Present but malformed ⇒ format gate floors.

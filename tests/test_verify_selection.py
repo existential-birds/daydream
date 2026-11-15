@@ -1,6 +1,6 @@
 from dataclasses import replace
 
-from daydream.deep.verify_selection import SelectionDecision, item_content_digest, select_items
+from daydream.deep.verify_selection import SelectionDecision, select_items
 
 
 def _item(item_uid: str, **over: object) -> dict[str, object]:
@@ -23,21 +23,21 @@ def test_every_finding_is_verified_except_exempt_lenses() -> None:
         ("item:4", 4, False, "exempt:structural"), ("item:5", 5, False, "exempt:wonder"),
         ("item:6", None, True, "verify_all"),
     ]
-    assert all(d.provenance == {} and d.verdict_reused is False for d in decisions)
-    assert [d.content_digest for d in decisions] == [item_content_digest(item) for item in items]
+    # The stored decision carries what the fix cycle reads, and nothing for skipping or reuse.
+    assert decisions[0].as_dict() == {"item_uid": "item:1", "item_id": 1, "selected": True,
+                                      "reason_code": "verify_all", "reason": "every finding is verified"}
 
-def _decision(item_uid: str, *, digest: str, item_id: int = 1) -> SelectionDecision:
+def _decision(item_uid: str, *, item_id: int = 1) -> SelectionDecision:
     return SelectionDecision(
         item_uid=item_uid, item_id=item_id, selected=True, reason_code="verify_all",
-        reason="every finding is verified", provenance={}, content_digest=digest,
+        reason="every finding is verified",
     )
 
 def test_fresh_verdicts_bind_only_to_the_findings_asked_about() -> None:
     """Verdicts for findings the verifier was not shown are dropped before they reach a finding."""
     from daydream.deep.fix_steps import _attach_verdicts
     from daydream.phases.verify import _asked_verdicts
-    current = [_decision("item:1", digest="d1", item_id=9), _decision("item:2", digest="d2", item_id=2),
-               _decision("item:3", digest="d3", item_id=3)]
+    current = [_decision("item:1", item_id=9), _decision("item:2", item_id=2), _decision("item:3", item_id=3)]
     shown = {"issue_id": 2, "verdict": "uncertain", "evidence": "shown"}
     stray = [{"issue_id": n, "verdict": "contradicts", "evidence": "stray"} for n in (3, 99, "2")]
     decisions = [*current[:2], replace(current[2], selected=False)]
@@ -48,7 +48,3 @@ def test_fresh_verdicts_bind_only_to_the_findings_asked_about() -> None:
         _item("item:1", id=9),
         {**_item("item:2", id=2), "verifier_verdict": "uncertain", "evidence": "shown", "unverified_assumptions": []},
         _item("item:3", id=3)]
-
-    a = _item("item:1")
-    assert item_content_digest(a) == item_content_digest({**a, "id": 7, "verifier_verdict": "consistent"})
-    assert item_content_digest(a) != item_content_digest({**a, "evidence": "a.py:1 rewritten"})

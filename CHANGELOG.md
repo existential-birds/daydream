@@ -36,6 +36,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The `daydream.stack` trace span attribute and the `stack` parameter of `step_scope`.
     The archive index keeps its `skill` column, now always written as null; the archive
     schema is unchanged.
+- **Breaking (0.y.z):** Readers of files that only the replaced staged reviewer wrote are
+  deleted ([#1860](https://github.com/existential-birds/daydream/issues/1860)):
+  - `daydream.deep.routing_record.read_routing_record`, which read `latency-routing.json`. The
+    archived `evaluation.json` no longer has the `latency_profile` and `routing` keys, and
+    archive finalization no longer requires them.
+  - The evaluation's `findings.stacks`, `findings.dedup` and `findings.per_lens`, which counted
+    `stack-*-records.json`, `dedup-candidates.json` and `alternatives.json`. Evaluating an old
+    run directory reports no per-lens, per-stack or dedup counts, and its finding total comes
+    only from `merged-items.json` or the rendered review, else 0.
+  - The verifier's selection residue. `recommendation-verdicts.json`, and so the
+    `verification` evidence a dataset record captures, no longer carries the selection's
+    `mode`, `skipped`, `reused` and `rule_version`, or each decision's `provenance`,
+    `content_digest` and `verdict_reused`. Each decision keeps `item_uid`, `item_id`,
+    `selected`, `reason_code` and `reason`.
 
 ### Fixed
 

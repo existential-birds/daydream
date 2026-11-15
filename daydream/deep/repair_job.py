@@ -1,7 +1,6 @@
 """The durable repair job record (issue #1210).
 
-One artifact, one writer, one meaning — the read-modify-write shape of
-``deep/routing_record.py``. ``repair-job.json`` is the job's own state: which
+One artifact, one writer, one meaning. ``repair-job.json`` is the job's own state: which
 execution ran last, what the job has consumed, what bound it was granted, what
 the repair turn asked for, and every named degradation of the host's accounting
 (including a checkpoint that could not be persisted). A later execution merges

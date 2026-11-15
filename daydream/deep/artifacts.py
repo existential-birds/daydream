@@ -45,8 +45,6 @@ class DeepArtifact(StrEnum):
     # checkpoint carries captured work, the record carries the job's own state.
     REPAIR_CHECKPOINT = "repair-checkpoint.json"
     REPAIR_JOB = "repair-job.json"
-    # Written by earlier builds only; still read for the archive evaluation.
-    LATENCY_ROUTING = "latency-routing.json"
     DIFF_KEY = "diff-key"
 
     def at(self, root: Path) -> Path:

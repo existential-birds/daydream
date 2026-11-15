@@ -75,7 +75,7 @@ def _validate_evaluation(
 ) -> None:
     """Require a complete analyzer result bound to the archive's selected evidence."""
     sections = (
-        "agent", "cost", "timing", "tools", "findings", "location", "routing", "training_signals", "quality", "derived",
+        "agent", "cost", "timing", "tools", "findings", "location", "training_signals", "quality", "derived",
     )
     if (
         not isinstance(evaluation, dict)
@@ -84,8 +84,6 @@ def _validate_evaluation(
         or type(evaluation.get("trajectory_count")) is not int
         or evaluation["trajectory_count"] != trajectory_count
         or evaluation.get("daydream_dir") != str(display_path)
-        or "latency_profile" not in evaluation
-        or evaluation["latency_profile"] is not None and not isinstance(evaluation["latency_profile"], str)
         or any(not isinstance(evaluation.get(section), dict) for section in sections)
     ):
         raise ValueError("evaluation returned a malformed or unbound result")
