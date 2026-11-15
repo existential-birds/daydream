@@ -77,7 +77,6 @@ from daydream.immutable_review import HISTORICAL_CONTEXT_MAX_BYTES, ImmutableRev
 from daydream.json_utils import canonical_json, validate_json_schema
 from daydream.observability.spans import record_budget_stop
 from daydream.prompt_budget import SanctionedInputUnavailable, truncate_utf8_to_budget
-from daydream.prompts.grounding import REPOSITORY_SEARCH_GUIDANCE
 from daydream.redaction import redact_text
 from daydream.review_budget import BudgetDimension, BudgetLedger, review_scale_for_diff
 from daydream.review_profile import ResolvedProfile, build_default_profile, resolve_from_runconfig
@@ -982,41 +981,26 @@ def _instruction_json(value: Any) -> str:
     return text
 
 
-def _context_bytes(text: str) -> int:
-    """The documented bound counts the description JSON-escaped twice."""
-    return len(canonical_json(_instruction_json(text)).encode())
-
-
 def bounded_author_description(config: RunConfig) -> FrozenAuthorDescription | None:
-    """Refuse embedder-supplied author text over its encoded bound before any source preparation."""
+    """Refuse embedder-supplied author text over its UTF-8 bound before any source preparation."""
     author = config.frozen_author_description
-    if author is not None and _context_bytes(author.description) > HISTORICAL_CONTEXT_MAX_BYTES["context"]:
+    if author is not None and len(author.description.encode()) > HISTORICAL_CONTEXT_MAX_BYTES["context"]:
         raise ValueError("frozen author description exceeds its encoded UTF-8 bound")
     return author
 
 
 def fit_author_context(text: str) -> str:
-    """Keep the longest prefix of host-fetched author text that fits the encoded bound, saying what was kept.
+    """Keep the longest prefix of host-fetched author text that fits the UTF-8 bound, saying what was kept.
 
     A pull request's author cannot avoid review with a long description: it is cut, never refused.
     """
-    total = len(text.encode())
-
-    def kept(budget: int) -> str:
-        prefix = truncate_utf8_to_budget(text, budget)
-        return (f"{prefix}\n[author description truncated by the host: first {len(prefix.encode())} of "
-                f"{total} UTF-8 bytes]")
-
-    if _context_bytes(text) <= HISTORICAL_CONTEXT_MAX_BYTES["context"]:
+    total, bound = len(text.encode()), HISTORICAL_CONTEXT_MAX_BYTES["context"]
+    if total <= bound:
         return text
-    low, high = 0, total
-    while low < high:
-        middle = (low + high + 1) // 2
-        if _context_bytes(kept(middle)) <= HISTORICAL_CONTEXT_MAX_BYTES["context"]:
-            low = middle
-        else:
-            high = middle - 1
-    return kept(low)
+    marker = "\n[author description truncated by the host: first {} of " + f"{total} UTF-8 bytes]"
+    # The kept count has the bound's digits, so the marker sized with the bound is the marker sent.
+    prefix = truncate_utf8_to_budget(text, bound - len(marker.format(bound).encode()))
+    return prefix + marker.format(len(prefix.encode()))
 
 
 def review_settings(config: RunConfig) -> dict[str, Any]:
@@ -1591,12 +1575,9 @@ class _Schedule:
             + profile["strategies"][strategy]
             + f"\nThis dispatch's host token: {token}\n"
         )
-        # The host's own search guidance, as composed review prompts embed it: a copy quoted inside the
-        # assignment would otherwise stop the agent from adding it.
         prompt = (f"{token} Begin the committed review {kind} assignment. Navigate with review_source, admit "
                   "batches with review_admit and finish with structured_output."
-                  f"\n{token} Committed review assignment: {_instruction_json(assignment)}"
-                  f"\n{token} {REPOSITORY_SEARCH_GUIDANCE}\n")
+                  f"\n{token} Committed review assignment: {_instruction_json(assignment)}\n")
         reason: str | None = None
         settled = False
         try:

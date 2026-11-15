@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import shlex
 import subprocess
 import sys
 import threading
@@ -17,6 +18,7 @@ from mcp import types as mcp_types
 from daydream import agent, clock
 from daydream.atif import validate
 from daydream.backends import (
+    READ_ONLY_BASH_ALLOWLIST,
     AuditIsolationError,
     BackendExecutionInput,
     ClaudeRequestConfig,
@@ -421,22 +423,28 @@ async def test_audit_execute_rejects_unsafe_invocation_before_client(patch_sdk: 
 # --- Session continuation via SDK resume --------------------------------------
 
 
-async def test_execute_registers_background_bash_guard(patch_sdk: Any) -> None:
+async def test_execute_registers_background_bash_guard(patch_sdk: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """Registered guards block background Bash in both profiles with foreground guidance.
 
     Foreground commands and non-Bash tools with the same key remain allowed; the read-only
     syntax guard and the always-on catastrophic-command guard enforce each execution profile.
+    The search helper is admitted only as the running interpreter's command the guidance names.
     """
+    search = shlex.join((sys.executable, "-m", "daydream", "search"))
+    # A quoted interpreter path with a space is one word of its family.
+    spaced = shlex.join(("/opt/py env/bin/python", "-m", "daydream", "search"))
+    monkeypatch.setattr(claude_backend, "READ_ONLY_BASH_ALLOWLIST", (*READ_ONLY_BASH_ALLOWLIST, spaced))
     profile_commands = {
         True: [
             ("git log --grep='fix|bug'", True), ("git log", True), ("git blame -L 10,10 src.py", True),
             ("git show 648a327 -- src.py", True), ("git diff HEAD~1 HEAD -- --output", True),
-            ("daydream search symbol src --expand deps/pkg --reason 'trace caller'", True),
+            (f"{search} symbol src --expand deps/pkg --reason 'trace caller'", True), (f"{spaced} symbol src", True),
             ("git ls-files -z --cached --others --exclude-standard -- src", True),
             ("cat foo(1).txt", True), ("ls -la", True),
             ("git commit -m x", False), ("git reset --hard HEAD", False), ("rm -rf build", False),
-            ("ls \nrm -rf /", False), ("cat foo\rrm x", False), ("daydream search-other symbol src", False),
-            ("daydream search symbol src > evidence.json", False), ("git status && rm x", False),
+            ("ls \nrm -rf /", False), ("cat foo\rrm x", False), (f"{search}-other symbol src", False),
+            ("daydream search symbol src", False), ("/opt/py env/bin/python -m daydream search symbol src", False),
+            (f"{search} symbol src > evidence.json", False), ("git status && rm x", False),
             ("cat f | tee g", False), ("git log; rm x", False), ("echo $(rm x)", False),
             ("git log foo# > status.txt", False), ("cat < README.md", False),
             ("git diff --output=diff.patch", False), ("git log --output log.txt", False), ("(rm x)", False),
