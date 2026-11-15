@@ -7,16 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.2] - 2026-11-15
+
 ### Changed
 
 - The bot workflows install Daydream at the v0.35.1 release commit (`7e036838`) instead of the
   v0.35.0 one: the repository's review and post workflows, which take effect on merge, and the
   packaged split and single-file templates. The 0.35.1 package's templates still install the
-  v0.35.0 pin, so `daydream setup` users get the v0.35.1 pin with the next release; existing
-  installs then read as customized under `daydream setup --verify` until `daydream setup` is
-  rerun. Both releases write findings schema 2, so the artifact of a review started before
-  this change and posted after it is still accepted
-  ([#1641](https://github.com/existential-birds/daydream/issues/1641)).
+  v0.35.0 pin; this release's templates install the v0.35.1 pin, so `daydream setup` users get
+  it now; existing installs read as customized under `daydream setup --verify` until
+  `daydream setup` is rerun. Both releases write findings schema 2, so the artifact of a review
+  started before this change and posted after it is still accepted. That pin predates the
+  route-file fixes below; the bot gets them when it moves to the v0.35.2 release commit
+  ([#1641](https://github.com/existential-birds/daydream/issues/1641), #1876).
 
 ### Fixed
 
@@ -34,14 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A finding on a path that is not confined (absolute, or with a `..` or `.` part such as a
   leading `./`), which only an extension step that rewrites the findings can produce, still
   fails the review: the sealed result keeps every confirmed finding
-  ([#1875](https://github.com/existential-birds/daydream/issues/1875)).
+  ([#1875](https://github.com/existential-birds/daydream/issues/1875), #1877).
 - Console lines no longer drop bracketed text or crash on it. Info, success and dim lines,
   and error titles, used to read their text as Rich markup: the posting line printed
   `PR #7: 2 inline on src/routes//+page.ts` for `src/routes/[slug]/+page.ts`, and a path
   with an unbalanced closing tag, such as `docs/notes[/x].md`, raised `MarkupError` and
   stopped the run before anything was posted. These lines now print their text exactly,
   so `daydream setup --verify` also shows its check names such as `[secrets]`
-  ([#1878](https://github.com/existential-birds/daydream/issues/1878)).
+  ([#1878](https://github.com/existential-birds/daydream/issues/1878), #1877).
 
 ## [0.35.1] - 2026-11-15
 
@@ -2961,7 +2964,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.35.1...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.35.2...HEAD
+[0.35.2]: https://github.com/existential-birds/daydream/compare/v0.35.1...v0.35.2
 [0.35.1]: https://github.com/existential-birds/daydream/compare/v0.35.0...v0.35.1
 [0.35.0]: https://github.com/existential-birds/daydream/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/existential-birds/daydream/compare/v0.33.0...v0.34.0
