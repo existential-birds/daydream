@@ -508,41 +508,22 @@ def record_name(identity: str) -> str:
     return _sha(identity.encode()) + ".jsonl"
 
 
-# On a filesystem that grants a lock to a second descriptor while another holds it, a stage
-# can't be told live by its writer's lock, so recovery removes only a stage untouched this long.
-_UNLOCKED_STAGE_GRACE_SECONDS = 3600
+# Recovery removes a stage only once it is unlocked and untouched this long. Some filesystems
+# grant a held lock to another descriptor: on Docker Desktop's macOS bind mounts (virtiofs
+# "fakeowner"), descriptors in one container can share a lock, so a live writer's stage
+# looked abandoned and recovery deleted it before publish (#1883).
+_STAGE_GRACE_SECONDS = 3600
 
 
-def _locks_enforced(lock: Path) -> bool:
-    """Whether a second descriptor is refused the store lock while the caller holds it.
-
-    Docker Desktop's macOS bind mounts (virtiofs "fakeowner") grant flock, OFD and POSIX
-    locks to every process in a container at once, so there a held lock proves nothing (#1883).
-    """
-    with os.fdopen(os.open(lock, os.O_RDWR | os.O_NOFOLLOW), "rb") as probe:
-        try:
-            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True
-        except OSError:  # a lock refused for another reason proves no exclusion either
-            pass
-        return False
-
-
-def _abandoned(staged: Path, *, locks_enforced: bool) -> bool:
-    """Whether a staged temp is still linked and no live writer holds it.
-
-    Where locks are enforced, a writer holds its stage's lock until it publishes or removes
-    it. Where they aren't, only a stage untouched for ``_UNLOCKED_STAGE_GRACE_SECONDS`` counts.
-    """
+def _abandoned(staged: Path) -> bool:
+    """Whether a staged temp is still linked, unlocked, and untouched for the grace period."""
     try:
         handle = open(staged, "rb")
     except FileNotFoundError:
         return False
     with handle:
-        if not locks_enforced:
-            metadata = os.fstat(handle.fileno())
-            return metadata.st_nlink > 0 and time.time() - metadata.st_mtime > _UNLOCKED_STAGE_GRACE_SECONDS
+        if time.time() - os.fstat(handle.fileno()).st_mtime <= _STAGE_GRACE_SECONDS:
+            return False
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -672,9 +653,6 @@ class LocalRecordStore:
                 os.fchmod(lock.fileno(), 0o600)
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 diagnostics: list[str] = []
-                locks_enforced = _locks_enforced(self.root / ".lock")
-                if not locks_enforced:
-                    diagnostics.append("store_locks_unenforced")
                 for staged in (path for name in _DIRECTORIES for path in (self.root / name).glob("*.tmp")):
                     try:
                         metadata = staged.lstat()
@@ -682,7 +660,7 @@ class LocalRecordStore:
                         continue
                     if not stat.S_ISREG(metadata.st_mode):
                         raise StoreError("unsafe_storage_path")
-                    if _abandoned(staged, locks_enforced=locks_enforced):
+                    if _abandoned(staged):
                         staged.unlink(missing_ok=True)
                         diagnostics.append("recovered_interrupted_write")
                 yield tuple(diagnostics)
@@ -721,8 +699,9 @@ class LocalRecordStore:
         """Stage one run record outside the store lock, then compare or publish it under the lock.
 
         The stage is a ``*.tmp`` file created under the lock and locked by its writer until
-        it is published or removed, so interrupted-write recovery skips it while the writer lives;
-        where the filesystem doesn't enforce locks, recovery skips any recently written stage.
+        it is published or removed, and recovery also skips any stage written within the last
+        hour, so interrupted-write recovery skips it while the writer lives even where the
+        filesystem doesn't keep the lock exclusive.
         """
         identity = envelope["run_id"]
         path = self._shard("runs", identity)
@@ -756,7 +735,7 @@ class LocalRecordStore:
                 recorded = digest.copy()
                 recorded.update(b"\n")
                 with self._locked() as also_recovered:
-                    diagnostics = tuple(dict.fromkeys(recovered + also_recovered))
+                    diagnostics = recovered + also_recovered
                     if path.exists():
                         if not self._holds(path, size + 1, recorded.hexdigest()):
                             raise StoreError("immutable_identity_conflict")

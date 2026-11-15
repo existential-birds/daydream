@@ -206,6 +206,7 @@ def test_failed_commit_is_not_visible_and_abandoned_staging_recovers_privately(
     assert [run["run_id"] for run in read_records(store).runs] == ["run-1"]
     abandoned = store.root / "runs" / "record-abandoned.tmp"
     abandoned.write_bytes(b'{"partial":')
+    os.utime(abandoned, (0, 0))
     assert store.commit_run(run_record("retry")).diagnostics == ("recovered_interrupted_write",)
     assert {run["run_id"] for run in read_records(store).runs} == {"run-1", "retry"}
 
@@ -227,14 +228,13 @@ def test_failed_commit_is_not_visible_and_abandoned_staging_recovers_privately(
     assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in (store.root / "runs").iterdir())
 
 
-def test_where_locks_are_unenforced_recovery_spares_live_stages_and_reports_it(
+def test_recovery_spares_a_live_stage_whose_lock_is_shared(
     store: LocalRecordStore, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Docker Desktop's macOS bind mounts grant every lock to every process in a container,
-    so a writer's lock can't keep its live stage from recovery there (#1883)."""
+    """Docker Desktop's macOS bind mounts can grant a held lock to another descriptor, so the
+    writer's lock alone can't keep its live stage from recovery there (#1883)."""
     monkeypatch.setattr(fcntl, "flock", lambda descriptor, operation: None)
-    result = store.commit_run(run_record("bind-mount"))
-    assert result.committed and result.diagnostics == ("store_locks_unenforced",)
+    assert store.commit_run(run_record("bind-mount")).committed
 
     def documents() -> Iterator[dict[str, Any]]:
         """While this stage is live, another commit recovers only a stale one."""
@@ -242,8 +242,7 @@ def test_where_locks_are_unenforced_recovery_spares_live_stages_and_reports_it(
         stale = store.root / "runs" / "record-abandoned.tmp"
         stale.write_bytes(b'{"partial":')
         os.utime(stale, (0, 0))
-        assert store.commit_run(run_record("concurrent")).diagnostics == (
-            "store_locks_unenforced", "recovered_interrupted_write")
+        assert store.commit_run(run_record("concurrent")).diagnostics == ("recovered_interrupted_write",)
         assert live.exists() and not stale.exists()
         yield {"schema_version": "ATIF-v1.7", "session_id": "streamed", "trajectory_id": "streamed",
                "agent": {"name": "daydream", "version": "test"},

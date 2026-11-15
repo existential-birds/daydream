@@ -10,11 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Data capture commits again when the dataset store is on a Docker Desktop (macOS) bind mount, as
-  it did before 0.35.0 (#1883). Those mounts grant a file lock to every process in a container at
-  once, so a commit's own interrupted-write recovery took its live staged record for abandoned and
-  deleted it, and `commit_run` failed with `persistence_failed`. The store now checks whether its
-  filesystem enforces locks; where it doesn't, recovery removes only stages untouched for an hour,
-  and each commit reports `store_locks_unenforced` in its diagnostics.
+  it did before 0.35.0 (#1883). Those mounts can grant a held file lock to another descriptor, so a
+  commit's interrupted-write recovery took a live staged record for abandoned and deleted it, and
+  `commit_run` failed with `persistence_failed`. Recovery now also requires a staged `*.tmp` file
+  to be untouched for an hour, so an interrupted write's leftover is removed an hour later
+  instead of at the next commit.
 
 - `daydream setup` now installs the Daydream version that ran it. The packaged bot workflows
   carried a hard-coded commit that always lagged the release shipping them (the 0.35.2 templates
