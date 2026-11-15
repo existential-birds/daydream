@@ -102,8 +102,8 @@ def _validate_artifact(data: Any) -> None:
         validate_json_schema(data, IMMUTABLE_FINDINGS_SCHEMA if version == IMMUTABLE_FINDINGS_SCHEMA_VERSION
                             else FINDINGS_SCHEMA)
         if data["kind"] == "review":
-            if 'source_id' in data['terminal_result']['analyzed_revision']:
-                raise ValueError('local captured findings cannot be relabeled as a committed PR artifact')
+            if {'source_id', 'tracked_worktree_edits'} & data['terminal_result']['analyzed_revision'].keys():
+                raise ValueError('working-tree findings cannot be relabeled as a committed PR artifact')
             immutable = version == IMMUTABLE_FINDINGS_SCHEMA_VERSION
             if immutable:
                 _validate_immutable_binding(data)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Literal, NamedTuple
 
@@ -322,7 +323,7 @@ def _finalize_run_artifacts(
     work: WorkContext, successful: bool, interrupted: bool = False,
     progress: Callable[[str], None],
 ) -> _FinalizationOutcomes:
-    """Freeze once, collect optional data, and publish the joined runtime outputs."""
+    """Freeze once, publish the joined runtime outputs, then collect optional data with the final outcome."""
     from daydream.archive import (
         ArchiveFinalizationError,
         ArchiveIntegrityError,
@@ -332,12 +333,6 @@ def _finalize_run_artifacts(
     from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
 
     outcomes = run_artifacts.outcomes
-    # Publication to a lost or replaced source fails after capture and ends the run non-zero,
-    # so the record captured below must not report that run as successful.
-    try:
-        run_artifacts.session.validate_source()
-    except ArtifactVisibilityError:
-        successful = False
     if config.dataset_capture:
         outcomes.capture = "not attempted"
         if config.trajectory_hub_repo:
@@ -345,14 +340,20 @@ def _finalize_run_artifacts(
     if config.archive or config.dump_artifacts:
         outcomes.archive = "not attempted"
     progress("Freezing run evidence")
+    # The record and its upload follow every step that can still fail the run, so its outcome is final.
     if selected is None:
         snapshot = run_artifacts.session.freeze_unproduced()
-        _capture_dataset(run_artifacts, snapshot=snapshot, selected=None, config=config,
-                         work=work, successful=successful, interrupted=interrupted, progress=progress)
-        progress("Restoring run outputs")
-        outcomes.publication = "failed"
-        run_artifacts.session.finalize_frozen(snapshot, disposition=ArtifactDisposition.ROLLBACK)
-        outcomes.publication = "restored prior outputs"
+        capture = partial(_capture_dataset, run_artifacts, snapshot=snapshot, selected=None, config=config,
+                          work=work, interrupted=interrupted, progress=progress)
+        try:
+            progress("Restoring run outputs")
+            outcomes.publication = "failed"
+            run_artifacts.session.finalize_frozen(snapshot, disposition=ArtifactDisposition.ROLLBACK)
+            outcomes.publication = "restored prior outputs"
+        except Exception:
+            capture(successful=False)
+            raise
+        capture(successful=successful)
         return outcomes
     if run_artifacts.capture.run_flow is None:
         raise ArtifactVisibilityError("run flow provenance was not retained")
@@ -364,9 +365,8 @@ def _finalize_run_artifacts(
         raise ArtifactVisibilityError("frozen run snapshot was not retained")
     dropped_children = len(snapshot.trajectories.documents) != len(selected.documents)
     selected = snapshot.trajectories
-    _capture_dataset(run_artifacts, snapshot=snapshot, selected=selected, config=config,
-                     work=work, successful=successful, interrupted=interrupted, progress=progress,
-                     dropped_children=dropped_children)
+    capture = partial(_capture_dataset, run_artifacts, snapshot=snapshot, selected=selected, config=config,
+                      work=work, interrupted=interrupted, progress=progress, dropped_children=dropped_children)
     recorder_provenance = archive_recorder_provenance_from_snapshot(
         write_snapshot=selected, run_flow=run_artifacts.capture.run_flow
     )
@@ -376,30 +376,35 @@ def _finalize_run_artifacts(
         else run_artifacts.session.finalization_merge_path(run_artifacts.dump, snapshot=snapshot)
     )
     try:
-        if config.archive or config.dump_artifacts:
-            outcomes.archive = "failed"
-        finalize_archive_run(
-            run=ArchiveRunSnapshot(recorder_provenance, identity, selected), artifacts=snapshot,
-            artifact_provenance=run_artifacts.session.provenance, config=config,
-            work=work, dump_path=dump_path, progress=progress,
-            code_workspace=run_artifacts.session.code_workspace,
-        )
-    except (ArchiveIntegrityError, ArchivePublicationError) as exc:
-        raise ArtifactVisibilityError(str(exc)) from exc
-    except ArchiveFinalizationError as exc:
-        # Exception text can include credentials, repository content, or private
-        # runtime paths. Collection diagnostics report only the error category.
-        print_error(console, "Data Collection", f"Archive/evaluation failed ({type(exc).__name__}).")
-        if dump_path is not None and dump_path.is_dir() and not any(dump_path.iterdir()):
-            dump_path.rmdir()
-    else:
-        if config.archive or config.dump_artifacts:
-            outcomes.archive = "retained"
-    disposition = ArtifactDisposition.COMPLETE if successful else ArtifactDisposition.PARTIAL_EVIDENCE
-    progress("Publishing run outputs")
-    outcomes.publication = "failed"
-    run_artifacts.session.finalize_frozen(snapshot, disposition=disposition)
-    outcomes.publication = "installed"
+        try:
+            if config.archive or config.dump_artifacts:
+                outcomes.archive = "failed"
+            finalize_archive_run(
+                run=ArchiveRunSnapshot(recorder_provenance, identity, selected), artifacts=snapshot,
+                artifact_provenance=run_artifacts.session.provenance, config=config,
+                work=work, dump_path=dump_path, progress=progress,
+                code_workspace=run_artifacts.session.code_workspace,
+            )
+        except (ArchiveIntegrityError, ArchivePublicationError) as exc:
+            raise ArtifactVisibilityError(str(exc)) from exc
+        except ArchiveFinalizationError as exc:
+            # Exception text can include credentials, repository content, or private
+            # runtime paths. Collection diagnostics report only the error category.
+            print_error(console, "Data Collection", f"Archive/evaluation failed ({type(exc).__name__}).")
+            if dump_path is not None and dump_path.is_dir() and not any(dump_path.iterdir()):
+                dump_path.rmdir()
+        else:
+            if config.archive or config.dump_artifacts:
+                outcomes.archive = "retained"
+        disposition = ArtifactDisposition.COMPLETE if successful else ArtifactDisposition.PARTIAL_EVIDENCE
+        progress("Publishing run outputs")
+        outcomes.publication = "failed"
+        run_artifacts.session.finalize_frozen(snapshot, disposition=disposition)
+        outcomes.publication = "installed"
+    except Exception:
+        capture(successful=False)
+        raise
+    capture(successful=successful)
     return outcomes
 
 

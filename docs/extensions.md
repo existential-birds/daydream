@@ -47,14 +47,12 @@ alter the tree. Models cannot authorize commits through completion prose.
 `deep` starts with the `review` step, which runs the
 [committed-review program](#committed-review-program) that the flow's preamble planned.
 It runs only in the `deep` flow: a custom-named flow that lists `review` is refused
-with an extension error. A flow that lists a step name of the replaced staged reviewer
-(`intent`, `per-stack-reviews`, `per-stack-parse`, `arbiter`, `cross-stack-merge`,
-`single-stack-merge`, `supervise`) fails preflight. `exploration` is no longer a step
-of `deep`. Replacing the `review` phase (`register_phase(..., replace=True)`) does not
-replace the reviewer: the planned review is never dispatched, so the run seals without
-evidence and ends as a failed review with exit 1. Rewrite findings in a step after
-`load-items` instead; if that step leaves the items unusable, the review also ends as
-failed and its report says the findings could not be read.
+with an extension error. `exploration` is no longer a step of `deep`. Replacing the
+`review` phase (`register_phase(..., replace=True)`) does not replace the reviewer: the
+planned review is never dispatched, so the run seals without evidence and ends as a
+failed review with exit 1. Rewrite findings in a step after `load-items` instead; if that
+step leaves the items unusable, the review also ends as failed and its report says the
+findings could not be read.
 
 ### Diagram
 
@@ -94,12 +92,8 @@ Read [coordinator](../daydream/deep/repair_coordinator.py),
 Overrides replace whole builders and must accept supplied optional kwargs and
 preserve host schemas. The seeded prompt names are `fix`, `verify`, `fix-verify`,
 `diagram_sequence`, `diagram_flowchart`, `audit`, `vet` and `plan-writer`. The review
-itself has no prompt seam: the nine names of the replaced staged reviewer (`intent`,
-`alternatives`, `per-stack`, `structural`, `generic-fallback`, `arbiter`, `supervise`,
-`suppression`, `merge`) are removed, and overriding one fails registration and
-`daydream ext validate` with a message naming it. An extension's own prompt names
-still register.
-Review behavior is configured through the review profile.
+itself has no prompt seam; review behavior is configured through the review profile.
+An extension's own prompt names still register.
 
 ### Committed-review program
 
@@ -200,8 +194,8 @@ partial trajectory, and return `tool_vetoed:<name>`. Exceptions are extension
 failures, not retryable backend failures. Supervision observes `ToolStartEvent`;
 backend dispatch timing remains host-owned. Extension tool supervision conflicts
 with built-in `tool_supervisor = "rules"`; Claude's always-on guards still apply.
-There is no findings supervisor: a flow step that filters findings rewrites
-`items_file` and round-trips each item's identity fields.
+A flow step that filters findings rewrites `items_file` and round-trips each item's
+identity fields.
 
 ## Trace exporters
 
