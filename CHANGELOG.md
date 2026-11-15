@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-11-15
+
 ### Added
 
 - Committed review (`run_committed_review`) now runs on Claude as well as Pi: select
@@ -17,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guards in force. Claude has no sole-terminal-call rule or output-limit preflight; see
   [Claude host tools](docs/runtime.md#claude-host-tools). Hosted and immutable inputs stay
   Pi-only. `mcp` is now a direct dependency
-  ([#1647](https://github.com/existential-birds/daydream/issues/1647)).
+  ([#1647](https://github.com/existential-birds/daydream/issues/1647), #1784).
 - Committed review (`run_committed_review`) now also runs on native Codex: select
   `RunConfig(backend="codex")`. For these invocations the adapter serves `review_source`,
   `review_admit` and the terminal `structured_output` from a fresh MCP server on loopback,
@@ -30,17 +32,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   admitted a claim, and it never counts as a failure on the outage circuit. An
   assignment that ends unsubmitted is still reported as `missing_output` unless a budget
   or deadline limit stops it first
-  ([#1829](https://github.com/existential-birds/daydream/issues/1829)).
-  Daydream writes nothing to the Codex home. `daydream --backend codex` and every other
-  Codex invocation keep their command line and environment; their one change is the
-  failed-tool-result fix listed under Fixed. Codex shows the model a schema without most
+  ([#1829](https://github.com/existential-birds/daydream/issues/1829), #1833).
+  Daydream writes nothing to the Codex home. Codex invocations without host tools (fixing,
+  verification, test repair, diagrams and the diagram-only pre-scan) keep their command
+  line and environment; their one change is the failed-tool-result fix listed under
+  Fixed. Codex shows the model a schema without most
   length, range and pattern limits, replaces the user's developer instructions for the
   invocation, cannot deny its own tools before they run, cannot start an assignment whose
   instructions exceed the platform's single-argument size, and on 0.139.0 and 0.153.4
   lets a model shell command read the per-attempt callback secret; see
   [Codex host tools](docs/runtime.md#codex-host-tools) for these and the versions
   exercised. `uvicorn` is now a direct dependency
-  ([#1646](https://github.com/existential-birds/daydream/issues/1646)).
+  ([#1646](https://github.com/existential-birds/daydream/issues/1646), #1819).
 - Committed review (`run_committed_review`) no longer ignores
   `RunConfig.frozen_author_description` on a request without hosted policy.
   The reviewer receives non-blank text as captured untrusted context
@@ -49,13 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   description bound to a `head_sha` other than the analyzed
   head is refused, and so is one whose encoded size (JSON-escaped twice, as a native
   argument carries it) exceeds 65536 UTF-8 bytes; both refusals precede any model
-  work. An accepted description beside a large
-  catalog and many challenge claims can still exceed a platform's single-argument size on
-  Claude or Codex, and that assignment fails to start with the adapter's own error.
+  work.
   Assignment JSON now escapes DEL, U+0085, U+2028 and U+2029, and quoted text that repeats
   the host's search guidance no longer displaces the host's own copy. See
   [committed review](docs/runtime.md#committed-review-requestresult)
-  ([#1641](https://github.com/existential-birds/daydream/issues/1641)).
+  ([#1641](https://github.com/existential-birds/daydream/issues/1641), #1822).
 - `--trace-to local` (or `DAYDREAM_TRACE_TO=local`) records a run's spans as OTLP/JSON
   lines in `otel-trace.jsonl` in its private run directory, with no network or credentials,
   alone or beside remote destinations. Like all tracing it is off by default and follows
@@ -79,7 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   posting, the findings export, capture, diagrams, the embedded result callback and the fix
   cycle already read, plus `.daydream/deep/committed-review.json`. Findings schema 2, the dataset
   record and the embedded callback keep their formats. What changes for callers
-  ([#1641](https://github.com/existential-birds/daydream/issues/1641)):
+  ([#1641](https://github.com/existential-birds/daydream/issues/1641), #1834):
   - Findings carry `severity` (`low`, `medium` or `high`): the reviewer rates each claim and
     the challenge checks the rating with the claim, correcting it by revising the claim, which
     is then challenged again. Comments, the review body, the report, `--findings-out`, the
@@ -107,7 +108,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     cancellation propagates; an embedded result callback is not called for it and no
     `--findings-out` artifact is written.
   - `--shallow`, `--stack`, `--precision`, `--latency-profile`, `--no-review-cache` and
-    `--start-at` are usage errors that say what replaces them; the same values on an
+    `--start-at` are usage errors on the built-in review flows that say what replaces them;
+    the same values on an
     embedded `RunConfig` are refused before any work, and `--shallow`,
     `--no-review-cache` and `--start-at` are refused on `--diagram-only` runs too. Every
     review starts fresh. Repository settings that no longer select anything
@@ -169,7 +171,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `reviewer_tool_call_budget` and `reviewer_investigation_budget_s` by that `scale` and,
   for spent time, that `review_wall_budget_s` grows with the diff in the default profile
   only
-  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
+  ([#1836](https://github.com/existential-birds/daydream/issues/1836), #1839, #1834).
 - A change of more than four batches is reviewed as one discovery assignment per batch,
   followed by the cross-assignment and the challenge, when the allowance leaves every
   batch two starts. They run ten at a time on Pi and eight on Claude and Codex by default;
@@ -178,14 +180,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while its `name` is `broad`. A change of at most four batches is one assignment; when
   its diff is in the first tier it is planned exactly as before
   ([#1836](https://github.com/existential-birds/daydream/issues/1836),
-  [#1838](https://github.com/existential-birds/daydream/issues/1838)).
+  [#1838](https://github.com/existential-birds/daydream/issues/1838), #1839, #1834).
 - A split discovery or follow-up assignment receives each of its targets in its first
   message as `review_source` returns it, instead of fetching each with a charged call,
   so its prompt and recorded trajectory are larger. Because those bytes are untrusted
   and now sit in a message of the host's, each header and description line of a supplied
   target begins with a random token that the message's first line announces, and the
   instructions of such an assignment say that only those lines are host-authored
-  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
+  ([#1836](https://github.com/existential-birds/daydream/issues/1836), #1839).
 - Trace agent spans record each retry-ladder stop as a `daydream.retry.stop` event carrying
   the trajectory's `agent_budget_stop` fields as `daydream.retry.*`, with or without a
   trajectory recorder. The run span carries the run's GitHub repository and, when known,
@@ -234,7 +236,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sealed in memory, without staged shards under the store's `uploads/` directory;
   publish deletes any staged by earlier versions. `dataset download` reports a moving
   revision as `invalid_revision` instead of `exact_revision_required`
-  ([#1678](https://github.com/existential-birds/daydream/issues/1678)).
+  ([#1678](https://github.com/existential-birds/daydream/issues/1678), #1799).
 - Run finalization holds one trajectory document at a time, so its peak memory follows
   the largest document instead of the run's size times the number of consumers. One
   summary pass now feeds timing, evaluation and the archive manifest; dataset capture
@@ -276,7 +278,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one of them now records `review_only` as false and, for a custom flow, gets its `.env`
   and `--copy` files in an operational worktree. See
   [fixing selection](docs/runtime.md#validation-and-repair)
-  ([#1641](https://github.com/existential-birds/daydream/issues/1641)).
+  ([#1641](https://github.com/existential-birds/daydream/issues/1641), #1824).
 - **Breaking (0.y.z):** Time and tool-call budgets live on one host ledger per
   budget owner: an absolute deadline plus one charged tool-call count
   (`daydream.review_budget.BudgetLedger`, which replaces `ReviewInvestigationBudget`).
@@ -289,7 +291,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `deadline` instead of `wall_budget_s`. The extension API is
   unchanged because `run_agent` is not exported from `daydream.extensions`; callers
   migrate by building `BudgetLedger(owner, wall_s=..., limit=..., deadline=...)`
-  ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
+  ([#1773](https://github.com/existential-birds/daydream/issues/1773), #1774).
 - **Breaking (0.y.z):** Committed review reads its limits from the review profile
   only: `[pipeline] reviewer_investigation_budget_s`, `review_wall_budget_s` and
   `reviewer_tool_call_budget`, which the size of the change scales (see the changed
@@ -297,7 +299,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CommittedReviewRequest.limits` and `HostedReviewPolicy.limits` are removed. With the
   default profile the window of a review in the first diff tier, of at most four
   batches, grows from about 600 s to about 2520 s
-  ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
+  ([#1773](https://github.com/existential-birds/daydream/issues/1773), #1774).
 - **Breaking (0.y.z):** Committed review no longer takes an assignment policy, and the
   `adaptive` policy is gone. `CommittedReviewRequest.assignment_policy` is removed (no
   known caller) and nothing replaces it: every review splits a change of more than four
@@ -310,10 +312,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   digest recorded by an unreleased build that had the key differs from the one computed
   now for the same profile, the default included, while against 0.34.0 the key changes
   no digest ([#1686](https://github.com/existential-birds/daydream/issues/1686),
-  [#1838](https://github.com/existential-birds/daydream/issues/1838)).
+  [#1838](https://github.com/existential-birds/daydream/issues/1838), #1814, #1834).
 - **Breaking (0.y.z):** `DAYDREAM_FANOUT_CONCURRENCY` now sets the fan-out limit for
   every backend. Unset, each backend keeps its default: Pi 10, Claude and Codex 8,
-  Osprey 4 ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
+  Osprey 4 ([#1773](https://github.com/existential-birds/daydream/issues/1773), #1774).
 - Every budget stop records its owner, dimension (time or tool calls), limit, spend,
   remaining amount at dispatch and reserved calls once on the trace: as
   `daydream.budget.*` attributes on the agent span it ends, or as a
@@ -321,12 +323,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dispatch refused before any agent runs. A Pi read cut
   short by the deadline now stops as `wall_budget_exceeded` instead of a retryable
   idle stall that advised widening `DAYDREAM_STREAM_IDLE_TIMEOUT_S`
-  ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
+  ([#1773](https://github.com/existential-birds/daydream/issues/1773), #1774).
 - The exploration repository survey and Improve's combined recon stop after 50 tool
   calls instead of 50 model turns. Retry backoff uses fixed delays (base 10 s for Pi
   and 2 s for other backends, at most 120 s); only `DAYDREAM_PI_RETRY_ATTEMPTS` remains
   configurable, read by one parser
-  ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
+  ([#1773](https://github.com/existential-birds/daydream/issues/1773), #1774).
 - Daydream loads a native backend adapter and its SDK only when a run or phase
   selects it. CLI help, configuration and Codex, Pi or Osprey runs no longer
   import the Claude Agent SDK or unused adapters, which cuts startup memory per
@@ -337,6 +339,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The default reviewer tool-call budget rises from 48 to 120. `[pipeline]
   reviewer_tool_call_budget` in a review profile still overrides it
   ([#1762](https://github.com/existential-birds/daydream/pull/1762)).
+- **prompt_budget:** collapse sanctioned-transport wrappers (#1768)
+- **intent:** remove unused advisory-intent variants and the always-true Pi capability gate (#1769)
+- **review:** prove the Codex lifecycle diagnostic reaches staged-review failure coverage (#1770)
+- **readme:** link the public benchmarks from the intro (#1823)
 
 ### Removed
 
@@ -351,7 +357,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after this one does the same to this build's `deep/` files. What ends, and what to do
   instead
   ([#1687](https://github.com/existential-birds/daydream/issues/1687),
-  [#1641](https://github.com/existential-birds/daydream/issues/1641)):
+  [#1641](https://github.com/existential-birds/daydream/issues/1641), #1834):
   - Passes: intent (and its interactive confirmation), design alternatives, per-language
     stack reviews, the structural lens, parse, arbiter, suppression, cross-stack merge,
     automatic sharding, latency profiles and risk-raised effort. Review depth, time and
@@ -444,29 +450,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EffectiveRequestConfig` and every adapter, `MaxTurnsError` and its salvage path.
   `ReasonCode.MODEL_BUDGET_EXHAUSTION` is removed without a schema version bump because
   no current path emits it; regenerate any artifact that contains
-  `model_budget_exhaustion` ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
+  `model_budget_exhaustion` ([#1773](https://github.com/existential-birds/daydream/issues/1773), #1774).
 - **Breaking (0.y.z):** The retry-recovery allowance: `RetryRecoveryBudget`,
   `DEFAULT_RETRY_RECOVERY_ALLOWANCE_S`, `RetryPolicy.retry_recovery_allowance_s`, the
   `retry_recovery_allowance_s` config-file key, the `retry_recovery_allowance_exhausted`
   stop and `retry_recovery_spent_s` in `agent_budget_stop` events and retry summaries.
   Retries stay bounded by the attempt count, the deadline and the outage circuit
-  ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
+  ([#1773](https://github.com/existential-birds/daydream/issues/1773), #1774).
 - **Breaking (0.y.z):** Environment variables `DAYDREAM_PI_RETRY_BASE_DELAY_S`,
   `DAYDREAM_PI_RETRY_MAX_DELAY_S`, `DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S`,
   `DAYDREAM_PI_FANOUT_CONCURRENCY`, `DAYDREAM_OSPREY_FANOUT_CONCURRENCY`,
   `DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S`, `DAYDREAM_CODEX_PROCESS_REAP_TIMEOUT_S`,
   `DAYDREAM_CODEX_CLEANUP_TIMEOUT_S` and `DAYDREAM_REVIEW_PROFILE_CANDIDATE`; their
-  defaults are now fixed ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
+  defaults are now fixed ([#1773](https://github.com/existential-birds/daydream/issues/1773), #1774).
 - **Breaking (0.y.z):** `SubmissionStatus` (`daydream.reviews.models` and its
   `daydream.pr_review` re-export) and the `ClassifiedReviewResult.status` and
   `final_review_posted` fields. They duplicated `review_url`, which is `None` whenever no
   successful response was confirmed; test `review_url is None` instead. No known caller
-  used them ([#1679](https://github.com/existential-birds/daydream/issues/1679)).
+  used them ([#1679](https://github.com/existential-birds/daydream/issues/1679), #1802).
 - **Breaking (0.y.z):** `approve_on_clean` in `[tool.daydream]` or `.daydream.toml`.
   Pass `--approve-on-clean` to `daydream --comment` or `daydream post-findings`.
   Repository content can no longer turn a posted review into an approval. A leftover
   key is ignored without a warning
-  ([#1680](https://github.com/existential-birds/daydream/issues/1680)).
+  ([#1680](https://github.com/existential-birds/daydream/issues/1680), #1803).
 - **Breaking (0.y.z):** Extension API 9, which API 10 above supersedes in this release.
   Removed, with no known caller:
   `Registry.insert_before`, `insert_after` and `remove` (edit the list
@@ -475,7 +481,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parameter of `detect_stacks`) and `StackAssignment.has_explicit_rule`;
   `SummaryContext.agent_prompt`; `ExtensionVersionError` (version failures raise
   `ExtensionError`); and `MIN_SUPPORTED_EXTENSION_API_VERSION`
-  ([#1680](https://github.com/existential-birds/daydream/issues/1680)).
+  ([#1680](https://github.com/existential-birds/daydream/issues/1680), #1805).
 - **Breaking (0.y.z):** `RunConfig.verify_all` and `RunConfig.verify_extra_risk_categories`;
   the `extra_risk_categories` setting (`DaydreamFileConfig.extra_risk_categories`), which
   could only name categories that are always verified; `resolve_selection_config`,
@@ -483,15 +489,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SelectionConfig.extra_categories`; and `selection.extra_categories` in
   `recommendation-verdicts.json`. No known caller. A leftover `extra_risk_categories`
   key is ignored without a warning, so a misspelled category no longer stops a fix run
-  ([#1631](https://github.com/existential-birds/daydream/issues/1631)).
+  ([#1631](https://github.com/existential-birds/daydream/issues/1631), #1808).
 - **Breaking (0.y.z):** `RunConfig.test_required_suites`, which nothing set. No known
   caller. The setting still works: set `test_required_suites` in `[tool.daydream]` or
   `.daydream.toml`, or pass `file_config=DaydreamFileConfig(test_required_suites=[...])`
-  ([#1681](https://github.com/existential-birds/daydream/issues/1681)).
+  ([#1681](https://github.com/existential-birds/daydream/issues/1681), #1809).
 - Dead code no configuration path reached: `RepairJobPolicy.max_cost_usd`, the
   `setup_timeout_ms` Pi host packet field, `resolve_harbor_profile` and
   `config.DEFAULT_TOOL_CALL_BUDGET`, which was always `None`
-  ([#1773](https://github.com/existential-birds/daydream/issues/1773)).
+  ([#1773](https://github.com/existential-birds/daydream/issues/1773), #1774).
 - The `daydream benchmark` command, the `daydream.benchmark` package and the
   `benchmark` extra: both the public ReviewBench lane (`reviewbench harbor-export`
   and `harbor-run`, #1759) and the private Harbor benchmark workspace (`init`,
@@ -499,18 +505,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Benchmarks now run from
   [code-review-benchmarks](https://github.com/existential-birds/code-review-benchmarks),
   and `daydream benchmark` exits with a pointer there. Repair-job ownership keeps
-  its cross-process lock on the same lock file.
+  its cross-process lock on the same lock file (#1760).
 - `scripts/redrive_post.py`, an untested manual re-post script
-  ([#1679](https://github.com/existential-birds/daydream/issues/1679)).
+  ([#1679](https://github.com/existential-birds/daydream/issues/1679), #1802).
 - `ReviewRenderers.fallback_finding` and `fallback_summary` (also via
   `daydream.pr_review`), which nothing set; a failed custom renderer always falls
   back to the built-in default. No known caller
-  ([#1680](https://github.com/existential-birds/daydream/issues/1680)).
+  ([#1680](https://github.com/existential-birds/daydream/issues/1680), #1803).
 - `RunContext.choice`'s undocumented `assume_yes` and `assume_no` keyword arguments,
   which only an unreachable menu path passed. No known caller
-  ([#1633](https://github.com/existential-birds/daydream/issues/1633)).
+  ([#1633](https://github.com/existential-birds/daydream/issues/1633), #1806).
 - `phase_fix_verify`'s unused `console_lock` keyword argument. No known caller
-  ([#1631](https://github.com/existential-birds/daydream/issues/1631)).
+  ([#1631](https://github.com/existential-birds/daydream/issues/1631), #1808).
 - Repair and test-evidence plumbing nothing set or read, with no known caller:
   `continue_repair_job(cost_usd=)`; `RepairJobRecord.cumulative_cost_usd` and
   `disproven_hypotheses`; `record_execution`'s `cost_usd`, `tool_calls` and
@@ -519,19 +525,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `disproven_hypotheses` and `test_cwd`; `RepairContinuationResult.passed`;
   `TestAttemptEvidence.abort_reason`; `canonical_test_command`. Their constant keys leave
   the repair and test-verdict artifacts, and a blocked repair job's reason no longer claims
-  "0 tool call(s)" ([#1681](https://github.com/existential-birds/daydream/issues/1681)).
+  "0 tool call(s)" ([#1681](https://github.com/existential-birds/daydream/issues/1681), #1809).
 - Improve internals nothing read: `AuditWorkspace.source`, `repo_git_common_dir` and
   `source_git_common_dir`; `PublishResult.package_id` and `plan_path`; and the
   `allow_standalone` and `allow_shell_composition` keyword arguments of `improve_dir` and
   `literal_command_error`. `improve_dir`, `filter_scope`, `enumerate_repository_commands`,
   `issue_body` and other Improve helpers now require the arguments every caller already
-  passed. No known caller ([#1637](https://github.com/existential-birds/daydream/issues/1637)).
+  passed. No known caller ([#1637](https://github.com/existential-birds/daydream/issues/1637), #1811).
 - `diagram-complete.json` is no longer written. Diagram internals nothing read also go: the reason-code sets
   `REASON_CODES` and `OMIT_REASONS`, `DiagramInputs.settings`, and the
   `diagram_comment_kinds`, `render_diagram_comment_body` and `post_diagram_comment_to_pr`
   re-exports from `daydream.pr_review` (all three remain in `daydream.reviews.diagrams`).
   `post_diagram_artifact` now takes the diagram payload instead of the findings artifact.
-  No known caller ([#1683](https://github.com/existential-birds/daydream/issues/1683)).
+  No known caller ([#1683](https://github.com/existential-birds/daydream/issues/1683), #1812).
 - Corpus, dataset and harvest internals nothing set or read: `BuildFrozenCorpusConfig`'s
   `caps`, `emit_process_traces`, `labeler_policy_version`, `reply_classifier_version` and
   `rubric_schema_version`, so a projection's `lineage.json` no longer carries the
@@ -547,7 +553,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which nothing read, can be derived from `lineage.json` and the output files.
   `LocalRecordStore.read_snapshot` takes only a snapshot id, not the mapping
   `select_snapshot` returns. No known caller
-  ([#1684](https://github.com/existential-birds/daydream/issues/1684)).
+  ([#1684](https://github.com/existential-birds/daydream/issues/1684), #1813).
+- **rl:** remove the unused RL review environment (#1776)
+- **training:** delete the unused RFT replay and Stage-0 rubric scorer (#1781)
+- **training:** remove the unused RFT stage and projection fixture copy (#1782)
+- **training:** drop RL stack pins, unproduced task fields and a dead fixture (#1783)
 
 ### Fixed
 
@@ -559,7 +569,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it. A profile that sets `strategies.arbitration` is now refused (see the removal of the
   staged reviewer above); override `strategies.challenge` instead. The default profile's
   digest changes
-  ([#1845](https://github.com/existential-birds/daydream/issues/1845)).
+  ([#1845](https://github.com/existential-birds/daydream/issues/1845), #1846).
 - Committed review now delivers the challenged findings of a large change. Before, challenge
   verdicts counted against the same fixed capacity of 128 claims in 128 KiB that discovery
   had filled, so on a change with a few dozen claims the challenge's verdicts were refused
@@ -580,9 +590,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names only the claims that fit its page (about 60 of typical size) and at most 256
   assignments; a review retains at most what its findings
   export holds (about 470 claims of typical size, fewer with a long pull request
-  description or on a very large change) and refuses the rest at discovery; a reader
-  on an older release rejects a sealed result with more than 128 claims
-  ([#1842](https://github.com/existential-birds/daydream/issues/1842)).
+  description or on a very large change) and refuses the rest at discovery
+  ([#1842](https://github.com/existential-birds/daydream/issues/1842), #1844).
 - Committed review on Codex and Claude now starts the cross-assignment and every challenge
   of a large change. Before, each assignment travelled in the system instructions, which
   both pass as one command-line argument (131072 bytes on Linux): every pending claim, the
@@ -599,14 +608,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   description; and pending claims, unlike targets and catalog pages, cannot be requested
   again, so a compacted challenge can leave some claims unresolved, retained as unfinished
   work, and a compacted cross-assignment continues without its retained conclusions
-  ([#1840](https://github.com/existential-birds/daydream/issues/1840)).
+  ([#1840](https://github.com/existential-birds/daydream/issues/1840), #1843).
 - Committed review on Pi no longer aborts when one model generation issues more than
   three host-tool calls, or when a host callback outlasts the three-second transport
   allowance of a call waiting behind it. Before, the unanswered calls ended the review as
   `backend_failure` with "This operation was aborted". Pi now runs every tool call of a
   generation that calls `review_source` or `review_admit` in order, so each is answered;
   the stock reads in such a generation no longer run concurrently
-  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835), #1837).
 - A final `structured_output` batch that committed review rejects on its reserved last
   tool start can now be corrected. Before, that rejection was fatal ("no calls remain
   for correction") and every decision in the batch was lost. The start is kept: its
@@ -615,7 +624,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reviewer that keeps resubmitting a rejected batch is paid for until that bound, and an
   execution entry's `observed_starts` can exceed its `allocation` while `overshoot` stays
   0. Bindings without a reserved start keep the fatal outcome
-  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835), #1837).
 - A committed-review assignment that ends on a rejected final batch no longer loses the
   whole batch. When its work closes without an accepted final submission and that batch
   was the last one it submitted, the target decisions, verdicts and claims in it that are
@@ -632,7 +641,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The sealed result does not mark such items; their work is recorded as not accepted. If
   the retained items together exceed retained capacity, nothing of the batch is kept
-  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835), #1837).
 - One committed-review rejection now names every distinct violation in the batch instead
   of the first one only. Each states how many targets, verdicts or claims broke it and
   the first three of them: quoted ids cut to 160 characters, or the selector itself (a
@@ -641,26 +650,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dropped before a violation when the 1,024-byte rejection bound is tight. A schema
   rejection still names its first fault. The rule that references need an assigned
   `source_id` no longer calls a claim or verdict "a reviewed target"
-  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835), #1837).
 - A supporting `{path, side, source_range, basis}` selector is no longer refused because
   its whole file exceeds 65,536 bytes, a rule nothing stated to the reviewer. The existing
   8 MiB source retrieval limit still applies, and the retained reference is unchanged: the
   whole file's digest and the cited range
-  ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+  ([#1835](https://github.com/existential-birds/daydream/issues/1835), #1837).
 - The committed-review instructions now state the limits a reviewer is held to (batch and
   text sizes, part ids as target ids, the assigned and supporting selector rules, and what
   follows a rejected final submission) and ask it to admit decisions as it reaches them.
   Before, a reviewer learned several of them only from rejections, on Codex without a
   schema that shows them. Each assignment's instructions grow by about 1.6 KB. The Pi
   `review_source` description no longer tells the reviewer to omit arguments its schema
-  requires ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+  requires ([#1835](https://github.com/existential-birds/daydream/issues/1835), #1837).
 - When a committed review ends unfinished because current work ran out of tool calls or
   time, it now says so in one sentence and names the `[pipeline]` profile keys that raise
   the allowance: `reviewer_tool_call_budget`, or `reviewer_investigation_budget_s` with
   `review_wall_budget_s`, which caps the review window. The sentence appears once under
   "Unfinished work" in `run_committed_review`'s report, and once each in the console
   outcome line, the report's "Review outcome" and the pull request notice of every
-  other review route ([#1835](https://github.com/existential-birds/daydream/issues/1835)).
+  other review route ([#1835](https://github.com/existential-birds/daydream/issues/1835), #1837, #1834).
 - Committed review no longer rejects a reviewed target submitted with empty
   `evidence_refs` when the target has more than four sources. The host expanded `[]` to
   every source of the target and then refused its own expansion ("supply at most four
@@ -669,18 +678,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `assignments[].source_refs`, and results for targets with at most four sources are
   unchanged. The reviewer instructions now state that every `evidence_refs` array holds
   at most four selectors, a bound Codex does not show in its tool schema
-  ([#1829](https://github.com/existential-birds/daydream/issues/1829)).
+  ([#1829](https://github.com/existential-birds/daydream/issues/1829), #1833).
 - A Codex MCP tool call whose server marked the result as an error is now recorded as a
   failed tool result. Codex reports such a result only through a `failed` status, which
   was recorded as a success. This applies to every Codex invocation, including
   `daydream --backend codex`, and changes the recorded tool-result evidence for such calls
-  ([#1646](https://github.com/existential-birds/daydream/issues/1646)).
+  ([#1646](https://github.com/existential-birds/daydream/issues/1646), #1819).
 - A retry after a retryable provider failure refunds the failed attempt's tool calls,
   so a stage whose stream drops late can still finish within its original allowance.
   Before, the retry restarted from scratch on the already spent budget and usually
   stopped with `tool_call_budget_exceeded`. Elapsed time is never refunded, and
   compaction never renews a budget
-  ([#1767](https://github.com/existential-birds/daydream/issues/1767)).
+  ([#1767](https://github.com/existential-birds/daydream/issues/1767), #1774).
 - When Daydream cannot run `pi --version` or `node --version` to check the hosted
   Pi baseline, the error now says the check timed out or failed instead of telling
   you to install Pi 1.4.0 and Node 24.18.1. A real version mismatch reports the
@@ -696,7 +705,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--approve-on-clean` already allowed it. Without an earlier notice, a complete
   clean review posts nothing beyond that approval. Both `--comment` and
   `post-findings` follow this
-  ([#1766](https://github.com/existential-birds/daydream/issues/1766)).
+  ([#1766](https://github.com/existential-birds/daydream/issues/1766), #1772).
 - Claude trajectories, archives and embedded review usage no longer count a provider
   message's prompt and cache tokens once per content block, so recorded Claude prompt
   and cached totals now match the provider's figures. Claude records written before
@@ -708,64 +717,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--diagram-only` and `post-findings` say it could not be confirmed instead of reporting
   a failure or "No comments were posted.", since the request may still have reached
   GitHub; they still report file-level comments already posted and the safe error
-  ([#1679](https://github.com/existential-birds/daydream/issues/1679)).
+  ([#1679](https://github.com/existential-birds/daydream/issues/1679), #1802).
 - `Registry.override_prompt` rejects a non-callable builder at registration with
   `ExtensionError`, as `override_renderer` already did, so the run stops before any
   work. Before, only `daydream ext validate` caught it, and a run failed when it first
-  built that prompt ([#1680](https://github.com/existential-birds/daydream/issues/1680)).
+  built that prompt ([#1680](https://github.com/existential-birds/daydream/issues/1680), #1803).
 - Recommendation verification keeps only verdicts for the findings shown to the verifier.
-  A verdict for a skipped, exempt or unknown finding number was saved to
+  A verdict for an unknown finding number was saved to
   `recommendation-verdicts.json`, counted in the verification summary and scored in
-  captured data, and the fixer saw it as that skipped or exempt finding's verdict and
-  evidence ([#1631](https://github.com/existential-birds/daydream/issues/1631)).
+  captured data, and the fixer saw it as evidence ([#1631](https://github.com/existential-birds/daydream/issues/1631), #1808).
 - A replacement test command approved from the interactive retry menu no longer finalizes
   the tree for commit on its own result: Daydream now runs the configured test command on
   the final tree once, with the existing override prompt if that run is red
-  ([#1681](https://github.com/existential-birds/daydream/issues/1681)).
+  ([#1681](https://github.com/existential-birds/daydream/issues/1681), #1809).
 - Cancelling a run now stops a running test command, or a check a regression claim names,
   with its child processes; before, they kept running and could write to the checkout
-  ([#1681](https://github.com/existential-birds/daydream/issues/1681)).
+  ([#1681](https://github.com/existential-birds/daydream/issues/1681), #1809).
 - The fix loop's `git commit` and `git push`, and those of `daydream setup`, now run without
   a time limit, as they do when run by hand, so the repository's own hooks can finish.
   Interrupting the run still stops them. Before, Daydream stopped them after 30 and 60
   seconds and reported a failure while the hook kept running, so a pre-push hook that runs
   a full test suite could never let a push through
-  ([#1682](https://github.com/existential-birds/daydream/issues/1682)).
+  ([#1682](https://github.com/existential-birds/daydream/issues/1682), #1810).
 - Remote CI now uses the pull request's test merge commit results only when the pushed
   commit has none. Before, any result on the merge commit replaced the pushed commit's own,
   so a failed or pending required check on the pushed commit could be reported as passed
-  ([#1682](https://github.com/existential-birds/daydream/issues/1682)).
+  ([#1682](https://github.com/existential-birds/daydream/issues/1682), #1810).
 - Improve's report now counts findings that vetting dropped because a vet turn failed
   or returned no usable verdict, and a run in which no finding received a usable
   verdict stops with exit code 1 instead of printing
   "No vetted defect findings -- done." and exiting 0. The findings stay in
-  `audit-findings.json` ([#1637](https://github.com/existential-birds/daydream/issues/1637)).
+  `audit-findings.json` ([#1637](https://github.com/existential-birds/daydream/issues/1637), #1811).
 - `post-findings` no longer rejects a valid sequence diagram whose calls were proven by
   the callee's name in files Daydream cannot parse (only `.go`, `.js`, `.jsx`, `.py`,
   `.rs`, `.ts` and `.tsx` files have a parser) as "not grounded in immutable head". Its
   check against the pull request head now finds those names in the cited files, as the
   run did. Before, such a diagram-only artifact failed to post, and a review artifact
-  dropped its diagram ([#1683](https://github.com/existential-birds/daydream/issues/1683)).
+  dropped its diagram ([#1683](https://github.com/existential-birds/daydream/issues/1683), #1812).
 - `--diagram-only` without `--findings-out` now checks the diagram against the pull
   request's current head before posting it, as `post-findings` does, and exits 1 without
   posting when a cited line does not hold there. Before, a diagram drawn from unpushed
   commits or uncommitted edits was posted under that head's marker and the run exited 0
-  ([#1683](https://github.com/existential-birds/daydream/issues/1683)).
+  ([#1683](https://github.com/existential-birds/daydream/issues/1683), #1812).
 - `post-findings` and the live post no longer reject a valid flowchart whose file
   contains a form feed or another character Python treats as a line break before a
-  cited line ([#1683](https://github.com/existential-birds/daydream/issues/1683)).
+  cited line ([#1683](https://github.com/existential-birds/daydream/issues/1683), #1812).
 - `daydream train` now refuses a projection whose files no longer match its `SHA256SUMS`,
   or that has none, as `corpus calibrate-reward` already did, and both commands now also
   refuse a `SHA256SUMS` that leaves out a `.jsonl` file or `lineage.json`. Before, a
   projection with an edited label or a dropped record, from a hand edit or an interrupted
   copy, was loaded and trained on, and the run reported "Training run complete"; an empty
   or partial `SHA256SUMS` also let `corpus calibrate-reward` read files it never checked
-  ([#1684](https://github.com/existential-birds/daydream/issues/1684)).
+  ([#1684](https://github.com/existential-birds/daydream/issues/1684), #1813).
 - `corpus build` now also refuses a captured run whose pull request belongs to a
   repository excluded as a benchmark holdout. Before, a run captured in a fork's clone was
   checked only under the fork's name, so the exclusion missed it and its findings could
   reach the corpus and training input
-  ([#1684](https://github.com/existential-birds/daydream/issues/1684)).
+  ([#1684](https://github.com/existential-birds/daydream/issues/1684), #1813).
 - Committed review on Pi and Codex no longer holds the host's event loop while it
   re-reads the captured source for each `review_admit` and final submission. That read
   grows with the repository (about 0.2 s for 700 files, 0.6 s for 5,000 and 2.7 s for
@@ -782,7 +790,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   final submission whose reserved start is refunded: up to 32 such reads per assignment
   beyond its charged starts. Claude's in-process admissions, and keeping a rejected final
   batch when its work closes, still read on the loop
-  ([#1836](https://github.com/existential-birds/daydream/issues/1836)).
+  ([#1836](https://github.com/existential-birds/daydream/issues/1836), #1839).
 
 ## [0.34.0] - 2026-11-03
 
@@ -2801,7 +2809,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.34.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.35.0...HEAD
+[0.35.0]: https://github.com/existential-birds/daydream/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/existential-birds/daydream/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/existential-birds/daydream/compare/v0.32.0...v0.33.0
 [0.32.0]: https://github.com/existential-birds/daydream/compare/v0.31.0...v0.32.0
