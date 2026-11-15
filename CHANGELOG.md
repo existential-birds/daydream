@@ -51,6 +51,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the release you run. **Breaking (0.y.z)** for manual copies only: replace the placeholder as
   the [workflow README](daydream/templates/workflows/README.md#daydream-pin) describes
   ([#1884](https://github.com/existential-birds/daydream/issues/1884)).
+- Test healing saves and restores a forbidden generated-file edit whose bytes are not UTF-8,
+  instead of stopping the fixing run with `UnicodeDecodeError`. Its recovery patch shows each
+  such byte as U+FFFD, as review diffs do; the smart-quote scrub still skips an attribution diff
+  that is not UTF-8 ([#1870](https://github.com/existential-birds/daydream/issues/1870)).
+- A changed path that fits the checkout but sits over the OS path limit at the capture
+  destination fails capture with the path, its length there and the limit, instead of
+  "captured native source population changed", which describes a concurrent change
+  ([#1870](https://github.com/existential-birds/daydream/issues/1870)).
+- A Pi committed-review turn that settles with nothing accepted and no host failure now raises
+  the shared `host_tools.UnsubmittedTurn`, as Claude and Codex do, instead of a retryable stream
+  truncation: it gets one fresh conversation (none after an earlier retryable provider failure)
+  and seals `missing_output` if that one ends unsubmitted too, and the outage circuit records it
+  as a completed turn. Before, it was retried up to the full attempt count and each try counted
+  as a provider failure, which could open the circuit for the whole run. A stream that ends
+  before it settles is still a truncation
+  ([#1872](https://github.com/existential-birds/daydream/issues/1872)).
+- A diagram can cite a route file such as `src/routes/[slug]/+page.ts` or
+  `app/routes/users.$userId.tsx`. Its spec's `file` fields no longer carry the model-path
+  pattern; grounding accepts a citation that exactly names a Git-observed path of the captured
+  change or the checked-out tree and holds every other path to the model grammar, so a bracket
+  path that names no such file is still refused. Posting reads each cited file from the head
+  tree by its exact name, percent-encoded on GitHub's contents API, and never expands it
+  ([#1879](https://github.com/existential-birds/daydream/issues/1879)).
 - A `--fix` run on a checkout with tracked uncommitted edits no longer presents the committed
   head as the whole reviewed subject. It prints that those edits are reviewed with the commits
   and committed with the fixes, and its review coverage and committed review result mark

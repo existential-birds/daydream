@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +11,12 @@ from daydream.deep.diagram_types import (
     as_int as _norm_line,
 )
 from daydream.git_ops import GitError, grep_fixed_matches
-from daydream.repository_paths import path_is_confined, strip_dot_slash, valid_repository_file_path
+from daydream.repository_paths import (
+    git_observed_path_is_confined,
+    path_is_confined,
+    strip_dot_slash,
+    valid_repository_file_path,
+)
 from daydream.tree_sitter_index import (
     definitions_in_file,
     is_branch_line,
@@ -145,10 +150,15 @@ def resolve_anywhere(
 
 
 class SourceCache:
-    """Memoized head-tree file reader for one grounding pass."""
+    """Memoized head-tree file reader for one grounding pass.
 
-    def __init__(self, repo_root: Path) -> None:
+    ``observed_paths`` are the Git-observed paths a citation may name exactly
+    outside the model-path grammar.
+    """
+
+    def __init__(self, repo_root: Path, observed_paths: Collection[str] = frozenset()) -> None:
         self._repo_root = repo_root
+        self.observed_paths = frozenset(observed_paths)
         self._bytes: dict[str, bytes | None] = {}
         self._lines: dict[str, list[str]] = {}
 
@@ -205,16 +215,20 @@ def in_ranges(ranges: list[tuple[int, int]], line: int) -> bool:
     return any(start <= line <= end for start, end in ranges)
 
 
-def check_path(repo_root: Path, file: Any) -> tuple[str, str | None]:
-    """Return ``(normalized_path, reason)`` for a cited path."""
+def check_path(repo_root: Path, file: Any, observed_paths: Collection[str]) -> tuple[str, str | None]:
+    """Return ``(normalized_path, reason)`` for a cited path.
+
+    A model-written path keeps the model grammar unless it exactly names a
+    Git-observed path, such as ``src/routes/[slug]/+page.ts``; nothing is expanded.
+    """
     if not isinstance(file, str) or not file:
         return "", "FILE_MISSING"
     normalized = strip_dot_slash(file)
-    if not valid_repository_file_path(normalized) or not path_is_confined(
-        repo_root, normalized
-    ):
-        return normalized, "PATH_ESCAPES_REPO"
-    return normalized, None
+    if normalized in observed_paths:
+        confined = git_observed_path_is_confined(repo_root, normalized)
+    else:
+        confined = valid_repository_file_path(normalized) and path_is_confined(repo_root, normalized)
+    return normalized, None if confined else "PATH_ESCAPES_REPO"
 
 
 def check_location(
@@ -228,7 +242,7 @@ def check_location(
     Returns ``(normalized_path, line, reason)``. Check order is fixed: path
     grammar and confinement, then existence, then line range.
     """
-    normalized, reason = check_path(repo_root, file)
+    normalized, reason = check_path(repo_root, file, sources.observed_paths)
     if reason is not None:
         return normalized, _norm_line(line), reason
     if sources.read(normalized) is None:

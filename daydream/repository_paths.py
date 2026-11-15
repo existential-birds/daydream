@@ -1,9 +1,10 @@
 """Shared path grammar, filesystem confinement, and lexical test-path detection.
 
 Model-produced paths are untrusted. Core review and improve share these rules;
-Git-observed paths, including a finding's file from the captured change, skip the
-grammar: ``git_observed_path_is_confined`` refuses only absolute, empty, dot, dot-dot
-or NUL spellings and symlink crossings (a leaf symlink only without allow_leaf_symlink)."""
+Git-observed paths, including a finding's file from the captured change and a diagram
+citation that exactly names a file Git observed, skip the grammar:
+``git_observed_path_is_confined`` refuses only absolute, empty, dot, dot-dot or NUL
+spellings and symlink crossings (a leaf symlink only without allow_leaf_symlink)."""
 
 from __future__ import annotations
 
@@ -93,6 +94,13 @@ def canonicalize_repository_file_path(repo: Path, value: object) -> str:
     return canonical
 
 
+def valid_git_observed_path(value: object) -> bool:
+    """Return whether ``value`` is a legal relative Git name: no absolute, NUL, empty, ``.`` or ``..`` part."""
+    if not isinstance(value, str) or not value or "\0" in value or value.startswith("/"):
+        return False
+    return not any(part in {"", ".", ".."} for part in value.split("/"))
+
+
 def git_observed_path_is_confined(
     repo: Path, value: str, *, allow_leaf_symlink: bool = False
 ) -> bool:
@@ -100,11 +108,9 @@ def git_observed_path_is_confined(
 
     Reject absolute/NUL/empty/dot/parent components and current symlink crossings.
     allow_leaf_symlink checks only parents for callers that inspect/replace the leaf."""
-    if not isinstance(value, str) or not value or "\0" in value or value.startswith("/"):
+    if not valid_git_observed_path(value):
         return False
     parts = value.split("/")
-    if any(part in {"", ".", ".."} for part in parts):
-        return False
     root = repo.resolve()
     walked = _walk_components(repo, parts[:-1] if allow_leaf_symlink else parts)
     if walked is None:
@@ -251,5 +257,6 @@ __all__ = [
     "is_test_path",
     "path_is_confined",
     "valid_directory_scope_lexical",
+    "valid_git_observed_path",
     "valid_repository_file_path",
 ]
