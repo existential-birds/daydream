@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.console import Console
 
 from daydream import git_ops, pr_comment_renderer, pr_review
 from daydream.extensions import Registry
@@ -37,6 +39,7 @@ from daydream.reviews.rendering import (
 from daydream.run_config import RunConfig
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.runner import _write_findings_for_parsed
+from daydream.ui import NEON_THEME
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git as _git
 from tests.harness.review_payload import payload_for
@@ -387,6 +390,9 @@ async def test_publication_decisions_follow_review_state(tmp_path: Path, pr: PRI
     repeated, = pr_review.parsed_issues_from_items([{"file": "a.py", "line": 1, "description": "Same text",
                                                      "rationale": "Same text", "severity": "low"}])
     assert repeated.title == "Same text" and "Same text" not in repeated.body
+    # A legal Git name keeps its edge spaces through export and posting; only an empty path is skipped.
+    (edged,) = pr_review.parsed_issues_from_items([{"file": " notes.md ", "description": "d"}, {"file": ""}])
+    assert edged.path == " notes.md "
     with pytest.MonkeyPatch.context() as mp:
         warnings: list[str] = []
         mp.setattr(pr_review, "find_pr_by_number", lambda *_a, **_k: None)
@@ -411,8 +417,17 @@ async def test_pinned_publication_revalidates_and_places_the_captured_comparison
     monkeypatch: pytest.MonkeyPatch,
     git_repo: Path,
 ) -> None:
-    """Real placement covers dirty bytes; prior _post tests replaced classification and missed reanchoring."""
-    row, base, head = _local_pr_row(git_repo)
+    """Real placement covers dirty bytes; prior _post tests replaced classification and missed reanchoring.
+
+    The console line names every placed path literally, a bracketed route or an unbalanced closing tag included."""
+    row, base, _ = _local_pr_row(git_repo)
+    paths = ("feature.py", "routes/[slug]/+page.py", "docs/notes[/x].md")
+    for path in paths[1:]:
+        (git_repo / path).parent.mkdir(parents=True)
+        (git_repo / path).write_text("value = 1\n")
+    _git(git_repo, "add", ".")
+    _git(git_repo, "commit", "-m", "routes")
+    head = git_ops.head_sha(git_repo)
     pinned = PRInfo(
         number=7,
         owner="o",
@@ -427,9 +442,9 @@ async def test_pinned_publication_revalidates_and_places_the_captured_comparison
     snapshot = git_ops.diff_paths(git_repo, base, head, ["."])
     (git_repo / "feature.py").write_text('value = "LOCAL_ONLY"\n' * 10)
     (git_repo / "untracked.py").write_text("LOCAL_ONLY = True\n")
-    issue = ParsedIssue(
-        path="feature.py", line=1, title="Pinned defect", body="value = 1", severity="medium", confidence="HIGH"
-    )
+    issues = [ParsedIssue(path=path, line=1, title="Pinned defect", body="value = 1", severity="medium",
+                          confidence="HIGH") for path in paths]
+    printed = StringIO()
     moved = {
         None: pinned,
         "head": replace(pinned, head_sha=base),
@@ -443,8 +458,9 @@ async def test_pinned_publication_revalidates_and_places_the_captured_comparison
         monkeypatch.setattr(pr_review, "post_classified_review", _recording_fake_submit(captured))
         status = await pr_review._post(
             git_repo,
-            [issue],
-            **_post_kwargs(post=True, captured_pr=pinned, snapshot_diff=snapshot, publication_dir=git_repo),
+            issues,
+            **_post_kwargs(post=True, captured_pr=pinned, snapshot_diff=snapshot, publication_dir=git_repo,
+                           console=Console(file=printed, theme=NEON_THEME, width=300, color_system=None)),
         )
         assert lookups == []
         if movement:
@@ -452,10 +468,11 @@ async def test_pinned_publication_revalidates_and_places_the_captured_comparison
         else:
             plan = captured["plan"]
             assert status is pr_review.PostStatus.POSTED
-            assert plan.pr == pinned and [(item.path, item.line) for item in plan.inline] == [("feature.py", 1)]
+            assert plan.pr == pinned and [(item.path, item.line) for item in plan.inline] == [(p, 1) for p in paths]
             assert not plan.file_level and not plan.body_only
         assert (git_repo / "feature.py").read_text() == 'value = "LOCAL_ONLY"\n' * 10
         assert (git_repo / "untracked.py").read_text() == "LOCAL_ONLY = True\n"
+    assert printed.getvalue().count(f"PR #7: 3 inline on {', '.join(sorted(paths))}, 0 file-level") == len(moved)
 
 
 async def test_complete_pinned_comment_review_supersedes_its_unfinished_notice(
@@ -658,9 +675,22 @@ def test_file_hunks_fall_back_to_the_pr_diff_only_when_git_cannot_read_the_base(
     monkeypatch: pytest.MonkeyPatch,
     git_repo: Path,
 ) -> None:
-    """A gh-wrapper fake supplies hunks after real Git rejects the base SHA; failures degrade to no hunks."""
+    """A gh-wrapper fake supplies hunks after real Git rejects the base SHA; failures degrade to no hunks.
+
+    Real Git reads a bracketed route name literally, never as a glob that also matches its sibling."""
+    numbered = "".join(f"{n}\n" for n in range(1, 21))
+    for name in ("r/[id].py", "r/i.py"):
+        (git_repo / name).parent.mkdir(exist_ok=True)
+        (git_repo / name).write_text(numbered)
+    _git(git_repo, "add", ".")
+    _git(git_repo, "commit", "-m", "routes")
+    base = _git(git_repo, "rev-parse", "HEAD")
+    (git_repo / "r/[id].py").write_text(numbered.replace("2\n", "two\n", 1))
+    (git_repo / "r/i.py").write_text(numbered.replace("19\n", "nineteen\n"))
+    _git(git_repo, "commit", "-am", "edit routes")
     missing_base = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
     monkeypatch.setattr(git_ops, "gh_pr_diff", _raise_on_gh_fallback)
+    assert pr_review.file_hunks(git_repo, base, "HEAD", "r/[id].py") == [(1, 5)]
     assert pr_review.file_hunks(git_repo, missing_base, "HEAD", "x.py") == []
     monkeypatch.setattr(git_ops, "gh_pr_diff", lambda _r, _n, **_kwargs: _GH_PR_DIFF)
     # Must come from the x.py block only; the other.py hunk must NOT leak into x.py's result.

@@ -3,11 +3,13 @@
 The error/warning/success/cost/info/skipped/dim print helpers and the
 selection menu. Interactive input is owned by ``RunContext.choice`` in
 ``daydream.run_context``; the raw reader ``_read_user_input`` below is that
-gateway's stdin-only leaf.
+gateway's stdin-only leaf. Messages are plain text: the helpers escape them,
+so callers neither write nor escape Rich markup.
 """
 
 from rich import box
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.style import Style
 from rich.text import Text
@@ -27,7 +29,7 @@ def print_error(console: Console, title: str, message: str) -> None:
     """Print an error in a red double-border panel."""
     panel = Panel(
         Text(message, style=STYLE_RED),
-        title=f"⚠️  {title}",
+        title=f"⚠️  {escape(title)}",
         title_align="left",
         box=box.DOUBLE_EDGE,
         border_style=STYLE_RED,
@@ -48,8 +50,8 @@ def print_warning(console: Console, message: str) -> None:
 
 
 def print_success(console: Console, message: str) -> None:
-    """Print a success message with green styling."""
-    console.print(f"[neon.success]✔[/] [neon.green]{message}[/]")
+    """Print a plain-text success message with green styling."""
+    console.print(f"[neon.success]✔[/] [neon.green]{escape(message)}[/]")
 
 
 def print_cost(console: Console, cost_usd: float) -> None:
@@ -58,13 +60,13 @@ def print_cost(console: Console, cost_usd: float) -> None:
 
 
 def print_info(console: Console, message: str) -> None:
-    """Print an info message with cyan styling."""
-    console.print(f"[neon.cyan]ℹ[/] [neon.fg]{message}[/]")
+    """Print a plain-text info message with cyan styling."""
+    console.print(f"[neon.cyan]ℹ[/] [neon.fg]{escape(message)}[/]")
 
 
 def print_dim(console: Console, message: str) -> None:
-    """Print a dimmed message for secondary information."""
-    console.print(f"[neon.dim]{message}[/]")
+    """Print a dimmed plain-text message for secondary information."""
+    console.print(f"[neon.dim]{escape(message)}[/]")
 
 
 def print_menu(console: Console, title: str, options: list[tuple[str, str]]) -> None:

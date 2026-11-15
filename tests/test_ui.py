@@ -30,6 +30,9 @@ from daydream.trajectory import DaydreamPhase
 from daydream.ui import (
     NEON_THEME,
     ShutdownPanel,
+    print_dim,
+    print_error,
+    print_success,
     print_verification_summary,
     render_exploration_summary,
 )
@@ -68,6 +71,14 @@ def test_summaries_stay_quiet_and_choice_returns_the_typed_value(
 
     monkeypatch.setattr("builtins.input", lambda: "y")
     assert _ask(Console(), "Confirm?", default="n") == "y"
+
+    # Message helpers print caller text literally: bracketed text neither styles, vanishes nor raises.
+    literal = "docs/notes[/x].md in routes/[slug]"
+    console = Console(file=StringIO(), record=True, force_terminal=True, width=200)
+    print_success(console, literal)
+    print_dim(console, literal)
+    print_error(console, literal, "")
+    assert console.export_text().count(literal) == 3
 
 async def test_log_lines_live_headers_and_shutdown_steps_render_every_input_shape(
     capsys: pytest.CaptureFixture[str],

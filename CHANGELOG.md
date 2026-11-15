@@ -18,6 +18,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this change and posted after it is still accepted
   ([#1641](https://github.com/existential-birds/daydream/issues/1641)).
 
+### Fixed
+
+- A review with a finding on a file whose name has `[`, `]` or `$` (route files such as
+  `src/routes/[slug]/+page.ts` or `app/routes/users.$userId.tsx`) no longer fails. The
+  findings check after the review held each finding's file to the narrower grammar for paths a
+  model writes, so one such finding failed the whole review with `malformed_artifact`, and
+  nothing was posted or exported. A finding's file is a path of the captured Git change, so
+  the check now only confines it as one (no absolute path, no empty, `.` or `..` part, no
+  NUL byte, no symlinked parent directory), and every legal Git name passes. The fix flow
+  accepts and edits these files, and every file path Daydream passes Git to diff or restore is
+  now a literal pathspec, never a glob that could also match a sibling file. The export and
+  posting keep a path with leading or trailing spaces exact instead of trimming it onto
+  another name.
+  A finding on a path that is not confined (absolute, or with a `..` or `.` part such as a
+  leading `./`), which only an extension step that rewrites the findings can produce, still
+  fails the review: the sealed result keeps every confirmed finding
+  ([#1875](https://github.com/existential-birds/daydream/issues/1875)).
+- Console lines no longer drop bracketed text or crash on it. Info, success and dim lines,
+  and error titles, used to read their text as Rich markup: the posting line printed
+  `PR #7: 2 inline on src/routes//+page.ts` for `src/routes/[slug]/+page.ts`, and a path
+  with an unbalanced closing tag, such as `docs/notes[/x].md`, raised `MarkupError` and
+  stopped the run before anything was posted. These lines now print their text exactly,
+  so `daydream setup --verify` also shows its check names such as `[secrets]`
+  ([#1878](https://github.com/existential-birds/daydream/issues/1878)).
+
 ## [0.35.1] - 2026-11-15
 
 ### Changed

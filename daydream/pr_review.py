@@ -148,9 +148,9 @@ def _severity_off_vocabulary(raw: dict[str, Any]) -> bool:
 def extract_item_fields(
     raw: dict[str, Any],
 ) -> ItemFields | None:
-    """Normalize one canonical finding; reject an empty file path."""
-    path = str(raw.get("file", "")).strip()
-    if not path:
+    """Normalize one canonical finding; reject a missing or empty file path, keeping a Git name exact."""
+    path = raw.get("file")
+    if not isinstance(path, str) or not path:
         return None
     line = raw.get("line")
     line_int = int(line) if isinstance(line, int) and not isinstance(line, bool) else None
@@ -492,7 +492,7 @@ def file_hunks(
     The GitHub fallback selects this path's block from the full PR diff."""
     try:
         diff_text = git_ops.diff_paths(
-            target_dir, base_sha, head_sha, [path], unified=3, merge_base_diff=False
+            target_dir, base_sha, head_sha, [f":(literal){path}"], unified=3, merge_base_diff=False
         )
     except GitError:
         diff_text = (

@@ -75,7 +75,7 @@ def _install_scope_boundary_shims(
         "#!/bin/sh\n"
         + (
             f'if [ "$1" = "diff" ] && [ "$2" = "HEAD" ] && [ "$3" = "--" ] '
-            f'&& [ "$4" = "{fail_diff_path}" ]; then\n'
+            f'&& [ "$4" = ":(literal){fail_diff_path}" ]; then\n'
             '  echo "SECRET_TOKEN optional evidence failure" >&2\n'
             "  exit 2\n"
             "fi\n"
@@ -155,10 +155,13 @@ def test_model_and_reviewed_paths_normalize_or_fail_closed(tmp_path: Path) -> No
         canonicalize_repository_file_path(repo, "src/a.py")
 
 def test_footprint_treats_reviewed_git_names_separately_from_model_paths(git_repo: Path) -> None:
-    """Git-observed names (control characters, globs, non-UTF-8 bytes) are authorized verbatim, not re-parsed."""
+    """Git-observed names (control characters, globs, non-UTF-8 bytes) are authorized verbatim, not re-parsed.
+
+    A finding on such a name targets it as a Git path, and Git reads it as a literal pathspec, never a glob."""
     for reviewed_path in ("odd\n$name[1].txt", "native-\udcff.py"):
+        sibling = reviewed_path.replace("[1]", "1")
         try:
-            _seed(git_repo, {reviewed_path: b"before\n", "normal.py": b"before\n"})
+            _seed(git_repo, {reviewed_path: b"before\n", sibling: b"before\n", "normal.py": b"before\n"})
         except OSError as exc:
             if exc.errno == errno.EILSEQ:
                 continue  # this host filesystem rejects non-UTF-8 names; Linux CI exercises them
@@ -168,14 +171,25 @@ def test_footprint_treats_reviewed_git_names_separately_from_model_paths(git_rep
         reviewed = set(git_ops.changed_paths_z(git_repo, "HEAD"))
         assert reviewed == {reviewed_path}
         item = {"item_uid": "item:normal", "file": "normal.py"}
-        footprint = AuthorizedFixFootprint.build(git_repo, reviewed, [item])
+        named = {"item_uid": "item:named", "file": reviewed_path}
+        footprint = AuthorizedFixFootprint.build(git_repo, reviewed, [item, named])
 
         assert footprint.run_allowed_paths == frozenset({reviewed_path, "normal.py"})
         assert footprint.group_paths([item]) == frozenset({"normal.py"})
+        assert footprint.group_paths([named]) == frozenset({reviewed_path})
         reviewed_event = next(event for event in footprint.events if event.origin == "reviewed")
         assert (reviewed_event.path, reviewed_event.path_kind) == (reviewed_path, "git")
+        primary_event = next(event for event in footprint.events if event.item_uid == "item:named")
+        assert (primary_event.origin, primary_event.path, primary_event.path_kind) == ("primary", reviewed_path, "git")
         assert footprint.accept_retarget(git_repo, "item:normal", reviewed_path, phase="fix", round_number=1,) is None
         assert json.loads(json.dumps(footprint.audit_payload("run")))["run_allowed_paths"]
+        if sibling == reviewed_path:
+            continue
+        (git_repo / sibling).write_bytes(b"sibling\n")
+        assert "+sibling" not in git_ops.diff_worktree_against(git_repo, "HEAD", [reviewed_path])
+        git_ops.restore_paths_from_ref(git_repo, "HEAD", [reviewed_path])
+        assert (git_repo / reviewed_path).read_bytes() == b"before\n"
+        assert (git_repo / sibling).read_bytes() == b"sibling\n"
 
 
 def test_preexisting_untracked_state_is_restored_exactly_and_new_residual_is_removed(git_repo: Path) -> None:

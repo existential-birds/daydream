@@ -22,7 +22,7 @@ from daydream.prompt_budget import (
     PreparedSanctionedInputs,
 )
 from daydream.repository_paths import (
-    path_is_confined,
+    git_observed_path_is_confined,
 )
 from daydream.review_budget import BudgetLedger
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
@@ -335,7 +335,7 @@ def _resolve_finding_file_ref(repo: Path, value: object) -> str:
     """
     if not isinstance(value, str):
         raise UnconfinedFindingError("Finding file must be a confined repository-relative path")
-    if not path_is_confined(repo, value):
+    if not git_observed_path_is_confined(repo, value):
         raise UnconfinedFindingError("Finding file must be a confined repository-relative path")
     candidate = repo / value
     if candidate.is_file():

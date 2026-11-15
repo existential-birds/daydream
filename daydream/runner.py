@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any, AsyncIterator
 
 import anyio
 from rich.console import Console
-from rich.markup import escape as escape_markup
 
 from daydream import git_ops, github_app, pr_review
 from daydream.agent import console
@@ -1036,10 +1035,7 @@ async def _run_improve(
                 f"{'enabled' if ctx.data['improve_publish_issues'] else 'disabled'}",
             )
             print_info(console, f"Model: {ctx.backend_for('recon').model}")
-            print_info(
-                console,
-                f"GitHub identity: {escape_markup(config.identity)}",
-            )
+            print_info(console, f"GitHub identity: {config.identity}")
             console.print()
 
             return await run_flow(ctx.registry, "improve", ctx)
@@ -1101,8 +1097,7 @@ async def _run_custom_flow(
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Flow: {flow_name}")
         print_info(console, f"Branch: {branch}")
-        # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
-        print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
+        print_info(console, f"GitHub identity: {config.identity}")
         console.print()
 
         return await run_flow(ctx.registry, flow_name, ctx)

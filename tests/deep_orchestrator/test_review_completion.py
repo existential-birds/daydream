@@ -148,8 +148,16 @@ async def test_snapshot_boundaries(
 
     'live' is a runner row: only a real review whose PR head moves after capture proves the pinned
     head is still analyzed and placed, with one lookup. Its produced artifact then meets the poster.
+    Its change also adds route files whose legal names fall outside the model-path grammar.
     """
     if case == 'live':
+        routes = ('src/routes/[slug]/+page.ts', 'app/routes/users.$userId.tsx')
+        for route in routes:
+            (review.repo / route).parent.mkdir(parents=True)
+            (review.repo / route).write_text('export const a = 1;\nexport const b = 2;\n')
+        git(review.repo, 'add', '.')
+        git(review.repo, 'commit', '-m', 'add routes')
+        review.pr = _pin_findings_pr(review.patch, review.repo)
         live, calls = review.pr, []
 
         def lookup(*_a: Any, **_k: Any) -> Any:
@@ -162,7 +170,8 @@ async def test_snapshot_boundaries(
 
         review.patch.setattr('daydream.pr_review.find_pr_by_number', lookup)
         review.backend = EmptyReviewBackend(review.repo, responder=advance)
-        review.backend.review_claims = [{'title': 'Grounded defect', 'file': 'api.py', 'line': 2, 'severity': 'low'}]
+        review.backend.review_claims = [{'title': 'Grounded defect', 'file': 'api.py', 'line': 2, 'severity': 'low'}, *(
+            {'title': f'Route defect in {route}', 'file': route, 'line': 2, 'severity': 'low'} for route in routes)]
         scripted = review.backend._scripted_review
 
         def synthesize(prompt: str, binding: Any) -> dict[str, Any]:
@@ -172,22 +181,24 @@ async def test_snapshot_boundaries(
             if 'verdicts' in value:
                 return value
             binding.admit('admit', 'review_admit', value)
-            (predecessor,) = binding.call('admit', 'review_admit', value)['admitted']['claims']
-            (claim,) = value['claims']
+            predecessor, *_ = binding.call('admit', 'review_admit', value)['admitted']['claims']
+            claim, *_ = value['claims']
             return {'targets': [], 'claims': [{
                 **claim, 'source_uids': [predecessor['uid']], 'title': 'Grounded defect, restated',
                 'payload': {**claim['payload'], 'claim': 'api.py line 2 changes the grounded behavior.'}}]}
 
         review.patch.setattr(review.backend, '_scripted_review', synthesize)
         assert await review.run() == 0
-        assert collapse_panel_text(capsys).count('Review complete: 1 confirmed finding.') == 1
+        assert collapse_panel_text(capsys).count('Review complete: 3 confirmed findings.') == 1
         data = review.load()
         result = data['terminal_result']
         assert result['analysis_state'] == 'complete'
         assert live.head_sha == review.pr.base_sha and git_ops.head_sha(review.repo) == review.pr.head_sha
         assert git_ops.show(review.repo, live.head_sha, 'api.py') and len(calls) == 1
-        assert [(finding['title'], finding['placement'], finding['line']) for finding in data['findings']] == [
-            ('Grounded defect, restated', 'inline', 2)]
+        assert sorted((finding['path'], finding['title'], finding['placement'], finding['line'])
+                      for finding in data['findings']) == sorted([
+            ('api.py', 'Grounded defect, restated', 'inline', 2),
+            *((route, f'Route defect in {route}', 'inline', 2) for route in routes)])
         assert result['analyzed_revision']['pr_base_sha'] == review.pr.base_sha
         # The poster takes that produced artifact only for the event it was produced for: a moved head, another
         # repository or another pull request is refused before any GitHub call.
@@ -203,12 +214,14 @@ async def test_snapshot_boundaries(
         assert len(fake_gh.process_calls()) == produced
         assert post() == 0
         (posted,) = fake_gh.calls('POST', 'repos/o/r/pulls/7/reviews')
-        # A complete review whose only finding the reviewer rated low earns the opted-in approval.
+        # A complete review whose only findings the reviewer rated low earns the opted-in approval.
         assert (posted.payload['event'], posted.payload['commit_id']) == ('APPROVE', review.pr.head_sha)
-        assert [(comment['path'], comment['line']) for comment in posted.payload['comments']] == [('api.py', 2)]
+        assert sorted((comment['path'], comment['line']) for comment in posted.payload['comments']) == sorted([
+            ('api.py', 2), *((route, 2) for route in routes)])
         # An incomplete review still exports its admitted finding with truthful coverage, and never approves.
         # Discovery admits its claim and all but one decision, then calls tools until its allowance is spent.
         review.backend.review_undecided = 1
+        del review.backend.review_claims[1:]
 
         def exhaust(prompt: str, binding: Any) -> dict[str, Any]:
             value = scripted(prompt, binding)
@@ -345,8 +358,8 @@ async def test_atomic_public_failure(
 
 # Source-loss and replacement-checkout rows are runner rows: only the real terminal export after
 # admission can lose its checkout, read retained bytes, and install privately.
-@pytest.mark.parametrize('fault', ['coverage', 'fix', 'projection', 'report', 'pipeline', 'source-loss',
-                                   'placement-replacement-worktree'])
+@pytest.mark.parametrize('fault', ['coverage', 'fix', 'projection', 'unconfined-path', 'report', 'pipeline',
+                                   'source-loss', 'placement-replacement-worktree'])
 async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str) -> None:
     """A failure after admission publishes typed coverage atomically, never live or replaced Git."""
     force_worktree = fault.endswith('-worktree')
@@ -384,7 +397,15 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         return allocate(*args, **kwargs)
     def faulty_read(path: Path, *args: Any, **kwargs: Any) -> str:
         text = read(path, *args, **kwargs)
-        return '{"items": "invalid"}' if fault == 'projection' and path.name == 'merged-items.json' else text
+        if path.name != 'merged-items.json' or fault not in ('projection', 'unconfined-path'):
+            return text
+        if fault == 'projection':
+            return '{"items": "invalid"}'
+        # An extension step rewrote the items onto paths outside the repository.
+        payload = json.loads(text)
+        for item in payload['items']:
+            item['file'] = '../' + item['file']
+        return json.dumps(payload)
     def retained_source_only(target: Path, *args: Any, **kwargs: Any) -> bytes:
         if target == review.repo and fault == 'source-loss' and state['failed']:
             pytest.fail('terminal export attempted to read live Git after source loss')
@@ -471,6 +492,16 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         assert 'Terminal review finalization failed: coverage staging failed' in panel
         with pytest.raises(FindingsValidationError):
             review.load()
+        return
+    if fault == 'unconfined-path':
+        # The confirmed finding is never delivered on an unconfined path; the sealed result keeps it.
+        data = review.load()
+        result = data['terminal_result']
+        assert data['findings'] == [] and result['reason_codes'] == ['malformed_artifact']
+        assert (result['analysis_state'], result['projection_valid']) == ('failed', False)
+        assert 'Review failed: no confirmed findings delivered (the reviewer confirmed 1).' in panel
+        sealed = json.loads((review.repo / '.daydream/deep/committed-review.json').read_text())
+        assert [finding['payload']['file'] for finding in sealed['findings']] == ['api.py']
         return
     if fault == 'projection':
         data = review.load()

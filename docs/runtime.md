@@ -15,8 +15,14 @@ Diagram artifacts carry no review coverage; unsupported schemas are rejected.
 
 Completion requires positive success or host no-op evidence for every planned
 scope and required phase. Valid unfinished work is incomplete; unusable analysis
-or invalid projection is failed. Finding count, CLI success, warning absence,
-and archive status cannot establish completeness. Review coverage is frozen
+or invalid projection is failed. A finding's `file` is a path of the captured change,
+so the projection check confines it as a Git-observed path (no absolute path, empty,
+`.` or `..` component, NUL or symlinked parent) and accepts any legal Git name, such as
+`[slug]` or `$userId`; the model-path grammar applies only to paths a model writes. One
+unconfined finding path makes the whole projection invalid, since only a step that
+rewrites the items can produce it; the sealed result keeps every confirmed finding.
+Finding count, CLI success, warning absence, and archive status cannot establish
+completeness. Review coverage is frozen
 independently of later fix/test/publication state. Reviewer source references
 prove correspondence, not understanding, reads, or executed checks.
 

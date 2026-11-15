@@ -73,9 +73,9 @@ class AuthorizedFixFootprint:
         items: list[dict[str, Any]],
     ) -> AuthorizedFixFootprint:
         """Build a fail-closed footprint from reviewed paths and canonical items."""
-        # Reviewed paths come from the host's Git diff, not model output.
+        # Reviewed paths and item targets come from the host's Git diff, not model output.
         # Preserve their exact native spelling while retaining confinement;
-        # item targets and related/retarget paths still use the model grammar.
+        # related/retarget paths still use the model grammar.
         reviewed_set: set[str] = set()
         for path in reviewed_paths or set():
             if not isinstance(path, str):
@@ -93,7 +93,9 @@ class AuthorizedFixFootprint:
             if not isinstance(uid, str) or not uid or uid in seen_uids:
                 raise ValueError("fix footprint requires unique non-empty item_uid values")
             seen_uids.add(uid)
-            primary = canonicalize_repository_file_path(repo, item.get("file"))
+            primary = item.get("file")
+            if not isinstance(primary, str) or not git_observed_path_is_confined(repo, primary):
+                raise InvalidRepositoryFilePath("invalid repository file path")
             raw_related = item.get("related_files")
             if raw_related is None:
                 related_values: list[object] = []
@@ -126,7 +128,7 @@ class AuthorizedFixFootprint:
             footprint._append_event(
                 action="authorize",
                 path=primary,
-                path_kind="model",
+                path_kind="git",
                 origin="primary",
                 item_uid=uid,
                 phase="initialization",

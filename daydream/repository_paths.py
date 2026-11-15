@@ -1,7 +1,9 @@
 """Shared path grammar, filesystem confinement, and lexical test-path detection.
 
 Model-produced paths are untrusted. Core review and improve share these rules;
-Git-observed paths have a separate grammar boundary."""
+Git-observed paths, including a finding's file from the captured change, skip the
+grammar: ``git_observed_path_is_confined`` refuses only absolute, empty, dot, dot-dot
+or NUL spellings and symlink crossings (a leaf symlink only without allow_leaf_symlink)."""
 
 from __future__ import annotations
 
@@ -11,6 +13,7 @@ from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+# No shell or pathspec expansion characters ($, backtick, * ? [ ], braces) in a path no host observed.
 _SEG_NONDOT = r"[\w #%~!&()+\-@]"               # non-dot segment char, no $/backtick
 _SEG_CHAR   = r"[\w .#%~!&()+\-@]"              # segment char incl. dot
 _PATH_SEGMENT = (
