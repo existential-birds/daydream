@@ -86,7 +86,7 @@ async def phase_verify_recommendations(
 ) -> tuple[Path, dict[str, Any]]:
     """Classify every canonical item and persist its selection decision beside verdicts.
 
-    Every non-exempt item reaches the prompt; an empty selection still writes an artifact
+    Every item reaches the prompt; an empty selection still writes an artifact
     without a backend call.
     """
     run_context = resolve_run_context(run_context)

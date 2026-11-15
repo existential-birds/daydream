@@ -91,7 +91,7 @@ def build_verification_prompt(
     )
     parts.append(
         "Empty-input rule: if the merged report contains no numbered issues "
-        "under `## Issues` or `## Cross-Stack Issues`, emit an empty `verdicts` "
+        "under `## Issues`, emit an empty `verdicts` "
         "array. This is NOT an error."
     )
     parts.append(
