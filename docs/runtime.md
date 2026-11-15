@@ -747,10 +747,11 @@ provider failure leads to a retry, the failed attempt's tool calls are refunded 
 the retry dispatches, because it is a fresh native conversation that must redo the
 lost work; a retry stopped before dispatch refunds nothing. Elapsed time is never refunded. Retries stay bounded by the
 attempt count, the absolute deadline and the outage circuit; a failure after possible
-host acceptance still permits no retry. A Claude or Codex turn that completes with nothing
+host acceptance still permits no retry. A Pi, Claude or Codex turn that completes with nothing
 accepted is retried under this rule only as the invocation's first retry, and the outage
 circuit records it as a completed turn, never as a failure
-([Claude](#claude-host-tools) and [Codex host tools](#codex-host-tools)).
+([Pi](#pi-host-tool-lifetime-and-limits), [Claude](#claude-host-tools) and
+[Codex host tools](#codex-host-tools)).
 Apart from that rejected submission, paths that do not retry are never refunded,
 including a committed challenge re-dispatch. Committed
 batches admitted before a provider failure stay installed while that attempt's starts
@@ -823,7 +824,11 @@ continuation and retry, and never invite removing the contradiction to obtain
 complete coverage. Foreign or duplicate contradiction IDs remain correctable
 payload faults.
 
-Ordinary transient preacceptance retries follow the [renewal rule](#budget-ledger). Attempt
+Ordinary transient preacceptance retries follow the [renewal rule](#budget-ledger). A Pi turn
+that settles and exits zero with nothing accepted and no host failure is not a stream
+truncation: as on [Codex](#codex-host-tools), it gets one fresh conversation as the
+invocation's first retry, and `missing_output` if that conversation ends unsubmitted too. A
+stream that ends before it settles is still a retryable truncation. Attempt
 closure revokes its endpoint before cleanup; only an unaccepted, nonfatal binding
 with completed cleanup may open another attempt. Explicit capability closure is
 permanent. A retired endpoint cannot revoke or mutate a later attempt. The

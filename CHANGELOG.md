@@ -36,6 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   destination fails capture with the path, its length there and the limit, instead of
   "captured native source population changed", which describes a concurrent change
   ([#1870](https://github.com/existential-birds/daydream/issues/1870)).
+- A Pi committed-review turn that settles with nothing accepted and no host failure now raises
+  the shared `host_tools.UnsubmittedTurn`, as Claude and Codex do, instead of a retryable stream
+  truncation: it gets one fresh conversation (none after an earlier retryable provider failure)
+  and seals `missing_output` if that one ends unsubmitted too, and the outage circuit records it
+  as a completed turn. Before, it was retried up to the full attempt count and each try counted
+  as a provider failure, which could open the circuit for the whole run. A stream that ends
+  before it settles is still a truncation
+  ([#1872](https://github.com/existential-birds/daydream/issues/1872)).
 
 ## [0.35.2] - 2026-11-15
 
