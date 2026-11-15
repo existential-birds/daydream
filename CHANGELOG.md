@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A `--fix` run on a checkout with tracked uncommitted edits no longer presents the committed
+  head as the whole reviewed subject. It prints that those edits are reviewed with the commits
+  and committed with the fixes, and its review coverage and committed review result mark
+  `analyzed_revision` with `tracked_worktree_edits: true`. That coverage and terminal result use
+  the new version 3, which earlier builds reject; a clean checkout records and prints what it did
+  before. A commit-bound findings artifact refuses the marker as it refuses a captured
+  `source_id` ([#1828](https://github.com/existential-birds/daydream/issues/1828)).
 - An archived run whose base-to-head diff is empty now has pipeline status `succeeded` instead of
   `partial`. It returns before any merge, fix or test phase, and the archive now accepts its sealed
   no-diff review, bound to the same session, as the evidence that it finished

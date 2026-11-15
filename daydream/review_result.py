@@ -121,12 +121,12 @@ _PHASE_SCHEMA = strict_object({'phase': _TEXT, **_OUTCOME_PROPERTIES, 'noop': {'
                               'usable_evidence': {'type': 'boolean'}})
 ANALYZED_REVISION_SCHEMA = strict_object({
     'head_sha': _TEXT, 'merge_base_sha': _TEXT, 'diff_key': _TEXT, 'pr_base_sha': _TEXT,
-    'source_id': {'type': 'string', 'pattern': '^[0-9a-f]{64}$'},
+    'source_id': {'type': 'string', 'pattern': '^[0-9a-f]{64}$'}, 'tracked_worktree_edits': {'const': True},
 })
-for _optional in ('pr_base_sha', 'source_id'):
+for _optional in ('pr_base_sha', 'source_id', 'tracked_worktree_edits'):
     ANALYZED_REVISION_SCHEMA['required'].remove(_optional)
 TERMINAL_RESULT_SCHEMA: dict[str, Any] = strict_object({
-        'schema_version': {'enum': [1, 2]}, 'run_id': _TEXT,
+        'schema_version': {'enum': [1, 2, 3]}, 'run_id': _TEXT,
         'analysis_state': {'enum': ['complete', 'incomplete', 'failed']},
         'pipeline_state': {'enum': ['completed', 'failed', 'cancelled']},
         'analyzed_revision': ANALYZED_REVISION_SCHEMA, 'reason_codes': _REASONS,
@@ -150,15 +150,26 @@ _COVERAGE_SCHEMA = strict_object({
 })
 
 
+def _revision_version(revision: Mapping[str, Any]) -> int:
+    """Terminal result version of a reviewed subject: commits, a captured working source, or commits plus
+    tracked working-tree edits that no commit holds."""
+    return 2 if 'source_id' in revision else 3 if 'tracked_worktree_edits' in revision else 1
+
+
 @dataclass(frozen=True)
 class AnalyzedRevision:
-    """Pinned base, actual HEAD provenance and optional captured working-source identity."""
+    """Pinned base, actual HEAD provenance and optional captured working-source identity.
+
+    ``tracked_worktree_edits`` marks a reviewed diff that also holds the checkout's tracked uncommitted edits,
+    so it is not exactly ``merge_base_sha...head_sha``.
+    """
 
     head_sha: str
     merge_base_sha: str
     diff_key: str
     pr_base_sha: str | None = None
     source_id: str | None = None
+    tracked_worktree_edits: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -166,6 +177,8 @@ class AnalyzedRevision:
             result.pop('pr_base_sha')
         if self.source_id is None:
             result.pop('source_id')
+        if not self.tracked_worktree_edits:
+            result.pop('tracked_worktree_edits')
         return result
 
     @classmethod
@@ -301,8 +314,8 @@ def validate_terminal_result(data: Any, *, expected_head_sha: str | None = None)
         validate_json_schema(data, TERMINAL_RESULT_SCHEMA)
     except jsonschema.ValidationError as exc:
         raise ValueError(f'terminal result schema validation failed: {exc.message}') from exc
-    if type(data['schema_version']) is not int or data['schema_version'] != (
-            2 if 'source_id' in data['analyzed_revision'] else 1):
+    if type(data['schema_version']) is not int or data['schema_version'] != _revision_version(
+            data['analyzed_revision']):
         raise ValueError('terminal result version does not match its captured source identity; restart review')
     planned = {s['scope_id']: s for s in data['planned_scopes']}
     outcomes = {s['scope_id']: s for s in data['stack_outcomes']}
@@ -455,8 +468,9 @@ class ReviewCoverage:
         if self._terminal is not None:
             assert self._frozen_evidence is not None
             return copy.deepcopy(self._frozen_evidence)
-        return copy.deepcopy({'schema_version': 2 if self.revision.source_id is not None else 1, 'run_id': self.run_id,
-            'analyzed_revision': self.revision.to_dict(),
+        revision = self.revision.to_dict()
+        return copy.deepcopy({'schema_version': _revision_version(revision), 'run_id': self.run_id,
+            'analyzed_revision': revision,
             'planned_scopes': sorted((s.to_dict() for s in self.planned_scopes), key=lambda s: s['scope_id']),
             'required_phases': sorted(self.required_phases),
             'stack_outcomes': [self.scopes[key] for key in sorted(self.scopes)],

@@ -14,7 +14,6 @@ from urllib.parse import urlparse
 from daydream import git_ops
 from daydream.archive.git_safe import normalize_remote_url
 from daydream.archive.provenance import capture_executable_provenance
-from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.deep.diff import _diff_changed_files
 from daydream.deep.records import item_source_uids
 from daydream.observability.runtime import current_run_trace_id
@@ -46,11 +45,7 @@ def retain_original_task(
     dirty_tracked: bool | None = None
     if captured is None:
         try:
-            status = git_ops.status_porcelain(work.repo)
-            dirty_tracked = any(
-                not line.startswith("??") and not line[3:].startswith(".daydream/")
-                and line[3:] not in (".daydream", REVIEW_OUTPUT_FILE) for line in status.splitlines()
-            )
+            dirty_tracked = git_ops.has_tracked_edits(work.repo)
         except git_ops.GitError:
             pass
     # An accepted capture has its own index. Live checkout status after that

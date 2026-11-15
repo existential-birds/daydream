@@ -9,6 +9,8 @@ and `daydream --help-all` for settings rather than copying defaults into docs.
 Ordinary `--findings-out` uses schema version 2 with committed `terminal_result` version 1.
 Local captured review coverage uses terminal version 2 and a distinct `source_id`;
 commit-bound findings envelopes reject that identity instead of relabeling it.
+A fixing run over tracked uncommitted edits uses terminal version 3
+([captured local source](#captured-local-source)).
 Immutable PR exports use schema 3, retaining original PR provenance separately
 from the materialized analyzed revision (see [immutable PR inputs](#immutable-pr-inputs)).
 Diagram artifacts carry no review coverage; unsupported schemas are rejected.
@@ -451,7 +453,11 @@ before/after contents, eligible population, scope, full target inventory and nat
 materialization. Ordinary review mode uses this same owner; comment and commit-bound
 `--findings-out` select an independently pinned committed PR subject instead, with a
 visible exclusion notice when the checkout is dirty. Improve retains its separate
-audit-workspace population policy. Fixing-flow migration is outside this contract.
+audit-workspace population policy. Fixing-flow migration is outside this contract:
+fixing reviews the checkout as is, so its diff is the commits plus tracked working-tree
+edits. When such edits exist the run says so before it reviews, and its coverage and
+committed result (schema 10) mark `analyzed_revision` with `tracked_worktree_edits: true`
+and terminal/coverage version 3; a clean checkout keeps version 1 and no marker.
 
 Local capture compares the pinned merge base with final working bytes, combining
 committed and later tracked edits. The index is not another change layer. Undone
@@ -548,7 +554,8 @@ is not an OS sandbox. Native configuration/trust/authentication
 still resolve in the original project, while native cwd/read/search use the capture.
 
 Local program results use schema 12 and terminal/coverage version 2; committed
-results 10, immutable results 11 and their committed terminal version 1 stay distinct.
+results 10, immutable results 11 and their committed terminal version 1 (3 for a fixing
+run over tracked uncommitted edits) stay distinct.
 Results 1–3 predate bounded navigation and sharded per-target coverage, 4–6 predate
 work records and 7–9 predate claim severity; they are rejected with a restart instruction
 rather than converted.

@@ -283,6 +283,8 @@ async def run_deep(
     pr_base_sha = None if captured_pr is None else captured_pr.pr_base_sha
     source_id = None if work.captured_source is None else work.captured_source.source_id
     dirty_snapshot = False
+    # Only the live-checkout diff below holds tracked uncommitted edits next to the commits.
+    tracked_worktree_edits = False
     diff: str | None
     try:
         if work.captured_source is not None:
@@ -326,6 +328,7 @@ async def run_deep(
                 diff = git_ops.diff_paths(target_dir, captured_base, captured_head, paths)
             else:
                 diff = git_ops.diff(work.repo, work.base_branch, exclude=config.ignore_paths)
+                tracked_worktree_edits = git_ops.has_tracked_edits(work.repo)
         except GitTimeoutError as exc:
             print_error(console, "Git Timeout", f"git timed out under load: {exc}")
             return 1
@@ -468,7 +471,8 @@ async def run_deep(
                 await plan_committed_review(
                     ctx, run_id=recorder.session_id,
                     revision=AnalyzedRevision(captured_head, captured_base, current_diff_sha, pr_base_sha,
-                                              source_id=source_id).to_dict(),
+                                              source_id=source_id,
+                                              tracked_worktree_edits=tracked_worktree_edits).to_dict(),
                     index_path=index_path, files=changed_files, started=started,
                 )
             except (ValueError, SanctionedInputUnavailable, GitError) as exc:
