@@ -30,8 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guidance named a bare `daydream search`, which such a shell answered with
   `daydream: command not found`, at the cost of a tool start each time. It now names the
   helper through the running interpreter (`<python> -m daydream search`), and Claude's
-  read-only Bash guard admits exactly that form instead of a bare `daydream search`
-  ([#1830](https://github.com/existential-birds/daydream/issues/1830)).
+  read-only Bash guard admits exactly that form instead of a bare `daydream search`. A
+  read-only Codex turn that runs in a clone of the checkout keeps that interpreter path
+  even when it lies in the checkout's ignored virtual environment, which the clone lacks
+  ([#1830](https://github.com/existential-birds/daydream/issues/1830),
+  [#1868](https://github.com/existential-birds/daydream/issues/1868)).
 - Author text that quotes the host's search guidance reaches the reviewer unchanged. On
   read-only Pi, a description that quoted it was rewritten before delivery, so the model
   did not read what the sealed result records, and on every backend quoted guidance in a

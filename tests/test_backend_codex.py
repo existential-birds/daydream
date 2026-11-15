@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -319,9 +320,12 @@ async def test_continuation_token_resumes(tmp_path: Path) -> None:
             raise
 
 
-async def test_codex_read_only_uses_read_only_sandbox(linked_worktree: tuple[Path, Path]) -> None:
+async def test_codex_read_only_uses_read_only_sandbox(
+    linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A disposable clone mirrors HEAD, index, tracked worktree edits, and untracked files; rebind prompts,
-    omit origin, and clean up without changing the source.
+    omit origin, and clean up without changing the source. The search helper's command keeps an interpreter
+    that lives in the checkout's ignored virtual environment, which the clone lacks.
     """
     _main, source = linked_worktree
     parser = source / "services" / "taste" / "parser.go"
@@ -332,6 +336,12 @@ async def test_codex_read_only_uses_read_only_sandbox(linked_worktree: tuple[Pat
     lexer.write_text("package taste\n\n// caller unstaged\nfunc CallerUnstaged() {}\n")
     notes = source / "notes.md"
     notes.write_text("untracked caller note\n")
+    (source / ".gitignore").write_text(".venv/\n")
+    interpreter = source / ".venv" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.symlink_to(sys.executable)
+    helper = shlex.join((str(interpreter), "-m", "daydream", "search"))
+    monkeypatch.setattr("daydream.prompts.grounding.DAYDREAM_SEARCH_COMMAND", helper)
     source_head = git_ops.head_sha(source)
     source_patch = git_ops.staged_patch(source)
     captured: dict[str, Any] = {}
@@ -349,6 +359,7 @@ async def test_codex_read_only_uses_read_only_sandbox(linked_worktree: tuple[Pat
         captured["has_notes"] = (isolated / "notes.md").exists()
         captured["notes"] = (isolated / "notes.md").read_text() if captured["has_notes"] else None
         captured["remote"] = git_ops.remote_url(isolated)
+        captured["has_venv"] = (isolated / ".venv").exists()
         captured["branches"] = git_ops.list_local_branches(isolated)
         captured["source_branches"] = git_ops.list_local_branches(source)
         captured["args"] = flat
@@ -358,7 +369,7 @@ async def test_codex_read_only_uses_read_only_sandbox(linked_worktree: tuple[Pat
 
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
         events = [event async for event in CodexBackend(model="fixture-model").execute(
-            source, f"Audit repository at {source}", read_only=True,
+            source, f"Audit repository at {source}\nSearch with `{helper} 'literal' services`", read_only=True,
         )]
     flat = captured["args"]
     assert flat[flat.index("--sandbox") + 1] == "read-only"
@@ -376,8 +387,8 @@ async def test_codex_read_only_uses_read_only_sandbox(linked_worktree: tuple[Pat
     assert "feature" in captured["branches"]
     written = mock_proc.stdin.write.call_args.args[0]
     assert isinstance(written, bytes)
-    assert str(isolated).encode() in written
-    assert str(source).encode() not in written
+    assert written.decode() == f"Audit repository at {isolated}\nSearch with `{helper} 'literal' services`"
+    assert captured["has_venv"] is False and interpreter.exists()
     request = next(event for event in events if isinstance(event, RequestEvent))
     assert request.prompt.encode() == written
     assert isinstance(request.config, CodexRequestConfig)
