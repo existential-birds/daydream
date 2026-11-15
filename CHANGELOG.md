@@ -29,6 +29,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pin they installed (`.github/workflows/package.json`) and that pin's Dependabot npm block are
   gone. Reviews of this repository come from the hosted review service. No package user is
   affected: `daydream setup` and the packaged templates it installs do not depend on them.
+- **Breaking (0.y.z):** The refusals that 0.35.0 kept only to name the replaced staged
+  reviewer's review-profile keys, findings supervisor and prompt names are deleted
+  ([#1859](https://github.com/existential-birds/daydream/issues/1859)):
+  - A review profile's former `[pipeline]` keys (`assignment_policy`, `structural_enabled`,
+    `arbitration_enabled`, `arbitration_min_severity`, `arbitration_contested_location`,
+    `suppression_enabled`, `suppression_severity_classes` and
+    `suppression_confidence_classes`) get the generic `pipeline: unknown key` error that
+    names the first one, instead of one naming each as removed.
+    `review_profile.REMOVED_PROFILE_KEYS` is deleted.
+  - The former strategy names (`intent`, `alternatives`, `discovery.per_stack`,
+    `discovery.structural`, `suppression`, `merge`, `supervision` and `arbitration`) are
+    accepted again, like any strategy name an extension step may read: they count in the
+    profile digest and steer nothing. A profile that set `strategies.arbitration` to steer
+    the challenge now loads silently; set `strategies.challenge` instead.
+  - The `supervisor` repository setting and its `DaydreamFileConfig.supervisor` field are no
+    longer recognized: a review no longer refuses `supervisor = "rules"` or `"llm"`, and the
+    key is handled like any other top-level key Daydream does not read.
+    `supervisor_deny_globs` and `tool_supervisor` are unchanged.
+  - `extensions.registry.REMOVED_PROMPTS` is deleted. Overriding one of the former prompt
+    names (`intent`, `alternatives`, `per-stack`, `structural`, `generic-fallback`,
+    `arbiter`, `supervise`, `suppression`, `merge`) registers like any extension prompt and
+    never runs; `daydream ext validate` no longer fails on it.
 - **Breaking (0.y.z):** The replaced staged reviewer's command-line options, flow aliases and
   `RunConfig` fields, which 0.35.0 kept only to refuse them with guidance, are deleted
   ([#1857](https://github.com/existential-birds/daydream/issues/1857)):

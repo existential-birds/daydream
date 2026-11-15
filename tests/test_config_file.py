@@ -21,7 +21,7 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(
     dotfile = tmp_path / ".daydream.toml"
     dotfile.write_text(
         "precision_mode = true\nscope_issue_filing = true\n"
-        'supervisor = "rules"\nsupervisor_deny_globs = ["vendor/**"]\n'
+        'supervisor_deny_globs = ["vendor/**"]\n'
         'tool_supervisor = "rules"\ntool_bash_deny = ["rm -rf"]\n'
         "quality_gate_erosion_delta = 0\nquality_gate_verbosity_delta = 0.05\n"
         "quality_gate_erosion_absolute = 100\nquality_gate_verbosity_absolute = 0.25\n"
@@ -38,7 +38,7 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(
     assert config.backend == "claude"
     assert config.phases == {"review": {"model": "pyproject-review"}, "fix": {"backend": "codex"}}
     assert (config.precision_mode, config.scope_issue_filing) == (True, True)
-    assert (config.supervisor, config.supervisor_deny_globs) == ("rules", ["vendor/**"])
+    assert config.supervisor_deny_globs == ["vendor/**"]
     assert (config.tool_supervisor, config.tool_bash_deny) == ("rules", ["rm -rf"])
     assert (
         config.quality_gate_erosion_delta,
@@ -60,7 +60,7 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(
 
     dotfile.write_text(
         "precision_mode = 1\nscope_issue_filing = 1\n"
-        'supervisor = "unknown"\nsupervisor_deny_globs = [1]\n'
+        "supervisor_deny_globs = [1]\n"
         'tool_supervisor = "unknown"\ntool_bash_deny = [1]\n'
         'review_cache_enabled = "yes"\nreview_cache_max_entries = -1\n'
         "review_cache_max_bytes = 1.5\nreview_cache_max_age_days = -1\n"
@@ -74,7 +74,7 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(
     degraded = load_file_config(tmp_path)
 
     assert (degraded.precision_mode, degraded.scope_issue_filing) == (None, None)
-    assert (degraded.supervisor, degraded.supervisor_deny_globs) == (None, [])
+    assert degraded.supervisor_deny_globs == []
     assert (degraded.tool_supervisor, degraded.tool_bash_deny) == (None, [])
     assert (
         degraded.review_cache_enabled,

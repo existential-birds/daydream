@@ -1042,20 +1042,12 @@ extension registers them.
   `intent`, `merge`, `parse`, `per_stack_review`, `supervise`, `suppression` and `wonder`.
   Every finding is verified before a fix, so `verify_all` selects nothing.
   `[phases.review]` configures discovery and `[phases.arbiter]` configures the challenge.
-- **Refused:** `supervisor = "rules"` or `"llm"`. The findings supervisor ended with the
-  staged reviewer; an extension flow step can rewrite the canonical items, and
-  `--ignore-path` excludes paths. `tool_supervisor` is unaffected.
 - **Refused:** a review or challenge backend without native host tools. Pi, Claude and
   Codex serve them; Osprey does not and cannot run a review.
-- **Refused when a review profile is parsed**, before any work, with one message naming
-  each key as removed: every key in `review_profile.REMOVED_PROFILE_KEYS`. These are the
-  `[pipeline]` keys `assignment_policy`, `structural_enabled`, `arbitration_enabled`,
-  `arbitration_min_severity`, `arbitration_contested_location`, `suppression_enabled`,
-  `suppression_severity_classes` and `suppression_confidence_classes`, and the strategies
-  `intent`, `alternatives`, `discovery.per_stack`, `discovery.structural`, `suppression`,
-  `merge`, `supervision` and `arbitration`. The packaged default carries none of them, so
-  none counts in a profile digest. A profile that sets `strategies.arbitration` to steer the
-  challenge is refused until the key is dropped; set `strategies.challenge` instead.
+- **Review profiles:** the former `[pipeline]` keys fail with the generic
+  `pipeline: unknown key` error. Strategy names stay open to extension steps, so a former
+  strategy such as `strategies.arbitration` loads, counts in the profile digest and steers
+  nothing; the challenge reads `strategies.challenge`.
 
 No stored format is converted. A fresh review rebuilds its own `.daydream/deep/`
 working directory, as every fresh run did, so the previous run's files there are
