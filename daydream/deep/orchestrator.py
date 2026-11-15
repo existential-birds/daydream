@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 from daydream import clock, git_ops
 from daydream.agent import console
 from daydream.artifact_visibility import ArtifactVisibilityError, artifact_dir_for, artifact_session_active
-from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.deep import review_steps
 from daydream.deep.artifacts import DeepArtifact, deep_dir, diff_key
 from daydream.deep.dependency import build_import_graph
@@ -56,20 +55,6 @@ if TYPE_CHECKING:
     from daydream.pr_review import PRInfo
     from daydream.run_artifacts import _RunArtifacts
     from daydream.run_config import RunConfig
-
-
-def _has_non_daydream_worktree_changes(status: str) -> bool:
-    """Whether porcelain output names a path outside Daydream-owned artifacts."""
-    for line in status.splitlines():
-        paths = line[3:].split(" -> ")
-        if not all(
-            path == ".daydream"
-            or path.startswith(".daydream/")
-            or path == REVIEW_OUTPUT_FILE
-            for path in paths
-        ):
-            return True
-    return False
 
 
 def _print_findings_target_mismatch(analyzed_head: str, pr_head: str | None) -> None:
@@ -319,7 +304,7 @@ async def run_deep(
             # Commit-bound, in every artifact mode: a dirty analyzed checkout is
             # rejected below, because the diagram path still reads the diff (and
             # its grounding) from working-tree content.
-            dirty_snapshot = _has_non_daydream_worktree_changes(git_ops.status_porcelain(target_dir))
+            dirty_snapshot = git_ops.has_worktree_edits(target_dir, untracked=True)
         try:
             if work.captured_source is not None:
                 diff = work.captured_source.diff
@@ -328,7 +313,7 @@ async def run_deep(
                 diff = git_ops.diff_paths(target_dir, captured_base, captured_head, paths)
             else:
                 diff = git_ops.diff(work.repo, work.base_branch, exclude=config.ignore_paths)
-                tracked_worktree_edits = git_ops.has_tracked_edits(work.repo)
+                tracked_worktree_edits = git_ops.has_worktree_edits(work.repo)
         except GitTimeoutError as exc:
             print_error(console, "Git Timeout", f"git timed out under load: {exc}")
             return 1

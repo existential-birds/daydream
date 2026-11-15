@@ -45,7 +45,7 @@ def retain_original_task(
     dirty_tracked: bool | None = None
     if captured is None:
         try:
-            dirty_tracked = git_ops.has_tracked_edits(work.repo)
+            dirty_tracked = git_ops.has_worktree_edits(work.repo)
         except git_ops.GitError:
             pass
     # An accepted capture has its own index. Live checkout status after that
