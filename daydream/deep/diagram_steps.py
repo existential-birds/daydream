@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 
+from daydream import clock
 from daydream.agent import console, run_agent
 from daydream.artifact_visibility import artifact_dir_for
 from daydream.backends import effective_fanout_concurrency
@@ -317,6 +318,7 @@ async def _diagram_turn(
     continuation: Any = None,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     advisory: dict[str, Any] | None = None,
+    deadline: float | None = None,
 ) -> tuple[Any, Any, str | None] | DiagramResult:
     """Run an author/repair turn and return output, continuation, and budget reason.
 
@@ -333,7 +335,7 @@ async def _diagram_turn(
                 output_schema=schema,
                 continuation=continuation,
                 read_only=True,
-                budget=BudgetLedger("diagram", wall_s=DEFAULT_WALL_BUDGET_S, deadline=review_deadline(discovery=False)),
+                budget=BudgetLedger("diagram", wall_s=DEFAULT_WALL_BUDGET_S, deadline=deadline),
                 sanctioned_inputs=sanctioned_inputs,
                 run_context=ctx.run_context,
             )
@@ -354,6 +356,7 @@ async def _run_diagram_kind(
     recorder: "TrajectoryRecorder | None",
     backend: Any,
     dispatch: "DispatchHandle | None" = None,
+    deadline: float | None = None,
 ) -> DiagramResult:
     """Author, ground, optionally repair once, then prune and render a kind.
 
@@ -446,6 +449,7 @@ async def _run_diagram_kind(
             dispatch=dispatch,
             sanctioned_inputs=sanctioned_inputs,
             advisory=advisory,
+            deadline=deadline,
         )
         if not isinstance(turn, tuple):
             return turn
@@ -495,6 +499,7 @@ async def _run_diagram_kind(
             continuation=continuation,
             sanctioned_inputs=sanctioned_inputs,
             advisory=advisory,
+            deadline=deadline,
         )
         if not isinstance(turn, tuple):
             return turn
@@ -621,6 +626,15 @@ async def _run_diagram_step(
         # tasks cannot interleave inside one lookup.
         symbols = RepoSymbols(target_dir)
         limiter = anyio.CapacityLimiter(concurrency or effective_fanout_concurrency(2, backend))
+        deadline = review_deadline(discovery=False)
+        profile = ctx.review_profile
+        if deadline is not None and profile is not None and profile.source_kind == "default":
+            from daydream.committed_review import _FINALIZATION_S
+
+            pipeline = profile.profile.pipeline
+            # A scaled review's window can reach this deadline; diagrams keep what an unscaled review leaves them.
+            deadline = max(deadline, clock.monotonic() + pipeline.review_wall_budget_s
+                           - pipeline.reviewer_investigation_budget_s - _FINALIZATION_S)
         descriptors = tuple(f"diagram-{kind}" for kind in kinds)
         async with dispatch_scope(
             recorder, phase=DaydreamPhase.DIAGRAM, descriptors=descriptors
@@ -640,6 +654,7 @@ async def _run_diagram_step(
                                     recorder=recorder,
                                     backend=backend,
                                     dispatch=dispatch,
+                                    deadline=deadline,
                                 )
                             except Exception as exc:  # noqa: BLE001 -- parallel isolation
                                 detail = f"{type(exc).__name__}: {exc}"

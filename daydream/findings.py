@@ -351,41 +351,54 @@ def committed_export_bytes(coverage: dict[str, Any], immutable_input: dict[str, 
 
 
 def write_findings_artifact(path: Path, artifact: dict[str, Any]) -> None:
-    """Write UTF-8 JSON with parent creation, enforcing the cap on exact output bytes."""
+    """Write UTF-8 JSON with parent creation, enforcing the cap on exact output bytes.
+
+    Over the cap, a review drops optional parts in a fixed order, each only while still over: its
+    review context (trimmed, then whole), diagrams, then warnings. Findings and coverage always stay.
+    """
     try:
         _validate_artifact(artifact)
         payload = _artifact_payload(artifact)
         attribution = published_attribution_bytes(artifact.get('terminal_result', {}))
-        if len(payload) - attribution > MAX_ARTIFACT_BYTES and 'review_context' in artifact:
+        if len(payload) - attribution > MAX_ARTIFACT_BYTES:
             core = {key: value for key, value in artifact.items() if key != 'review_context'}
+            dropped = ['review context'] if 'review_context' in artifact else []
+            for key, empty in (('diagrams', None), ('review_warnings', [])) if artifact['kind'] == 'review' else ():
+                if core[key] and len(_artifact_payload(core)) - attribution > MAX_ARTIFACT_BYTES:
+                    core[key] = empty
+                    dropped.append(key.replace('_', ' '))
             core_payload = _artifact_payload(core)
             _enforce_max_artifact_bytes(len(core_payload) - attribution)
-            fitted = {**core, 'review_context': copy.deepcopy(artifact['review_context'])}
-            context = fitted['review_context']
-            while len(payload) - attribution > MAX_ARTIFACT_BYTES:
-                verification = context['verification']
-                if context['author_reported'] is not None:
-                    context['author_reported'] = None
-                elif context['scopes']:
-                    context['scopes'].pop()
-                    context['scopes_omitted'] += 1
-                elif verification['value']:
-                    priority = {'test-verdict.json': 2, 'remote-ci-verdict.json': 1}
-                    name = min(verification['value'], key=lambda key: (priority.get(key, 0), key))
-                    omitted = verification.setdefault('omitted_artifacts', [])
-                    if name not in omitted:
-                        if len(omitted) == 16:
-                            payload = core_payload
-                            break
-                        omitted.append(name)
-                    verification['value'].pop(name)
-                    verification['value'] = verification['value'] or None
-                    verification['status'] = 'failed'
-                else:
-                    payload = core_payload
-                    break
-                payload = _artifact_payload(fitted)
-            logging.getLogger(__name__).warning('Optional review context omitted to fit the findings artifact budget')
+            if dropped != ['review context']:
+                payload = core_payload
+            else:
+                fitted = {**core, 'review_context': copy.deepcopy(artifact['review_context'])}
+                context = fitted['review_context']
+                while len(payload) - attribution > MAX_ARTIFACT_BYTES:
+                    verification = context['verification']
+                    if context['author_reported'] is not None:
+                        context['author_reported'] = None
+                    elif context['scopes']:
+                        context['scopes'].pop()
+                        context['scopes_omitted'] += 1
+                    elif verification['value']:
+                        priority = {'test-verdict.json': 2, 'remote-ci-verdict.json': 1}
+                        name = min(verification['value'], key=lambda key: (priority.get(key, 0), key))
+                        omitted = verification.setdefault('omitted_artifacts', [])
+                        if name not in omitted:
+                            if len(omitted) == 16:
+                                payload = core_payload
+                                break
+                            omitted.append(name)
+                        verification['value'].pop(name)
+                        verification['value'] = verification['value'] or None
+                        verification['status'] = 'failed'
+                    else:
+                        payload = core_payload
+                        break
+                    payload = _artifact_payload(fitted)
+            logging.getLogger(__name__).warning('Optional %s omitted to fit the findings artifact budget',
+                                                ', '.join(dropped))
         _enforce_max_artifact_bytes(len(payload) - attribution)
         atomic_write_bytes(path, payload)
     except (OSError, ValueError, TypeError, RecursionError) as exc:

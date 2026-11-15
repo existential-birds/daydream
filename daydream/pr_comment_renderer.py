@@ -29,6 +29,7 @@ _PHASE_LABELS: dict[str, str] = {
     "merge": "Merge Findings",
     "exploration": "Exploration",
     "verify": "Verify Recommendations",
+    "challenge": "Challenge",
     "recon": "Reconnaissance",
     "audit": "Audit",
     "vet": "Vet Findings",
