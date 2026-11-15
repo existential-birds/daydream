@@ -194,39 +194,23 @@ def _load_shipped_items(deep_dir: Path) -> list[Any] | None:
     return items
 
 
-def _shipped_counts(deep_dir: Path, merged_review: dict[str, Any]) -> tuple[int, dict[str, int]]:
-    """Return shipped total and confidence counts from the same evidence source.
-
-    Canonical merged items win, including an empty list. Otherwise use the rendered
-    review count, which carries no confidence attribution.
-    """
-    merged_items = _load_shipped_items(deep_dir)
-    if merged_items is not None:
-        # Every merged item is shipped; a present-but-empty list means "shipped nothing".
-        by_confidence = dict(
-            Counter(i.get("confidence", "UNKNOWN") for i in merged_items)
-        )
-        return len(merged_items), by_confidence
-    return merged_review.get("merged_finding_count", 0), {}
-
-
 def analyze_findings(daydream_dir: Path) -> dict[str, Any]:
-    """Report shipped totals and confidence; _shipped_counts owns source precedence."""
-    deep_dir = daydream_dir / "deep"
-    if not deep_dir.is_dir():
-        return {"total": 0, "by_confidence": {}, "merged_review": {}}
+    """Report shipped totals and confidence from one evidence source.
 
+    Canonical merged items win, including an empty list ("shipped nothing"). Otherwise use
+    the rendered review's count, which carries no confidence attribution.
+    """
+    deep_dir = daydream_dir / "deep"
     merged_review: dict[str, Any] = {}
     review_path = deep_dir / "review-output.md"
     if review_path.exists():
-        text = review_path.read_text()
-        merged_review["merged_finding_count"] = len(
-            re.findall(r"^\d+\.\s+\[", text, re.MULTILINE)
-        )
-
-    total, by_confidence = _shipped_counts(deep_dir, merged_review)
-
-    return {"total": total, "by_confidence": by_confidence, "merged_review": merged_review}
+        merged_review["merged_finding_count"] = len(re.findall(r"^\d+\.\s+\[", review_path.read_text(), re.MULTILINE))
+    items = _load_shipped_items(deep_dir)
+    if items is None:
+        return {"total": merged_review.get("merged_finding_count", 0), "by_confidence": {},
+                "merged_review": merged_review}
+    by_confidence = dict(Counter(i.get("confidence", "UNKNOWN") for i in items))
+    return {"total": len(items), "by_confidence": by_confidence, "merged_review": merged_review}
 
 
 # Location accuracy + shipped duplication (issue #1106) ---------------------
