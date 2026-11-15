@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -95,7 +96,7 @@ def _ground_participants(
             reason = "PARTICIPANT_NO_FILES"
         else:
             for file in record["files"]:
-                normalized, path_reason = evidence.check_path(repo_root, file)
+                normalized, path_reason = evidence.check_path(repo_root, file, sources.observed_paths)
                 if path_reason is not None:
                     reason = path_reason
                     break
@@ -292,13 +293,15 @@ def ground_sequence(
     repo_root: Path,
     hunk_ranges: dict[str, list[tuple[int, int]]],
     symbols: evidence.RepoSymbols,
+    observed_paths: Collection[str] = frozenset(),
 ) -> GroundingReport:
     """Ground against head-tree citations and changed hunks, then prune, cap and floor-test.
 
     Malformed entries become failed checks. spec_final has exactly the schema keys;
     render it only when omit_reasons is empty. Share symbols across repair turns.
+    A citation may name one of ``observed_paths`` exactly outside the model grammar.
     """
-    sources = evidence.SourceCache(repo_root)
+    sources = evidence.SourceCache(repo_root, observed_paths)
     raw_participants = _as_list(spec.get("participants"))
     raw_messages = _as_list(spec.get("messages"))
     raw_blocks = _as_list(spec.get("blocks"))

@@ -78,7 +78,7 @@ def test_scrub_driver_raises_git_error_on_unattributable_diffs(tmp_path: Path, m
     repo = _baseline_repo(tmp_path / "failed", {"main.go": "x\n"})
     (repo / "main.go").write_text("// \u201d\n", encoding="utf-8")
 
-    def _fail_diff(repo: Any, ref: Any, paths: Any) -> None:
+    def _fail_diff(repo: Any, ref: Any, paths: Any, **_: Any) -> None:
         raise GitError("git diff failed")
 
     with monkeypatch.context() as failing:
@@ -95,7 +95,7 @@ def test_scrub_driver_raises_git_error_on_unattributable_diffs(tmp_path: Path, m
     src = repo / "main.go"
     src.write_text("// baseline \u201d quote\n// added \u201cquote\u201d\n", encoding="utf-8")
 
-    def _garbage_diff(repo: Any, ref: Any, paths: Any) -> str:
+    def _garbage_diff(repo: Any, ref: Any, paths: Any, **_: Any) -> str:
         return "raw external-driver output without unified-diff structure\n"
 
     monkeypatch.setattr("daydream.quote_scrub.diff_worktree_against", _garbage_diff)

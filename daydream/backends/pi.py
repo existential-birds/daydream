@@ -75,7 +75,7 @@ from daydream.backends._transport import (
 )
 from daydream.backends.lifecycle import current_backend_lifecycle
 from daydream.config import DEFAULT_PI_MODEL
-from daydream.host_tools import HostToolBinding
+from daydream.host_tools import HostToolBinding, UnsubmittedTurn
 from daydream.redaction import _PEM_HEADER, _PEM_KEY_REDACTED_MARKER, redact_structured_text
 from daydream.retry_policy import classify_failure, parse_message_retry_hint
 from daydream.review_budget import BudgetExhausted
@@ -1753,8 +1753,9 @@ class PiBackend:
                 or finish_reason in {"aborted", "length", "error"}
                 or not (saw_turn_start and saw_finish_reason and saw_native_settlement)
                 or (host_tools is not None and not host_ready)
-                or (host_tools is not None and (
-                    not host_tools.accepted or pending_submission != host_tools.accepted_result
+                # A native success the host never accepted is inconsistent evidence, not an unsubmitted turn.
+                or (host_tools is not None and (host_tools.accepted or pending_submission is not None) and (
+                    pending_submission != host_tools.accepted_result
                     or pending_submission_generation != last_generation_id))
                 or ambiguous_host_identity
                 or host_submission_indeterminate
@@ -1810,6 +1811,9 @@ class PiBackend:
                     retryable=True,
                     category="STREAM_TRUNCATION",
                 )
+            if host_tools is not None and not host_tools.accepted:
+                # A settled turn that neither submitted nor failed: one fresh retry, then missing_output.
+                raise UnsubmittedTurn("Pi completed its turn without an accepted structured_output submission")
 
         except Exception as exc:
             native_failed = True

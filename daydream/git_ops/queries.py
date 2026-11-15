@@ -420,18 +420,20 @@ def diff_paths(
     return process.decode_diff(proc.stdout)
 
 
-def diff_worktree_against(repo: Path, ref: str, paths: list[str]) -> str:
+def diff_worktree_against(repo: Path, ref: str, paths: list[str], *, strict: bool = False) -> str:
     """Capture named working-tree paths against a ref before restoring partial edits.
 
-    Git omits paths untracked at the ref. Query failures raise ``GitError``.
+    Git omits paths untracked at the ref. Query failures raise ``GitError``. Bytes that
+    are not UTF-8 read as U+FFFD, or raise ``UnicodeDecodeError`` when ``strict``.
     """
     if not paths:
         return ""
     args = ["diff", ref, "--", *(_literal_pathspec(path) for path in paths)]
     proc = process._run_git(
-        repo, args, timeout=30, retries=0, error_context=f"git diff {ref} -- {paths} failed in {repo}"
+        repo, args, capture_bytes=True, timeout=30, retries=0,
+        error_context=f"git diff {ref} -- {paths} failed in {repo}",
     )
-    return proc.stdout
+    return process.decode_diff(proc.stdout, strict=strict)
 
 
 def log(repo: Path, base: str, head: str = "HEAD") -> str:
@@ -613,6 +615,16 @@ def status_porcelain(repo: Path) -> str:
     """Read porcelain status, raising on failure; a clean tree returns empty text."""
     proc = process._run_git(repo, ["status", "--porcelain"], timeout=10, error_context=f"git status failed in {repo}")
     return proc.stdout
+
+
+def has_worktree_edits(repo: Path, *, untracked: bool = False) -> bool:
+    """Whether tracked files, and with ``untracked`` nonignored untracked ones, differ from HEAD outside
+    Daydream's own artifacts, raising on failure."""
+    return any(
+        (untracked or not line.startswith("??")) and not all(
+            path == ".daydream" or _is_untracked_runtime_artifact(path) for path in line[3:].split(" -> "))
+        for line in status_porcelain(repo).splitlines()
+    )
 
 
 def staged_patch(repo: Path) -> bytes:

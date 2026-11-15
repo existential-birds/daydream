@@ -101,6 +101,7 @@ from daydream.git_ops.queries import (
     git_dirs as git_dirs,
     grep_fixed_matches as grep_fixed_matches,
     has_executable_pre_push_hook as has_executable_pre_push_hook,
+    has_worktree_edits as has_worktree_edits,
     head_sha as head_sha,
     init_repository as init_repository,
     is_ancestor as is_ancestor,

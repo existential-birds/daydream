@@ -696,13 +696,26 @@ async def test_local_capture_corruption_retains_challenged_findings_and_unfinish
     # A blank author description is not supplied: no assignment carries it and nothing records it.
     assert not any('historical_context' in record for record in (value['settings'], *(c['profile'] for c in calls)))
     # Deliberate bumps (#1628's work records and capacity evidence, then claim severity) are restart-only.
-    assert RESULT_VERSIONS == {'committed': 10, 'immutable': 11, 'local': 12}
+    assert RESULT_VERSIONS == {'committed': 10, 'immutable': 11, 'local': 12, 'worktree': 13}
     assert value['schema_version'] == RESULT_VERSIONS['local'] and value['terminal_result']['schema_version'] == 2
     validate_committed_result(value)
     relabeled = deepcopy(value)
     relabeled['schema_version'] = RESULT_VERSIONS['committed']
     with pytest.raises(ValueError, match='result version does not match captured source identity'):
         validate_committed_result(relabeled)
+    # A committed subject plus tracked uncommitted edits is its own version, bound to its marker as local is to
+    # source_id: no other version may carry the marker, and that version cannot drop it.
+    review_inputs.revision['tracked_worktree_edits'] = True
+    worktree = Review(review_inputs, 'domain').seal({})
+    assert (worktree['schema_version'], worktree['terminal_result']['schema_version']) == (
+        RESULT_VERSIONS['worktree'], 3)
+    validate_committed_result(worktree)
+    unmarked = deepcopy(worktree)
+    del unmarked['analyzed_revision']['tracked_worktree_edits']
+    for forged in ({**worktree, 'schema_version': RESULT_VERSIONS['committed']},
+                   {**worktree, 'schema_version': RESULT_VERSIONS['local']}, unmarked):
+        with pytest.raises(ValueError, match='result version does not match captured source identity'):
+            validate_committed_result(forged)
     assert value['analyzed_revision']['head_sha'] == review_inputs.revision['head_sha']
     assert value['analyzed_revision']['source_id'] == calls[0]['analyzed_revision']['source_id']
     assert value['terminal_result']['analysis_state'] == 'incomplete'
