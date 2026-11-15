@@ -690,6 +690,8 @@ async def _run_agent(
                         attempt_prompt += retry_budget_update
                         if "review_instructions" in execute_kwargs:
                             execute_kwargs["review_instructions"] += retry_budget_update
+                        if host_tools is not None and host_tools.retry_context is not None:
+                            attempt_prompt += host_tools.retry_context()
                     event_iter = backend.execute(
                         cwd, attempt_prompt, output_schema, continuation,
                         **execute_kwargs,

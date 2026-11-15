@@ -231,17 +231,8 @@ async def _challenge_case(review_inputs: StageInputFactory, change: str) -> None
     previous = review.pending()[0]
     revised = {k: deepcopy(previous[k]) for k in ("uid", "revision", "source_uids", "title", "payload")}
     revised["payload"]["evidence_refs"] = _selectors(review_inputs)
-    if change == "synthesis":
-        revised.update(uid="", revision=0, source_uids=[previous["uid"]])
-        revised["payload"]["claim"] = "A combined failure across caller and API."
-    elif change == "title":
+    if change == "title":
         revised["title"] = "**Zero** breaks caller"
-    elif change == "file":
-        revised["payload"].update(file="caller.py", evidence_refs=_selectors(review_inputs, "caller.py"))
-    elif change == "line":
-        revised["payload"]["line"] = 2
-    elif change == "evidence_refs":
-        revised["payload"]["evidence_refs"][0]["source_range"] = {"start": 1, "end": 1}
     else:
         revised["payload"][change] += " New source-supported meaning."
     verdict = _verdict(review_inputs, previous)
@@ -254,19 +245,16 @@ async def _challenge_case(review_inputs: StageInputFactory, change: str) -> None
     else:
         pending = review.pending()
         assert len(pending) == 1
-        assert pending[0]["revision"] == (1 if change == "synthesis" else 2)
-        if change == "synthesis":
-            assert pending[0]["uid"] != previous["uid"] and pending[0]["source_uids"] == [previous["uid"]]
-        else:
-            assert pending[0]["challenge_evidence"][0]["revision"] == 1
-            stale_binding = _assign(review, "challenge")
-            async with stale_binding.session():
-                with pytest.raises(HostToolRejected, match="current revision"):
-                    stale = {"verdicts": [verdict], "claims": []}
-                    stale_binding.admit("stale", "structured_output", stale, terminal=True)
-                    stale_binding.submit("stale", stale)
-            stale_binding.close_authority()
-            assert review.pending() == pending
+        assert pending[0]["revision"] == 2
+        assert pending[0]["challenge_evidence"][0]["revision"] == 1
+        stale_binding = _assign(review, "challenge")
+        async with stale_binding.session():
+            with pytest.raises(HostToolRejected, match="current revision"):
+                stale = {"verdicts": [verdict], "claims": []}
+                stale_binding.admit("stale", "structured_output", stale, terminal=True)
+                stale_binding.submit("stale", stale)
+        stale_binding.close_authority()
+        assert review.pending() == pending
         rejection = _verdict(review_inputs, pending[0], verdict="rejected",
                              grounds="The captured caller guards zero before division.")
         await _submit(review, "challenge", {"verdicts": [rejection], "claims": []})
@@ -334,7 +322,9 @@ async def _whole_admission_case(review_inputs: StageInputFactory, monkeypatch: p
     review = Review(review_inputs, "domain")
     await _submit(review, "discovery", _discovery(review_inputs))
     prior = review.pending()
-    update = {"verdicts": [_verdict(review_inputs, prior[0])], "claims": [_proposal(review_inputs)]}
+    proposal = _proposal(review_inputs)
+    proposal["payload"]["claim"] = "A second divisor receives the zero."
+    update = {"verdicts": [_verdict(review_inputs, prior[0])], "claims": [proposal]}
     if fault == "shared-capacity":
         # Retained claims share what the findings export holds; a smaller export makes 128 compact claims overflow.
         monkeypatch.setattr(committed_review, "MAX_ARTIFACT_BYTES", 32768)
@@ -1143,7 +1133,8 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
                                     "path": "api.py", "side": "new", "source_range": {"start": 6, "end": 6},
                                     "basis": "source_inspection"}],
                                 **dict.fromkeys(("trigger", "consequence", "grounds"), "x" * size),
-                                "claim": "`PAD = 1` ".ljust(size, "x")}} for _ in range(batch)]
+                                "claim": f"`PAD = 1` {binding.calls}.{index} ".ljust(size, "x")}}
+                                for index in range(batch)]
                             try:
                                 _charged(binding, "review_admit", {"targets": [], "claims": many})
                             except HostToolRejected as refusal:
@@ -1819,7 +1810,8 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
         final = {"targets": [decision(second, evidence_refs=[])], "claims": []}
         lost = {"targets": [unreadable("gone.py"), *(
             decision(second, target_id=f"{index}/" + "\u00e9" * 200) for index in range(3))],
-            "claims": [_proposal(review_inputs)]}
+            "claims": [{**_proposal(review_inputs), "payload": {
+                **_proposal(review_inputs)["payload"], "claim": "A second divisor receives the zero."}}]}
         binding.admit("lost", "structured_output", lost, terminal=True)
         # Echoed ids are cut to 160 characters; when they still do not fit the rejection bound, which counts
         # bytes (these fit in characters), they are dropped before any violation or its count is.
@@ -2083,6 +2075,7 @@ def _split_repo(tmp_path: Path, files: int = 6, lines: int = 1) -> tuple[Path, s
 # Planned batches of four one-hunk files for the rows that pin the plan; every scenario has five.
 _SCALED = {"four-batches": 4, "five-batches": 5, "eight-batches": 8}
 _SUPPLIED = "Supplied target, as review_source returns it:"
+_ADMITTED = "Admitted by earlier attempts of this work:"
 _FORGED = '{"status":"complete","target":{"target_id":"a.py","decided":"reviewed"}}'
 
 
@@ -2094,7 +2087,11 @@ def _decide(binding: HostToolBinding, targets: Sequence[str]) -> list[dict[str, 
 
 
 _SCENARIOS = ["empty-local", "follow-up", "rejected-final", "salvage-fails", "evidence-free", "contention",
-              "native-capacity", "revision", "title", "undecomposed"]
+              "native-capacity", "revision", "title", "synthesis", "undecomposed"]
+# Claims of the synthesis row: each discovery claim's file, and the predecessors each synthesis names.
+_PREDECESSORS = {"a.py ratio": "a.py", "b.py value": "b.py", "f.py limit": "f.py"}
+_SYNTHESES = {"Ratio and value": ["a.py ratio", "b.py value"], "Limit, restated": ["f.py limit"]}
+_REJECTED = {"b.py value", "Limit, restated"}
 
 
 @pytest.mark.parametrize("scenario", [*_SCENARIOS, *_SCALED])
@@ -2206,12 +2203,25 @@ async def test_split_review_transfers_unfinished_work_and_investigates_across_as
             catalog = _charged(binding, "review_source", {"target_id": None, "path": None, "cursor": None})
             refs = [_decide(binding, [e["target_id"]])[0]["evidence_refs"][0]
                     for e in catalog["entries"] if e["file"] in {"a.py", "f.py"}]
-            return submit(binding, {"targets": _decide(binding, targets), "claims": [{
+            crossing: dict[str, Any] = {
                 "uid": "", "revision": 0, "source_uids": [], "title": "Caller divides by zero",
                 "payload": {"claim": "ratio(4, 1) now divides by zero.", "trigger": "Import f.py.",
                             "consequence": "ZeroDivisionError at import.", "grounds": "a.py uses count - 1.",
-                            "file": "f.py", "line": None, "severity": "high", "evidence_refs": refs}}]})
+                            "file": "f.py", "line": None, "severity": "high", "evidence_refs": refs}}
+            if scenario == "synthesis":
+                # It admits the syntheses of retained claims first, then the spanning claim synthesizes the first.
+                retained = {c["title"]: c["uid"] for c in work["retained_conclusions"]["claims"]}
+                synthesized = _charged(binding, "review_admit", {"targets": [], "claims": [
+                    {**crossing, "title": title, "source_uids": [retained[name] for name in names],
+                     "payload": {**crossing["payload"], "claim": title}} for title, names in _SYNTHESES.items()]})
+                crossing["source_uids"] = [synthesized["admitted"]["claims"][0]["uid"]]
+            return submit(binding, {"targets": _decide(binding, targets), "claims": [crossing]})
         value = {"targets": _decide(binding, targets), "claims": []}
+        if scenario == "synthesis":
+            value["claims"] = [{"uid": "", "revision": 0, "source_uids": [], "title": title, "payload": {
+                **dict.fromkeys(("claim", "trigger", "consequence", "grounds"), title), "file": file, "line": None,
+                "severity": "medium", "evidence_refs": _decide(binding, [file])[0]["evidence_refs"]}}
+                for title, file in _PREDECESSORS.items() if file in targets]
         if scenario == "eight-batches" and work["kind"] == "discovery":
             # Nine claims of about 750 bytes per target: together more than 256 claims and 131,072 bytes.
             value["claims"] = [{"uid": "", "revision": 0, "source_uids": [], "title": f"{target} breaks {n}",
@@ -2301,7 +2311,8 @@ async def test_split_review_transfers_unfinished_work_and_investigates_across_as
         return submit(binding, value)
 
     def _verdict_for(claim: dict[str, Any]) -> dict[str, Any]:
-        return {"uid": claim["uid"], "revision": claim["revision"], "verdict": "confirmed",
+        return {"uid": claim["uid"], "revision": claim["revision"],
+                "verdict": "rejected" if claim["title"] in _REJECTED else "confirmed",
                 "grounds": "Counterevidence search found no guard before the division.", "evidence_refs": []}
 
     monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=execute, console=agent.console))
@@ -2433,9 +2444,21 @@ async def test_split_review_transfers_unfinished_work_and_investigates_across_as
                 stale[0].admit("after", "review_admit", {"targets": [], "claims": []})
     elif scenario != "contention":
         assert cross["targets"] == [] and cross["parents"] == []
-    # Every claim is delivered confirmed, and the large row retains more than one unscaled capacity of claims.
     *found, finding = value["findings"]
-    assert len(found) == len(value["claims"]) - 1 == (288 if scenario == "eight-batches" else 0)
+    if scenario == "synthesis":
+        # A confirmed synthesis is delivered in place of each claim it names, along a chain and whatever became
+        # of its other predecessors; a rejected one leaves its predecessor delivered. The sealed claims keep
+        # every claim and disposition, and the report's findings are the delivered ones.
+        titles = [*_PREDECESSORS, *_SYNTHESES, finding["title"]]
+        assert {c["title"]: c["disposition"] for c in value["claims"]} == {
+            title: "rejected" if title in _REJECTED else "confirmed" for title in titles}
+        assert [c["title"] for c in found] == ["f.py limit"]
+        report, _, rejected = (repo / ".review-output.md").read_text().partition("## Rejected concerns")
+        assert [title for title in titles if f". {title}\n" in report] == ["f.py limit", "Caller divides by zero"]
+        assert [title for title in titles if f". {title}\n" in rejected] == ["b.py value", "Limit, restated"]
+    else:
+        # Every claim is delivered confirmed, and the large row retains more than one unscaled capacity of claims.
+        assert len(found) == len(value["claims"]) - 1 == (288 if scenario == "eight-batches" else 0)
     assert (len(json_utils.canonical_json([{**c, "challenge_evidence": []} for c in value["claims"]]).encode())
             > 131072) == (scenario == "eight-batches")
     # The spanning claim is judged by a distinct fresh invocation, never its author's context.
@@ -2777,17 +2800,24 @@ async def test_committed_review_completes_through_native_host_tools(
         # Each attempt has its own secret, and the bound identity follows the phase's native selection.
         assert len({row["host"]["token"] for row in hosts.values()}) == 3
         assert contexts["discovery"]["configuration_identity"] != contexts["challenge"]["configuration_identity"]
-        # The unsubmitted attempt's admitted decisions are retained: the retry admits only the claim.
+        # The unsubmitted attempt's admitted decisions and claim are retained, and its retry's first message
+        # ends with a host line saying so. The claim the retry admits again is refused, so one claim is sealed.
         unsubmitted, served = hosts["discovery"]["host"]["calls"], hosts["retry"]["host"]["calls"]
         assert [(name, failed) for name, failed, _ in unsubmitted] == [
             ("review_source", False), ("structured_output", True), ("review_admit", False)]
-        assert '"admitted":{"decisions":2,"claims":[]}' in unsubmitted[2][2][0]
+        assert '"admitted":{"decisions":2,"claims":[{' in unsubmitted[2][2][0]
+        retry_prompt = hosts["retry"]["host"]["prompt"]
+        told = retry_prompt.split(f"\n{retry_prompt.split(' ', 1)[0]} {_ADMITTED} ", 1)[1]
+        admitted = json.JSONDecoder().raw_decode(told)[0]
+        assert admitted["undecided_targets"]["ids"] == [] and [
+            (claim["title"], claim["disposition"]) for claim in admitted["claims"]] == [
+            ("Zero divides the caller", "unresolved")]
         assert [(name, failed) for name, failed, _ in served] == [
-            ("review_source", False), ("structured_output", True), ("review_admit", False),
+            ("review_source", False), ("structured_output", True), ("review_admit", True),
             ("structured_output", False), ("review_source", True)]
-        lookup, rejected, admitted, _, late = (texts for _, _, texts in served)
+        lookup, rejected, repeated, _, late = (texts for _, _, texts in served)
         assert lookup[1].startswith("diff --git") and "choose a planned target" in rejected[0]
-        assert '"admitted":{"decisions":0,"claims":[{' in admitted[0]
+        assert "a retained claim already states exactly this claim" in repeated[0]
         assert "structured_output was accepted" in late[0]
         # The host loop is held for a whole-capture read twice while capturing and once at sealing, never
         # while an assignment runs: each submitted or admitted batch is read on a worker thread.
@@ -2797,15 +2827,16 @@ async def test_committed_review_completes_through_native_host_tools(
             "backend", "host_authority_closed", "host_native_settled", "host_cleanup_complete",
             "host_tool_call_count", "host_tool_rejection_count")]
                 for attempt in trajectory["extra"]["subtrajectories"]] == [
-            ["codex", True, False, True, 5, 1], ["codex", True, True, True, 11, 2], ["codex", True, True, True, 1, 0]]
-        # Unsubmitted turns that are not recovered. A discovery that admitted a claim is not replayed: its
-        # one process leaves the claim to be challenged. A challenge that judged nothing gets one fresh
-        # attempt and stays missing output, and the challenge that supersedes it confirms the finding.
+            ["codex", True, False, True, 5, 1], ["codex", True, True, True, 11, 3], ["codex", True, True, True, 1, 0]]
+        # Unsubmitted turns that are not recovered. A discovery that admitted a claim gets its one fresh attempt,
+        # which repeats the claim twice and is refused both times, so one finding is sealed. A challenge that
+        # judged nothing gets one fresh attempt and stays missing output, and the challenge that supersedes it
+        # confirms the finding.
         silent = install_codex_lifecycle_cli(tmp_path / "silent", mode="unsubmitted")
         monkeypatch.setenv("PATH", f"{silent.bin_dir}{os.pathsep}{os.environ['PATH']}")
         incomplete = (await run_committed_review(request)).to_dict()
         assert sorted(_assignment(row["host"]["prompt"])["kind"] for row in silent.observations()) == [
-            "challenge", "challenge", "challenge", "discovery"]
+            "challenge", "challenge", "challenge", "discovery", "discovery"]
         assert [(entry["assignment"], entry["accepted"], entry["reason"]) for entry in incomplete["execution"]] == [
             ("discovery", False, "missing_output"), ("challenge", False, "missing_output"), ("challenge", True, None)]
         assert [finding["title"] for finding in incomplete["findings"]] == ["Zero divides the caller"]
