@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The packaged bot workflow templates install Daydream at the v0.35.2 release commit
+  (`5e6eba92`) instead of the v0.35.1 one, so a bot installed from them delivers findings on
+  route files whose names have `[`, `]` or `$` and prints those paths whole. The 0.35.2
+  package's templates install the v0.35.1 pin, so `daydream setup` users get v0.35.2 with the
+  next release; existing installs then read as customized under `daydream setup --verify`
+  until `daydream setup` is rerun. Both releases write findings schema 2, so the artifact of a
+  review started before an install is updated is still accepted when posted after it
+  ([#1641](https://github.com/existential-birds/daydream/issues/1641)).
+
+### Removed
+
+- This repository no longer runs its own Daydream review bot: its repository-only
+  `daydream-command.yml`, `daydream-review.yml` and `daydream-post.yml` workflows, the Codex CLI
+  pin they installed (`.github/workflows/package.json`) and that pin's Dependabot npm block are
+  gone. Reviews of this repository come from the hosted review service. No package user is
+  affected: `daydream setup` and the packaged templates it installs do not depend on them.
+
 ## [0.35.2] - 2026-11-15
 
 ### Changed
