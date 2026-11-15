@@ -41,6 +41,7 @@ from typing import (
     overload,
 )
 
+from daydream.prompts.grounding import DAYDREAM_SEARCH_COMMAND
 from daydream.redaction import redact_structured_text
 from daydream.timeutil import now_iso
 
@@ -53,7 +54,7 @@ READ_ONLY_BASH_ALLOWLIST: tuple[str, ...] = (
     "cat",
     "git status",
     "git ls-files",
-    "daydream search",
+    DAYDREAM_SEARCH_COMMAND,
     "git log",
     "git show",
     "git blame",

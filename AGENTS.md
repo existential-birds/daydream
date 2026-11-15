@@ -113,10 +113,12 @@ These boundaries matter across subsystems; module docstrings carry finer detail:
 
 ### Runtime invariants
 
-- Review/exploration search guidance is shared in `prompts/grounding.py` and retained
-  through custom prompt composition. Use relevant roots and tracked plus nonignored
-  untracked file sets; named ignored-file expansion requires a concrete reason.
-  `daydream search` owns the bounded no-rg fallback in `daydream/commands/search.py`.
+- Review/exploration search guidance is shared in `prompts/grounding.py`. `run_agent` appends
+  it to every search turn and chooses read-only Pi's variant there; composed prompts do not
+  embed it, so quoted text cannot displace or rewrite it. Use relevant roots and tracked
+  plus nonignored untracked file sets; named ignored-file expansion requires a concrete reason.
+  `daydream search` owns the bounded no-rg fallback in `daydream/commands/search.py`; the
+  guidance and the read-only Bash allowlist name it through the running interpreter.
 
 - `git_ops.repository` resolves embedded provenance and App bootstrap locally (explicit `pr_repo`,
   captured `GH_REPO`, then target `origin`), admitting only unambiguous github.com identities.
