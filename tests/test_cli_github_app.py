@@ -237,6 +237,9 @@ def test_cli_requested_branch_ignores_current_checkout_pr(
     assert len(reviews) == 1 and reviews[0].payload["commit_id"] == requested_head
     # A high finding withholds the opted-in approval, and every comment shows the reviewer's severity.
     assert reviews[0].payload["event"] == "COMMENT" and "- **Severity:** 1 high, 1 low" in reviews[0].payload["body"]
+    # Run details name the challenge, not a recommendation verification this review-only run never made.
+    assert "| Challenge |" in reviews[0].payload["body"]
+    assert "Verify Recommendations" not in reviews[0].payload["body"]
     (inline,) = reviews[0].payload["comments"]
     assert (inline["path"], inline["line"]) == ("main.py", 1) and "**Severity:** high" in inline["body"]
     # The old-side line is never offered as a head line: that finding is placed on the file, text intact.

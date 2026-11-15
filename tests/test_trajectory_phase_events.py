@@ -296,10 +296,10 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
                 continue
             key = (document_descriptors[document_id], invocation["phase"])
             qualified_counts[key] = qualified_counts.get(key, 0) + 1
-    # Discovery is one review invocation; its fresh challenge is recorded as verification beside the
-    # recommendation verifier and the post-fix verifier.
-    assert qualified_counts == {("root", "review"): 1, ("root", "verify"): 3, ("fix-api-py", "fix"): 4,
-                                ("fix-app-tsx", "fix"): 1}
+    # Discovery and its fresh challenge are one invocation each, apart from the recommendation verifier and
+    # the post-fix verifier.
+    assert qualified_counts == {("root", "review"): 1, ("root", "challenge"): 1, ("root", "verify"): 2,
+                                ("fix-api-py", "fix"): 4, ("fix-app-tsx", "fix"): 1}
 
     # The suite is a host operation within the TEST flow scope; it creates no
     # agent invocation and carries its own duration and terminal metadata.
@@ -319,9 +319,8 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
         if invocation.get("phase") == "verify" and "invocation_id" in invocation
     ]
     verify_events = [event for event in root["extra"]["phase_events"] if event["phase"] == "verify"]
-    # The reviewer's fresh challenge is the first verification interval, ahead of the two verifier steps.
-    assert len(verify_invocations) == 3
-    assert [event["event"] for event in verify_events] == ["phase_start", "phase_end"] * 3
+    assert len(verify_invocations) == 2
+    assert [event["event"] for event in verify_events] == ["phase_start", "phase_end"] * 2
     for start, end, invocation in zip(verify_events[::2], verify_events[1::2], verify_invocations, strict=True):
         assert start["scope_id"] == end["scope_id"]
         assert end["status"] == "succeeded"
@@ -332,7 +331,7 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     manifest = json.loads((archive / "manifest.json").read_bytes())
     evaluation = json.loads((archive / "evaluation.json").read_bytes())
     phase_timings = manifest["metrics"]["phase_timings"]
-    assert {"review", "merge", "verify", "fix", "test"} <= phase_timings.keys()
+    assert {"review", "challenge", "merge", "verify", "fix", "test"} <= phase_timings.keys()
     completeness = {"total": len(invocation_keys), "attributed": len(invocation_keys), "unattributed": 0}
     assert manifest["metrics"]["timing_coverage"]["agent_completeness"] == completeness
     assert evaluation["timing"]["agent_completeness"] == completeness

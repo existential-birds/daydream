@@ -44,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rejection. A Codex turn that ends unsubmitted after admitting a claim is now retried like
   any other unsubmitted turn
   ([#1831](https://github.com/existential-birds/daydream/issues/1831)).
+- The run details of a posted review now label the committed review's challenge
+  "Challenge". It was recorded under the fix flow's verification phase, so every review
+  posted with `--comment` showed a "Verify Recommendations" row for work that verified no
+  recommendation, and a fixing run folded the challenge's cost into its real verification
+  row. Trajectories now record the challenge under a new `challenge` phase; older
+  trajectories keep `verify`
+  ([#1851](https://github.com/existential-birds/daydream/issues/1851)).
 
 ## [0.35.0] - 2026-11-15
 

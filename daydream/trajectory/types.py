@@ -29,6 +29,7 @@ class DaydreamPhase(str, Enum):
     DEEP = "deep"
     EXPLORATION = "exploration"
     VERIFY = "verify"
+    CHALLENGE = "challenge"
     RECON = "recon"
     AUDIT = "audit"
     VET = "vet"

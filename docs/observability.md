@@ -138,7 +138,9 @@ system prompt. No native capacity diagnostic exists. See
 
 [Committed reviews](runtime.md#committed-review-requestresult) record each
 [work item](runtime.md#assignment-policy-and-work) as a separate native invocation;
-concurrent local work uses forked sibling trajectories. Claim UID/revision, verdict
+concurrent local work uses forked sibling trajectories. Challenge work records under the
+`challenge` phase (earlier releases recorded it under `verify`) and all other work under `review`;
+`verify` belongs to the fix flow's verification. Claim UID/revision, verdict
 `work_id` and captured source identify challenge evidence. Execution entries carry
 `work_id`, `allocation`, `observed_starts` (every observed start) and `overshoot`
 (observed starts that were neither charged nor refunded); superseded attempts remain
