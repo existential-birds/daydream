@@ -106,6 +106,14 @@ class HostToolCallBudgetExceeded(HostToolFatal):
         super().__init__(message, code="capacity_exhausted", preacceptance=preacceptance)
 
 
+class UnsubmittedTurn(Exception):
+    """A completed native turn with nothing accepted or failed: one fresh attempt, then ``missing_output``."""
+
+    category = "STREAM_TRUNCATION"
+    max_retries = 1
+    reason_code = "missing_output"
+
+
 def _valid_call_id(call_id: Any) -> bool:
     try:
         return isinstance(call_id, str) and 0 < len(call_id.encode("utf-8", errors="strict")) <= 512
