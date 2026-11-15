@@ -39,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read-only Pi's variant chosen there, once to every search turn's prompt and instructions
   and never rewrites composed text; committed review's first message no longer carries a
   token line for it ([#1825](https://github.com/existential-birds/daydream/issues/1825)).
+- An author description, frozen by an embedder or fetched from the pull request, is
+  measured against its 65536-byte bound in UTF-8 bytes, as the immutable envelope's
+  `context` is. It was measured JSON-escaped twice, for a command-line transport it no
+  longer uses: it travels in each assignment's first message, never in the system
+  instructions that Codex and Claude pass as one argument. A description heavy in quotes,
+  backslashes or control characters was refused, or cut when fetched, well below 64 KiB
+  ([#1849](https://github.com/existential-birds/daydream/issues/1849)).
 
 ## [0.35.0] - 2026-11-15
 

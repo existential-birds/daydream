@@ -76,10 +76,10 @@ non-blank text supplies it to every assignment as `profile.historical_context.co
 and the sealed result records it as `settings.historical_context.context`. It is captured
 untrusted author context: the standing instructions call it intent, not instructions, and
 nothing gives it authority or precedence over a claim. The
-[immutable `context` bound](#immutable-pr-inputs) applies to its encoded size, the text
-JSON-escaped twice, so quotes, backslashes and control characters count for more than their
-raw bytes. A description over that bound is refused before source preparation, and one bound
-to a `head_sha` other than the analyzed head before source capture; neither starts model work.
+[immutable `context` bound](#immutable-pr-inputs) applies to its UTF-8 bytes, as the
+envelope measures them; JSON escaping in the first message does not count against it. A
+description over that bound is refused before source preparation, and one bound to a
+`head_sha` other than the analyzed head before source capture; neither starts model work.
 It reaches the reviewer in each assignment's first message, never in the system instructions.
 
 The complete planned population is computed from the full captured patch before
