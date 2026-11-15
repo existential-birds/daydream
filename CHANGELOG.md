@@ -7,21 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- `daydream setup` now installs the Daydream version that ran it. The packaged bot workflows
-  carried a hard-coded commit that always lagged the release shipping them (the 0.35.2 templates
-  installed v0.35.1, and every release from 0.28 to 0.35.0 installed a 0.28.0-era commit). They now
-  carry a placeholder, and setup pins every Daydream install line, producer and poster alike, to
-  the full commit of the release tag `v<version>` of the Daydream running it, peeling an
-  annotated tag to its commit. A build whose version has no release tag (a development build)
-  refuses before registering or depositing anything. `daydream setup --verify` compares
-  installed workflows with the templates pinned to the running release, so workflows installed by
-  an earlier release read as customized: rerun `daydream setup` to move an existing install to
-  the release you run. **Breaking (0.y.z)** for manual copies only: replace the placeholder as
-  the [workflow README](daydream/templates/workflows/README.md#daydream-pin) describes
-  ([#1884](https://github.com/existential-birds/daydream/issues/1884)).
-
 ### Removed
 
 - This repository no longer runs its own Daydream review bot: its repository-only
@@ -54,14 +39,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `daydream setup` now installs the Daydream version that ran it. The packaged bot workflows
+  carried a hard-coded commit that always lagged the release shipping them (the 0.35.2 templates
+  installed v0.35.1, and every release from 0.28 to 0.35.0 installed a 0.28.0-era commit). They now
+  carry a placeholder, and setup pins every Daydream install line, producer and poster alike, to
+  the full commit of the release tag `v<version>` of the Daydream running it, peeling an
+  annotated tag to its commit. A build whose version has no release tag (a development build)
+  refuses before registering or depositing anything. `daydream setup --verify` compares
+  installed workflows with the templates pinned to the running release, so workflows installed by
+  an earlier release read as customized: rerun `daydream setup` to move an existing install to
+  the release you run. **Breaking (0.y.z)** for manual copies only: replace the placeholder as
+  the [workflow README](daydream/templates/workflows/README.md#daydream-pin) describes
+  ([#1884](https://github.com/existential-birds/daydream/issues/1884)).
 - A `--fix` run on a checkout with tracked uncommitted edits no longer presents the committed
   head as the whole reviewed subject. It prints that those edits are reviewed with the commits
   and committed with the fixes, and its review coverage and committed review result mark
   `analyzed_revision` with `tracked_worktree_edits: true`. That coverage and terminal result use
-  the new version 3 and the committed review result the new schema 13 (`RESULT_VERSIONS["worktree"]`),
-  which earlier builds reject; only schema 13 may carry the marker. A clean checkout records and
-  prints what it did before. A commit-bound findings artifact refuses the marker as it refuses a captured
-  `source_id` ([#1828](https://github.com/existential-birds/daydream/issues/1828)).
+  the new version 3, and the committed review result the new schema 13
+  (`RESULT_VERSIONS["worktree"]`), which earlier builds reject; only schema 13 may carry the
+  marker. A clean checkout records and prints what it did before. A commit-bound findings
+  artifact refuses the marker as it refuses a captured `source_id`
+  ([#1828](https://github.com/existential-birds/daydream/issues/1828)).
 - An archived run whose base-to-head diff is empty now has pipeline status `succeeded` instead of
   `partial`. It returns before any merge, fix or test phase, and the archive now accepts its sealed
   no-diff review, bound to the same session, as the evidence that it finished
