@@ -45,8 +45,8 @@ updates:
   # map in tests/test_workflow_templates.py was deleted: that map, not the SHA
   # pinning itself, is what made every actions bump structurally unmergeable —
   # Dependabot rewrote the pin and its `# vX.Y.Z` comment but could not edit a
-  # dict in a test file. Pins stay full 40-hex commit SHAs, still enforced by
-  # test_bot_workflow_action_references_are_pinned_to_commit_shas.
+  # dict in a test file. Pins stay full 40-hex commit SHAs; the bot workflows'
+  # are still enforced by _assert_execution_policy in that test file.
   - package-ecosystem: github-actions
     directory: /
     schedule:

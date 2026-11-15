@@ -104,9 +104,9 @@ one grouped PR each; the npm block is ungrouped since it tracks a single
 dependency. Commit messages carry the `chore(deps)` prefix.
 
 **Action bumps are automated.** Every third-party action stays pinned to a full
-commit SHA — enforced by
-`tests/test_workflow_templates.py::test_bot_workflow_action_references_are_pinned_to_commit_shas`
-— and the `github-actions` ecosystem raises the bumps.
+commit SHA — enforced for the bot workflows by `_assert_execution_policy` in
+`tests/test_workflow_templates.py` — and the `github-actions` ecosystem raises
+the bumps.
 
 **Validation gate.** Every dependency PR must pass `make check` before merge —
 its lockcheck-first ordering is what catches `uv.lock` / `pyproject.toml`
