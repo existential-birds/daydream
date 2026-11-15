@@ -55,13 +55,7 @@ def work_context(repo: Path, *, run_id: str) -> WorkContext:
 
 
 def write_and_stage(repo: Path, name: str, content: str | bytes) -> None:
-    path = repo / name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if isinstance(content, bytes):
-        path.write_bytes(content)
-    else:
-        path.write_text(content)
-    git(repo, "add", name)
+    _write_and_stage_files(repo, {name: content})
 
 
 def seeded_commit(repo: Path, message: str) -> str:
