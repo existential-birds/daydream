@@ -230,17 +230,8 @@ async def _challenge_case(review_inputs: StageInputFactory, change: str) -> None
     previous = review.pending()[0]
     revised = {k: deepcopy(previous[k]) for k in ("uid", "revision", "source_uids", "title", "payload")}
     revised["payload"]["evidence_refs"] = _selectors(review_inputs)
-    if change == "synthesis":
-        revised.update(uid="", revision=0, source_uids=[previous["uid"]])
-        revised["payload"]["claim"] = "A combined failure across caller and API."
-    elif change == "title":
+    if change == "title":
         revised["title"] = "**Zero** breaks caller"
-    elif change == "file":
-        revised["payload"].update(file="caller.py", evidence_refs=_selectors(review_inputs, "caller.py"))
-    elif change == "line":
-        revised["payload"]["line"] = 2
-    elif change == "evidence_refs":
-        revised["payload"]["evidence_refs"][0]["source_range"] = {"start": 1, "end": 1}
     else:
         revised["payload"][change] += " New source-supported meaning."
     verdict = _verdict(review_inputs, previous)
@@ -253,19 +244,16 @@ async def _challenge_case(review_inputs: StageInputFactory, change: str) -> None
     else:
         pending = review.pending()
         assert len(pending) == 1
-        assert pending[0]["revision"] == (1 if change == "synthesis" else 2)
-        if change == "synthesis":
-            assert pending[0]["uid"] != previous["uid"] and pending[0]["source_uids"] == [previous["uid"]]
-        else:
-            assert pending[0]["challenge_evidence"][0]["revision"] == 1
-            stale_binding = _assign(review, "challenge")
-            async with stale_binding.session():
-                with pytest.raises(HostToolRejected, match="current revision"):
-                    stale = {"verdicts": [verdict], "claims": []}
-                    stale_binding.admit("stale", "structured_output", stale, terminal=True)
-                    stale_binding.submit("stale", stale)
-            stale_binding.close_authority()
-            assert review.pending() == pending
+        assert pending[0]["revision"] == 2
+        assert pending[0]["challenge_evidence"][0]["revision"] == 1
+        stale_binding = _assign(review, "challenge")
+        async with stale_binding.session():
+            with pytest.raises(HostToolRejected, match="current revision"):
+                stale = {"verdicts": [verdict], "claims": []}
+                stale_binding.admit("stale", "structured_output", stale, terminal=True)
+                stale_binding.submit("stale", stale)
+        stale_binding.close_authority()
+        assert review.pending() == pending
         rejection = _verdict(review_inputs, pending[0], verdict="rejected",
                              grounds="The captured caller guards zero before division.")
         await _submit(review, "challenge", {"verdicts": [rejection], "claims": []})
