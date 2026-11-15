@@ -804,7 +804,8 @@ class LocalRecordStore:
         return member, record
 
     def _published(self, kind: str) -> list[str]:
-        # Called under the lock after recovery, so a remaining stage belongs to a live writer.
+        # Called under the lock after recovery. A remaining stage is a live writer's or one
+        # recovery hasn't reclaimed yet (younger than _STAGE_GRACE_SECONDS); never a record.
         names = []
         for path in sorted((self.root / kind).iterdir()):
             if path.suffix == ".tmp":
