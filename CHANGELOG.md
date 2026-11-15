@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gone. Reviews of this repository come from the hosted review service. No package user is
   affected: `daydream setup` and the packaged templates it installs do not depend on them.
 
+### Fixed
+
+- An archived run whose base-to-head diff is empty now has pipeline status `succeeded` instead of
+  `partial`. It returns before any merge, fix or test phase, and the archive now accepts its sealed
+  no-diff review, bound to the same session, as the evidence that it finished
+  ([#1847](https://github.com/existential-birds/daydream/issues/1847)).
+
 ## [0.35.2] - 2026-11-15
 
 ### Changed
