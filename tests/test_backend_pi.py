@@ -835,15 +835,12 @@ async def _pi_request_event_config_matches_exact_argv_case(monkeypatch: pytest.M
     process = make_mock_process(
         (FIXTURES_DIR / "simple_text.jsonl").read_text().splitlines() + ['{"type":"agent_settled"}']
     )
-    if mode == "disabled":
-        process.stdin = MagicMock()
     events, spawn = await replay_process(
         backend,
         process,
         Path("/tmp"),
         "structured please",
         output_schema=schema,
-        tools_disabled=mode == "disabled",
         finalization=mode == "finalization",
         validate_structured_output=mode != "validation-opt-out",
         read_only=True,
@@ -859,15 +856,11 @@ async def _pi_request_event_config_matches_exact_argv_case(monkeypatch: pytest.M
         # Large review instructions travel as a system-prompt file, never as an oversized argument.
         system_arg = flat_args[flat_args.index("--append-system-prompt") + 1]
         assert Path(system_arg).is_absolute() and len(system_arg) < 4096
-    if mode == "disabled":
-        # Tools-disabled prompts travel on stdin, never as an argv attachment.
-        written = b"".join(call.args[0] for call in process.stdin.write.call_args_list)
-        assert b"structured please" in written and not any(arg.startswith("@") for arg in flat_args)
     request = next(event for event in events if isinstance(event, RequestEvent))
     config = request.config
     assert isinstance(config, PiRequestConfig)
     assert config.read_only is True
-    if mode in {"disabled", "finalization"}:
+    if mode == "finalization":
         assert "--no-tools" in flat_args and config.selected_tools_count == 0
     else:
         assert flat_args[flat_args.index("--tools") + 1] == "read,find,ls,grep" + (
@@ -888,10 +881,12 @@ async def _pi_request_event_config_matches_exact_argv_case(monkeypatch: pytest.M
     if mode != "finalization":
         assert "Attempt dispatch-time snapshot:" in request.system_prompt
         assert "tool-call allocation is uncapped" in request.system_prompt
+        # No review mode the preamble names is gone: it speaks of no staged review.
+        assert "staged" not in request.system_prompt
 
 
 async def test_pi_request_event_config_matches_exact_argv() -> None:
-    for mode in ["native", "no-schema", "disabled", "finalization", "validation-opt-out"]:
+    for mode in ["native", "no-schema", "finalization", "validation-opt-out"]:
         with pytest.MonkeyPatch.context() as mp:
             try:
                 await _pi_request_event_config_matches_exact_argv_case(monkeypatch=mp, mode=mode)

@@ -933,6 +933,8 @@ async def test_committed_diff_uses_raw_commit_endpoints_despite_local_diff_drive
     claim may still name it, it is no evidence of analysis, and a change of nothing else completes
     without a model. A path whose diff header alone overflows an assignment is refused by name.
     """
+    from daydream.git_ops.immutable import immutable_review_diff
+
     repo = tmp_path / "source"
     init_repo(repo)
     write_and_stage(repo, ".gitattributes", "*.py diff=review\n")
@@ -955,7 +957,7 @@ async def test_committed_diff_uses_raw_commit_endpoints_despite_local_diff_drive
     git(repo, "config", "diff.noprefix", "true")
     git(repo, "config", "color.diff", "always")
 
-    patch = git_ops.committed_diff(repo, base, head)
+    patch = immutable_review_diff(repo, base, head)
 
     inputs = _inputs(repo, tmp_path / "captured", ["api.py", "data.bin", "link.bin", "mode.sh"], patch)
     parts = {part.assignment["file"]: part.assignment for part in inputs.parts}
@@ -993,7 +995,7 @@ async def test_committed_diff_uses_raw_commit_endpoints_despite_local_diff_drive
     write_and_stage(repo, deep, "VALUE = 1\n")
     deeper = commit(repo, "deep path")
     with pytest.raises(SanctionedInputUnavailable, match=f"required change header of '{deep[:160]}' exceeds"):
-        _inputs(repo, tmp_path / "deep", [deep], git_ops.committed_diff(repo, head, deeper))
+        _inputs(repo, tmp_path / "deep", [deep], immutable_review_diff(repo, head, deeper))
 
 
 def immutable_input_for(repo: Path, *, requested_base: str | None = None) -> ImmutableReviewInput:

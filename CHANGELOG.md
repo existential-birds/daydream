@@ -97,6 +97,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     a lens: every finding is verified. The Verdict Join table has no Structural row.
   - The extension API moves from 10 to 11: `CommentFinding`, which a finding renderer
     receives, no longer has `is_cross_stack`. Declare `DAYDREAM_EXT_API = 11`.
+- **Breaking (0.y.z):** The tool-free agent mode that only the staged reviewer used is deleted
+  ([#1850](https://github.com/existential-birds/daydream/issues/1850)): `run_agent`'s
+  `tools_disabled` argument, the backend capability `supports_tools_disabled` and `PiBackend`'s
+  tools-disabled path, which sent the prompt on standard input. Passing `tools_disabled` raises
+  `TypeError`, and `review_system_instructions` now requires an investigation ledger. The
+  packaged Pi extension no longer reads a submission assignment that nothing sets, the Pi
+  preamble no longer mentions staged reviews, and `git_ops.committed_diff`, which nothing
+  called, is gone.
 
 ### Fixed
 

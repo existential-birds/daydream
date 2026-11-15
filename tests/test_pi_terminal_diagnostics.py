@@ -1,4 +1,4 @@
-"""Public Pi failure evidence through real staged review and frozen record storage."""
+"""Public Pi failure evidence through a real agent run and frozen record storage."""
 from __future__ import annotations
 
 import json
