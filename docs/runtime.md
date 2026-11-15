@@ -553,7 +553,7 @@ Results 1–3 predate bounded navigation and sharded per-target coverage, 4–6 
 work records and 7–9 predate claim severity; they are rejected with a restart instruction
 rather than converted.
 Mismatched versions/identities and local-to-PR relabeling are explicitly rejected.
-Every review starts fresh: `--start-at` is refused and nothing restores a stopped
+Every review starts fresh: nothing restores a stopped
 review, because retained evidence cannot restore assignment authority. Replace
 incompatible inputs by starting a new review; no historical converter is provided.
 
@@ -747,10 +747,11 @@ provider failure leads to a retry, the failed attempt's tool calls are refunded 
 the retry dispatches, because it is a fresh native conversation that must redo the
 lost work; a retry stopped before dispatch refunds nothing. Elapsed time is never refunded. Retries stay bounded by the
 attempt count, the absolute deadline and the outage circuit; a failure after possible
-host acceptance still permits no retry. A Claude or Codex turn that completes with nothing
+host acceptance still permits no retry. A Pi, Claude or Codex turn that completes with nothing
 accepted is retried under this rule only as the invocation's first retry, and the outage
 circuit records it as a completed turn, never as a failure
-([Claude](#claude-host-tools) and [Codex host tools](#codex-host-tools)).
+([Pi](#pi-host-tool-lifetime-and-limits), [Claude](#claude-host-tools) and
+[Codex host tools](#codex-host-tools)).
 Apart from that rejected submission, paths that do not retry are never refunded,
 including a committed challenge re-dispatch. Committed
 batches admitted before a provider failure stay installed while that attempt's starts
@@ -823,7 +824,11 @@ continuation and retry, and never invite removing the contradiction to obtain
 complete coverage. Foreign or duplicate contradiction IDs remain correctable
 payload faults.
 
-Ordinary transient preacceptance retries follow the [renewal rule](#budget-ledger). Attempt
+Ordinary transient preacceptance retries follow the [renewal rule](#budget-ledger). A Pi turn
+that settles and exits zero with nothing accepted and no host failure is not a stream
+truncation: as on [Codex](#codex-host-tools), it gets one fresh conversation as the
+invocation's first retry, and `missing_output` if that conversation ends unsubmitted too. A
+stream that ends before it settles is still a retryable truncation. Attempt
 closure revokes its endpoint before cleanup; only an unaccepted, nonfatal binding
 with completed cleanup may open another attempt. Explicit capability closure is
 permanent. A retired endpoint cannot revoke or mutate a later attempt. The
@@ -1030,13 +1035,10 @@ and macOS are not yet exercised.
 ## Replaced reviewer options
 
 Committed review is the only reviewer. It reviews the whole change in one program, so
-the options and settings of the staged reviewer it replaced select nothing.
+the settings of the staged reviewer it replaced select nothing. Its command-line options
+are gone, and `review` and `shallow` are ordinary custom flow names, unregistered unless an
+extension registers them.
 
-- **Refused before any work**, as a usage error on the CLI (exit 2) and by `runner.run`
-  (exit 1) with the same guidance: `--shallow` and the `shallow` flow alias, `--stack`/`-s`,
-  `--precision`, `--latency-profile`, `--no-review-cache`, and `--start-at` with any value
-  other than `review`. `--shallow`, `--no-review-cache` and `--start-at` are refused on
-  `--diagram-only` runs too. A custom flow reads its own options.
 - **Ignored with one printed notice** naming each key: the repository settings
   `latency_profile`, `shallow_fanout_threshold`, `precision_mode`, `deep_shard_enabled`,
   `deep_shard_max_files`, `deep_shard_max_bytes`, `deep_shard_fanout_cap`,
@@ -1080,15 +1082,13 @@ review are generated after it.
 A review ends with findings. Fixing is selected explicitly: `--fix` on the CLI,
 `output_mode="loop"` for embedded callers. `--yes` (`assume="yes"`) answers the gates
 of a selected fixing run or a custom flow and never selects fixing; without `--fix` the
-CLI rejects it except on a custom `--flow`. There is no shallow mode and no resume:
-`--shallow`, `--flow shallow`, `flow_name="shallow"`, `shallow=True` and `--start-at`
-are refused before any work, on diagram-only runs too
+CLI rejects it except on a custom `--flow`. There is no shallow mode and no resume
 ([replaced options](#replaced-reviewer-options)). To fix what a review reported,
 rerun with `--fix`.
 
 A fixing request that could only end as a review is refused before any work: one whose
 fix gate cannot be confirmed (unattended without `--yes`, or `assume="no"`), and one
-combined with the `review` flow or a findings export. A run that finds no diff says so
+combined with a findings export. A run that finds no diff says so
 and exits 0. Inside a selected run every gate below stays binding.
 
 The host admits one canonical test recipe before an accepted actionable fix run.
@@ -1198,6 +1198,10 @@ index; preserve unsupported indexes and use a fresh directory.
 Models supply evidence-bearing JSON; the host grounds it against immutable head
 source and renders Mermaid. Forcing a kind changes eligibility, never grounding.
 Flowchart grounding proves statements/calls exist, not arrow execution order.
+A citation's `file` follows the model-path grammar unless it exactly names a Git-observed
+path of the captured change or the checked-out tree, such as `src/routes/[slug]/+page.ts`
+or `app/routes/users.$userId.tsx`. Posting reads every cited file from the head tree by
+that exact name (percent-encoded on GitHub's contents API); no path is expanded.
 Review diagram failures warn and retain findings; diagram-only failures exit 1.
 Custom flow ordering remains authoritative. Read [diagram flow](extensions.md#diagram)
 and [grounding](../daydream/deep/diagram_grounding/) before changing this boundary.

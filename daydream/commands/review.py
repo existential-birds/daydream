@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.commands import common
-from daydream.run_config import DEEP_FLOW_ALIASES, RunConfig, replaced_review_options
+from daydream.run_config import DEEP_FLOW_ALIASES, RunConfig
 
 
 class _HelpAllAction(argparse.Action):
@@ -104,21 +104,11 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         help="Force ephemeral worktree even when --branch is omitted." if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
-        "--shallow",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
         "--flow",
         metavar="NAME",
         dest="flow_name",
-        help="Dispatch a registered flow by name (built-in: deep/review, both the "
-             "default review; or a daydream_ext custom flow)." if full_help else argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--precision",
-        action="store_true",
-        help=argparse.SUPPRESS,
+        help="Dispatch a registered flow by name (built-in: deep, the default review; "
+             "or a daydream_ext custom flow)." if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
         "--test-command",
@@ -175,14 +165,7 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         if full_help else argparse.SUPPRESS,
     )
 
-    # Stack selection (overrides auto-detect)
-    parser.add_argument(
-        "-s", "--stack",
-        choices=["python", "react", "elixir", "go", "rust", "ios"],
-        help=argparse.SUPPRESS,
-    )
-
-    # Cleanup / phase resume
+    # Cleanup
     cleanup_group = parser.add_mutually_exclusive_group()
     cleanup_group.add_argument(
         "--cleanup",
@@ -195,19 +178,6 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         action="store_false",
         dest="cleanup",
         help="Keep review output after completion" if full_help else argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--no-review-cache",
-        action="store_false",
-        default=None,
-        dest="review_cache_enabled",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--start-at",
-        choices=["review", "parse", "fix", "test", "ttt", "per-stack", "merge"],
-        default="review",
-        help=argparse.SUPPRESS,
     )
 
     parser.add_argument(
@@ -233,7 +203,6 @@ _REMOVED_PHASE_FLAGS: dict[str, str] = {
     "--test-backend": "[tool.daydream.phases.test] backend = \"...\"",
     "--exploration-model": "[tool.daydream.phases.exploration] model = \"...\"",
     "--review-model": "[tool.daydream.phases.review] model = \"...\"",
-    "--per-stack-review-model": "[tool.daydream.phases.review] model = \"...\"",
     "--arbiter-model": "[tool.daydream.phases.arbiter] model = \"...\"",
     "--fix-model": "[tool.daydream.phases.fix] model = \"...\"",
     "--test-model": "[tool.daydream.phases.test] model = \"...\"",
@@ -244,8 +213,6 @@ def _reject_removed_phase_flags(parser: argparse.ArgumentParser, argv: list[str]
     """Reject removed phase flags, including --flag=value, with their config-table replacement."""
     for token in argv:
         flag = token.split("=", 1)[0]
-        if flag == "--parse-model":
-            parser.error("--parse-model was removed: the review has no parse phase; drop it.")
         replacement = _REMOVED_PHASE_FLAGS.get(flag)
         if replacement is not None:
             parser.error(
@@ -284,14 +251,11 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     if args.flow_name is not None:
         if args.fix or args.comment or args.review or args.diagram_only is not None:
             parser.error("--flow cannot be combined with --fix/--review/--comment/--diagram-only")
-        if args.shallow:
-            parser.error("--flow cannot be combined with --shallow")
 
     # ``--yes`` answers the gates of a fixing run or a custom flow; it never selects fixing.
     review_only = (
         "--comment" if args.comment else "--review" if args.review
         else "--diagram-only" if args.diagram_only is not None
-        else "--flow review" if args.flow_name == "review"
         else "--findings-out" if args.findings_out is not None else None
     )
     if args.assume == "yes" and not (
@@ -309,13 +273,9 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     if args.findings_out is not None and output_mode not in ("review", "diagram"):
         parser.error("--findings-out exports review or --diagram-only findings; it cannot follow --comment or --fix")
 
-    config = common.config_from_args(
+    return common.config_from_args(
         parser, args, detect_pr=True, output_mode=output_mode,
         # An explicit diagram-only kind overrides a repo's diagram mode.
         diagram=args.diagram_only if args.diagram_only is not None else args.diagram,
-        precision_mode=args.precision, scope_issue_filing=args.file_scope_issues,
+        scope_issue_filing=args.file_scope_issues,
     )
-    replaced = replaced_review_options(config)
-    if replaced:
-        parser.error("options of the replaced staged reviewer no longer apply. " + "; ".join(replaced))
-    return config

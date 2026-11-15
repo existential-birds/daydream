@@ -94,7 +94,7 @@ def scrub_smart_quotes_changed_files(
         added_lines: dict[str, set[int]] | None = None
     else:
         try:
-            diff_text = diff_worktree_against(repo, pre_fix_ref, changed)
+            diff_text = diff_worktree_against(repo, pre_fix_ref, changed, strict=True)
         except UnicodeDecodeError as exc:
             # A changed file with non-UTF-8 content makes the attribution diff
             # undecodable. The diff cannot be computed: degrade to the

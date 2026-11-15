@@ -53,13 +53,12 @@ def _profile_with_pipeline(**overrides: object) -> "ResolvedProfile":
     return ResolvedProfile(profile=replace(build_default_profile(), pipeline=parsed.pipeline), source_kind="test",)
 
 async def _run_deep(
-    target: Path, *, start_at: str = "review", precision_mode: bool = False, approve_on_clean: bool = False,
-    review_profile: "ResolvedProfile | None" = None, review_cache_enabled: bool = True, test_command: str | None = None,
+    target: Path, *, approve_on_clean: bool = False, review_profile: "ResolvedProfile | None" = None,
+    test_command: str | None = None,
 ) -> int:
     # cleanup=False suppresses the interactive cleanup prompt; callers force a terminal to answer the fix gate.
-    config = RunConfig(target=str(target), output_mode="loop", start_at=start_at, cleanup=False,
-        precision_mode=precision_mode, approve_on_clean=approve_on_clean, review_profile=review_profile,
-        review_cache_enabled=review_cache_enabled, test_command=test_command or f"{sys.executable} -c pass",
+    config = RunConfig(target=str(target), output_mode="loop", cleanup=False, approve_on_clean=approve_on_clean,
+        review_profile=review_profile, test_command=test_command or f"{sys.executable} -c pass",
     )
     return await run(config)
 

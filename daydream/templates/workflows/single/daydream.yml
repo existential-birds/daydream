@@ -232,9 +232,10 @@ jobs:
         uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
 
       - name: Install daydream
-        # Pinned to an immutable reviewed commit containing the diagram CLI used
-        # below, so a moved or compromised tag cannot change the executable code.
-        run: uv tool install --python 3.14 git+https://github.com/existential-birds/daydream@5e6eba92d99a1207b2140693cfd268b91f01fb04
+        # `daydream setup` replaces the placeholder with the commit of the Daydream
+        # release that runs it, so a moved or compromised tag cannot change the
+        # executable code.
+        run: uv tool install --python 3.14 git+https://github.com/existential-birds/daydream@DAYDREAM_RELEASE_COMMIT
 
       # The gate's matched `command` selects the run. `review` runs the default
       # review, which writes only the findings artifact; `sequence` / `flowchart`
@@ -323,9 +324,9 @@ jobs:
         uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
 
       - name: Install daydream
-        # Pinned to the same immutable reviewed commit as analysis so this phase
-        # can validate and post the diagram artifact that analysis produces.
-        run: uv tool install --python 3.14 git+https://github.com/existential-birds/daydream@5e6eba92d99a1207b2140693cfd268b91f01fb04
+        # Pinned to the same release commit as analysis so this phase can
+        # validate and post the artifact that analysis produces.
+        run: uv tool install --python 3.14 git+https://github.com/existential-birds/daydream@DAYDREAM_RELEASE_COMMIT
 
       - name: Download findings artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0

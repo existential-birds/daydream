@@ -7,17 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- The packaged bot workflow templates install Daydream at the v0.35.2 release commit
-  (`5e6eba92`) instead of the v0.35.1 one, so a bot installed from them delivers findings on
-  route files whose names have `[`, `]` or `$` and prints those paths whole. The 0.35.2
-  package's templates install the v0.35.1 pin, so `daydream setup` users get v0.35.2 with the
-  next release; existing installs then read as customized under `daydream setup --verify`
-  until `daydream setup` is rerun. Both releases write findings schema 2, so the artifact of a
-  review started before an install is updated is still accepted when posted after it
-  ([#1641](https://github.com/existential-birds/daydream/issues/1641)).
-
 ### Removed
 
 - This repository no longer runs its own Daydream review bot: its repository-only
@@ -25,6 +14,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pin they installed (`.github/workflows/package.json`) and that pin's Dependabot npm block are
   gone. Reviews of this repository come from the hosted review service. No package user is
   affected: `daydream setup` and the packaged templates it installs do not depend on them.
+- **Breaking (0.y.z):** The replaced staged reviewer's command-line options, flow aliases and
+  `RunConfig` fields, which 0.35.0 kept only to refuse them with guidance, are deleted
+  ([#1857](https://github.com/existential-birds/daydream/issues/1857)):
+  - `--shallow`, `--stack`/`-s`, `--precision`, `--latency-profile`, `--no-review-cache`,
+    `--start-at`, `--parse-model` and `--per-stack-review-model` now get the parser's own
+    usage error and exit 2, for example `daydream: error: unrecognized arguments: --shallow`.
+    Command lines that accepted some of them and ignored them are rejected the same way:
+    `--start-at` or `--stack` with a custom `--flow`; `--stack`, `--precision` or
+    `--latency-profile` with `--diagram-only`; and `--latency-profile` on `daydream improve`.
+    Drop them.
+  - `deep` is the only built-in flow alias. `review` and `shallow` (`--flow review`,
+    `flow_name="shallow"`) are ordinary custom flow names: unless an extension registers
+    one, the run stops with the Extension Error `flow 'shallow' is not registered; run
+    'daydream ext validate' to check the extension registry` and exit 1. Omit the flow
+    (`flow_name=None`) for the default review.
+  - `RunConfig.stack`, `start_at`, `latency_profile`, `parse_model`, `shallow`,
+    `precision_mode` and `review_cache_enabled`, and `run_config.replaced_review_options`.
+    Passing one of these fields raises `TypeError` (unexpected keyword argument), where
+    `runner.run` used to refuse it with exit 1 or ignore it.
+  - The `daydream.stack` trace span attribute and the `stack` parameter of `step_scope`.
+    The archive index keeps its `skill` column, now always written as null; the archive
+    schema is unchanged.
+
+### Fixed
+
+- `daydream setup` now installs the Daydream version that ran it. The packaged bot workflows
+  carried a hard-coded commit that always lagged the release shipping them (the 0.35.2 templates
+  installed v0.35.1, and every release from 0.28 to 0.35.0 installed a 0.28.0-era commit). They now
+  carry a placeholder, and setup pins every Daydream install line, producer and poster alike, to
+  the full commit of the release tag `v<version>` of the Daydream running it, peeling an
+  annotated tag to its commit. A build whose version has no release tag (a development build)
+  refuses before registering or depositing anything. `daydream setup --verify` compares
+  installed workflows with the templates pinned to the running release, so workflows installed by
+  an earlier release read as customized: rerun `daydream setup` to move an existing install to
+  the release you run. **Breaking (0.y.z)** for manual copies only: replace the placeholder as
+  the [workflow README](daydream/templates/workflows/README.md#daydream-pin) describes
+  ([#1884](https://github.com/existential-birds/daydream/issues/1884)).
+- Test healing saves and restores a forbidden generated-file edit whose bytes are not UTF-8,
+  instead of stopping the fixing run with `UnicodeDecodeError`. Its recovery patch shows each
+  such byte as U+FFFD, as review diffs do; the smart-quote scrub still skips an attribution diff
+  that is not UTF-8 ([#1870](https://github.com/existential-birds/daydream/issues/1870)).
+- A changed path that fits the checkout but sits over the OS path limit at the capture
+  destination fails capture with the path, its length there and the limit, instead of
+  "captured native source population changed", which describes a concurrent change
+  ([#1870](https://github.com/existential-birds/daydream/issues/1870)).
+- A Pi committed-review turn that settles with nothing accepted and no host failure now raises
+  the shared `host_tools.UnsubmittedTurn`, as Claude and Codex do, instead of a retryable stream
+  truncation: it gets one fresh conversation (none after an earlier retryable provider failure)
+  and seals `missing_output` if that one ends unsubmitted too, and the outage circuit records it
+  as a completed turn. Before, it was retried up to the full attempt count and each try counted
+  as a provider failure, which could open the circuit for the whole run. A stream that ends
+  before it settles is still a truncation
+  ([#1872](https://github.com/existential-birds/daydream/issues/1872)).
+- A diagram can cite a route file such as `src/routes/[slug]/+page.ts` or
+  `app/routes/users.$userId.tsx`. Its spec's `file` fields no longer carry the model-path
+  pattern; grounding accepts a citation that exactly names a Git-observed path of the captured
+  change or the checked-out tree and holds every other path to the model grammar, so a bracket
+  path that names no such file is still refused. Posting reads each cited file from the head
+  tree by its exact name, percent-encoded on GitHub's contents API, and never expands it
+  ([#1879](https://github.com/existential-birds/daydream/issues/1879)).
 
 ## [0.35.2] - 2026-11-15
 

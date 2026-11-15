@@ -34,6 +34,21 @@ The setup guide is the single source of truth for the step-by-step install
 (App permissions, the three secrets, the bot-handle variable, and the PEM
 download). The sections below document what these workflows *do* once installed.
 
+## Daydream pin
+
+Each Daydream install line — producer (`daydream-review.yml`) and poster
+(`daydream-post.yml`) alike, and both in `single/daydream.yml` — installs
+`git+https://github.com/existential-birds/daydream@DAYDREAM_RELEASE_COMMIT`.
+`daydream setup` replaces the placeholder with the full commit SHA of the release
+tag `v<version>` of the Daydream that runs it (an annotated tag is peeled to its
+commit), so the bot runs the release that installed it and a moved tag cannot
+change the executable code. A build whose version has no release tag (a
+development build) refuses to install the workflows. `--verify` compares the
+installed files with the templates pinned the same way, so workflows installed by
+another release read as customized until `daydream setup` is rerun. For a manual
+install, replace each placeholder with the commit on the `^{}` line of
+`git ls-remote https://github.com/existential-birds/daydream 'refs/tags/vX.Y.Z*'`.
+
 > **Optional single-file variant:** [`single/daydream.yml`](single/README.md)
 > collapses these three workflows into one. It drops the cross-workflow dispatch
 > and with it the App's `Actions: read & write` permission. It is a manual-copy
@@ -111,4 +126,4 @@ fingerprint markers in each comment body:
 Comment format is unchanged from `daydream --comment` — these workflows add
 triggers and posting identity, not a new output format.
 
-Review artifacts require current findings schema version 2 with typed terminal coverage. Upgrade producer and poster pins together; older schemas are rejected. For states, invocation freshness and output absence, see the [terminal findings contract](../../../docs/runtime.md#terminal-review-findings-contract).
+Review artifacts require current findings schema version 2 with typed terminal coverage. Producer and poster install the same release commit; older schemas are rejected. For states, invocation freshness and output absence, see the [terminal findings contract](../../../docs/runtime.md#terminal-review-findings-contract).
