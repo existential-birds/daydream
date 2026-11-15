@@ -250,7 +250,7 @@ def test_sequence_graph_isolates_bad_elements_and_preserves_live_order_and_block
                 ("Empty", []),
                 ("Escape", ["../elsewhere/service.py"]),
                 # Changed route files are cited by their exact Git names; a bracket path that names
-                # no Git-observed file still meets the model grammar, which refuses it.
+                # no Git-observed file must meet the model grammar, which refuses it.
                 ("Page", ["app/routes/[slug]/+page.py"]),
                 ("UserRoute", ["app/routes/users.$userId.py"]),
                 ("GhostRoute", ["app/routes/[ghost]/+page.py"]),

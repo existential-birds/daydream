@@ -61,7 +61,8 @@ def test_coercion_drops_each_malformed_entry_and_remaps_block_indices() -> None:
     good, digit = _message(), _message(evidence={**evidence, "line": "6"})
     sequence = coerce_sequence_spec({
         "participants": [
-            {"name": "Handler", "kind": "internal", "files": ["a.py", "a.py", "/a.py", "../x.py", 3]},
+            {"name": "Handler", "kind": "internal",
+             "files": ["a.py", "a.py", "/a.py", "../x.py", 3, "app/[slug]/$id.py"]},
             "not a participant", {"name": "", "kind": "internal"}, {"name": "Ghost", "kind": "daemon"},
             {"name": "Handler", "kind": "external"},
             {"name": "Resolver", "kind": "external", "files": "nope", "service": "svc"}],
@@ -76,7 +77,8 @@ def test_coercion_drops_each_malformed_entry_and_remaps_block_indices() -> None:
                        {"condition": "", "evidence": {"file": "a.py", "line": 3}, "messages": [1]}]}],
     })
     assert sequence == {
-        "participants": [{"name": "Handler", "kind": "internal", "files": ["a.py"], "service": None},
+        "participants": [{"name": "Handler", "kind": "internal", "files": ["a.py", "app/[slug]/$id.py"],
+                          "service": None},
                          {"name": "Resolver", "kind": "external", "files": [], "service": "svc"}],
         "messages": [good, {**digit, "evidence": {**evidence, "line": 6}}],
         "blocks": [{"kind": "opt", "branches": [
