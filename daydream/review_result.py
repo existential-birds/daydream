@@ -150,10 +150,11 @@ _COVERAGE_SCHEMA = strict_object({
 })
 
 
-def _revision_version(revision: Mapping[str, Any]) -> int:
+def _revision_version(revision: Mapping[str, Any]) -> int | None:
     """Terminal result version of a reviewed subject: commits, a captured working source, or commits plus
-    tracked working-tree edits that no commit holds."""
-    return 2 if 'source_id' in revision else 3 if 'tracked_worktree_edits' in revision else 1
+    tracked working-tree edits that no commit holds. A revision claiming both kinds has no version."""
+    source, worktree = 'source_id' in revision, 'tracked_worktree_edits' in revision
+    return None if source and worktree else 2 if source else 3 if worktree else 1
 
 
 @dataclass(frozen=True)
