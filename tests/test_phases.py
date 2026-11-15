@@ -249,6 +249,8 @@ def test_test_healing_guard_restores_generated_population_and_paired_manifests(
         (tmp_path / name).write_text("REPAIR = True\n")
 
     (tmp_path / "migrations/0000_local_draft.sql").write_bytes(b"-- forbidden healing edit\n")
+    # A forbidden edit with bytes that are not UTF-8 is still saved, as U+FFFD, and restored.
+    (tmp_path / "migrations/0001_init.sql").write_bytes(b"-- caf\xe9 healing edit\n")
 
     violations = _reject_test_healing_generated_file_edits(
         tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(protected),
@@ -274,6 +276,7 @@ def test_test_healing_guard_restores_generated_population_and_paired_manifests(
     assert len(patches) == 2
     assert any("--- a/migrations/a/b.sql" in patch for patch in patches)
     assert any("--- a/migrations/a-b.sql" in patch for patch in patches)
+    assert "+-- caf\ufffd healing edit" in "".join(p.read_text() for p in recovery.glob("migrations-0001_init*.patch"))
 
 
 def test_test_healing_guard_fails_safe_when_discovery_or_restore_fails(

@@ -334,14 +334,14 @@ def test_post_findings_classifies_api_head_reads(
 def test_post_findings_blames_the_artifact_for_a_malformed_citation_path(
     fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A trailing newline can pass schema re.search but must fail path fullmatch.
+    """A path that is no relative Git name passes the schema but is never read.
 
     No head read occurred; attribute the bad path to the artifact."""
     payload = _flowchart_payload()
     flowchart = payload["results"]["flowchart"]
-    flowchart["spec_final"]["root"]["file"] = "a.py\n"
+    flowchart["spec_final"]["root"]["file"] = "../a.py"
     for node in flowchart["spec_final"]["nodes"]:
-        node["evidence"]["file"] = "a.py\n"
+        node["evidence"]["file"] = "../a.py"
     artifact = _api_head_artifact(
         tmp_path, [_finding("a" * 64, path="a.py", line=1, placement="inline", title="Real finding")], diagrams=payload,
     )
@@ -350,7 +350,7 @@ def test_post_findings_blames_the_artifact_for_a_malformed_citation_path(
 
     assert code == 0
     printed = _console_text(capsys)
-    assert "flowchart diagram evidence cites an invalid repository path: 'a.py\\n'" in printed
+    assert "flowchart diagram evidence cites an invalid repository path: '../a.py'" in printed
     assert "could not be read from immutable head" not in printed
     assert _contents_calls(fake_gh) == []
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")

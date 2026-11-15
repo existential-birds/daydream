@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
@@ -211,13 +212,15 @@ def ground_flowchart(
     hunk_ranges: dict[str, list[tuple[int, int]]],
     candidate_roots: list[CandidateRoot],
     symbols: evidence.RepoSymbols,
+    observed_paths: Collection[str] = frozenset(),
 ) -> GroundingReport:
     """Ground, prune, cap and floor-test a proposal rooted in an eligible changed function.
 
     The root must match candidate_roots and still overlap a changed hunk, including
-    on repair turns. A rejected root yields no nodes or edges.
+    on repair turns. A rejected root yields no nodes or edges. A citation may name
+    one of ``observed_paths`` exactly outside the model grammar.
     """
-    sources = evidence.SourceCache(repo_root)
+    sources = evidence.SourceCache(repo_root, observed_paths)
     raw_root = spec.get("root")
     root: dict[str, Any] | None = _as_dict(raw_root) if isinstance(raw_root, dict) else None
     candidate = _match_candidate(root, candidate_roots) if root is not None else None

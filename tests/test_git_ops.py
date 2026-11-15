@@ -987,9 +987,11 @@ def test_gh_file_and_scope_wrappers_validate_before_requests(
 
     auth = git_ops.StaticGitHubAuth({"PATH": "/tools", "GH_TOKEN": "ghs_file_reader_token_1234567890"})
     seen_auth: list[Any] = []
+    endpoints: list[str] = []
 
     def api(_repo: Path, endpoint: str, **kwargs: Any) -> dict[str, Any]:
         seen_auth.append(kwargs["auth"])
+        endpoints.append(endpoint)
         if "/contents/" in endpoint:
             return {"type": "file", "sha": "c" * 40, "encoding": "none"}
         return {"encoding": "base64", "content": base64.b64encode(b"large file\n").decode()}
@@ -997,6 +999,10 @@ def test_gh_file_and_scope_wrappers_validate_before_requests(
     monkeypatch.setattr(git_github, "gh_api", api)
     assert git_ops.gh_file_at_ref(tmp_path, "o/r", _FILE_AT_REF_SHA, "large.bin", auth=auth) == b"large file\n"
     assert seen_auth == [auth, auth]
+    # A route file's Git name reaches the contents endpoint percent-encoded, never expanded.
+    assert git_ops.gh_file_at_ref(tmp_path, "o/r", _FILE_AT_REF_SHA, "routes/users.$id/[slug]/+page.ts") == (
+        b"large file\n")
+    assert endpoints[2] == f"repos/o/r/contents/routes/users.%24id/%5Bslug%5D/%2Bpage.ts?ref={_FILE_AT_REF_SHA}"
 
 
 def test_worktree_lock_mtime_rejects_nonregular_lock_metadata(tmp_path: Path, repo: Path) -> None:

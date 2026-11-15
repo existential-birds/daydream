@@ -11,7 +11,7 @@ from daydream import git_ops
 from daydream.config import DIAGRAM_KINDS
 from daydream.git_ops import INHERIT_GITHUB_AUTH, GitError, GitHubAuth, PathAbsentError
 from daydream.json_utils import validate_json_schema
-from daydream.repository_paths import valid_repository_file_path
+from daydream.repository_paths import valid_git_observed_path
 from daydream.reviews.identity import DAYDREAM_FOOTER, diagram_marker
 from daydream.reviews.models import PRInfo
 from daydream.ui import print_error, print_success, print_warning
@@ -183,11 +183,10 @@ class _HeadEvidence:
         cached = self._bytes.get(path)
         if cached is not None:
             return cached
-        # The spec schema's ``pattern`` is applied with ``re.search``, whose
-        # ``$`` matches before a trailing newline, so the grammar is re-checked
-        # here as a fullmatch — the sequence branch writes these paths into a
-        # snapshot tree, and the API branch into an endpoint.
-        if not valid_repository_file_path(path):
+        # The sequence branch writes these paths into a snapshot tree and the API
+        # branch percent-encodes them into an endpoint: only a legal relative Git
+        # name is read, and only an exact path of the head tree is found.
+        if not valid_git_observed_path(path):
             raise GitError("invalid repository file path")
         if self._reads_locally():
             data = git_ops.show(self._target_dir, self._head_sha, path)
@@ -225,7 +224,7 @@ def _diagram_head_evidence_problem(
 
     def unreadable(path: str, exc: GitError) -> str:
         """Separate invalid paths, proven absence, and operational read failures."""
-        if not valid_repository_file_path(path):
+        if not valid_git_observed_path(path):
             return f"{kind} diagram evidence cites an invalid repository path: {path!r}"
         if isinstance(exc, PathAbsentError):
             return f"{kind} diagram evidence is missing from immutable head: {path}"
@@ -274,6 +273,7 @@ def _diagram_head_evidence_problem(
                 repo_root=snapshot_root,
                 hunk_ranges={},
                 symbols=RepoSymbols(snapshot_root),
+                observed_paths=paths,  # Each was just read from the head tree by its exact path.
             )
         if report.spec_final != spec:
             return "sequence diagram evidence is not grounded in immutable head"
