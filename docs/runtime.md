@@ -1176,10 +1176,11 @@ retained or written whole. [The finalization measurement](../scripts/measure_fin
 reports each stage's peak memory and runtime and the archive's bytes read.
 
 Finalization reports local JSONL capture, configured upload, archive/evaluation,
-and public installation separately. Later failure cannot revoke a successful
-capture receipt or imply successful public installation. Valid frozen analysis
-can be archived with explicitly unavailable live-source quality (null metrics
-and an unavailable diagnostic); a valid operational workspace can still supply
+and public installation separately. Capture and upload run last, so a record's
+outcome is the run's final one: a run that archive integrity or public installation
+fails is recorded as failed, and nothing is stored or uploaded before that failure.
+Valid frozen analysis can be archived with explicitly unavailable live-source
+quality (null metrics and an unavailable diagnostic); a valid operational workspace can still supply
 quality independently of public-source availability when its current Git routing
 matches the captured worktree and common directories. Genuine evaluation or
 integrity failures continue to abort atomic archive installation. Body failures

@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `partial`. It returns before any merge, fix or test phase, and the archive now accepts its sealed
   no-diff review, bound to the same session, as the evidence that it finished
   ([#1847](https://github.com/existential-birds/daydream/issues/1847)).
+- A run captured with `--capture-data` is no longer recorded, or uploaded, as `success` when
+  archive integrity or publication of its outputs then fails and the command exits 1. Capture
+  and upload now run after archive finalization and publication, and such a run is recorded as
+  `failed` ([#1853](https://github.com/existential-birds/daydream/issues/1853)).
 
 ## [0.35.2] - 2026-11-15
 
