@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The bot workflows install Daydream at the v0.35.1 release commit (`7e036838`) instead of the
+  v0.35.0 one: the repository's review and post workflows, which take effect on merge, and the
+  packaged split and single-file templates. The 0.35.1 package's templates still install the
+  v0.35.0 pin, so `daydream setup` users get the v0.35.1 pin with the next release; existing
+  installs then read as customized under `daydream setup --verify` until `daydream setup` is
+  rerun. Both releases write findings schema 2, so the artifact of a review started before
+  this change and posted after it is still accepted
+  ([#1641](https://github.com/existential-birds/daydream/issues/1641)).
+
 ## [0.35.1] - 2026-11-15
 
 ### Changed
