@@ -712,6 +712,9 @@ async def _capture_review_workspace(
     if (config.flow_name not in (None, *DEEP_FLOW_ALIASES)
             or mode == "diagram"
             or (mode not in {"review", "comment"} and config.findings_out is None)):
+        if config.flow_name in (None, *DEEP_FLOW_ALIASES) and mode == "loop" and git_ops.has_worktree_edits(work.repo):
+            print_info(console, "Fixing reviews the checkout as is: its tracked uncommitted edits are reviewed "
+                                "with the commits and committed with the fixes.")
         yield work
         return
     assert work.head_sha is not None and work.base_sha is not None
