@@ -241,7 +241,7 @@ def test_optional_context_fits_remaining_budget_without_changing_findings(
     tmp_path: Path, valid_artifact: dict[str, Any], caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Optional prose cannot block a valid canonical handoff or weaken its existing byte cap."""
+    """Optional context, diagrams and warnings cannot block a valid canonical handoff or weaken its byte cap."""
     identity = execution_identity(head_sha=valid_artifact['head_sha'])
     verdict = {'attempts': [{'kind': 'host', 'command': list(identity.argv), 'passed': True,
                              'identity': identity.payload()}]}
@@ -278,3 +278,17 @@ def test_optional_context_fits_remaining_budget_without_changing_findings(
     assert 'Optional review context omitted' in caplog.text
     assert 'review_context' not in loaded
     assert path.stat().st_size - attribution_bytes(loaded) == MAX_ARTIFACT_BYTES
+    # Diagrams that push fitting findings over go next and warnings last, each only while still over.
+    warned = core | {'review_warnings': ['phases: challenge: host wall budget exhaustion']}
+    extra = len(json.dumps(warned, indent=2)) - len(json.dumps(core, indent=2))
+    warned['run_info'] = core['run_info'][extra:]
+    write_findings_artifact(path, warned | {'diagrams': _diagram_payload()})
+    assert json.loads(path.read_text()) == warned
+    assert 'Optional diagrams omitted' in caplog.text
+    write_findings_artifact(path, core | {'diagrams': _diagram_payload(), 'review_warnings': warned['review_warnings']})
+    assert json.loads(path.read_text()) == core
+    assert 'Optional diagrams, review warnings omitted' in caplog.text
+    # A diagram artifact's diagrams are its findings: it is refused, never emptied.
+    with pytest.raises(FindingsValidationError, match='size'):
+        write_findings_artifact(path, findings_artifact(kind='diagram', diagrams={'results': 'x' * MAX_ARTIFACT_BYTES}))
+    assert json.loads(path.read_text()) == core

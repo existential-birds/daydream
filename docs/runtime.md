@@ -333,9 +333,12 @@ bounds a review's claims beyond that; a batch still holds at most 128. A sealed 
 therefore hold more than 128 claims and findings, which a reader on an older release rejects.
 The `deep` flow's `--findings-out` artifact is another export: it also carries run
 information, warnings, the review context and diagrams, which this bound does not count.
-Its writer drops review context to fit 1 MiB but nothing else, so a review whose claims
-nearly fill the bound can fail to write it; the sealed result and the report keep every
-finding.
+To fit 1 MiB its writer drops the review context, then the diagrams, then the warnings,
+each only while the artifact is still over, and names what it dropped in a logged warning.
+Findings and coverage always stay, so a review whose warnings were dropped still reports
+its unfinished coverage and withholds approval. Run information also stays: an artifact
+still over 1 MiB without the others is refused, and the sealed result and the report keep
+every finding.
 
 All work draws on one [budget ledger](#budget-ledger) for the review window; each
 dispatch runs on its own child ledger carved from it, so parallel siblings never share a

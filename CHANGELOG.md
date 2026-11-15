@@ -51,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row. Trajectories now record the challenge under a new `challenge` phase; older
   trajectories keep `verify`
   ([#1851](https://github.com/existential-birds/daydream/issues/1851)).
+- The `deep` flow's `--findings-out` file no longer fails to write when diagrams or
+  warnings push a review whose findings nearly fill the 1 MiB bound over it. The run
+  printed "Findings Artifact", exited 1 and left no file for the poster. The writer now
+  drops the review context, then the diagrams, then the warnings, each only while still
+  over, and logs what it dropped; findings and coverage always stay
+  ([#1848](https://github.com/existential-birds/daydream/issues/1848)).
 
 ## [0.35.0] - 2026-11-15
 
