@@ -115,6 +115,12 @@ def shard_scope_id(index: int) -> str:
     return f"committed:{index:05d}"
 
 
+def host_decision(part: dict[str, Any]) -> dict[str, Any]:
+    """The host's decision for a binary target, which has no text a model could review."""
+    return {"target_id": part["target_id"], "status": "reviewed", "reason": "binary change: no text content",
+            "evidence_refs": part["source_refs"]}
+
+
 # Work records, attribution, per-execution capacity evidence, the cross_assignment phase (#1628) and claim severity.
 RESULT_VERSIONS = {"committed": 10, "immutable": 11, "local": 12}
 REQUIRED_PHASES = ["challenge", "cross_assignment"]
@@ -303,7 +309,7 @@ def validate_committed_result(value: dict[str, Any]) -> None:
         raise ValueError("execution evidence differs from retained work")
     # Current accepted work decides completion; superseded attempts remain evidence only.
     if terminal["analysis_state"] == "complete" and (
-        assignments and not native_assignments & INVESTIGATION_KINDS
+        any(not part.get("binary") for part in assignments) and not native_assignments & INVESTIGATION_KINDS
         or claims and "challenge" not in native_assignments
         or any(c["disposition"] == "unresolved" for c in claims)
         or any(record["state"] != "accepted" for wid, record in work.items() if wid not in superseded)
@@ -344,7 +350,8 @@ def _validate_work(records: list[dict[str, Any]], work: dict[str, dict[str, Any]
     decided = {d["target_id"]: d for outcome in terminal["stack_outcomes"] for d in outcome.get("target_decisions", [])}
     for target, decision in decided.items():
         if target not in admitted and (decision["status"] != "not_reviewed" or decision["evidence_refs"]
-                                       or not decision["reason"].startswith("unsubmitted:")):
+                                       or not decision["reason"].startswith("unsubmitted:")) and not (
+                by_target[target].get("binary") and decision == host_decision(by_target[target])):
             raise ValueError("target decision lacks admitting work attribution")
 
 

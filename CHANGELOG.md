@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A change with a binary file no longer leaves the review incomplete when the reviewer marks that
+  file `not_reviewed`. A changed file whose captured diff is binary (Git's `Binary files … differ`,
+  with no text hunk) is now decided by the host as `reviewed` with the reason
+  `binary change: no text content`; the reviewer owes it no decision but still sees it in the
+  catalog and may cite it. Its sealed assignment carries `binary: true` and the report names it. A
+  text file the reviewer marks `not_reviewed` still leaves the review incomplete, and a change of
+  only binary files completes without a model call
+  ([#1865](https://github.com/existential-birds/daydream/issues/1865)).
 - A changed path longer than 512 characters no longer stops the review before any model call with
   a "narrow the review base" capacity message. Target ids and scope files now accept paths up to
   4096 characters, as source references do. A path whose diff header alone cannot fit one review

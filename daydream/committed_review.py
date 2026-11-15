@@ -50,6 +50,7 @@ from daydream.committed_review_model import (
     coverage_shards,
     fragment_spans,
     head_line,
+    host_decision,
     planned_work_id,
     receipt_schema,
     reference_covers,
@@ -198,7 +199,9 @@ class Review:
         # Fragment-only evidence has no source range; its summarized complete-line span
         # admits claim lines without changing the canonical fragment identity.
         self._fragment_spans = fragment_spans(self.assignments)
-        self._decisions: dict[str, dict[str, Any]] = {}
+        self._decisions: dict[str, dict[str, Any]] = {
+            part["target_id"]: host_decision(part) for part in self.assignments if part.get("binary")}
+        self._host_decided = frozenset(self._decisions)
         self._claims: dict[str, dict[str, Any]] = {}
         self._sealed = False
         self.work: dict[str, _Work] = {}
@@ -216,7 +219,8 @@ class Review:
         # Reserve truthful unfinished attribution for every target before model work.
         try:
             for index in range(len(self._shards)):
-                self._coverage.admit_target_decisions(shard_scope_id(index), self._shard_decisions(index, {}))
+                self._coverage.admit_target_decisions(shard_scope_id(index),
+                                                      self._shard_decisions(index, self._decisions))
         except ValueError as exc:
             raise ValueError("captured plan exceeds retained per-target coverage capacity before review; "
                              "narrow the review base or exclusions and rerun") from exc
@@ -426,7 +430,8 @@ class Review:
             chunks: dict[int, list[dict[str, int]]] = {}
             sizes: dict[int, int] = {}
             for uid, revision in available.items():
-                group = allowance[self._claims[uid]["payload"]["file"]]
+                # A binary file has no batch; a claim on it joins the first group.
+                group = allowance.get(self._claims[uid]["payload"]["file"], 0)
                 size = len(canonical_json(self._claims[uid]).encode()) + 1
                 if group not in chunks or sizes[group] + size > LARGEST_TOOL_RESULT_BYTES:
                     chunks.setdefault(group, []).append({})
@@ -802,7 +807,7 @@ class Review:
         current = [record for record in records if record["state"] != "superseded"]
 
         kinds = {entry["assignment"] for entry in self.execution if entry["work_id"] is not None}
-        if self.assignments and not kinds & INVESTIGATION_KINDS:
+        if self.inputs.assignment_batches and not kinds & INVESTIGATION_KINDS:
             global_reasons.add(ReasonCode.EVIDENCE_INCOMPLETE.value)
         if self.assignments:
             scopes_complete = True
@@ -816,7 +821,8 @@ class Review:
                 scopes_complete &= not reasons
                 coverage.record_scope(
                     shard_scope_id(index), "incomplete" if reasons else "complete", reasons=sorted(reasons),
-                    partial_evidence=bool(reasons) and any(t in self._decisions for t in identifiers),
+                    partial_evidence=bool(reasons)
+                    and bool((identifiers - self._host_decided) & self._decisions.keys()),
                     target_decisions=self._shard_decisions(index, self._decisions),
                 )
             if self.decomposed:
@@ -1447,16 +1453,17 @@ class _Schedule:
         )
         settings["assignment_policy"] = {
             "name": "broad", "decomposed": self.decompose,
-            "planned_assignments": len(self.batches) if self.decompose else 1,
+            "planned_assignments": len(self.batches) if self.decompose else min(len(self.batches), 1),
             "cross_assignment": "required" if self.decompose else "not_applicable",
         }
 
     async def run(self, recorder: Any) -> None:
         review = self.review
-        if not self.decompose:
+        # A change of only binary files leaves no batch: the host decided every target.
+        if self.batches and not self.decompose:
             (work_id,) = review.plan("discovery")
             await self._dispatch(work_id, self.local, self.local_reserves)
-        else:
+        elif self.decompose:
             await self._round(review.plan("discovery", self.batches), recorder, self.local, self.local_reserves)
             while groups := self._follow_ups():
                 # A refused follow-up records the local ledger's stop on the trace.
