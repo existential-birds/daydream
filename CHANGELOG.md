@@ -25,6 +25,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pin they installed (`.github/workflows/package.json`) and that pin's Dependabot npm block are
   gone. Reviews of this repository come from the hosted review service. No package user is
   affected: `daydream setup` and the packaged templates it installs do not depend on them.
+- **Breaking (0.y.z):** The replaced staged reviewer's command-line options, flow aliases and
+  `RunConfig` fields, which 0.35.0 kept only to refuse them with guidance, are deleted
+  ([#1857](https://github.com/existential-birds/daydream/issues/1857)):
+  - `--shallow`, `--stack`/`-s`, `--precision`, `--latency-profile`, `--no-review-cache`,
+    `--start-at`, `--parse-model` and `--per-stack-review-model` now get the parser's own
+    usage error and exit 2, for example `daydream: error: unrecognized arguments: --shallow`.
+    Command lines that accepted some of them and ignored them are rejected the same way:
+    `--start-at` or `--stack` with a custom `--flow`; `--stack`, `--precision` or
+    `--latency-profile` with `--diagram-only`; and `--latency-profile` on `daydream improve`.
+    Drop them.
+  - `deep` is the only built-in flow alias. `review` and `shallow` (`--flow review`,
+    `flow_name="shallow"`) are ordinary custom flow names: unless an extension registers
+    one, the run stops with the Extension Error `flow 'shallow' is not registered; run
+    'daydream ext validate' to check the extension registry` and exit 1. Omit the flow
+    (`flow_name=None`) for the default review.
+  - `RunConfig.stack`, `start_at`, `latency_profile`, `parse_model`, `shallow`,
+    `precision_mode` and `review_cache_enabled`, and `run_config.replaced_review_options`.
+    Passing one of these fields raises `TypeError` (unexpected keyword argument), where
+    `runner.run` used to refuse it with exit 1 or ignore it.
+  - The `daydream.stack` trace span attribute and the `stack` parameter of `step_scope`.
+    The archive index keeps its `skill` column, now always written as null; the archive
+    schema is unchanged.
 
 ## [0.35.2] - 2026-11-15
 

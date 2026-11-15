@@ -553,7 +553,7 @@ Results 1–3 predate bounded navigation and sharded per-target coverage, 4–6 
 work records and 7–9 predate claim severity; they are rejected with a restart instruction
 rather than converted.
 Mismatched versions/identities and local-to-PR relabeling are explicitly rejected.
-Every review starts fresh: `--start-at` is refused and nothing restores a stopped
+Every review starts fresh: nothing restores a stopped
 review, because retained evidence cannot restore assignment authority. Replace
 incompatible inputs by starting a new review; no historical converter is provided.
 
@@ -1030,13 +1030,10 @@ and macOS are not yet exercised.
 ## Replaced reviewer options
 
 Committed review is the only reviewer. It reviews the whole change in one program, so
-the options and settings of the staged reviewer it replaced select nothing.
+the settings of the staged reviewer it replaced select nothing. Its command-line options
+are gone, and `review` and `shallow` are ordinary custom flow names, unregistered unless an
+extension registers them.
 
-- **Refused before any work**, as a usage error on the CLI (exit 2) and by `runner.run`
-  (exit 1) with the same guidance: `--shallow` and the `shallow` flow alias, `--stack`/`-s`,
-  `--precision`, `--latency-profile`, `--no-review-cache`, and `--start-at` with any value
-  other than `review`. `--shallow`, `--no-review-cache` and `--start-at` are refused on
-  `--diagram-only` runs too. A custom flow reads its own options.
 - **Ignored with one printed notice** naming each key: the repository settings
   `latency_profile`, `shallow_fanout_threshold`, `precision_mode`, `deep_shard_enabled`,
   `deep_shard_max_files`, `deep_shard_max_bytes`, `deep_shard_fanout_cap`,
@@ -1080,15 +1077,13 @@ review are generated after it.
 A review ends with findings. Fixing is selected explicitly: `--fix` on the CLI,
 `output_mode="loop"` for embedded callers. `--yes` (`assume="yes"`) answers the gates
 of a selected fixing run or a custom flow and never selects fixing; without `--fix` the
-CLI rejects it except on a custom `--flow`. There is no shallow mode and no resume:
-`--shallow`, `--flow shallow`, `flow_name="shallow"`, `shallow=True` and `--start-at`
-are refused before any work, on diagram-only runs too
+CLI rejects it except on a custom `--flow`. There is no shallow mode and no resume
 ([replaced options](#replaced-reviewer-options)). To fix what a review reported,
 rerun with `--fix`.
 
 A fixing request that could only end as a review is refused before any work: one whose
 fix gate cannot be confirmed (unattended without `--yes`, or `assume="no"`), and one
-combined with the `review` flow or a findings export. A run that finds no diff says so
+combined with a findings export. A run that finds no diff says so
 and exits 0. Inside a selected run every gate below stays binding.
 
 The host admits one canonical test recipe before an accepted actionable fix run.

@@ -1,7 +1,7 @@
 """Workspace, extension registry, and flow dispatch for one run.
 
-``run`` binds the per-run registry and opens the workspace. Explicit ``review``
-and ``deep`` aliases, plus review/comment/diagram/loop output modes,
+``run`` binds the per-run registry and opens the workspace. The explicit ``deep``
+alias, plus review/comment/diagram/loop output modes,
 use ``deep.orchestrator.run_deep``. ``improve`` opens a read-only audit workspace;
 other registered flow names use the custom-flow preamble.
 """
@@ -92,7 +92,6 @@ from daydream.run_config import (
     _resolved_model,
     _resolved_reasoning_effort,
     ignored_review_settings,
-    replaced_review_options,
     runs_review,
 )
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context, resolve_gate
@@ -292,8 +291,8 @@ def _fix_request_refusal(config: RunConfig) -> str | None:
     """Explain why a requested fix would end as a successful review, or return None."""
     if config.output_mode != "loop" or config.flow_name not in (None, *DEEP_FLOW_ALIASES):
         return None
-    if config.flow_name == "review" or config.findings_out is not None:
-        return 'The "review" flow and a findings export end with findings; drop them or the fixing request.'
+    if config.findings_out is not None:
+        return "A findings export ends with findings; drop it or the fixing request."
     if resolve_gate(assume=config.assume, interactive=_resolve_interactive(config), safe_default=False) is False:
         return ('The fix gate cannot be confirmed: the run is unattended or assumes "no". '
                 'Pass --yes (assume="yes"), or drop --fix (output_mode="loop") to review only.')
@@ -302,10 +301,6 @@ def _fix_request_refusal(config: RunConfig) -> str | None:
 
 def _review_refusal(config: RunConfig) -> str | None:
     """Explain why the reviewer cannot serve this request, before any workspace or GitHub call."""
-    replaced = replaced_review_options(config)
-    if replaced:
-        return ("These options belonged to the replaced staged reviewer and no longer apply. "
-                + "; ".join(replaced) + ".")
     if not runs_review(config):
         return None
     if _file_config_or_empty(config).supervisor in {"rules", "llm"}:
@@ -645,7 +640,7 @@ async def _run_workspace(
                             progress=progress,
                         )
                         with anyio.CancelScope(shield=True):
-                            with step_scope("artifact-finalization", stack=dispatch_config.stack) as observed:
+                            with step_scope("artifact-finalization") as observed:
                                 outcomes = await anyio.to_thread.run_sync(finalize)
                                 observed.finish()
                     except BaseException as exc:
@@ -796,20 +791,17 @@ async def _dispatch_selected_flow(
     github_execution: github_app.GitHubExecutionInput,
     backend_factory: BackendFactory | None = None,
 ) -> int:
-    """Resolve built-in aliases before registered flows.
+    """Resolve the built-in ``deep`` alias before registered flows.
 
-    The review and deep aliases share the deep flow. Unknown names raise
-    ``UnresolvedExtensionError`` for ``run`` to render as an Extension Error.
+    Unknown names raise ``UnresolvedExtensionError`` for ``run`` to render as an Extension Error.
     """
     name = config.flow_name
     assert name is not None
 
-    # Built-in mode aliases: resolve before the registry lookup so the deep
-    # routing wins over the "not registered" error.
+    # Resolve the alias before the registry lookup so the deep routing wins over the "not registered" error.
     if name in DEEP_FLOW_ALIASES:
         # A review or comment run arrives captured, with the base commit as base_branch, so this never binds it.
-        if name == "deep":
-            _require_reviewable_branch(work, config)
+        _require_reviewable_branch(work, config)
         return await _run_loop_deep(
             work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
             backend_factory=backend_factory,

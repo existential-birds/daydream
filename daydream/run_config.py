@@ -33,23 +33,18 @@ class RunConfig:
 
     target: str | None = None
     observability: ObservabilityConfig | None = None
-    stack: str | None = None  # "python", "react", "elixir", "go", "rust", "ios"
     cleanup: bool | None = None
     quiet: bool = True
-    start_at: str = "review"
     pr_number: int | None = None
     approved_head_sha: str | None = None
     backend: str | None = None
     model: str | None = None
     reasoning_effort: str | None = None
-    # Refused: the replaced reviewer's option. Kept so the refusal can name it.
-    latency_profile: str | None = None
     file_config: DaydreamFileConfig | None = None
     review_backend: str | None = None
     fix_backend: str | None = None
     test_backend: str | None = None
     review_model: str | None = None
-    parse_model: str | None = None
     fix_model: str | None = None
     test_model: str | None = None
     exploration_context: ExplorationContext | None = None
@@ -73,14 +68,11 @@ class RunConfig:
     dump_artifacts: str | None = None
     trajectory_hub_repo: str | None = None
     force_worktree: bool = False
-    shallow: bool = False
     extra_copy: list[Path] = field(default_factory=list)
     non_interactive: bool = False
     assume: str | None = None  # forced gate answer: "yes" (--yes), "no", or None
     log_mode: bool = False  # --verbose: redacted plain-text diagnostics bypass Rich UI
     identity: str = "unknown"  # resolved GitHub identity; set once by run()
-    # Refused when set: the replaced reviewer's option.
-    precision_mode: bool = False
     # Opt in to posting APPROVE for a complete review with no findings.
     approve_on_clean: bool = False
     # Opt in at CLI/file tier to filing pre-fix findings and post-fix reverted edits.
@@ -91,8 +83,6 @@ class RunConfig:
     improve_scope: str | None = None
     improve_plan_description: str | None = None
     improve_prune_name: str | None = None
-    # Refused when False: the replaced reviewer's option.
-    review_cache_enabled: bool | None = None
     # Resolve the CLI/env path once into a validated profile with source and digest.
     review_profile_path: str | Path | None = None
     review_profile: ResolvedProfile | None = None
@@ -168,7 +158,7 @@ def _resolved_reasoning_effort(config: RunConfig, phase: str) -> str | None:
     )
 
 
-DEEP_FLOW_ALIASES = ("review", "shallow", "deep")
+DEEP_FLOW_ALIASES = ("deep",)
 
 # Top-level repository settings and phase tables that only the replaced staged reviewer, or the
 # verifier selection that depended on it, read.
@@ -183,27 +173,6 @@ REPLACED_REVIEW_PHASES = ("intent", "merge", "parse", "per_stack_review", "super
 def runs_review(config: RunConfig) -> bool:
     """Whether this request runs the reviewer: every built-in flow mode except diagram-only."""
     return config.flow_name in (None, *DEEP_FLOW_ALIASES) and config.output_mode != "diagram"
-
-
-def replaced_review_options(config: RunConfig) -> list[str]:
-    """Explain each replaced-reviewer option a built-in flow request selects; custom flows select none."""
-    review = runs_review(config)
-    builtin = config.flow_name in (None, *DEEP_FLOW_ALIASES)
-    return [f"{option}: {guidance}" for option, selected, guidance in (
-        ("--shallow" if config.shallow else "--flow shallow",
-         builtin and (config.shallow or config.flow_name == "shallow"),
-         "there is no shallow mode; drop it"),
-        ("--stack", review and config.stack is not None,
-         "the reviewer covers the whole change in one review; drop it"),
-        ("--precision", review and config.precision_mode,
-         "every finding is already challenged in a fresh context; drop it"),
-        ("--latency-profile", review and config.latency_profile is not None,
-         "review time and tool allowances come from the review profile's [pipeline] table (--review-profile)"),
-        # Diagram-only runs never resumed or read a review cache either: only a custom flow reads its own options.
-        ("--no-review-cache", builtin and config.review_cache_enabled is False, "no review cache exists; drop it"),
-        ("--start-at", builtin and config.start_at not in (None, "review"),
-         "every review starts fresh; rerun without it"),
-    ) if selected]
 
 
 def ignored_review_settings(config: RunConfig) -> list[str]:
