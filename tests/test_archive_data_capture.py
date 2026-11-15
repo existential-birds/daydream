@@ -130,7 +130,7 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
         multi_stack_target, monkeypatch, archive_dir, no_ci_remote, dataset_store=store.root, dump_path=dump_dir)
     assert exit_code == 0
     join = capsys.readouterr().out.split("Verdict Join", 1)[1].split("Total", 1)[0]
-    assert "Matched" in join and "Structural" not in join
+    assert "Matched" in join
     head_after = git_ops.head_sha(multi_stack_target)
     assert head_after != head_before
     assert git(remote, "rev-parse", "refs/heads/feature") == head_after
@@ -155,12 +155,12 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert verdict["passed"] and all(attempt["kind"] == "host" for attempt in verdict["attempts"])
 
     # Stored records name the reviewer that ran: discovery on the review phase's backend, not on a phase
-    # table this build ignores. The keys are the stored ones.
+    # table this build ignores. A version 3 manifest names no per-stack reviewer or skill.
     review_model = _resolved_model(RunConfig(backend="pi", review_backend="codex"), "review")
     assert trajectory["extra"]["review_backend"] == "codex"
     recorded = manifest["run"]
-    assert (recorded["review_backend"], recorded["per_stack_review_backend"], recorded["per_stack_review_model"]) == (
-        "codex", "codex", review_model)
+    assert recorded["review_backend"] == "codex" and manifest["schema_version"] == "3.0"
+    assert not {"skill", "per_stack_review_backend", "per_stack_review_model"} & recorded.keys()
     metrics = manifest["metrics"]
     assert "grounding_rate" not in metrics
     assert metrics["total_findings"] is not None
@@ -192,7 +192,7 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
         assert (dump_dir / filename).read_bytes() == (run_dir / filename).read_bytes()
     assert json.loads((run_dir / "deep/committed-review.json").read_text())["run_id"] == manifest["session_id"]
     captured = read_records(store).runs[0]
-    # The record lists the phases that ran, each with what it resolved to; a phase no run has is absent.
+    # The record lists each phase a review and fix can run, with what it resolved to; no retired phase is listed.
     resolved = captured["provenance"]["resolved_phases"]
     assert sorted(resolved) == ["arbiter", "fix", "review", "test", "verify"]
     assert (resolved["review"]["backend"], resolved["review"]["model"]) == ("codex", review_model)

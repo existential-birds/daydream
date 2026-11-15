@@ -49,7 +49,7 @@ class ReviewRun:
     def load(self) -> dict[str, Any]:
         artifact = load_findings_artifact(self.output, expected_repo='o/r', expected_pr_number=7,
                                          expected_head_sha=self.pr.head_sha)
-        assert artifact.schema_version == 2 and artifact.head_sha == self.pr.head_sha
+        assert artifact.schema_version == 4 and artifact.head_sha == self.pr.head_sha
         data: dict[str, Any] = json.loads(self.output.read_text())
         revision = data['terminal_result']['analyzed_revision']
         assert (data['head_sha'], revision['head_sha'], revision['merge_base_sha']) == (

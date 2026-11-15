@@ -600,10 +600,7 @@ async def _run_workspace(
                 findings = _route(config.findings_out, OutputLabel.FINDINGS_OUTPUT)
                 dump = _route(config.dump_artifacts, OutputLabel.DUMP_DIRECTORY)
                 capture = _RunWriteCapture(session_id=session_id)
-                run_artifacts = _RunArtifacts(
-                    artifacts, private_owner, trajectory, capture, dump,
-                    execution_input=backend_execution,
-                )
+                run_artifacts = _RunArtifacts(artifacts, private_owner, trajectory, capture, dump)
                 dispatch_config = config
                 if work.captured_source is not None or findings is not None:
                     dispatch_config = replace(config, findings_out=(

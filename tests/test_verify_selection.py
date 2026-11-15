@@ -11,8 +11,8 @@ def _item(item_uid: str, **over: object) -> dict[str, object]:
     return {**base, **over}
 
 
-def test_every_finding_is_verified_except_exempt_lenses() -> None:
-    """One selection batch retains each sibling's identity and input order; only exempt lenses stay out."""
+def test_every_finding_is_verified() -> None:
+    """One selection batch retains each sibling's identity and input order; no lens keeps a finding out."""
     items = [_item("item:1"), _item("item:2", lens="cross-stack"), _item("item:3", confidence="MEDIUM", evidence="n/a"),
              _item("item:4", lens="structural"), _item("item:5", lens="wonder"), _item("item:6", id="six")]
     for index, item in enumerate(items[:5], 1):
@@ -20,7 +20,7 @@ def test_every_finding_is_verified_except_exempt_lenses() -> None:
     decisions = select_items(items)
     assert [(d.item_uid, d.item_id, d.selected, d.reason_code) for d in decisions] == [
         ("item:1", 1, True, "verify_all"), ("item:2", 2, True, "verify_all"), ("item:3", 3, True, "verify_all"),
-        ("item:4", 4, False, "exempt:structural"), ("item:5", 5, False, "exempt:wonder"),
+        ("item:4", 4, True, "verify_all"), ("item:5", 5, True, "verify_all"),
         ("item:6", None, True, "verify_all"),
     ]
     # The stored decision carries what the fix cycle reads, and nothing for skipping or reuse.

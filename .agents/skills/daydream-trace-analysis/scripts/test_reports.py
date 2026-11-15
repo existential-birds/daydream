@@ -22,7 +22,7 @@ class ReportCliTests(unittest.TestCase):
         self.script = self.root / "scripts" / "reports.py"
         shutil.copytree(Path(__file__).parent, self.script.parent, ignore=shutil.ignore_patterns("__pycache__"))
         self.source = self.root / "capture.jsonl"
-        self.records = [{"schema_version": "daydream.run.v1", "run_id": f"run-{i}",
+        self.records = [{"schema_version": "daydream.run.v2", "run_id": f"run-{i}",
                          "outcome": "success", "completeness": {},
                          "provenance": {"effective_configuration": {"model": "other" if i == 4 else "same"}},
                          "original_task": {"status": "available", "value": "repeated search; later recovered"}}

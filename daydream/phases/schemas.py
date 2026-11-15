@@ -16,7 +16,7 @@ _FINDING_FIELDS = {
 }
 MERGED_ITEMS_SCHEMA = result_array_schema("items", {
     **_FINDING_FIELDS,
-    "lens": {"type": "string", "enum": ["per-stack", "cross-stack", "structural", "wonder"]},
+    "lens": {"type": "string", "enum": ["per-stack"]},
     "severity": severity_enum_schema(),
     # Strict structured output requires both keys. Null means no known related
     # file or provenance; the host validates source_uids against actual records.

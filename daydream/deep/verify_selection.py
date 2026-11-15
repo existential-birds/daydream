@@ -1,7 +1,6 @@
 """Recommendation-verifier selection.
 
-Every canonical item gets one decision, in order. Each finding is verified; only an
-item of a verdict-exempt lens stays out of the verifier.
+Every canonical item gets one decision, in order, and every finding is verified.
 """
 
 from __future__ import annotations
@@ -11,12 +10,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from daydream.deep.records import item_uid
-
-#: Lenses the verifier never adjudicates, with the exemption reason each records.
-_EXEMPT_LENSES: dict[str, str] = {
-    "structural": "exempt:structural",
-    "wonder": "exempt:wonder",
-}
 
 
 @dataclass(frozen=True)
@@ -46,14 +39,12 @@ def select_items(items: Sequence[Mapping[str, Any]]) -> list[SelectionDecision]:
     for item in items:
         data = dict(item) if isinstance(item, Mapping) else {}
         item_id = data.get("id")
-        lens = str(data.get("lens", ""))
-        exempt = _EXEMPT_LENSES.get(lens)
         decisions.append(SelectionDecision(
             item_uid=item_uid(data),
             item_id=item_id if isinstance(item_id, int) and not isinstance(item_id, bool) else None,
-            selected=exempt is None,
-            reason_code=exempt or "verify_all",
-            reason=f"lens {lens!r} is verdict-exempt" if exempt else "every finding is verified",
+            selected=True,
+            reason_code="verify_all",
+            reason="every finding is verified",
         ))
     return decisions
 

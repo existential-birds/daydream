@@ -73,7 +73,6 @@ def format_verdict_join(
     matched: list[int | None],
     unmatched: list[int | None],
     skipped: list[int | None],
-    structural: list[int | None],
     other: list[int | None],
     total: int,
 ) -> Table:
@@ -97,7 +96,6 @@ def format_verdict_join(
         ("Matched", matched),
         ("Unmatched", unmatched),
         ("Skipped", skipped),
-        ("Structural", structural),
         ("Other", other),
     )
     computed_total = sum(len(values) for _, values in categories)

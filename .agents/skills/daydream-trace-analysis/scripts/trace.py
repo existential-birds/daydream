@@ -72,7 +72,7 @@ def load(path, run_id=None, line=None):
     if len(selected) != 1:
         raise ValueError(f"{path}: found {len(selected)} matching records; select one with --run-id or --line")
     line, record = selected[0]
-    if record.get("schema_version") == "daydream.run.v1":
+    if record.get("schema_version") == "daydream.run.v2":
         bundle = unwrap(record.get("trajectories")) or {}
         docs = bundle.get("documents", [])
         prefix = "/trajectories/value/documents"

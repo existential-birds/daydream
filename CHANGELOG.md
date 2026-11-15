@@ -34,8 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     Passing one of these fields raises `TypeError` (unexpected keyword argument), where
     `runner.run` used to refuse it with exit 1 or ignore it.
   - The `daydream.stack` trace span attribute and the `stack` parameter of `step_scope`.
-    The archive index keeps its `skill` column, now always written as null; the archive
-    schema is unchanged.
+    The archive index's `skill` column goes with the stored-format change below.
 - **Breaking (0.y.z):** Readers of files that only the replaced staged reviewer wrote are
   deleted ([#1860](https://github.com/existential-birds/daydream/issues/1860)):
   - `daydream.deep.routing_record.read_routing_record`, which read `latency-routing.json`. The
@@ -65,6 +64,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The `intents` and `review-cache` public `.daydream/` directories. Nothing writes either
     one. A run now deletes an existing `.daydream/review-cache/` from an earlier build when it
     starts, instead of carrying it into its published outputs.
+- **Breaking (0.y.z):** Stored formats drop the names of the replaced reviewer's phases and
+  lenses, and each changed format has a new version. Earlier versions are refused with their
+  existing messages and never converted or deleted
+  ([#1852](https://github.com/existential-birds/daydream/issues/1852)):
+  - Findings artifacts (`--findings-out`, the bot's `findings.json`) drop each finding's
+    `is_cross_stack` and move from schema 2 to 4, and immutable PR exports from 3 to 5.
+    `post-findings` refuses an earlier artifact with `artifact failed schema validation:
+    unsupported schema version 2`. The packaged producer and poster install the same release,
+    so only a review started on an earlier release and posted after the upgrade is refused
+    (the bot reports the failure on the PR); rerun the bot command. A consumer that reads
+    findings artifacts must accept the new versions and stop reading `is_cross_stack`.
+  - Dataset run records move from `daydream.run.v1` to `daydream.run.v2`: `provenance` no
+    longer has `latency_profile`, `latency_route` or `latency_routing`, and its
+    `effective_configuration` no longer has `skill`, `per_stack_review_backend`,
+    `per_stack_review_model` or `phases.per_stack_review`. A record store or Hub dataset
+    holding version 1 records is refused (`invalid_or_unknown_record_schema`,
+    `invalid_or_unknown_manifest`); capture into a fresh store and Hub dataset.
+  - The archive index moves from schema 9 to 10 without the `skill`,
+    `per_stack_review_backend` and `per_stack_review_model` columns, and the run manifest from
+    `2.0` to `3.0` without the same fields under `run`. An existing index is refused with
+    `unsupported archive index schema ... use a fresh archive directory`; use one. The
+    archive no longer records the review phase's resolved model; the dataset record's
+    `provenance.resolved_phases` still does.
+  - The default model and reasoning-effort tables (`PHASE_DEFAULT_MODELS`,
+    `DEEP_PHASE_DEFAULT_EFFORT`) lose their `parse`, `per_stack_review`, `intent`, `wonder`
+    and `merge` rows; no phase with these names runs.
+  - Canonical items accept only `per-stack` as a `lens`; an extension step that writes
+    `cross-stack`, `structural` or `wonder` fails the review's findings check. The report lists
+    every finding under one Issues heading, without the Structural Review, Cross-Stack Issues
+    and Wonder Findings groups or the `[cross-stack]` prefix, and the verifier no longer exempts
+    a lens: every finding is verified. The Verdict Join table has no Structural row.
+  - The extension API moves from 10 to 11: `CommentFinding`, which a finding renderer
+    receives, no longer has `is_cross_stack`. Declare `DAYDREAM_EXT_API = 11`.
 
 ### Fixed
 

@@ -52,3 +52,12 @@ def test_unsupported_schema_is_rejected_without_changing_database(
     with closing(connect(db_path)) as connection:
         assert list(connection.iterdump()) == before_dump
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    # An index of an earlier release (version 9, with its skill and per-stack reviewer columns) is refused alike.
+    earlier = tmp_path / "earlier"
+    _current_database(earlier)
+    with closing(connect(earlier / "index.db")) as connection, connection:
+        for column in ("skill", "per_stack_review_backend", "per_stack_review_model"):
+            connection.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT")
+        connection.execute("PRAGMA user_version = 9")
+    with pytest.raises(ValueError, match=r"\(version 9\); expected complete schema version 10 .*fresh archive"):
+        index.upsert_run(earlier, make_manifest(session_id="refused"))

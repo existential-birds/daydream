@@ -1,14 +1,14 @@
 # Extension contract (`daydream_ext`)
 
 Read before changing extension behavior or implementing a fork extension.
-Current API: **10**, the only version accepted. Exact exported types/methods live in
+Current API: **11**, the only version accepted. Exact exported types/methods live in
 [api.py](../daydream/extensions/api.py), [registry.py](../daydream/extensions/registry.py),
 and [builtins.py](../daydream/extensions/builtins.py); consult builder signatures
 for prompt names/kwargs instead of maintaining another inventory.
 
 ## Implement and validate
 
-1. Create `daydream_ext/__init__.py` with `DAYDREAM_EXT_API = 10` and
+1. Create `daydream_ext/__init__.py` with `DAYDREAM_EXT_API = 11` and
    `register(registry)`. Built-ins are seeded first; registries are per-run.
 2. After creating the package, run `uv sync --reinstall-package daydream` for
    editable discovery. Fork wheels include it through Hatch configuration.

@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from daydream.flows.engine import FlowContext
     from daydream.trajectory import DaydreamPhase
 
-EXTENSION_API_VERSION: int = 10
+EXTENSION_API_VERSION: int = 11
 
 
 class ExtensionError(Exception):
@@ -95,7 +95,6 @@ class CommentFinding:
     line: int | None
     title: str
     body: str
-    is_cross_stack: bool
     severity: str | None
     confidence: str | None
     fingerprint: str | None

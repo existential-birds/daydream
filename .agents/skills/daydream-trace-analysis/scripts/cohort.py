@@ -82,7 +82,7 @@ def context(record):
             if isinstance(task_section, dict) and task_section.get("status") == "available" else {})
     task = task if isinstance(task, dict) else {}
     result = {key: provenance.get(key) for key in (
-        "producer", "resolved_phases", "effective_configuration", "profile", "latency_profile",
+        "producer", "resolved_phases", "effective_configuration", "profile",
         "file_configuration", "repository_context", "flow")}
     result.update({key: task.get(key) for key in (
         "repository", "analyzed_revision", "diff_sha256", "source_diff_sha256", "input_scope", "dirty_tracked")})
@@ -92,8 +92,8 @@ def context(record):
 
 
 def run_row(record, source, line):
-    if not isinstance(record, dict) or record.get("schema_version") != "daydream.run.v1":
-        raise ValueError("expected a daydream.run.v1 capture object")
+    if not isinstance(record, dict) or record.get("schema_version") != "daydream.run.v2":
+        raise ValueError("expected a daydream.run.v2 capture object")
     if not isinstance(record.get("run_id"), str) or not record["run_id"]:
         raise ValueError("capture requires a nonempty run_id")
     captured_at = record.get("captured_at")

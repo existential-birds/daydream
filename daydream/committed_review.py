@@ -1291,8 +1291,7 @@ async def _run_committed_review(
             None if hosted is None else hosted.output_dir / "trajectory.json",
         )
         capture = _RunWriteCapture(session_id=run_id)
-        artifacts = _RunArtifacts(session, owner, trajectory, capture, None,
-                                  execution_input=inputs_by_kind["discovery"])
+        artifacts = _RunArtifacts(session, owner, trajectory, capture, None)
         if request.immutable_input is None:
             assert work.captured_source is not None
             diff = work.captured_source.diff
