@@ -44,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as a provider failure, which could open the circuit for the whole run. A stream that ends
   before it settles is still a truncation
   ([#1872](https://github.com/existential-birds/daydream/issues/1872)).
+- A diagram can cite a route file such as `src/routes/[slug]/+page.ts` or
+  `app/routes/users.$userId.tsx`. Its spec's `file` fields no longer carry the model-path
+  pattern; grounding accepts a citation that exactly names a Git-observed path of the captured
+  change or the checked-out tree and holds every other path to the model grammar, so a bracket
+  path that names no such file is still refused. Posting reads each cited file from the head
+  tree by its exact name, percent-encoded on GitHub's contents API, and never expands it
+  ([#1879](https://github.com/existential-birds/daydream/issues/1879)).
 
 ## [0.35.2] - 2026-11-15
 

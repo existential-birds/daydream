@@ -1203,6 +1203,10 @@ index; preserve unsupported indexes and use a fresh directory.
 Models supply evidence-bearing JSON; the host grounds it against immutable head
 source and renders Mermaid. Forcing a kind changes eligibility, never grounding.
 Flowchart grounding proves statements/calls exist, not arrow execution order.
+A citation's `file` follows the model-path grammar unless it exactly names a Git-observed
+path of the captured change or the checked-out tree, such as `src/routes/[slug]/+page.ts`
+or `app/routes/users.$userId.tsx`. Posting reads every cited file from the head tree by
+that exact name (percent-encoded on GitHub's contents API); no path is expanded.
 Review diagram failures warn and retain findings; diagram-only failures exit 1.
 Custom flow ordering remains authoritative. Read [diagram flow](extensions.md#diagram)
 and [grounding](../daydream/deep/diagram_grounding/) before changing this boundary.

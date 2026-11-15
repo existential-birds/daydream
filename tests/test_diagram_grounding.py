@@ -71,6 +71,18 @@ _NON_EXECUTABLE_PY = '''def classify(value):
     return None
 '''
 
+# Route files whose names hold pathname- and shell-expansion characters.
+_SLUG_PAGE_PY = """from app.routes import users
+
+
+def load(request):
+    return load_user(request)
+"""
+
+_USER_ROUTE_PY = """def load_user(request):
+    return request
+"""
+
 _LEGACY_RB = """def resolve_legacy(request)
   request
 end
@@ -92,6 +104,7 @@ NON_EXECUTABLE_ROOT = CandidateRoot(file="pkg/non_executable.py", name="classify
 HUNKS: dict[str, list[tuple[int, int]]] = {
     "pkg/api.py": [(4, 6)], "pkg/service.py": [(1, 2)], "pkg/flow.py": [(1, 9)], "pkg/big.py": [(1, 39)],
     "pkg/caller.rb": [(1, 3)], "pkg/legacy.rb": [(1, 3)], **{f"pkg/p{index:02d}.py": [(1, 3)] for index in range(12)},
+    "app/routes/[slug]/+page.py": [(1, 5)], "app/routes/users.$userId.py": [(1, 2)],
 }
 
 _BIG_LAST_STATEMENT = 38
@@ -114,7 +127,8 @@ def repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
     (root / "pkg").mkdir()
     files = {"pkg/api.py": _API_PY, "pkg/service.py": _SERVICE_PY, "pkg/flow.py": _FLOW_PY,
         "pkg/non_executable.py": _NON_EXECUTABLE_PY, "pkg/big.py": _big_py(), "pkg/legacy.rb": _LEGACY_RB,
-        "pkg/caller.rb": _CALLER_RB,
+        "pkg/caller.rb": _CALLER_RB, "app/routes/[slug]/+page.py": _SLUG_PAGE_PY,
+        "app/routes/users.$userId.py": _USER_ROUTE_PY,
     }
     for index in range(12):
         body = [
@@ -124,6 +138,7 @@ def repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
         ]
         files[f"pkg/p{index:02d}.py"] = "\n".join(body) + "\n"
     for name, text in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
         (root / name).write_text(text)
     git(root, "add", "-A")
     commit(root, "fixtures")
@@ -200,7 +215,7 @@ def base_flowchart() -> dict[str, Any]:
 
 def run_sequence(repo: Path, symbols: RepoSymbols, spec: dict[str, Any]) -> GroundingReport:
     """Ground ``spec`` as a sequence diagram against the fixture repo."""
-    return ground_sequence(spec, repo_root=repo, hunk_ranges=HUNKS, symbols=symbols,)
+    return ground_sequence(spec, repo_root=repo, hunk_ranges=HUNKS, symbols=symbols, observed_paths=HUNKS)
 
 
 def run_flowchart(
@@ -234,6 +249,11 @@ def test_sequence_graph_isolates_bad_elements_and_preserves_live_order_and_block
                 ("Missing", ["pkg/api.py", "pkg/ghost.py"]),
                 ("Empty", []),
                 ("Escape", ["../elsewhere/service.py"]),
+                # Changed route files are cited by their exact Git names; a bracket path that names
+                # no Git-observed file still meets the model grammar, which refuses it.
+                ("Page", ["app/routes/[slug]/+page.py"]),
+                ("UserRoute", ["app/routes/users.$userId.py"]),
+                ("GhostRoute", ["app/routes/[ghost]/+page.py"]),
             ]
         ]
     )
@@ -297,6 +317,9 @@ def test_sequence_graph_isolates_bad_elements_and_preserves_live_order_and_block
     messages.append("not a message")
     expected[f"message:{len(messages)}"] = "MALFORMED_ELEMENT"
     messages.append({**call, "kind": "telepathy"})
+    route_index = len(messages)
+    messages.append({**call, "from": "Page", "to": "UserRoute", "label": "load user",
+                     "evidence": {"file": "app/routes/[slug]/+page.py", "line": 5, "symbol": "load_user"}})
     spec["messages"] = messages
     spec["blocks"] = [
         {
@@ -330,6 +353,12 @@ def test_sequence_graph_isolates_bad_elements_and_preserves_live_order_and_block
     assert check_for(report, "participant", "Missing").reason == "PARTICIPANT_FILE_MISSING"
     assert check_for(report, "participant", "Empty").reason == "PARTICIPANT_NO_FILES"
     assert check_for(report, "participant", "Escape").reason == "PATH_ESCAPES_REPO"
+    assert check_for(report, "participant", "Page").grounded and check_for(report, "participant", "UserRoute").grounded
+    assert check_for(report, "message", str(route_index)).defined_at == "app/routes/users.$userId.py:1"
+    assert check_for(report, "participant", "GhostRoute").reason == "PATH_ESCAPES_REPO"
+    # Posting reads each cited route file from the head tree by its exact name and grounds it again.
+    payload = {"results": {"sequence": {"status": "rendered", "spec_final": report.spec_final}}}
+    assert validate_diagram_payload(payload, target_dir=repo, head_sha=git(repo, "rev-parse", "HEAD")) is None
     assert check_for(report, "participant", "ExternalFiles").reason == "EXTERNAL_MISUSED"
     assert check_for(report, "participant", "BadExternal").reason == "EXTERNAL_MISUSED"
     assert [check.reason for check in report.elements if check.element == "participant"].count("MALFORMED_ELEMENT") == 2
@@ -353,6 +382,7 @@ def test_sequence_graph_isolates_bad_elements_and_preserves_live_order_and_block
         "orphan check call",
         "symbol snap",
         "self interaction",
+        "load user",
     ]
     assert check_for(report, "message", str(snap_index)).snapped_line == 5
     assert report.spec_final["messages"][4]["evidence"]["line"] == 5

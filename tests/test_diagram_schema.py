@@ -61,13 +61,13 @@ def test_coercion_drops_each_malformed_entry_and_remaps_block_indices() -> None:
     good, digit = _message(), _message(evidence={**evidence, "line": "6"})
     sequence = coerce_sequence_spec({
         "participants": [
-            {"name": "Handler", "kind": "internal", "files": ["a.py", "a.py", "a$b.py", "../x.py", 3]},
+            {"name": "Handler", "kind": "internal", "files": ["a.py", "a.py", "/a.py", "../x.py", 3]},
             "not a participant", {"name": "", "kind": "internal"}, {"name": "Ghost", "kind": "daemon"},
             {"name": "Handler", "kind": "external"},
             {"name": "Resolver", "kind": "external", "files": "nope", "service": "svc"}],
         "messages": ["not a message", good, digit, _message(kind="broadcast"),
                      *(_message(evidence={**evidence, **bad}) for bad in (
-                         {"line": True}, {"line": 0}, {"file": "a$b.py"}, {"symbol": None})),
+                         {"line": True}, {"line": 0}, {"file": "/a.py"}, {"symbol": None})),
                      _message(evidence="nowhere")],
         "blocks": ["x", {"kind": "loop", "branches": []}, {"kind": "weird", "branches": []},
                    {"kind": "opt", "branches": [
