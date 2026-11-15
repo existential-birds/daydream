@@ -212,6 +212,11 @@ not. Each claim carries a required `severity` (`high`, `medium` or `low`, define
 consequence in the host instructions); the challenge judges it with the claim and corrects
 it only by revising the claim. Confirmed findings carry it to every consumer of the
 canonical items. Retain confirmed, substantively rejected and unresolved concerns separately.
+A confirmed claim that names predecessors in `source_uids` is delivered in their place: the sealed
+`findings`, which the report, the outcome line, the findings export, posting, approval and severity
+counts read, are the confirmed claims less every claim another confirmed claim names, so along a chain
+only its last claim is delivered. A rejected or unresolved synthesis leaves its confirmed predecessors
+delivered, and `claims` keep every claim with its disposition.
 Missing/failed challenge is unfinished work. Whole-submission admission rechecks authority,
 revisions and limits before installation; closure precedes cleanup and sealing.
 Cancellation installs interrupted coverage and retained concerns before propagating.
@@ -315,7 +320,9 @@ Siblings admit independently. Preparation validates a delta; installation, at on
 synchronous point, rechecks only touched identities (target still undecided and owned
 by this work, claim revision current, retained claim/coverage capacity) and then mints
 claim ordinals. A sibling conflict is a correctable rejection; closure or deadline
-remains fatal. Any retained claim can become a finding, so retained claims share what the
+remains fatal. A new claim whose canonical payload equals a retained claim's is refused,
+correctably, so an attempt that repeats an admitted claim cannot deliver it twice. Any
+retained claim can become a finding, so retained claims share what the
 review's findings export (`findings.json`, the hosted route's paired output) can hold:
 installation refuses, correctably, a batch after which that export would exceed its
 1 MiB bound with every retained claim as a relocated inline finding and every scope and phase
@@ -718,7 +725,9 @@ records it as a completed turn, never as a failure ([Codex host tools](#codex-ho
 Apart from that rejected submission, paths that do not retry are never refunded,
 including a committed challenge re-dispatch. Committed
 batches admitted before a provider failure stay installed while that attempt's starts
-are refunded with the rest of the attempt.
+are refunded with the rest of the attempt. The retry's first message ends with a host line
+of what earlier attempts of that work admitted: its undecided targets, its claims and its
+verdicts, bounded as its assignment's context is.
 
 Every budget stop records its owner, dimension (`time` or `tool_calls`), limit, amount
 spent, amount remaining at dispatch and calls reserved for later work, as durations and
@@ -970,10 +979,9 @@ refused before any process or server starts, and the disposable read-only checko
   released after it. A turn that completes and exits zero with no accepted submission
   is a retryable truncation. As the invocation's first retry it gets one fresh attempt
   under the [renewal rule](#budget-ledger): admitted target decisions stay installed and
-  the attempt's starts are refunded. It is not retried after an earlier retryable
-  provider failure, nor once it admitted a claim, because a fresh conversation is not
-  told what the earlier one admitted. It is the provider answering, so the outage
-  circuit records a completed turn, not a failure. An assignment that ends unsubmitted
+  the attempt's starts are refunded, and the retry is told what the attempt admitted. It is
+  not retried after an earlier retryable provider failure. It is the provider answering, so
+  the outage circuit records a completed turn, not a failure. An assignment that ends unsubmitted
   keeps the reason `missing_output` unless a budget or deadline limit stops it first;
   that limit's reason is then sealed.
 - Not offered: resuming a native conversation with host tools, a capacity preflight, or

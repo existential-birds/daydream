@@ -23,6 +23,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can read the per-attempt callback secret; 0.169.0 does not expose it. The packaged
   templates do not install Codex.
 
+### Fixed
+
+- A review no longer delivers one defect twice when a later claim restates an earlier one.
+  When the challenge confirmed both a claim and a claim that names it in `source_uids` (a
+  cross-assignment claim that combines a discovery claim, for example), both were findings:
+  the pull request got two comments, and the outcome line, severity counts and
+  `--approve-on-clean` counted two. A confirmed claim now replaces every claim it names, so
+  along a chain only the last is delivered. The sealed result's `findings`, the report, the
+  outcome line, the findings export and posting all read that delivered set, on every route.
+  A rejected or unresolved synthesis leaves its predecessors delivered, and `claims` keep
+  every claim with its disposition. The result schema versions are unchanged
+  ([#1864](https://github.com/existential-birds/daydream/issues/1864)).
+- A retried review attempt is now told what its failed attempt admitted, and cannot admit
+  the same claim twice. A retry is a fresh conversation that saw every target undecided and
+  no claims, so it could install a claim the failed attempt had already admitted, deliver it
+  as a second finding, and pay a rejected start for each target it re-decided. Its first
+  message now ends with the work's undecided targets, admitted claims and verdicts, and a
+  new claim whose payload exactly equals a retained claim's is refused as a correctable
+  rejection. A Codex turn that ends unsubmitted after admitting a claim is now retried like
+  any other unsubmitted turn
+  ([#1831](https://github.com/existential-birds/daydream/issues/1831)).
+
 ## [0.35.0] - 2026-11-15
 
 ### Added
