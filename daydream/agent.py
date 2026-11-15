@@ -366,19 +366,12 @@ async def run_agent(
         DaydreamPhase.REVIEW, DaydreamPhase.DEEP, DaydreamPhase.EXPLORATION,
         DaydreamPhase.INTENT, DaydreamPhase.ALTERNATIVES, DaydreamPhase.VERIFY,
     }:
-        # Host composition also covers wholesale extension prompt overrides.
+        # The only insertion of the guidance: composed text can quote either variant as untrusted data.
         # Read-only Pi has only its stock bounded tools: no shell, Git or helper.
-        search_guidance = REPOSITORY_SEARCH_GUIDANCE
-        if read_only and is_adapter_instance(backend, "PiBackend"):
-            # Composed review prompts embed the shell guidance; substitute it in place.
-            search_guidance = READ_ONLY_PI_SEARCH_GUIDANCE
-            prompt = prompt.replace(REPOSITORY_SEARCH_GUIDANCE, search_guidance)
-            if review_instructions:
-                review_instructions = review_instructions.replace(REPOSITORY_SEARCH_GUIDANCE, search_guidance)
-        if search_guidance not in prompt:
-            prompt += "\n\n" + search_guidance
-        # Instructions can quote untrusted text that repeats the guidance; only the host's own copy ends them.
-        if review_instructions and not review_instructions.endswith(search_guidance):
+        search_guidance = (READ_ONLY_PI_SEARCH_GUIDANCE if read_only and is_adapter_instance(backend, "PiBackend")
+                           else REPOSITORY_SEARCH_GUIDANCE)
+        prompt += "\n\n" + search_guidance
+        if review_instructions:
             review_instructions += "\n\n" + search_guidance
     if sanctioned_inputs is not None:
         prompt = sanctioned_inputs.render_prompt(prompt)
@@ -697,6 +690,8 @@ async def _run_agent(
                         attempt_prompt += retry_budget_update
                         if "review_instructions" in execute_kwargs:
                             execute_kwargs["review_instructions"] += retry_budget_update
+                        if host_tools is not None and host_tools.retry_context is not None:
+                            attempt_prompt += host_tools.retry_context()
                     event_iter = backend.execute(
                         cwd, attempt_prompt, output_schema, continuation,
                         **execute_kwargs,

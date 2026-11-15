@@ -25,6 +25,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A review no longer delivers one defect twice when a later claim restates an earlier one.
+  When the challenge confirmed both a claim and a claim that names it in `source_uids` (a
+  cross-assignment claim that combines a discovery claim, for example), both were findings:
+  the pull request got two comments, and the outcome line, severity counts and
+  `--approve-on-clean` counted two. A confirmed claim now replaces every claim it names, so
+  along a chain only the last is delivered. The sealed result's `findings`, the report, the
+  outcome line, the findings export and posting all read that delivered set, on every route.
+  A rejected or unresolved synthesis leaves its predecessors delivered, and `claims` keep
+  every claim with its disposition. The result schema versions are unchanged
+  ([#1864](https://github.com/existential-birds/daydream/issues/1864)).
+- A retried review attempt is now told what its failed attempt admitted, and cannot admit
+  the same claim twice. A retry is a fresh conversation that saw every target undecided and
+  no claims, so it could install a claim the failed attempt had already admitted, deliver it
+  as a second finding, and pay a rejected start for each target it re-decided. Its first
+  message now ends with the work's undecided targets, admitted claims and verdicts, and a
+  new claim whose payload exactly equals a retained claim's is refused as a correctable
+  rejection. A Codex turn that ends unsubmitted after admitting a claim is now retried like
+  any other unsubmitted turn
+  ([#1831](https://github.com/existential-birds/daydream/issues/1831)).
+- The reviewer can run the search helper its guidance names when Daydream is embedded in
+  another process or runs from a virtual environment whose `bin` is not on `PATH`. The
+  guidance named a bare `daydream search`, which such a shell answered with
+  `daydream: command not found`, at the cost of a tool start each time. It now names the
+  helper through the running interpreter (`<python> -m daydream search`), and Claude's
+  read-only Bash guard admits exactly that form instead of a bare `daydream search`. A
+  read-only Codex turn that runs in a clone of the checkout keeps that interpreter path
+  even when it lies in the checkout's ignored virtual environment, which the clone lacks
+  ([#1830](https://github.com/existential-birds/daydream/issues/1830),
+  [#1868](https://github.com/existential-birds/daydream/issues/1868)).
+- Author text that quotes the host's search guidance reaches the reviewer unchanged. On
+  read-only Pi, a description that quoted it was rewritten before delivery, so the model
+  did not read what the sealed result records, and on every backend quoted guidance in a
+  prompt could stand in for the host's own copy. The host now appends its guidance, with
+  read-only Pi's variant chosen there, once to every search turn's prompt and instructions
+  and never rewrites composed text; committed review's first message no longer carries a
+  token line for it ([#1825](https://github.com/existential-birds/daydream/issues/1825)).
+- An author description, frozen by an embedder or fetched from the pull request, is
+  measured against its 65536-byte bound in UTF-8 bytes, as the immutable envelope's
+  `context` is. It was measured JSON-escaped twice, for a command-line transport it no
+  longer uses: it travels in each assignment's first message, never in the system
+  instructions that Codex and Claude pass as one argument. A description heavy in quotes,
+  backslashes or control characters was refused, or cut when fetched, well below 64 KiB
+  ([#1849](https://github.com/existential-birds/daydream/issues/1849)).
 - A change with a binary file no longer leaves the review incomplete when the reviewer marks that
   file `not_reviewed`. A changed file whose captured diff is binary (Git's `Binary files … differ`,
   with no text hunk) is now decided by the host as `reviewed` with the reason

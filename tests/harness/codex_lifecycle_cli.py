@@ -60,14 +60,14 @@ def install_codex_lifecycle_cli(
     root: Path, *, mode: LifecycleMode = "healthy", fix_modes: dict[str, LifecycleMode] | None = None,
     structure_mode: LifecycleMode | None = None, shutdown_delay_s: float = 0.0,
     empty_reviews: bool = False, spawn_on_term: bool = False,
-    tool_output_path: Path | None = None,
+    tool_output_path: Path | None = None, run_search: bool = False,
 ) -> CodexLifecycleCli:
     root = root.resolve()
     for name in ("bin", "observations", "controls", "fix_started"):
         (root / name).mkdir(parents=True)
     config = {"root": str(root), "mode": mode, "fix_modes": fix_modes or {},
               "structure_mode": structure_mode, "shutdown_delay_s": shutdown_delay_s, "empty_reviews": empty_reviews,
-              "spawn_on_term": spawn_on_term,
+              "spawn_on_term": spawn_on_term, "run_search": run_search,
               "tool_output_path": None if tool_output_path is None else str(tool_output_path)}
     executable = root / "bin" / "codex"
     executable.write_text(
@@ -178,9 +178,10 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
     Codex-owned starts, a rejected submission, an admitted batch, the terminal submission
     and two host calls after acceptance) or challenged, every assigned claim in one turn;
     one with no targets submits an empty batch. The first review attempt admits its
-    targets and ends its turn unsubmitted; the host's retry admits the claim and submits.
-    Mode ``unsubmitted`` admits its claim, then its targets, and never submits its review, and
-    judges nothing until a challenge supersedes the unsubmitted one. Otherwise the user prompt
+    targets and its claim and ends its turn unsubmitted; the host's retry admits the same
+    claim again, whatever its first message says, and submits. Mode ``unsubmitted`` admits its
+    claim, then its targets, and never submits its review, its retry repeating the claim twice,
+    and judges nothing until a challenge supersedes the unsubmitted one. Otherwise the user prompt
     is the JSON submission, followed by as many Codex-owned shell starts as its ``shells`` asks.
     """
     from mcp import ClientSession
@@ -260,6 +261,12 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
                 option = next(item for item in json.loads(texts[0])["target"]["source_options"]
                               if item["side"] == "new")
                 shell("command")
+                if _FIXTURE_CONFIG["run_search"] and "Retry dispatch-time snapshot" not in prompt:
+                    # As Codex's shell runs it: the helper named by the host's own copy of the guidance, the
+                    # last one in the prompt, from this process's checkout and environment.
+                    named = re.findall(r"Use `(.+?) 'literal' path/to/source", prompt)[-1]
+                    host["search"] = subprocess.run(f"{named} VALUE {option['path']}", shell=True,
+                                                    capture_output=True, text=True, check=False).stdout
                 # Codex fails another server's call itself (the shape of a refused approval).
                 failed = {"result": None, "error": {"message": "user cancelled MCP tool call"}, "status": "failed"}
                 other = {"type": "mcp_tool_call", "id": "other", "server": "user", "tool": "search", "arguments": {}}
@@ -276,8 +283,9 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
                     await call("structured_output", {"targets": [{**decisions[0], "target_id": "unplanned"}],
                                                      "claims": []})
                 retry = "Retry dispatch-time snapshot" in prompt
-                await call("review_admit", {"targets": [] if retry else decisions, "claims": [claim] if retry else []})
-                if retry:
+                await call("review_admit", {"targets": [] if retry else decisions,
+                                            "claims": [] if mode == "unsubmitted" and not retry else [claim]})
+                if retry and mode != "unsubmitted":
                     await call("structured_output", {"targets": [], "claims": []})
                     # After acceptance: one host call the host refuses, one Codex fails itself.
                     await call("review_source", lookup)

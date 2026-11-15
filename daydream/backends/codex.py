@@ -71,6 +71,7 @@ from daydream.host_tools import (
     HostToolRejected,
 )
 from daydream.pricing import ModelPrice, compute_cost_from_totals, load_user_prices, resolve_prices
+from daydream.prompts import grounding
 from daydream.trajectory import redact_structured_text
 
 _CODEX_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
@@ -258,12 +259,16 @@ def _rebind_source_paths(prompt: str, source: Path, execution: Path) -> str:
     """Replace source paths in prompts, including resolved and doubled-slash forms.
 
     Match path boundaries so sibling prefixes such as work-2/workspace/work.py
-    remain unchanged; no recognized source spelling may reach isolated stdin.
+    remain unchanged; no recognized source spelling may reach isolated stdin, except
+    the search helper's command: its interpreter is a host tool, which can live in an
+    ignored environment under the source that the clone does not carry.
     """
+    helper = grounding.DAYDREAM_SEARCH_COMMAND
+    parts = prompt.split(helper)
     for candidate in {str(source), str(source.resolve())}:
         pattern = re.escape(candidate).replace("/", "/+") + r"(?![\w.-])"
-        prompt = re.sub(pattern, str(execution), prompt)
-    return prompt
+        parts = [re.sub(pattern, str(execution), part) for part in parts]
+    return helper.join(parts)
 
 
 _SHELL_LC_PREFIX_RE = re.compile(r"^/bin/(?:zsh|bash|sh)\s+-lc\s+")
@@ -539,7 +544,6 @@ class _CodexHostEndpoint(HostToolEndpoint):
         self.token = secrets.token_urlsafe(32)
         self.url = ""
         self._calls = 0
-        self.claims_admitted = False
         self._stop = asyncio.Event()
         self._serving: asyncio.Task[None] | None = None
 
@@ -621,10 +625,7 @@ class _CodexHostEndpoint(HostToolEndpoint):
                                        "the call was not served", code="authority_closed")
             binding.admit(call_id, name, arguments, terminal=name == NATIVE_SUBMIT)
             if name != NATIVE_SUBMIT:
-                receipt = binding.call(call_id, name, arguments)
-                # A committed-review admission receipt lists the claims its batch touched.
-                self.claims_admitted |= bool(receipt.get("admitted", {}).get("claims"))
-                return False, self.result_blocks(receipt)
+                return False, self.result_blocks(binding.call(call_id, name, arguments))
             result = binding.submit(call_id, arguments)
             # Acceptance closes authority at once: later starts become observed overshoot.
             binding.close_authority()
@@ -761,9 +762,10 @@ class CodexBackend:
         read_only adds a sandbox and, at Git worktree roots, a disposable standalone
         clone of HEAD, index, tracked/nonignored files, and refs without a source
         remote. Git metadata mutations therefore affect the clone. Exclude source
-        paths from argv/stdin/env/cwd; independently discovered paths remain a
-        limitation. Non-root cwd uses the sandbox in place. Clone preparation and
-        read-only resumption failures raise CodexError; never fall back to source.
+        paths from argv/stdin/env/cwd, except the search helper's interpreter;
+        independently discovered paths remain a limitation. Non-root cwd uses the
+        sandbox in place. Clone preparation and read-only resumption failures
+        raise CodexError; never fall back to source.
         Keep native session identity but omit continuation for deleted checkouts.
         The default uses danger-full-access in the caller's cwd.
 
@@ -1463,9 +1465,8 @@ class CodexBackend:
                 host.binding.native_settled = host.binding.accepted
             if _pending_result is not None:
                 yield _pending_result
-            if host is not None and not host.binding.closed and not host.claims_admitted:
-                # Neither accepted nor failed. A fresh conversation is not told what this one admitted,
-                # so a turn that admitted a claim is never replayed.
+            if host is not None and not host.binding.closed:
+                # Neither accepted nor failed.
                 raise CodexUnsubmittedTurn("Codex completed its turn without an accepted structured_output submission",
                                            category="STREAM_TRUNCATION")
 

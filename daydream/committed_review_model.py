@@ -129,6 +129,16 @@ INVESTIGATION_KINDS = frozenset({"discovery", "follow_up", "cross_assignment"})
 WORK_KINDS = [*sorted(INVESTIGATION_KINDS), "challenge"]
 
 
+def delivered_findings(claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Confirmed claims, less each one that another confirmed claim names in its ``source_uids``.
+
+    A confirmed synthesis delivers its predecessors' defect in their place; a rejected or unresolved one does not.
+    """
+    confirmed = [claim for claim in claims if claim["disposition"] == "confirmed"]
+    subsumed = {uid for claim in confirmed for uid in claim["source_uids"]}
+    return [claim for claim in confirmed if claim["uid"] not in subsumed]
+
+
 def planned_work_id(revision: dict[str, Any], assignments: list[dict[str, Any]]) -> str:
     return hashlib.sha256(canonical_json({"revision": revision, "assignments": assignments}).encode()).hexdigest()
 
@@ -301,7 +311,7 @@ def validate_committed_result(value: dict[str, Any]) -> None:
             for verdict in claim["challenge_evidence"]
         ):
             raise ValueError("publication/rejection requires current-revision challenge evidence")
-    if value["findings"] != [claim for claim in claims if claim["disposition"] == "confirmed"]:
+    if value["findings"] != delivered_findings(claims):
         raise ValueError("findings differ from challenged publication claims")
     native_assignments = {e["assignment"] for e in value["execution"]}
     superseded = {wid for wid, record in work.items() if record["state"] == "superseded"}

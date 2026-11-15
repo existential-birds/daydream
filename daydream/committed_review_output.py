@@ -54,10 +54,10 @@ def render_committed_review(payload: Mapping[str, Any]) -> str:
     lines.extend(['', '## Findings', ''])
     if not payload['findings']:
         lines.append('No confirmed findings.')
-    for disposition, heading in (
-        ('confirmed', None), ('unresolved', 'Unresolved concerns'), ('rejected', 'Rejected concerns'),
-    ):
-        claims = [claim for claim in payload['claims'] if claim['disposition'] == disposition]
+    concerns = {disposition: [claim for claim in payload['claims'] if claim['disposition'] == disposition]
+                for disposition in ('unresolved', 'rejected')}
+    for heading, claims in ((None, payload['findings']), ('Unresolved concerns', concerns['unresolved']),
+                            ('Rejected concerns', concerns['rejected'])):
         if heading is not None and claims:
             lines.extend(['', '## ' + heading, ''])
         for claim in claims:

@@ -163,6 +163,22 @@ async def test_snapshot_boundaries(
         review.patch.setattr('daydream.pr_review.find_pr_by_number', lookup)
         review.backend = EmptyReviewBackend(review.repo, responder=advance)
         review.backend.review_claims = [{'title': 'Grounded defect', 'file': 'api.py', 'line': 2, 'severity': 'low'}]
+        scripted = review.backend._scripted_review
+
+        def synthesize(prompt: str, binding: Any) -> dict[str, Any]:
+            # Discovery admits its claim, then a claim that restates it in more detail and names it as its
+            # predecessor. The challenge confirms both, and the synthesis alone is delivered.
+            value = scripted(prompt, binding)
+            if 'verdicts' in value:
+                return value
+            binding.admit('admit', 'review_admit', value)
+            (predecessor,) = binding.call('admit', 'review_admit', value)['admitted']['claims']
+            (claim,) = value['claims']
+            return {'targets': [], 'claims': [{
+                **claim, 'source_uids': [predecessor['uid']], 'title': 'Grounded defect, restated',
+                'payload': {**claim['payload'], 'claim': 'api.py line 2 changes the grounded behavior.'}}]}
+
+        review.patch.setattr(review.backend, '_scripted_review', synthesize)
         assert await review.run() == 0
         assert collapse_panel_text(capsys).count('Review complete: 1 confirmed finding.') == 1
         data = review.load()
@@ -170,7 +186,8 @@ async def test_snapshot_boundaries(
         assert result['analysis_state'] == 'complete'
         assert live.head_sha == review.pr.base_sha and git_ops.head_sha(review.repo) == review.pr.head_sha
         assert git_ops.show(review.repo, live.head_sha, 'api.py') and len(calls) == 1
-        assert (data['findings'][0]['placement'], data['findings'][0]['line']) == ('inline', 2)
+        assert [(finding['title'], finding['placement'], finding['line']) for finding in data['findings']] == [
+            ('Grounded defect, restated', 'inline', 2)]
         assert result['analyzed_revision']['pr_base_sha'] == review.pr.base_sha
         # The poster takes that produced artifact only for the event it was produced for: a moved head, another
         # repository or another pull request is refused before any GitHub call.
@@ -192,7 +209,6 @@ async def test_snapshot_boundaries(
         # An incomplete review still exports its admitted finding with truthful coverage, and never approves.
         # Discovery admits its claim and all but one decision, then calls tools until its allowance is spent.
         review.backend.review_undecided = 1
-        scripted = review.backend._scripted_review
 
         def exhaust(prompt: str, binding: Any) -> dict[str, Any]:
             value = scripted(prompt, binding)

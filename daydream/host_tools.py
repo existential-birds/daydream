@@ -226,6 +226,8 @@ class HostToolBinding:
         self.prompt_bytes = 0
         self.native_limits: dict[str, Any] | None = None
         self._host_pending: dict[str, str] = {}
+        # Domain state a retried attempt's fresh conversation is shown after its dispatch-time first message.
+        self.retry_context: Callable[[], str] | None = None
 
     @property
     def deadline(self) -> float:
