@@ -1451,8 +1451,7 @@ class CodexBackend:
                 # completed turn, zero exit and cleanup settle it.
                 _pending_result.structured_output = host.binding.accepted_result
                 host.binding.native_settled = host.binding.accepted
-            if _pending_result is not None:
-                yield _pending_result
+            yield _pending_result
             if host is not None and not host.binding.closed:
                 # Neither accepted nor failed.
                 raise UnsubmittedTurn("Codex completed its turn without an accepted structured_output submission")
