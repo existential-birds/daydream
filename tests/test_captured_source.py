@@ -58,6 +58,15 @@ def test_capture_uses_working_bytes_of_a_staged_addition(
         captured.read("old", "added.py")
     assert captured.read("new", "added.py")[1] == b"value = 2\n"
     assert (captured.root / "added.py").read_bytes() == b"value = 2\n"
+    # A path the source holds but that sits over the OS path limit at a deeper destination is refused by name.
+    deep = tmp_path / ("c" * 200) / "captured"
+    deep.parent.mkdir()
+    limit = os.pathconf(tmp_path, "PC_PATH_MAX")
+    directory = "/".join(["d" * 200] * 20)[: limit - len(os.fsencode(deep)) - 1] + "d"
+    write_and_stage(repo, f"{directory}/long.py", "value = 3\n")
+    with pytest.raises(GitError, match=rf"captured source path '{directory}/long.py' is \d+ bytes at the capture "
+                       rf"destination, over the OS path limit of {limit} bytes"):
+        capture_source(repo, deep, base_sha=base, head_sha=head, local=True)
 
 
 def test_capture_of_a_shallow_clone_stays_copyable(

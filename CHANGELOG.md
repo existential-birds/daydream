@@ -26,6 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gone. Reviews of this repository come from the hosted review service. No package user is
   affected: `daydream setup` and the packaged templates it installs do not depend on them.
 
+### Fixed
+
+- Test healing saves and restores a forbidden generated-file edit whose bytes are not UTF-8,
+  instead of stopping the fixing run with `UnicodeDecodeError`. Its recovery patch shows each
+  such byte as U+FFFD, as review diffs do; the smart-quote scrub still skips an attribution diff
+  that is not UTF-8 ([#1870](https://github.com/existential-birds/daydream/issues/1870)).
+- A changed path that fits the checkout but sits over the OS path limit at the capture
+  destination fails capture with the path, its length there and the limit, instead of
+  "captured native source population changed", which describes a concurrent change
+  ([#1870](https://github.com/existential-birds/daydream/issues/1870)).
+
 ## [0.35.2] - 2026-11-15
 
 ### Changed
