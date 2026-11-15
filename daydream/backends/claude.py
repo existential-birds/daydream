@@ -599,7 +599,7 @@ def _is_read_only_command(cmd: str) -> bool:
     if argv is None:
         return False  # Malformed quoting -- deny (fail-closed).
     for family in READ_ONLY_BASH_ALLOWLIST:
-        words = family.split()
+        words = shlex.split(family)
         if argv[: len(words)] == words:
             if family.startswith("git ") and _denies_git_output_option(argv, len(words)):
                 return False

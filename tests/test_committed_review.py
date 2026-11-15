@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -2600,7 +2601,8 @@ async def test_committed_review_completes_through_native_host_tools(
     Outputs, trajectory, native contexts and execution entries come from the production program,
     not a substituted dispatcher. Claude is its real bundled CLI on the run-local SDK route; Codex
     is an external process that is a real MCP client of the invocation's loopback server, since
-    the gate has no Codex binary.
+    the gate has no Codex binary. The search helper the host's guidance names runs in the
+    reviewer's shell although no `daydream` command is on its PATH, as in an embedding process.
     """
     repo = tmp_path / "subject"
     base = {"api.py": "VALUE = 1\n", "caller.py": "TOTAL = 10 / 1\n"}
@@ -2616,9 +2618,14 @@ async def test_committed_review_completes_through_native_host_tools(
         review_profile=replace(profile, profile=replace(profile.profile, strategies=strategies))))
     delivered: list[tuple[str, str]] = []
     capture_reads: list[bool] = []
+    monkeypatch.setenv("PATH", os.pathsep.join(entry for entry in os.environ["PATH"].split(os.pathsep)
+                                               if shutil.which("daydream", path=entry) is None))
+    assert shutil.which("daydream") is None
+    named_search = re.compile(r"Use `(.+?) 'literal' path/to/source")
     if backend == "claude":
         steps: dict[str, int] = {}
         claims: list[dict[str, Any]] = []
+        searched: list[tuple[bool, list[str]]] = []
 
         def assignment(body: dict[str, Any]) -> dict[str, Any]:
             system, first = body["system"], body["messages"][0]["content"]
@@ -2647,10 +2654,15 @@ async def test_committed_review_completes_through_native_host_tools(
             decisions = [{"target_id": target, "status": "reviewed", "reason": "Captured change inspected.",
                           "evidence_refs": []} for target in targets]
             if step == 1:
-                return tool("lookup", "mcp__daydream__review_source", {"target_id": targets[0], "path": None,
-                                                                       "cursor": None})
+                # The host's own copy of the guidance closes the first message.
+                command = named_search.findall(delivered[-1][1])[-1]
+                return tool("search", "Bash", {"command": f"{command} VALUE api.py"})
             failed, texts = last_result(body)
             if step == 2:
+                searched.append((failed, texts))
+                return tool("lookup", "mcp__daydream__review_source", {"target_id": targets[0], "path": None,
+                                                                       "cursor": None})
+            if step == 3:
                 # Exact captured diff bytes arrive as their own block beside the target's source options.
                 assert not failed and texts[1].startswith("diff --git")
                 option = next(item for item in json.loads(texts[0])["target"]["source_options"]
@@ -2662,7 +2674,7 @@ async def test_committed_review_completes_through_native_host_tools(
                                                {key: option[key] for key in ("source_id", "basis", "source_range")}]}})
                 return tool("unplanned", "mcp__daydream__structured_output",
                             {"targets": [{**decisions[0], "target_id": "unplanned"}], "claims": []})
-            if step == 3:
+            if step == 4:
                 assert failed and "choose a planned target" in texts[0]
                 return tool("submit", "mcp__daydream__structured_output", {"targets": decisions, "claims": claims})
             return Turn(text="Discovery complete.")
@@ -2674,7 +2686,7 @@ async def test_committed_review_completes_through_native_host_tools(
         with provider.serving():
             result = await run_committed_review(request)
     else:
-        codex = install_codex_lifecycle_cli(tmp_path / "codex")
+        codex = install_codex_lifecycle_cli(tmp_path / "codex", run_search=True)
         monkeypatch.setenv("PATH", f"{codex.bin_dir}{os.pathsep}{os.environ['PATH']}")
         # A proxy that refuses everything: only a loopback exemption lets the callback connect. The
         # user's exemptions are set under one name only and must survive under both.
@@ -2708,7 +2720,7 @@ async def test_committed_review_completes_through_native_host_tools(
         # host call after acceptance is observed without being charged. Its first attempt ended unsubmitted
         # after five starts, which the retry's dispatch refunded.
         {"assignment": "discovery", "accepted": True, "settled": True, "cleanup_complete": True, "reason": None,
-         "observed_starts": 3 if backend == "claude" else 12, "overshoot": 0 if backend == "claude" else 1},
+         "observed_starts": 4 if backend == "claude" else 12, "overshoot": 0 if backend == "claude" else 1},
         {"assignment": "challenge", "accepted": True, "settled": True, "cleanup_complete": True, "reason": None,
          "observed_starts": 1, "overshoot": 0}]
     trajectory = root_trajectory(repo)
@@ -2716,7 +2728,10 @@ async def test_committed_review_completes_through_native_host_tools(
     calls = [call["function_name"] for step in trajectory["steps"] for call in step.get("tool_calls") or []]
     assert calls.count("mcp__daydream__structured_output" if backend == "claude" else "structured_output") == (
         3 if backend == "claude" else 4)
+    found = '"matches": [{"path": "api.py", "line": 1, "text": "VALUE = 0"}]'
     if backend == "claude":
+        # The CLI's own Bash ran the helper the guidance names from the captured checkout, past the read-only guard.
+        assert [(failed, found in texts[0]) for failed, texts in searched] == [(False, True)]
         # Each claim schema served requires a severity from the canonical levels.
         served = [tool["input_schema"]["properties"]["claims"]["items"]["properties"]["payload"]
                   for body in provider.requests for tool in body["tools"]
@@ -2734,6 +2749,8 @@ async def test_committed_review_completes_through_native_host_tools(
                   _assignment(row["host"]["prompt"])["kind"]): row for row in codex.observations()}
         assert sorted(hosts) == ["challenge", "discovery", "retry"] and len(codex.observations()) == 3
         delivered.extend((row["host"]["instructions"], row["host"]["prompt"]) for row in hosts.values())
+        # The first process ran the helper the guidance names from its own checkout and environment.
+        assert found in hosts["discovery"]["host"]["search"]
         for row in hosts.values():
             host = row["host"]
             registration = {key: text for key, text in host["overrides"].items() if key != "model_reasoning_effort"}
@@ -2849,8 +2866,9 @@ async def test_committed_review_completes_through_native_host_tools(
             "share one byte capacity, what the review's findings export holds" in system)
         assert "structured_output keeps its reserved start: correct it and submit again." in system
         # The natively delivered first message decodes to the exact description with its separators escaped.
-        # The instructions hold no author text, and the host's own search guidance still follows the
-        # assignment line that repeats it.
+        # The instructions hold no author text, and the host's one copy of its search guidance closes the first
+        # message (before a retry's snapshot), after the assignment that repeats it.
         assert _assignment(prompt)["profile"]["historical_context"] == {"context": description}
         assert not set("\x7f\x85\u2028\u2029") & set(system + prompt) and "Draws" not in system
-        assert f"{prompt.split(' ', 1)[0]} {REPOSITORY_SEARCH_GUIDANCE}" in prompt.split("\n")[2:]
+        assert prompt.split("\n\nRetry dispatch-time snapshot")[0].endswith("\n\n" + REPOSITORY_SEARCH_GUIDANCE)
+        assert prompt.count(REPOSITORY_SEARCH_GUIDANCE) == 2

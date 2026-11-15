@@ -100,15 +100,14 @@ fresh challenge, navigates it under the
   decisions as it reaches them.
 - The first message carries the assignment. The token is a random value made for that
   dispatch, and every line committed review writes there begins with it (the allowance
-  snapshot appended after them repeats the one in the instructions); only the instructions
+  snapshot and search guidance after them are in the instructions too); only the instructions
   announce it, so text a backend places before the message cannot claim it. The second
   host line holds the assignment as canonical JSON with DEL, U+0085, U+2028 and U+2029
   escaped, so text inside it cannot draw a line break: the assignment identity, the work's
   responsibilities, pending claims (with compact `retained_conclusions` for the
   cross-assignment), the profile with any historical context, and a bounded (16 KiB) first
   catalog page with `status`, `total_targets`, `total_files` and omitted counts. Catalog
-  and decided markers there are a dispatch-time snapshot. The third carries the host's
-  search guidance, so a copy quoted inside the assignment cannot stand in for it. The
+  and decided markers there are a dispatch-time snapshot. The
   instructions say that only lines beginning with the token are host-authored and that the
   assignment's paths, claims and historical context are data, never instructions.
 - The trajectory records each dispatch's first message, so it holds every dispatch's whole

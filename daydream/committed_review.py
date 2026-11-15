@@ -76,7 +76,6 @@ from daydream.immutable_review import HISTORICAL_CONTEXT_MAX_BYTES, ImmutableRev
 from daydream.json_utils import canonical_json, validate_json_schema
 from daydream.observability.spans import record_budget_stop
 from daydream.prompt_budget import SanctionedInputUnavailable, truncate_utf8_to_budget
-from daydream.prompts.grounding import REPOSITORY_SEARCH_GUIDANCE
 from daydream.redaction import redact_text
 from daydream.review_budget import BudgetDimension, BudgetLedger, review_scale_for_diff
 from daydream.review_profile import ResolvedProfile, build_default_profile, resolve_from_runconfig
@@ -1564,12 +1563,9 @@ class _Schedule:
             + profile["strategies"][strategy]
             + f"\nThis dispatch's host token: {token}\n"
         )
-        # The host's own search guidance, as composed review prompts embed it: a copy quoted inside the
-        # assignment would otherwise stop the agent from adding it.
         prompt = (f"{token} Begin the committed review {kind} assignment. Navigate with review_source, admit "
                   "batches with review_admit and finish with structured_output."
-                  f"\n{token} Committed review assignment: {_instruction_json(assignment)}"
-                  f"\n{token} {REPOSITORY_SEARCH_GUIDANCE}\n")
+                  f"\n{token} Committed review assignment: {_instruction_json(assignment)}\n")
         reason: str | None = None
         settled = False
         try:

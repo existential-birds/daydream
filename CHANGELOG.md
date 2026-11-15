@@ -23,6 +23,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can read the per-attempt callback secret; 0.169.0 does not expose it. The packaged
   templates do not install Codex.
 
+### Fixed
+
+- The reviewer can run the search helper its guidance names when Daydream is embedded in
+  another process or runs from a virtual environment whose `bin` is not on `PATH`. The
+  guidance named a bare `daydream search`, which such a shell answered with
+  `daydream: command not found`, at the cost of a tool start each time. It now names the
+  helper through the running interpreter (`<python> -m daydream search`), and Claude's
+  read-only Bash guard admits exactly that form instead of a bare `daydream search`
+  ([#1830](https://github.com/existential-birds/daydream/issues/1830)).
+- Author text that quotes the host's search guidance reaches the reviewer unchanged. On
+  read-only Pi, a description that quoted it was rewritten before delivery, so the model
+  did not read what the sealed result records, and on every backend quoted guidance in a
+  prompt could stand in for the host's own copy. The host now appends its guidance, with
+  read-only Pi's variant chosen there, once to every search turn's prompt and instructions
+  and never rewrites composed text; committed review's first message no longer carries a
+  token line for it ([#1825](https://github.com/existential-birds/daydream/issues/1825)).
+
 ## [0.35.0] - 2026-11-15
 
 ### Added
