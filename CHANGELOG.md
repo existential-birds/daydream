@@ -68,6 +68,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instructions that Codex and Claude pass as one argument. A description heavy in quotes,
   backslashes or control characters was refused, or cut when fetched, well below 64 KiB
   ([#1849](https://github.com/existential-birds/daydream/issues/1849)).
+- A committed-review turn on Claude that ends without an accepted `structured_output` is now
+  retried instead of leaving its assignment unfinished. The assignment was sealed
+  `missing_output` at once, however much of its tool and time allowance remained. Such a
+  turn now gets one fresh conversation as the invocation's first retry, as on Codex: it keeps
+  what the turn admitted, is told about it, and is refused an exact repeat of an admitted
+  claim. It is not retried after an earlier retryable provider failure, it never counts as a
+  failure on the outage circuit, and an assignment that ends unsubmitted again is still
+  reported as `missing_output` unless a budget or deadline limit stops it first
+  ([#1832](https://github.com/existential-birds/daydream/issues/1832)).
 - A change with a binary file no longer leaves the review incomplete when the reviewer marks that
   file `not_reviewed`. A changed file whose captured diff is binary (Git's `Binary files … differ`,
   with no text hunk) is now decided by the host as `reviewed` with the reason

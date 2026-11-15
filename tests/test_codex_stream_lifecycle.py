@@ -29,7 +29,7 @@ from daydream.backends import (
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.codex import CodexBackend, CodexError
 from daydream.backends.lifecycle import BackendLifecycleCollector
-from daydream.host_tools import HostToolBinding, HostToolFatal
+from daydream.host_tools import HostToolBinding, HostToolFatal, UnsubmittedTurn
 from daydream.review_budget import BudgetLedger
 from daydream.trajectory import DaydreamPhase
 from tests.harness.codex_lifecycle_cli import CodexLifecycleCli, LifecycleMode, install_codex_lifecycle_cli
@@ -228,7 +228,7 @@ async def test_codex_process_outcomes_require_completion_and_zero_exit(
                             # The consumer leaves while the submission's check is on a worker thread.
                             assert await asyncio.to_thread(checking.wait, 5)
                             break
-            except (CodexError, HostToolFatal) as exc:
+            except (CodexError, HostToolFatal, UnsubmittedTurn) as exc:
                 stop = getattr(exc, "code", None) or getattr(exc, "category", None)
         (observation,) = served.observations()
         await wait_for_process_group_gone(observation["pid"], timeout_s=5)
