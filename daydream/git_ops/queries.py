@@ -378,9 +378,9 @@ def diff(repo: Path, base: str, head: str = "HEAD", *, exclude: list[str] | None
     result = []
     for revision, label in ((f"{preferred_base}...{head}", f"{base}...{head}"), (head, head)):
         proc = process._run_git(
-            repo, ["diff", revision, *paths], timeout=30, error_context=f"git diff {label} failed"
+            repo, ["diff", revision, *paths], capture_bytes=True, timeout=30, error_context=f"git diff {label} failed"
         )
-        result.append(proc.stdout)
+        result.append(process.decode_diff(proc.stdout))
     return "".join(result)
 
 

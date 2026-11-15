@@ -90,6 +90,14 @@ def _require_ok(proc: subprocess.CompletedProcess[Any], context: str) -> None:
         raise GitError(f"{context}: {os.fsdecode(proc.stderr).strip()}")
 
 
+def decode_diff(stdout: bytes) -> str:
+    """Read a diff as text-mode capture does, showing bytes that are not UTF-8 as U+FFFD.
+
+    Identity stays with the raw Git objects; the text is only the view reviewers read.
+    """
+    return io.TextIOWrapper(io.BytesIO(stdout), encoding="utf-8", errors="replace").read()
+
+
 # --- Internal subprocess helpers --------------------------------------------
 
 

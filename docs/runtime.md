@@ -407,7 +407,9 @@ The reviewer's assignments come from one canonical change: the full diff and its
 index are captured once with their identities, revalidated before every admission,
 and split into whole parts sized to the transport's assignment allowance
 ([review assignments](../daydream/review_stage_inputs.py)). Changed canonical bytes
-are refused, never re-read.
+are refused, never re-read. Review diffs show bytes that are not UTF-8 as U+FFFD, so
+such a file is reviewed as text; identity stays with the raw Git objects, and a
+supporting selector still requires a UTF-8 file.
 
 ### Captured local source
 

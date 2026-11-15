@@ -68,11 +68,11 @@ def immutable_review_diff(repo: Path, base_sha: str, head_sha: str) -> str:
     """Decode the review diff using captured-head attributes and inert configuration."""
     args = _diff_args(base_sha, head_sha)
     with _immutable_diff_source(repo, base_sha, head_sha) as view:
-        diff = process._run_git(
-            view, ["--attr-source=" + head_sha, "diff", *args], timeout=30,
+        diff = process.decode_diff(process._run_git(
+            view, ["--attr-source=" + head_sha, "diff", *args], capture_bytes=True, timeout=30,
             error_context="immutable review diff unavailable",
             max_output_bytes=_MAX_SOURCE_BYTES,
-        ).stdout
+        ).stdout)
     if len(diff.encode()) > _MAX_SOURCE_BYTES:
         raise GitError("immutable review diff exceeds the supported size")
     return diff

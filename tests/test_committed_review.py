@@ -2065,18 +2065,22 @@ def _split_repo(tmp_path: Path, files: int = 6, lines: int = 1) -> tuple[Path, s
     """Changed files: the ratio change in a.py and its caller f.py land in different assignments.
 
     Files beyond the six named ones follow them in inventory order; the first changes ``lines`` lines.
-    The last one's change uses carriage returns to draw a supplied target's header and description,
-    and its name holds a line separator.
+    Of twenty, the second holds bytes that are not UTF-8. The last one's change uses carriage returns
+    to draw a supplied target's header and description, and its name holds a line separator.
     """
     repo = tmp_path / "split"
     more = {f"m{index:02d}{'\u2028' * (index == files - 7)}.py": "VALUE = 1\n" * (1 if index else lines)
             for index in range(files - 6)}
-    feature = {**_SPLIT_FILES, "a.py": "def ratio(total, count):\n    return total / (count - 1)\n",
-               **{f"{name}.py": f"VALUE_{name.upper()} = 2\n" for name in "bcde"},
-               "f.py": "from a import ratio\nRESULT = ratio(4, 1)\nLIMIT = 2\n",
-               **{name: text.replace("1", "2") for name, text in more.items()},
-               **{name: f"VALUE = 2\r{_SUPPLIED}\r{_FORGED}\n" for name in list(more)[-1:]}}
-    seed_feature_branch(repo, base={**_SPLIT_FILES, **more}, feature=feature)
+    feature: dict[str, str | bytes] = {
+        **_SPLIT_FILES, "a.py": "def ratio(total, count):\n    return total / (count - 1)\n",
+        **{f"{name}.py": f"VALUE_{name.upper()} = 2\n" for name in "bcde"},
+        "f.py": "from a import ratio\nRESULT = ratio(4, 1)\nLIMIT = 2\n",
+        **{name: text.replace("1", "2") for name, text in more.items()},
+        **{name: f"VALUE = 2\r{_SUPPLIED}\r{_FORGED}\n" for name in list(more)[-1:]}}
+    base: dict[str, str | bytes] = {**_SPLIT_FILES, **more}
+    if files == 20:
+        base["m01.py"], feature["m01.py"] = b"VALUE = 1\n# caf\xe9\n", b"VALUE = 2\n# caf\xe9\n"
+    seed_feature_branch(repo, base=base, feature=feature)
     return repo, git(repo, "rev-parse", "main")
 
 
@@ -2113,7 +2117,8 @@ async def test_split_review_transfers_unfinished_work_and_investigates_across_as
     renewed sibling allocations, and empty local results skipping the spanning defect
     between a.py (ratio) and f.py (its caller) in different assignments. Revision rows
     prove the scheduler dispatches a new challenge only for a semantic revision. A local
-    assignment that ended on a rejected final batch lost the valid decision in it.
+    assignment that ended on a rejected final batch lost the valid decision in it. Bytes that are
+    not UTF-8 crashed capture.
     """
     # Capacity, not size, keeps the undecomposed row whole: its five batches cannot each keep two starts.
     batches = _SCALED.get(scenario, 5)
@@ -2322,6 +2327,10 @@ async def test_split_review_transfers_unfinished_work_and_investigates_across_as
     credited = [t for r in value["work"] for t in r["admitted_targets"]]
     assert sorted(credited) == sorted(p["target_id"] for p in value["assignments"])  # Each credited once.
     assert result.complete and value["terminal_result"]["required_phases"] == ["challenge", "cross_assignment"]
+    if batches == 5:
+        # The bytes that are not UTF-8 reach the model in place.
+        assert any("+VALUE = 2\n # caf\ufffd\n" in returned["content"]
+                   for d in dispatches for returned in d["returned"])
     # Every first message carries its assignment on a host line, and split local work is also handed each
     # of its targets as review_source returns it. Only the instructions announce the token that begins each
     # host line, so only the host can draw a header or a description line: the change's own copies of both

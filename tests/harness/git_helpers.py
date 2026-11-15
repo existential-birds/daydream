@@ -75,17 +75,21 @@ def init_repo(repo: Path) -> None:
     configure_identity(repo)
 
 
-def _write_and_stage_files(repo: Path, files: dict[str, str]) -> None:
+def _write_and_stage_files(repo: Path, files: dict[str, str] | dict[str, str | bytes]) -> None:
     """Stage the supplied paths together after writing one fixture revision."""
     for name, content in files.items():
         path = repo / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
+        if isinstance(content, bytes):
+            path.write_bytes(content)
+        else:
+            path.write_text(content)
     if files:
         git(repo, "add", "--", *files)
 
 
-def seed_feature_branch(repo: Path, *, base: dict[str, str], feature: dict[str, str], base_message: str = "base",
+def seed_feature_branch(repo: Path, *, base: dict[str, str] | dict[str, str | bytes],
+    feature: dict[str, str] | dict[str, str | bytes], base_message: str = "base",
     feature_message: str = "feature", base_ref: str | None = None,
 ) -> str:
     """Create main and feature commits from path/content maps; return feature HEAD.

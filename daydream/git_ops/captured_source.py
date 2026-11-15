@@ -673,10 +673,11 @@ def capture_source(
                 immutable._git(destination, "read-tree", after_revision)
                 paths = ["--", ".", ":(exclude).daydream", ":(exclude).review-output.md",
                          *(f":(exclude){path}" for path in scope)]
-                diff = process._run_git(destination, ["--attr-source=" + after_revision, "diff", "--no-ext-diff",
-                    "--no-textconv", "--no-color", "--find-renames", "--src-prefix=a/", "--dst-prefix=b/",
-                    base_sha, after_revision, *paths], timeout=30, error_context="captured source diff unavailable",
-                    max_output_bytes=immutable._MAX_SOURCE_BYTES).stdout
+                diff = process.decode_diff(process._run_git(destination, ["--attr-source=" + after_revision,
+                    "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames", "--src-prefix=a/",
+                    "--dst-prefix=b/", base_sha, after_revision, *paths], capture_bytes=True, timeout=30,
+                    error_context="captured source diff unavailable", max_output_bytes=immutable._MAX_SOURCE_BYTES,
+                ).stdout)
                 files = queries._decode_nul_paths(process._run_git(destination,
                     ["diff", "--find-renames", "--name-only", "-z", base_sha, after_revision, *paths],
                     capture_bytes=True, timeout=30).stdout)

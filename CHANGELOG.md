@@ -23,6 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can read the per-attempt callback secret; 0.169.0 does not expose it. The packaged
   templates do not install Codex.
 
+### Fixed
+
+- A changed file containing bytes that are not valid UTF-8, such as a Latin-1 source file, no
+  longer crashes review or fixing with `UnicodeDecodeError` before any work starts. The review diff
+  shows those bytes as U+FFFD, so the file is reviewed as text, while the captured source keeps the
+  raw bytes and their identity. The hosted immutable route reads its diff the same way
+  ([#1854](https://github.com/existential-birds/daydream/issues/1854)).
+
 ## [0.35.0] - 2026-11-15
 
 ### Added
