@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import shutil
 import stat
 from collections.abc import Sequence
 from contextlib import suppress
@@ -41,6 +42,25 @@ def _validated_canonical_entries(
     if filesystem.manifest_tree(canonical) != entries:
         raise ArtifactVisibilityError("canonical artifact recovery copy is corrupt")
     return entries
+
+
+def _delete_retired_review_cache(source: SourceOwnership) -> None:
+    """Delete the ``.daydream/review-cache`` directory of an earlier build, which no build reads.
+
+    Anything else at that name stays for public validation to refuse.
+    """
+    daydream = source.path / _DAYDREAM
+    cache = daydream / "review-cache"
+    try:
+        if not (stat.S_ISDIR(daydream.lstat().st_mode) and stat.S_ISDIR(cache.lstat().st_mode)):
+            return
+    except FileNotFoundError:
+        return
+    try:
+        with source.parent_descriptor(cache) as parent:
+            shutil.rmtree(cache.name, dir_fd=parent)
+    except OSError as exc:
+        raise ArtifactVisibilityError("stale review cache could not be deleted") from exc
 
 
 def _validate_public_tree(

@@ -13,7 +13,7 @@ from typing import Any, Literal
 from daydream.test_execution import TestExecutionIdentity
 
 #: Bump whenever the decision/audit shape changes so a stale record can never
-#: be read as the current contract (mirrors ``REUSE_KEY_FORMAT``).
+#: be read as the current contract.
 EVIDENCE_REUSE_FORMAT: int = 1
 
 ReuseResult = Literal[

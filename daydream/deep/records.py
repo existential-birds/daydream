@@ -88,14 +88,3 @@ def union_source_uids(*uid_groups: Any) -> list[str]:
             if isinstance(uid, str) and uid:
                 seen.setdefault(uid, None)
     return list(seen)
-
-
-def record_issues(records: Any) -> list[Any] | None:
-    """Read the current issues envelope; malformed payloads return None."""
-    issues = records.get('issues') if isinstance(records, dict) else None
-    return issues if isinstance(issues, list) else None
-
-
-def record_issues_or_empty(records: Any) -> list[Any]:
-    """Read current records, contributing no evidence for a malformed envelope."""
-    return record_issues(records) or []

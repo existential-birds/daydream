@@ -37,9 +37,9 @@ def build_verification_prompt(
 ) -> str:
     """Check recommendations against interfaces, sibling implementations, and evidence.
 
-    The caller excludes structural findings. Verdicts are advisory and keyed by
-    canonical issue ID; an empty issue list produces no verdicts. output_path is
-    accepted for extension compatibility, but the host writes the verdict file.
+    Verdicts are advisory and keyed by canonical issue ID; an empty issue list
+    produces no verdicts. output_path is accepted for extension compatibility, but
+    the host writes the verdict file.
     """
     from daydream.deep.render import render_report
 
@@ -91,7 +91,7 @@ def build_verification_prompt(
     )
     parts.append(
         "Empty-input rule: if the merged report contains no numbered issues "
-        "under `## Issues` or `## Cross-Stack Issues`, emit an empty `verdicts` "
+        "under `## Issues`, emit an empty `verdicts` "
         "array. This is NOT an error."
     )
     parts.append(

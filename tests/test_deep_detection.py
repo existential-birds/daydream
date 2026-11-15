@@ -1,4 +1,4 @@
-"""Stack ownership, sharding bounds, and import-graph routing."""
+"""Stack ownership, framework inspection bounds, and import-graph routing."""
 
 import json
 import os

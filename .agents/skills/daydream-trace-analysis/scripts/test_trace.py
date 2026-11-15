@@ -40,7 +40,7 @@ class TraceCliTests(unittest.TestCase):
                 "final_metrics": {"total_cost_usd": 5, "extra": {
                     "daydream_metric_scope": "whole_run_including_forks"}}}
         child = {"trajectory_id": "child", "steps": [steps[0]], "final_metrics": {"total_cost_usd": 3}}
-        self.record = {"schema_version": "daydream.run.v1", "run_id": "run", "outcome": "success",
+        self.record = {"schema_version": "daydream.run.v2", "run_id": "run", "outcome": "success",
                        "trajectories": {"status": "available", "value": {
                            "root_trajectory_id": "root", "documents": [child, root]}},
                        "completeness": {"trajectory": "complete"}}

@@ -2,6 +2,7 @@
 from collections.abc import Iterable
 from typing import Any
 
+from daydream.findings import FINDINGS_SCHEMA_VERSION
 from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
 
 
@@ -25,7 +26,7 @@ def terminal_result(state: str = "complete", *, head_sha: str = "h" * 40) -> dic
 def findings_artifact(
     findings: Iterable[dict[str, Any]] = (), *, kind: str = "review", **fields: Any,
 ) -> dict[str, Any]:
-    artifact = {"schema_version": 2, "repo": "o/r", "pr_number": 7, "head_sha": "h" * 40,
+    artifact = {"schema_version": FINDINGS_SCHEMA_VERSION, "repo": "o/r", "pr_number": 7, "head_sha": "h" * 40,
                 "findings": [{"location_distrust": False, "severity_before_demotion": None,
                               "severity_off_vocabulary": False, **finding} for finding in findings],
                 "kind": kind, "run_info": None, "review_warnings": [], "diagrams": None, **fields}

@@ -93,4 +93,4 @@ def test_verdict_buckets_reject_unchecked_or_missing_selection() -> None:
     for decisions in cases:
         payload = {"selection": {"decisions": decisions}}
         with pytest.raises(ValueError):
-            fix_steps._verdict_buckets([{"id": 4, "item_uid": "item:4", "lens": "structural"}], payload)
+            fix_steps._verdict_buckets([{"id": 4, "item_uid": "item:4"}], payload)

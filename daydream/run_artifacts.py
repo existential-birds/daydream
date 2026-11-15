@@ -31,7 +31,6 @@ from daydream.run_config import (
     _default_backend_name,
     _resolved_backend_name,
     _resolved_model,
-    _resolved_review_backend_name,
 )
 from daydream.run_snapshot import ArchiveRunSnapshot, ManifestRunIdentity, RunPhaseCapabilities, RunProfileIdentity
 from daydream.trajectory import (
@@ -301,39 +300,30 @@ def capture_manifest_run_identity(
         runs_merge = any("merge" in step for step in step_names)
     else:
         runs_merge = True
-    runs_per_stack_review = (
-        (config.flow_name is None or config.flow_name in DEEP_FLOW_ALIASES)
-        and flow_kind is not DaydreamRunFlow.DIAGRAM
-    )
     phases = RunPhaseCapabilities(
-        per_stack_review=runs_per_stack_review,
         merge=runs_merge,
         fix=runs_fix,
         test=runs_test,
         push=flow_kind not in (DaydreamRunFlow.TTT, DaydreamRunFlow.PR) and "commit" in step_names,
         remote_ci=flow_kind not in (DaydreamRunFlow.TTT, DaydreamRunFlow.PR) and "remote-ci" in step_names,
     )
-    per_stack_backend: str | None = None
-    per_stack_model: str | None = None
-    if phases.per_stack_review:
-        # The stored names predate the single reviewer; their values name the review phase that runs.
-        per_stack_backend = _resolved_backend_name(config, "review")
-        per_stack_model = _resolved_model(config, "review")
-        if per_stack_model is None and per_stack_backend == "pi":
+    review_backend: str | None = None
+    review_model: str | None = None
+    if (config.flow_name is None or config.flow_name in DEEP_FLOW_ALIASES) and flow_kind is not DaydreamRunFlow.DIAGRAM:
+        review_backend = _resolved_backend_name(config, "review")
+        review_model = _resolved_model(config, "review")
+        if review_model is None and review_backend == "pi":
             from daydream.backends.pi import _configured_pi_model
 
-            configured_model = _configured_pi_model(cwd, execution_input=execution_input)
-            per_stack_model = configured_model or DEFAULT_PI_MODEL
+            review_model = _configured_pi_model(cwd, execution_input=execution_input) or DEFAULT_PI_MODEL
     profile = config.review_profile
     return ManifestRunIdentity(
-        skill=None,
         model=None,
         backend=_default_backend_name(config),
-        review_backend=_resolved_review_backend_name(config),
+        review_backend=review_backend,
+        review_model=review_model,
         fix_backend=_resolved_backend_name(config, "fix") if phases.fix else None,
         test_backend=_resolved_backend_name(config, "test") if phases.test else None,
-        per_stack_review_backend=per_stack_backend,
-        per_stack_review_model=per_stack_model,
         review_only=flow_kind is DaydreamRunFlow.TTT and config.output_mode == "review",
         deep=True,
         profile=None if profile is None else RunProfileIdentity(

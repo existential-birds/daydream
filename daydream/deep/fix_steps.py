@@ -260,17 +260,13 @@ async def _step_verify(ctx: FlowContext) -> None:
     # Attach verifier verdicts to items by `id` (advisory; phase_fix reads them).
     items = _attach_verdicts(items, verdicts_payload)
     deep_state.items = items
-    matched_ids, unmatched_ids, skipped_ids, structural_ids, other_ids = _verdict_buckets(
-        items, verdicts_payload
-    )
-    # Use persisted selection decisions to distinguish operator skips from exempt
-    # lenses, so coverage accounting includes every fix-loop item.
+    matched_ids, unmatched_ids, skipped_ids, other_ids = _verdict_buckets(items, verdicts_payload)
+    # Persisted selection decisions identify skips, so coverage accounting includes every fix-loop item.
     console.print(
         format_verdict_join(
             matched=matched_ids,
             unmatched=unmatched_ids,
             skipped=skipped_ids,
-            structural=structural_ids,
             other=other_ids,
             total=len(items),
         )
@@ -279,17 +275,15 @@ async def _step_verify(ctx: FlowContext) -> None:
 
 def _verdict_buckets(
     items: list[dict[str, Any]], payload: object
-) -> tuple[list[int | None], list[int | None], list[int | None], list[int | None], list[int | None]]:
-    """Partition every canonical item into matched, unmatched, skipped, structural or other.
+) -> tuple[list[int | None], list[int | None], list[int | None], list[int | None]]:
+    """Partition every canonical item into matched, unmatched, skipped or other.
 
-    Checked persisted selection decisions own the skip/lens split. Structural and
-    wonder exemptions both use the structural bucket, never operator skips.
+    Checked persisted selection decisions own the skips.
     """
     decisions_by_uid = _selection_decisions(payload)
     matched: list[int | None] = []
     unmatched: list[int | None] = []
     skipped: list[int | None] = []
-    structural: list[int | None] = []
     other: list[int | None] = []
     for item in items:
         item_id = item.get("id")
@@ -297,11 +291,7 @@ def _verdict_buckets(
         uid = item_uid(item)
         if uid not in decisions_by_uid:
             raise ValueError(f"Verifier selection omits canonical item {uid!r}")
-        decision = decisions_by_uid[uid]
-        exempt = decision["reason_code"] in ("exempt:structural", "exempt:wonder")
-        if exempt:
-            structural.append(item_id)
-        elif decision["selected"] is False:
+        if decisions_by_uid[uid]["selected"] is False:
             skipped.append(item_id)
         elif verdict is not None:
             matched.append(item_id)
@@ -309,7 +299,7 @@ def _verdict_buckets(
             unmatched.append(item_id)
         else:
             other.append(item_id)
-    return matched, unmatched, skipped, structural, other
+    return matched, unmatched, skipped, other
 
 
 def _selection_decisions(payload: object) -> dict[str, dict[str, Any]]:

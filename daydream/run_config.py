@@ -121,16 +121,6 @@ def _default_backend_name(config: RunConfig) -> str:
     return config.backend or file_config.backend or "claude"
 
 
-def _resolved_review_backend_name(config: RunConfig) -> str | None:
-    """Resolve an explicit review backend for archival, preserving None when unset.
-
-    Consult CLI review_backend then the file review phase directly. The general
-    resolver would let a CLI global mask this override and blur archive provenance.
-    """
-    file_config = _file_config_or_empty(config)
-    return config.review_backend or file_config.phases.get("review", {}).get("backend")
-
-
 def _resolved_model(config: RunConfig, phase: str) -> str | None:
     """Explicit per-phase model > configured tiers > the resolved backend's table."""
     return (

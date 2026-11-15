@@ -219,14 +219,14 @@ async def test_review_revision_admission_and_sealing_contracts(
     for corruption in ("wrong-source", "unchallenged-revision", "foreign-plan", "empty-execution", "self-judged",
                        "double-credit", "forged-author", "unrecorded-verdict", "overlap"):
         await _sealed_result_case(review_inputs, corruption)
-    for fault in ("invalid-selector", "shared-capacity", "deadline", "unreadable", "unreadable-later",
+    for fault in ("invalid-selector", "shared-capacity", "deadline", "closed", "unreadable", "unreadable-later",
                   "replaced-final", "replaced-nonterminal", "replaced-admit", "replaced-served", "superseded",
                   "contradicted", "capture-integrity"):
         await _whole_admission_case(review_inputs, monkeypatch, fault)
 
 
 async def _challenge_case(review_inputs: StageInputFactory, change: str) -> None:
-    """Each semantic field renews challenge; legacy phase tests have no revision authority."""
+    """A semantic payload change renews challenge; legacy phase tests have no revision authority."""
     review = Review(review_inputs, "domain")
     await _submit(review, "discovery", _discovery(review_inputs))
     previous = review.pending()[0]
@@ -632,17 +632,14 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         validate_committed_result(corrupted)
 
 
-@pytest.mark.parametrize('corruption', ['assigned-delete', ])
-@pytest.mark.parametrize('new_concern', [True], ids=['before-fresh-challenge'])
 async def test_local_capture_corruption_retains_challenged_findings_and_unfinished_work(
     review_inputs: StageInputFactory, monkeypatch: pytest.MonkeyPatch,
-    new_concern: bool, corruption: str,
 ) -> None:
     """Owner integrity tests miss corruption between admitted findings and a fresh challenge.
 
-    Corrupt assigned or unchanged excluded support after a challenge admits a
-    confirmed concern. Later submission/terminal checks must preserve that finding
-    and unfinished work without consulting intact live bytes.
+    Delete assigned support after a challenge confirms one concern and proposes another.
+    Later submission/terminal checks must preserve that finding and unfinished work
+    without consulting intact live bytes.
     """
     repo = review_inputs.work.source
     original = tracked_source_state(repo)
@@ -668,17 +665,14 @@ async def test_local_capture_corruption_retains_challenged_findings_and_unfinish
             claim['payload'].update(file='caller.py', grounds='A distinct changed caller needs fresh challenge.',
                                     evidence_refs=selectors('caller.py'))
             verdict = _verdict(review_inputs, assignment['claims'][0], evidence_refs=selectors('api.py'))
-            value = {'verdicts': [verdict], 'claims': [claim] if new_concern else []}
+            value = {'verdicts': [verdict], 'claims': [claim]}
         binding = kwargs['host_tools']
         async with binding.session():
             binding.admit('terminal', 'structured_output', value, terminal=True)
             accepted = binding.submit('terminal', value)
             binding.native_settled = True
         if assignment['kind'] == 'challenge':
-            if corruption == 'assigned-delete':
-                (cwd / 'api.py').unlink()
-            else:
-                (cwd / 'support/helper.py').write_text('SUPPORT = False\n')
+            (cwd / 'api.py').unlink()
         return accepted, None, None
 
     monkeypatch.setattr(committed_review, 'agent', SimpleNamespace(run_agent=execute, console=agent.console))
@@ -719,21 +713,19 @@ async def test_local_capture_corruption_retains_challenged_findings_and_unfinish
     assert value['analyzed_revision']['head_sha'] == review_inputs.revision['head_sha']
     assert value['analyzed_revision']['source_id'] == calls[0]['analyzed_revision']['source_id']
     assert value['terminal_result']['analysis_state'] == 'incomplete'
-    assert value['terminal_result']['reason_codes'] == (
-        ['backend_failure', 'evidence_incomplete'] if new_concern else ['evidence_incomplete'])
-    assert len(value['claims']) == (2 if new_concern else 1) and len(value['findings']) == 1
+    assert value['terminal_result']['reason_codes'] == ['backend_failure', 'evidence_incomplete']
+    assert len(value['claims']) == 2 and len(value['findings']) == 1
     assert value['findings'][0]['uid'] == calls[1]['claims'][0]['uid']
     assert all(entry['file'] != 'support/helper.py' for entry in calls[0]['catalog']['entries'])
     assert value['findings'][0]['payload']['file'] == 'api.py'
     assert value['findings'][0]['payload']['evidence_refs'] == value['claims'][0]['payload']['evidence_refs']
-    if new_concern:
-        assert value['claims'][1]['disposition'] == 'unresolved'
-        assert value['execution'][-2]['assignment'] == 'challenge' and not value['execution'][-2]['accepted']
+    assert value['claims'][1]['disposition'] == 'unresolved'
+    assert value['execution'][-2]['assignment'] == 'challenge' and not value['execution'][-2]['accepted']
     assert value['execution'][-1]['assignment'] == 'source_integrity' and not value['execution'][-1]['accepted']
     assert tracked_source_state(repo) == original
 
 
-@pytest.mark.parametrize("cleanup_change", ["git-routing"])
+@pytest.mark.parametrize("cleanup_change", ["git-routing", "source-replacement"])
 async def test_committed_capture_cleanup_keeps_ownership_after_session_close(
     review_inputs: StageInputFactory, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     cleanup_change: str,
@@ -766,7 +758,7 @@ async def test_committed_capture_cleanup_keeps_ownership_after_session_close(
                 seed_feature_branch(repo, base={"foreign.py": "FOREIGN = 1\n"},
                                     feature={"foreign.py": "FOREIGN = 2\n"})
                 foreign_roots.append(repo)
-            elif cleanup_change == "git-routing":
+            else:
                 foreign = repo.with_name("foreign")
                 seed_feature_branch(foreign, base={"foreign.py": "FOREIGN = 1\n"},
                                     feature={"foreign.py": "FOREIGN = 2\n"})
@@ -821,8 +813,9 @@ async def test_committed_capture_cleanup_keeps_ownership_after_session_close(
 async def test_hosted_policy_refuses_unsupported_authority_before_source_preparation(
     review_inputs: StageInputFactory, operator_policy: HostedReviewPolicy,
 ) -> None:
-    """Each unsupported authority is refused before any checkout effect; the agent-dir removal runs last."""
-    for fault in ("preparation", "backend", "invalid-model", "output-overlap", "missing-agent-dir"):
+    """Each unsupported authority is refused before any checkout effect; the agent-dir faults run last."""
+    for fault in ("preparation", "backend", "blank-provider", "blank-model", "invalid-model", "output-overlap",
+                  "missing-agent-dir", "file-agent-dir"):
         await _hosted_policy_case(review_inputs, operator_policy, fault)
 
 
@@ -861,14 +854,11 @@ async def _hosted_policy_case(
     policy = operator_policy
     if fault == "missing-agent-dir":
         policy.agent_dir.rmdir()
-    elif fault == "file-agent-dir":
-        policy.agent_dir.rmdir()
+    elif fault == "file-agent-dir":  # Runs after missing-agent-dir removed the directory.
         policy.agent_dir.write_text("not a configuration directory")
     changes: dict[str, dict[str, Any]] = {
         "preparation": {"trusted_prepared_source": False}, "backend": {"backend": "claude"},
-        "empty-provider": {"provider": ""}, "blank-provider": {"provider": " \t\n"},
-        "invalid-provider": {"provider": None},
-        "empty-model": {"model": ""}, "blank-model": {"model": " \t\n"}, "invalid-model": {"model": 42},
+        "blank-provider": {"provider": " \t\n"}, "blank-model": {"model": " \t\n"}, "invalid-model": {"model": 42},
         "output-overlap": {"output_dir": repo / "output"},
     }
     policy = replace(policy, **changes.get(fault, {}))
@@ -946,6 +936,8 @@ async def test_committed_diff_uses_raw_commit_endpoints_despite_local_diff_drive
     claim may still name it, it is no evidence of analysis, and a change of nothing else completes
     without a model. A path whose diff header alone overflows an assignment is refused by name.
     """
+    from daydream.git_ops.immutable import immutable_review_diff
+
     repo = tmp_path / "source"
     init_repo(repo)
     write_and_stage(repo, ".gitattributes", "*.py diff=review\n")
@@ -968,7 +960,7 @@ async def test_committed_diff_uses_raw_commit_endpoints_despite_local_diff_drive
     git(repo, "config", "diff.noprefix", "true")
     git(repo, "config", "color.diff", "always")
 
-    patch = git_ops.committed_diff(repo, base, head)
+    patch = immutable_review_diff(repo, base, head)
 
     inputs = _inputs(repo, tmp_path / "captured", ["api.py", "data.bin", "link.bin", "mode.sh"], patch)
     parts = {part.assignment["file"]: part.assignment for part in inputs.parts}
@@ -1006,7 +998,7 @@ async def test_committed_diff_uses_raw_commit_endpoints_despite_local_diff_drive
     write_and_stage(repo, deep, "VALUE = 1\n")
     deeper = commit(repo, "deep path")
     with pytest.raises(SanctionedInputUnavailable, match=f"required change header of '{deep[:160]}' exceeds"):
-        _inputs(repo, tmp_path / "deep", [deep], git_ops.committed_diff(repo, head, deeper))
+        _inputs(repo, tmp_path / "deep", [deep], immutable_review_diff(repo, head, deeper))
 
 
 def immutable_input_for(repo: Path, *, requested_base: str | None = None) -> ImmutableReviewInput:
@@ -1316,7 +1308,7 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     # Only the no-diff journey completes here: nothing changed, so no native turn runs.
     assert result.complete and seen == []
     exported_value = json.loads((operator_policy.output_dir / "findings.json").read_text())
-    assert exported_value["schema_version"] == 3 and exported_value["findings"] == []
+    assert exported_value["schema_version"] == 5 and exported_value["findings"] == []
     assert exported_value["head_sha"] == envelope["provenance"]["head_sha"]
     assert exported_value["terminal_result"] == value["terminal_result"]
     trajectory = json.loads((operator_policy.output_dir / "trajectory.json").read_text())
@@ -1339,10 +1331,10 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
 async def test_immutable_envelope_rejects_unsupported_or_inconsistent_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy,
 ) -> None:
-    """Version, unknown-field and provenance/materialization disagreement fail at envelope parsing."""
+    """Version, unknown-field, author-text byte bounds and original/local disagreement fail at envelope parsing."""
     repo = tmp_path / "source"
     seed_feature_branch(repo, base={"api.py": "VALUE = 1\n"}, feature={"api.py": "VALUE = 0\n"})
-    for fault in ("float-version", "unknown", "original"):
+    for fault in ("version", "float-version", "unknown", "original", "title", "body", "context"):
         await _immutable_evidence_case(tmp_path / fault, monkeypatch, operator_policy, fault, shared=repo)
 
 
@@ -1356,9 +1348,11 @@ async def test_immutable_invalid_evidence_fails_before_native_work(
     """
     shared = tmp_path / "source"
     seed_feature_branch(shared, base={"api.py": "VALUE = 1\n"}, feature={"api.py": "VALUE = 0\n"})
-    for fault in ("head", "base", "tree"):  # identity disagreement leaves the repository untouched
+    # Identity disagreement leaves the repository untouched; authority runs first, before any private storage.
+    for fault in ("authority", "head", "base", "tree", "review-key"):
         await _immutable_evidence_case(tmp_path / fault, monkeypatch, operator_policy, fault, shared=shared)
-    for fault in ("object-fifo", "symlink-parent", "base-source-size", "ref-symlink", "ref-packed-suffix"):
+    for fault in ("object-fifo", "object-hash", "raw-bytes", "symlink-parent", "base-source-size", "source-total-size",
+                  "ref-symlink", "ref-packed-suffix", "ref-backslash", "ref-control"):
         # Destructive faults each corrupt a private byte copy of the seeded repository.
         (tmp_path / fault).mkdir()
         shutil.copytree(shared, tmp_path / fault / "source", symlinks=True)
@@ -1368,14 +1362,12 @@ async def test_immutable_invalid_evidence_fails_before_native_work(
 
 async def _immutable_evidence_case(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy, fault: str,
-    *, shared: Path | None = None,
+    *, shared: Path,
 ) -> None:
     from daydream.immutable_review import ImmutableReviewInput
 
     tmp_path.mkdir(exist_ok=True)
-    repo = shared or tmp_path / "source"
-    if shared is None:
-        seed_feature_branch(repo, base={"api.py": "VALUE = 1\n"}, feature={"api.py": "VALUE = 0\n"})
+    repo = shared
     if fault == "symlink-parent":
         (repo / "nested").mkdir()
         (repo / "nested/link").symlink_to("../api.py")
@@ -1383,7 +1375,7 @@ async def _immutable_evidence_case(
         commit(repo, "capture a symlink under a real parent")
     identity = immutable_input_for(repo)
     value = identity.to_dict()
-    if fault in {"source-size", "base-source-size", "source-total-size"}:
+    if fault in {"base-source-size", "source-total-size"}:
         if fault == "base-source-size":
             git(repo, "checkout", "main")
         write_and_stage(repo, "too-large.txt", "x" * (8 * 1024 * 1024 - (fault == "source-total-size")) + "\n")
@@ -1407,14 +1399,21 @@ async def _immutable_evidence_case(
         # Source bounds precede expansion, including validation of the stale
         # digest. Binary zeros never exercised text stdout allocation here.
         identity = ImmutableReviewInput.from_dict(value)
-    if fault in {"version", "float-version", "unknown", "original"}:
+    author_bytes = {"title": 512, "body": 8192, "context": 65536}  # Captured author text bounds, in UTF-8 bytes.
+    if fault in {"version", "float-version", "unknown", "original", *author_bytes}:
         if fault == "unknown":
             value["unknown"] = True
         elif fault == "original":
             value["provenance"]["head_sha"] = "a" * 40
+        elif fault in author_bytes:
+            # Two-byte text exactly at the bound parses; one more byte stays within the
+            # code-point schema, so only the UTF-8 byte check refuses it.
+            value["provenance"][fault] = "é" * (author_bytes[fault] // 2)
+            ImmutableReviewInput.from_dict(value)
+            value["provenance"][fault] += "a"
         else:
             value["schema_version"] = 9 if fault == "version" else 1.0
-        with pytest.raises(ValueError, match="immutable"):
+        with pytest.raises(ValueError, match="UTF-8 bound" if fault in author_bytes else "immutable"):
             ImmutableReviewInput.from_dict(value)
         return
     if fault in {"head", "base", "tree", "review-key"}:
@@ -1427,7 +1426,7 @@ async def _immutable_evidence_case(
         if fault in {"head", "base"}:
             value["provenance"][key] = value["materialization"][key]
         identity = ImmutableReviewInput.from_dict(value)
-    elif fault in {"missing-object", "object-fifo", "object-hash"}:
+    elif fault in {"object-fifo", "object-hash"}:
         head = value["materialization"]["head_sha"]
         object_path = repo / ".git/objects" / head[:2] / head[2:]
         if fault == "object-hash":
@@ -1437,8 +1436,7 @@ async def _immutable_evidence_case(
             object_path.write_bytes(zlib.compress(f"commit {len(body)}".encode() + b"\0" + body))
         else:
             object_path.unlink()
-            if fault == "object-fifo":
-                os.mkfifo(object_path)
+            os.mkfifo(object_path)
     elif fault == "raw-bytes":
         (repo / "api.py").write_text("checkout transform\n")
     elif fault == "symlink-parent":
@@ -1446,11 +1444,8 @@ async def _immutable_evidence_case(
         (repo / "nested").symlink_to(tmp_path / "outside-nested", target_is_directory=True)
     elif fault.startswith("ref-"):
         head = value["materialization"]["head_sha"]
-        outside = tmp_path / "outside-ref"
-        outside.write_text(head + "\n")
-        ref = {"ref-absolute": str(outside), "ref-traversal": "refs/heads/../../../../outside-ref",
-               "ref-backslash": "refs/heads/back\\slash", "ref-control": "refs/heads/fea\tture"}.get(
-                   fault, "refs/heads/feature")
+        ref = {"ref-backslash": "refs/heads/back\\slash", "ref-control": "refs/heads/fea\tture"}.get(
+            fault, "refs/heads/feature")
         if fault == "ref-backslash":
             (repo / ".git" / ref).write_text(head + "\n")
         elif fault == "ref-symlink":
@@ -1474,14 +1469,13 @@ async def _immutable_evidence_case(
         "head": "checkout HEAD differs", "base": "does not match the local merge base",
         "tree": "tree identity mismatch",
         "review-key": "review diff identity mismatch",
-        "missing-object": "source validation failed", "object-hash": "source validation failed",
+        "object-hash": "source validation failed",
         "object-fifo": "bounded regular file", "raw-bytes": "checkout differs from captured raw",
-        "symlink-parent": "checkout differs from captured raw", "source-size": "files exceed the supported size",
-        "base-source-size": "files exceed the supported size",
+        "symlink-parent": "checkout differs from captured raw", "base-source-size": "files exceed the supported size",
         "source-total-size": "files exceed the supported size",
         "authority": "trusted_prepared_source=True",
     }[fault]
-    bounded_source = fault in {"source-size", "base-source-size", "source-total-size"}
+    bounded_source = fault in {"base-source-size", "source-total-size"}
     if bounded_source:
         tracemalloc.start()
     try:
@@ -1495,6 +1489,8 @@ async def _immutable_evidence_case(
     if bounded_source:
         assert peak < 16 * 1024 * 1024
     assert attempts == [] and not policy.output_dir.exists()
+    if fault == "authority":
+        assert not policy.private_base.exists()  # Authority admission precedes immutable source preparation.
 
 
 async def test_immutable_synthetic_bundle_rejects_attested_extra_commit_history(

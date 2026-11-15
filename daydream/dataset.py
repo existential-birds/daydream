@@ -112,7 +112,7 @@ _EVIDENCE = _object(optional=("value", "reason"), status=_AVAILABILITY, value={}
 _EVIDENCE["if"] = {"properties": {"status": {"const": "available"}}}
 _EVIDENCE["then"] = {"required": ["value"], "properties": {"value": {"not": {"type": "null"}}}}
 _EVIDENCE["else"] = {"properties": {"value": {"type": "null"}}}
-_RUN_SCHEMA = _object(schema_version={"const": "daydream.run.v1"}, run_id=_ID, captured_at=_STRING,
+_RUN_SCHEMA = _object(schema_version={"const": "daydream.run.v2"}, run_id=_ID, captured_at=_STRING,
     outcome={"enum": ["success", "failed", "interrupted"]}, provenance=_MAP, completeness=_MAP,
     trace_id=_nullable(_STRING))
 _RUN_SCHEMA["properties"].update({name: {"allOf": [_EVIDENCE, {
@@ -162,7 +162,7 @@ _SNAPSHOT_V2_SCHEMA["properties"].update(
     source=_nullable(_object(repository=_ID, revision={"type": "string", "pattern": "^[a-f0-9]{40}$"},
                             manifest_sha256=_nullable(_SHA))))
 _SNAPSHOT_V2_SCHEMA["required"].append("source")
-_VALIDATORS = {"daydream.run.v1": Draft202012Validator(_RUN_SCHEMA),
+_VALIDATORS = {"daydream.run.v2": Draft202012Validator(_RUN_SCHEMA),
                "daydream.observation.v3": Draft202012Validator(_OBSERVATION_SCHEMA),
                "daydream.snapshot.v1": Draft202012Validator(_SNAPSHOT_SCHEMA),
                "daydream.snapshot.v2": Draft202012Validator(_SNAPSHOT_V2_SCHEMA)}
@@ -186,14 +186,14 @@ def _invalid(name: str) -> Iterator[None]:
 
 def _parse(raw: Mapping[str, Any] | str | bytes, version: str) -> Record:
     name = "ObservationRecord" if version.startswith("daydream.observation.") else (
-        "RunRecord" if version == "daydream.run.v1" else "Snapshot")
+        "RunRecord" if version == "daydream.run.v2" else "Snapshot")
     with _invalid(name):
         value = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
         if not isinstance(value, dict) or value.get("schema_version") != version or version not in _VALIDATORS:
             raise ValueError("schema_version")
         _JSON.validate_python(value)
         evidence_default = {"status": "unproduced", "value": None, "reason": None}
-        if version == "daydream.run.v1":
+        if version == "daydream.run.v2":
             value = {"provenance": {}, "completeness": {}, "trace_id": None, **value}
             for field in _RUN_PAYLOADS:
                 value[field] = {**evidence_default, **value.get(field, {})}
@@ -203,7 +203,7 @@ def _parse(raw: Mapping[str, Any] | str | bytes, version: str) -> Record:
             _timestamp(value["observed_at"])
         if not _VALIDATORS[version].is_valid(value):
             raise ValueError("record")
-        if version == "daydream.run.v1":
+        if version == "daydream.run.v2":
             _validate_run_evidence(value)
         elif version.startswith("daydream.observation."):
             _validate_observation(value)
@@ -241,7 +241,7 @@ def _run_envelope(
                 value["trajectories"] = {**section, "value": {**payload, "documents": [{}]}}
         elif documents is not None:
             raise ValueError("record")
-    envelope = _parse(value, "daydream.run.v1")
+    envelope = _parse(value, "daydream.run.v2")
     if documents is not None:
         envelope["trajectories"]["value"]["documents"] = f"documents-{uuid4().hex}"
     return envelope, documents

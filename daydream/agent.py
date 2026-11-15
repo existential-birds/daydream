@@ -282,7 +282,6 @@ async def run_agent(
     run_context: RunContext | None = None,
     review_limits: ReviewLimits | None = None,
     finalization_context: FinalizationContext | None = None,
-    tools_disabled: bool = False,
     review_system_instructions: str | None = None,
     review_stage_scope_id: str | None = None,
     host_tools: HostToolBinding | None = None,
@@ -300,7 +299,7 @@ async def run_agent(
     if host_tools is not None:
         if not getattr(backend, "supports_host_tools", False):
             raise NotImplementedError(f"{type(backend).__name__} does not support host tools")
-        if tools_disabled or continuation is not None or review_limits is not None:
+        if continuation is not None or review_limits is not None:
             raise ValueError("host tools require a fresh tools-enabled invocation without review finalization")
         if budget is None:
             budget = host_tools.budget
@@ -310,13 +309,8 @@ async def run_agent(
     investigation = budget.investigation
     if investigation and budget.deadline is None:
         raise ValueError("an investigation ledger requires an absolute deadline")
-    if tools_disabled and not getattr(backend, "supports_tools_disabled", False):
-        raise NotImplementedError(f"{type(backend).__name__} does not support tools_disabled")
-    if review_system_instructions is not None:
-        if not tools_disabled and not investigation:
-            raise ValueError("review_system_instructions requires tools_disabled=True or an investigation ledger")
-        if not investigation and not getattr(backend, "supports_review_instructions", False):
-            raise NotImplementedError(f"{type(backend).__name__} does not support review_instructions")
+    if review_system_instructions is not None and not investigation:
+        raise ValueError("review_system_instructions requires an investigation ledger")
     if sanctioned_inputs is not None:
         # Callers may already have rendered this suffix. Move it after the
         # host's budget/finalization instructions without duplicating inputs.
@@ -362,9 +356,9 @@ async def run_agent(
             item for item in (review_system_instructions, budget_instructions) if item
         )
     search_turn = read_only or review_limits is not None or investigation
-    if search_turn and not tools_disabled and phase in {
-        DaydreamPhase.REVIEW, DaydreamPhase.DEEP, DaydreamPhase.EXPLORATION,
-        DaydreamPhase.INTENT, DaydreamPhase.ALTERNATIVES, DaydreamPhase.VERIFY, DaydreamPhase.CHALLENGE,
+    if search_turn and phase in {
+        DaydreamPhase.REVIEW, DaydreamPhase.DEEP, DaydreamPhase.EXPLORATION, DaydreamPhase.VERIFY,
+        DaydreamPhase.CHALLENGE,
     }:
         # The only insertion of the guidance: composed text can quote either variant as untrusted data.
         # Read-only Pi has only its stock bounded tools: no shell, Git or helper.
@@ -392,7 +386,6 @@ async def run_agent(
                 run_context=context,
                 review_evidence=evidence,
                 review_instructions=review_instructions,
-                tools_disabled=tools_disabled,
                 review_stage_scope_id=review_stage_scope_id,
                 host_tools=host_tools,
             )
@@ -504,7 +497,6 @@ async def _run_agent(
     review_evidence: ReviewEvidence | None = None,
     review_instructions: str | None = None,
     finalization: bool = False,
-    tools_disabled: bool = False,
     review_stage_scope_id: str | None = None,
     host_tools: HostToolBinding | None = None,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
@@ -661,8 +653,6 @@ async def _run_agent(
                         execute_kwargs["host_tools"] = host_tools
                     if finalization and getattr(backend, "supports_finalization", False):
                         execute_kwargs["finalization"] = True
-                    if tools_disabled and getattr(backend, "supports_tools_disabled", False):
-                        execute_kwargs["tools_disabled"] = True
                     # Host-tool adapters serve committed-review instructions as the system prompt.
                     supports_review_instructions = (host_tools is not None
                                                     or bool(getattr(backend, "supports_review_instructions", False)))
