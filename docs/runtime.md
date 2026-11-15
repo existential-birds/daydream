@@ -370,10 +370,14 @@ extension steps, sealing, the fix cycle) are not bounded by the review window.
 Diagrams generated after the review share the flow's outer review deadline with it:
 `review_wall_budget_s`, times the tier in the default profile, from when the flow
 starts its steps. When `INV * scale + 120` reaches it, the review window equals that
-deadline, and a review that runs to its end leaves them about the 120 s finalization
-reserve. With the default profile that is any change of more than four batches in the
-first tier and a scale of at least 6, 12 or 17 in tiers 3, 6 and 9. Nothing extends the
-deadline for them.
+deadline: with the default profile, any change of more than four batches in the first
+tier and a scale of at least 6, 12 or 17 in tiers 3, 6 and 9. So in the default profile
+the diagram step runs until the later of that deadline and `WALL - INV - 120` seconds
+(1,980 s) after it starts, the time an unscaled review leaves it, and a review that runs
+to its end cannot consume that time; a run without diagrams is never lengthened. In every
+other profile `review_wall_budget_s` bounds diagrams too: a review that runs to its end
+leaves them about the 120 s finalization reserve, and a diagram kind that runs out of
+time fails with a budget stop the run reports.
 `settings.limits` records the profile's `tool_calls` and `investigation_s` beside
 `scale`, `effective_tool_calls` (`T'`) and `effective_investigation_s` (`W`). For
 example, a change of 134 batches under the default profile (120 calls, 2,400 s, wall

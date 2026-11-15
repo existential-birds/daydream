@@ -57,6 +57,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drops the review context, then the diagrams, then the warnings, each only while still
   over, and logs what it dropped; findings and coverage always stay
   ([#1848](https://github.com/existential-birds/daydream/issues/1848)).
+- Diagrams requested with a review keep their time after a large review. Once a review's
+  allowances scaled with the change, its window could reach the flow's outer deadline and
+  leave the diagram step about 120 seconds, so diagrams that needed longer were not
+  produced. With the default profile the diagram step now runs until at least
+  `review_wall_budget_s - reviewer_investigation_budget_s - 120` seconds (1,980 s) after it
+  starts, what an unscaled review leaves it; runs without diagrams are unchanged. Other
+  profiles keep `review_wall_budget_s` as the ceiling for diagrams too
+  ([#1841](https://github.com/existential-birds/daydream/issues/1841)).
 
 ## [0.35.0] - 2026-11-15
 

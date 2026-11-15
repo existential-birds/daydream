@@ -7,6 +7,7 @@ mode has separate coverage in test_diagram_only_integration.py.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, replace
@@ -16,6 +17,7 @@ from typing import Any, cast
 
 import pytest
 
+from daydream.agent import run_agent
 from daydream.artifact_visibility import (
     artifact_dir_for,
     open_artifact_session,
@@ -31,11 +33,13 @@ from daydream.exploration import _BOUNDARY_BLOCKQUOTE
 from daydream.extensions import Registry
 from daydream.flows.engine import FlowContext
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, SanctionedInputTransport, SanctionedInputUnavailable
+from daydream.review_profile import build_default_profile
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from daydream.workspace import WorkContext
 from tests.harness import diagram_repos as dr
 from tests.harness.diagram_repos import load_diagram_artifact as _artifact
+from tests.harness.fake_clock import FakeClock
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git, init_repo
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
@@ -135,10 +139,33 @@ def _diagram_calls(stub: StubBackend, kind: str) -> list[dict[str, Any]]:
 # --- Spec test 14: fail-open in review --------------------------------------
 
 async def test_diagram_phase_outcome_and_dispatch_interval_when_one_author_fails(
-    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
+    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One kind's backend error is fail-open; the other repairs once on its session, renders and posts."""
+    """After a review that used its whole scaled window, one kind's backend error is fail-open; the other
+    repairs once on its session, renders and posts."""
     target = dr.build_both_signals_repo(tmp_path)
+    # Five batches scale the default profile's review past the first tier, so its window reaches the outer deadline.
+    for number in range(14):
+        (target / f"note_{number}.md").write_text("note\n")
+    git(target, "add", ".")
+    commit(target, "notes")
+    clock = FakeClock().install(monkeypatch)
+    scripted = StubBackend._scripted_review
+
+    def run_challenge_to_its_deadline(self: StubBackend, prompt: str, binding: Any) -> dict[str, Any]:
+        value = scripted(self, prompt, binding)
+        if "verdicts" in value:
+            clock.advance(binding.budget.deadline - clock.monotonic() - 1)
+        return value
+
+    monkeypatch.setattr(StubBackend, "_scripted_review", run_challenge_to_its_deadline)
+    allowances: list[float] = []
+
+    async def timed_turn(*args: Any, budget: Any, **kwargs: Any) -> Any:
+        allowances.append(budget.deadline - clock.monotonic())
+        return await run_agent(*args, budget=budget, **kwargs)
+
+    monkeypatch.setattr(deep, "run_agent", timed_turn)
     ungrounded = dr.sequence_spec()
     ungrounded["messages"].append({**ungrounded["messages"][0], "to": "Ghost"})
 
@@ -150,6 +177,13 @@ async def test_diagram_phase_outcome_and_dispatch_interval_when_one_author_fails
     )
 
     assert exit_code == 0, "a failed diagram kind must not fail the review"
+    sealed = json.loads((target / ".daydream/deep/committed-review.json").read_text())
+    pipeline = build_default_profile().pipeline
+    assert sealed["terminal_result"]["analysis_state"] == "complete"
+    assert sealed["settings"]["limits"]["effective_investigation_s"] + 120 == pipeline.review_wall_budget_s
+    # Every diagram turn keeps the time an unscaled review leaves, not the review's last finalization reserve.
+    room = pipeline.review_wall_budget_s - pipeline.reviewer_investigation_budget_s - 120
+    assert allowances == [room] * 3
     results = _artifact(target)["results"]
     assert set(results) == {"sequence", "flowchart"}
     assert results["flowchart"]["status"] == "failed"
