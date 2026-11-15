@@ -211,7 +211,7 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
                 "instructions": instructions, "prompt": prompt, "output_schema": "--output-schema" in sys.argv,
                 "token_exposed": any(token in text for text in (*sys.argv, prompt)),
                 "no_proxy": [os.environ.get(name) for name in ("NO_PROXY", "no_proxy")], "refused": refused,
-                "tools": sorted(tool.name for tool in (await session.list_tools()).tools),
+                "tools": {tool.name: tool.inputSchema for tool in (await session.list_tools()).tools},
                 "calls": calls, "token": token}
             # Published before any call: the host may stop this process at any later point.
             _observe("listed", mode=mode, host=host)
@@ -268,7 +268,7 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
                 claim = {"uid": "", "revision": 0, "source_uids": [], "title": "Zero divides the caller", "payload": {
                     "claim": "VALUE becomes zero.", "trigger": "The caller divides by it.",
                     "consequence": "Requests fail.", "grounds": "The captured change sets zero.",
-                    "file": option["path"], "line": 1, "evidence_refs": [
+                    "file": option["path"], "line": 1, "severity": "high", "evidence_refs": [
                         {key: option[key] for key in ("source_id", "basis", "source_range")}]}}
                 if mode == "unsubmitted":
                     await call("review_admit", {"targets": [], "claims": [claim]})

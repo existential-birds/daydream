@@ -873,7 +873,9 @@ evidence_refs=[] to record the target's sources or the judged claim's evidence. 
 with {source_id,basis,source_range}; source_range=null retains the exact identity. Supporting selectors use
 {path,side,source_range,basis} against captured Git blobs and cannot replace assigned evidence. Every
 evidence_refs array holds at most four selectors, and evidence_refs=[] records up to four of a target's sources.
-Report only concrete claims with trigger, consequence, location and supporting grounds. A new claim uses
+Report only concrete claims with trigger, consequence, location and supporting grounds. Severity is high when a
+claim breaks correctness, security or data and must be fixed before merge, medium for a real defect with limited
+reach, and low when minor. A new claim uses
 uid="", revision=0 and source_uids=[] unless it explicitly synthesizes retained predecessor UIDs.
 A retained claim update echoes uid and current revision; changing any semantic payload creates a fresh
 challenge obligation. title is presentation only. Never claim an executed check unless it happened.

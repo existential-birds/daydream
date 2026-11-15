@@ -162,7 +162,7 @@ async def test_snapshot_boundaries(
 
         review.patch.setattr('daydream.pr_review.find_pr_by_number', lookup)
         review.backend = EmptyReviewBackend(review.repo, responder=advance)
-        review.backend.review_claims = [{'title': 'Grounded defect', 'file': 'api.py', 'line': 2}]
+        review.backend.review_claims = [{'title': 'Grounded defect', 'file': 'api.py', 'line': 2, 'severity': 'low'}]
         assert await review.run() == 0
         assert collapse_panel_text(capsys).count('Review complete: 1 confirmed finding.') == 1
         data = review.load()
@@ -186,8 +186,8 @@ async def test_snapshot_boundaries(
         assert len(fake_gh.process_calls()) == produced
         assert post() == 0
         (posted,) = fake_gh.calls('POST', 'repos/o/r/pulls/7/reviews')
-        # A finding without severity withholds the opted-in approval.
-        assert (posted.payload['event'], posted.payload['commit_id']) == ('COMMENT', review.pr.head_sha)
+        # A complete review whose only finding the reviewer rated low earns the opted-in approval.
+        assert (posted.payload['event'], posted.payload['commit_id']) == ('APPROVE', review.pr.head_sha)
         assert [(comment['path'], comment['line']) for comment in posted.payload['comments']] == [('api.py', 2)]
         # An incomplete review still exports its admitted finding with truthful coverage, and never approves.
         # Discovery admits its claim and all but one decision, then calls tools until its allowance is spent.

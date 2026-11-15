@@ -123,10 +123,10 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
         assert review.terminal_result["analyzed_revision"]["head_sha"] == git(target, "rev-parse", "HEAD")
         assert [scope["scope_id"] for scope in review.terminal_result["planned_scopes"]] == ["committed:00000"]
         (item,) = review.items
-        assert {key: item[key] for key in ("id", "file", "line", "description")} == {
-            "id": 1, "file": "README.md", "line": 1, "description": "Sample issue"}
+        assert {key: item[key] for key in ("id", "file", "line", "description", "severity")} == {
+            "id": 1, "file": "README.md", "line": 1, "description": "Sample issue", "severity": "medium"}
         assert item["item_uid"] and item["rationale"].startswith("The changed behavior is incorrect.")
-        assert not {"severity", "confidence", "lens"} & item.keys()
+        assert not {"confidence", "lens"} & item.keys()
         assert json.loads((target / ".daydream/deep/merged-items.json").read_text())["items"] == review.items
         # The embedder's description for this head reached both assignments as captured context.
         sealed = json.loads((target / ".daydream/deep/committed-review.json").read_text())

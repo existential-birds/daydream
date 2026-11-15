@@ -204,7 +204,7 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert captured["recommended_patch"]["value"]["patch"] == recommended_text
     item = captured["findings"]["value"]["items"][0]
     assert item["item_uid"] and item["source_uids"] == [item["uid"]]
-    assert item["description"] == "Sample issue" and "severity" not in item
+    assert (item["description"], item["severity"]) == ("Sample issue", "medium")
     verification = captured["verification"]["value"]
     verdicts = verification["recommendation-verdicts.json"]
     assert verdicts["selection"]["decisions"][0]["item_uid"] == item["item_uid"]

@@ -174,8 +174,9 @@ def build_default_profile() -> ReviewProfile:
                 "token, independently of the reasoning that proposed it: seek counterevidence in "
                 "the captured source with your read/search tools and review_source. Give each "
                 "claim one verdict: confirmed if it survives, rejected on substantive "
-                "counterevidence, or unresolved. You may revise an assigned claim or propose a "
-                "new one; each is challenged again."
+                "counterevidence, or unresolved. The verdict covers the claim's severity too: "
+                "to correct it, revise the claim with the corrected level. You may revise an "
+                "assigned claim or propose a new one; each is challenged again."
             ),
             source="authored: #1845 committed review challenge",
         ),

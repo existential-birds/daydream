@@ -127,7 +127,7 @@ def _proposal(inputs: StageInputFactory) -> dict[str, Any]:
     return {"uid": "", "revision": 0, "source_uids": [], "title": "Zero breaks the caller", "payload": {
         "claim": "The new zero reaches a divisor.", "trigger": "The caller divides by VALUE.",
         "consequence": "A request fails.", "grounds": "The changed assignment feeds the caller.",
-        "file": "api.py", "line": 1, "evidence_refs": _selectors(inputs)}}
+        "file": "api.py", "line": 1, "severity": "medium", "evidence_refs": _selectors(inputs)}}
 
 
 def _discovery(inputs: StageInputFactory) -> dict[str, Any]:
@@ -704,8 +704,8 @@ async def test_local_capture_corruption_retains_challenged_findings_and_unfinish
     assert [call['kind'] for call in calls] == ['discovery', 'challenge']
     # A blank author description is not supplied: no assignment carries it and nothing records it.
     assert not any('historical_context' in record for record in (value['settings'], *(c['profile'] for c in calls)))
-    # The deliberate #1628 bump: work records, attribution and capacity evidence are restart-only.
-    assert RESULT_VERSIONS == {'committed': 7, 'immutable': 8, 'local': 9}
+    # Deliberate bumps (#1628's work records and capacity evidence, then claim severity) are restart-only.
+    assert RESULT_VERSIONS == {'committed': 10, 'immutable': 11, 'local': 12}
     assert value['schema_version'] == RESULT_VERSIONS['local'] and value['terminal_result']['schema_version'] == 2
     validate_committed_result(value)
     relabeled = deepcopy(value)
@@ -1127,7 +1127,7 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
                 claim: dict[str, Any] = {"uid": "", "revision": 0, "source_uids": [], "title": "Captured zero",
                     "payload": {"claim": "Captured zero reaches division.", "trigger": "A caller divides.",
                         "consequence": "The caller fails.", "grounds": "Captured source retains zero.",
-                        "file": "api.py", "line": 1, "evidence_refs": removed}}
+                        "file": "api.py", "line": 1, "severity": "high", "evidence_refs": removed}}
                 value = {"targets": [{"target_id": part["target_id"], "status": "reviewed", "reason": "Inspected.",
                     "evidence_refs": refs}], "claims": [claim]}
                 if outcome == "install-failure":
@@ -1253,11 +1253,13 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
             )
             assert exported.terminal_result == value["terminal_result"]
             # The sealed claim keeps its old-side line; the findings handoff gives it no head line to post on.
+            # It carries the reviewer's severity, which its posted body shows.
             assert [(ref["side"], value["findings"][0]["payload"]["line"])
                     for ref in value["findings"][0]["payload"]["evidence_refs"]] == [("old", 1)]
-            assert [(finding["path"], finding["line"], finding["placement"])
+            assert [(finding["path"], finding["line"], finding["placement"], finding["severity"],
+                     finding["body"].split("\n\n")[0])
                     for finding in json.loads(findings.read_text())["findings"]
-                    if finding["title"] == "Captured zero"] == [("api.py", None, "file")]
+                    if finding["title"] == "Captured zero"] == [("api.py", None, "file", "high", "**Severity:** high")]
             assert list((operator_policy.private_base / "runtime").glob("*/unreconciled/publish-*"))
             assert not (repo / ".daydream").exists()
             return
@@ -1616,7 +1618,7 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
                         "payload": {"claim": "The late marker changes captured behavior.",
                                     "trigger": "Import the file.", "consequence": "The marker value is observed.",
                                     "grounds": "Late captured bytes.", "file": late[0]["file"], "line": None,
-                                    "evidence_refs": observed["late_refs"]}}]
+                                    "severity": "low", "evidence_refs": observed["late_refs"]}}]
                 if late or int(assignment["work"]["work_id"].split(":")[1]) % 3 == 0:
                     half = len(own) // 2
                     observed.setdefault("unfinished", []).extend(own[half:])
@@ -1802,6 +1804,13 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
              r"assigned inventory; .* \(2 claims: source:f{64}, source:e{64}\); .*outside the offered range; .* "
              r"\(2 claims: source:\S+ \d+\.\.\d+, source:\S+ \d+\.\.\d+\); .*supporting path\.source_range: .* "
              r"\(2 claims: 'caller.py' \(new\) 1\.\.2, 'support/helper.py' \(new\) 1\.\.1\)$"),
+            # A claim's severity is required and is one of the canonical levels.
+            ({"targets": [], "claims": [{**_proposal(review_inputs), "payload": {
+                key: value for key, value in _proposal(review_inputs)["payload"].items() if key != "severity"}}]},
+             r'\$\["claims"\]\[0\]\["payload"\]: add required fields \["severity"\]$'),
+            ({"targets": [], "claims": [{**_proposal(review_inputs), "payload": {
+                **_proposal(review_inputs)["payload"], "severity": "critical"}}]},
+             r'\["severity"\]: choose an allowed value from \["high", "medium", "low"\]$'),
             ({"targets": [decision(second, status="not_reviewed", reason="x" * 1024)], "claims": [
                 {**_proposal(review_inputs), "title": "t" * 4096} for _ in range(33)]}, "exceeds 131072 UTF-8 bytes"),
         ]:
@@ -2006,7 +2015,8 @@ async def test_claim_lines_inside_continuation_fragments_use_summarized_spans(tm
     def claim(line: int) -> dict[str, Any]:
         return {"uid": "", "revision": 0, "source_uids": [], "title": "Late item", "payload": {
             "claim": "A late item changes.", "trigger": "Import big.py.", "consequence": "Value differs.",
-            "grounds": "Captured late fragment.", "file": "big.py", "line": line, "evidence_refs": selector}}
+            "grounds": "Captured late fragment.", "file": "big.py", "line": line, "severity": "low",
+            "evidence_refs": selector}}
 
     async with binding.session():
         with pytest.raises(HostToolRejected, match="claim.payload.line"):
@@ -2200,13 +2210,13 @@ async def test_split_review_transfers_unfinished_work_and_investigates_across_as
                 "uid": "", "revision": 0, "source_uids": [], "title": "Caller divides by zero",
                 "payload": {"claim": "ratio(4, 1) now divides by zero.", "trigger": "Import f.py.",
                             "consequence": "ZeroDivisionError at import.", "grounds": "a.py uses count - 1.",
-                            "file": "f.py", "line": None, "evidence_refs": refs}}]})
+                            "file": "f.py", "line": None, "severity": "high", "evidence_refs": refs}}]})
         value = {"targets": _decide(binding, targets), "claims": []}
         if scenario == "eight-batches" and work["kind"] == "discovery":
             # Nine claims of about 750 bytes per target: together more than 256 claims and 131,072 bytes.
             value["claims"] = [{"uid": "", "revision": 0, "source_uids": [], "title": f"{target} breaks {n}",
                                 "payload": {**dict.fromkeys(("claim", "trigger", "consequence", "grounds"), "x" * 20),
-                                            "file": target, "line": None,
+                                            "file": target, "line": None, "severity": "low",
                                             "evidence_refs": _decide(binding, [target])[0]["evidence_refs"]}}
                                for target in targets for n in range(9)]
         if scenario == "contention":
@@ -2516,7 +2526,8 @@ async def test_unfinished_challenge_revisions_transfer_to_a_fresh_challenge(
     _clean(review, "work:2", "host_wall_budget_exhaustion")
     reviser = _assign(review, "challenge")
     revised = {key: deepcopy(claim[key]) for key in ("uid", "revision", "source_uids", "title", "payload")}
-    revised["payload"].update(grounds="Revised grounds.", evidence_refs=_selectors(review_inputs))
+    # The challenge corrects only the claim's severity, which is a revision like any other.
+    revised["payload"].update(severity="high", evidence_refs=_selectors(review_inputs))
     async with reviser.session():
         _charged(reviser, "review_admit", {"verdicts": [], "claims": [revised]})
         # The new revision belongs to a fresh challenge; its live author cannot revise it away.
@@ -2540,8 +2551,10 @@ async def test_unfinished_challenge_revisions_transfer_to_a_fresh_challenge(
     assert work["work:4"]["claims"] == [{"uid": claim["uid"], "revision": 2}]
     assert sealed["findings"][0]["revision"] == 2 and sealed["findings"][0]["revised_by"] == "work:3"
     assert sealed["terminal_result"]["analysis_state"] == "complete"
+    report = render_committed_review(sealed)
+    assert sealed["findings"][0]["payload"]["severity"] == "high" and "**Severity:** high" in report
     # The superseded work ran out of time; a review that finished elsewhere tells the user to raise nothing.
-    assert "review profile" not in render_committed_review(sealed)
+    assert "review profile" not in report
 
 
 async def test_failed_revising_challenge_is_superseded_by_the_challenge_that_judges_it(
@@ -2645,7 +2658,7 @@ async def test_committed_review_completes_through_native_host_tools(
                 claims.append({"uid": "", "revision": 0, "source_uids": [], "title": "Zero divides the caller",
                                "payload": {"claim": "VALUE becomes zero.", "trigger": "The caller divides by it.",
                                            "consequence": "Requests fail.", "grounds": "The captured change sets zero.",
-                                           "file": option["path"], "line": 1, "evidence_refs": [
+                                           "file": option["path"], "line": 1, "severity": "high", "evidence_refs": [
                                                {key: option[key] for key in ("source_id", "basis", "source_range")}]}})
                 return tool("unplanned", "mcp__daydream__structured_output",
                             {"targets": [{**decisions[0], "target_id": "unplanned"}], "claims": []})
@@ -2704,6 +2717,12 @@ async def test_committed_review_completes_through_native_host_tools(
     assert calls.count("mcp__daydream__structured_output" if backend == "claude" else "structured_output") == (
         3 if backend == "claude" else 4)
     if backend == "claude":
+        # Each claim schema served requires a severity from the canonical levels.
+        served = [tool["input_schema"]["properties"]["claims"]["items"]["properties"]["payload"]
+                  for body in provider.requests for tool in body["tools"]
+                  if tool["name"] in {"mcp__daydream__review_admit", "mcp__daydream__structured_output"}]
+        assert served and {(json.dumps(payload["properties"]["severity"]), "severity" in payload["required"])
+                           for payload in served} == {('{"type": "string", "enum": ["high", "medium", "low"]}', True)}
         # The challenge is a distinct native conversation: it starts without discovery history.
         challenge = next(body for body in provider.requests if assignment(body)["kind"] == "challenge")
         assert not any(message["role"] == "assistant" for message in challenge["messages"])
@@ -2727,7 +2746,12 @@ async def test_committed_review_completes_through_native_host_tools(
             # No secret, another secret and a request for a server stream are all refused.
             assert (host["output_schema"], host["token_exposed"], host["refused"]) == (False, False, [403, 403, 405])
             assert host["no_proxy"] == ["proxied.invalid,127.0.0.1"] * 2
-            assert host["tools"] == ["review_admit", "review_source", "structured_output"]
+            assert sorted(host["tools"]) == ["review_admit", "review_source", "structured_output"]
+            # Each claim schema served requires a severity from the canonical levels.
+            assert [(payload["properties"]["severity"], "severity" in payload["required"]) for payload in (
+                host["tools"][name]["properties"]["claims"]["items"]["properties"]["payload"]
+                for name in ("review_admit", "structured_output"))] == [
+                ({"type": "string", "enum": ["high", "medium", "low"]}, True)] * 2
             # The instructions name the checkout the process runs in, never the source it was copied from.
             work = _assignment(host["prompt"])
             assert Path(work["captured_root"]).resolve() == Path(row["cwd"])
@@ -2816,6 +2840,9 @@ async def test_committed_review_completes_through_native_host_tools(
         strategy = system.split("\nReview strategy:\n", 1)[1].rpartition("\nThis dispatch's host token: ")[0]
         assert strategy == strategies["challenge" if kind == "challenge" else "discovery.generic_fallback"].content
         assert "arbiter" not in strategy
+        # Severity levels are defined by consequence, and only the challenge corrects one, by revising the claim.
+        assert "must be fixed before merge, medium for a real defect with limited" in system
+        assert ("revise the claim with the corrected level" in strategy) == (kind == "challenge")
         # Limits a schema does not show on every backend, and what a rejected final batch leads to.
         assert "Admit decisions as you reach them" in system
         assert "Limits: a batch holds at most 128 targets or verdicts and 128 claims" in system and (

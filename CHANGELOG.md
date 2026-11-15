@@ -80,10 +80,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cycle already read, plus `.daydream/deep/committed-review.json`. Findings schema 2, the dataset
   record and the embedded callback keep their formats. What changes for callers
   ([#1641](https://github.com/existential-birds/daydream/issues/1641)):
-  - Findings carry no `severity`, `confidence`, `lens`, `evidence` or `related_files`.
-    `--approve-on-clean` approves only a complete review with no findings: a finding
-    without severity withholds approval on every route. A fix may no longer create a
-    file the reviewer named; the fix footprint is the reviewed change and the finding's file.
+  - Findings carry `severity` (`low`, `medium` or `high`): the reviewer rates each claim and
+    the challenge checks the rating with the claim, correcting it by revising the claim, which
+    is then challenged again. Comments, the review body, the report, `--findings-out`, the
+    hosted `findings.json`, the embedded callback items and the dataset record show it, and
+    fixing takes findings in severity order. Findings carry no `confidence`, `lens`,
+    `evidence` or `related_files`. `--approve-on-clean` approves a complete review whose
+    findings are all `low`; a `high` or `medium` finding, or one without severity, withholds
+    approval on every route. A fix may no longer create a file the reviewer named; the fix
+    footprint is the reviewed change and the finding's file.
+  - Committed/immutable/local results move to schemas 10/11/12: every claim revision's
+    payload requires `severity`. Restart reviews; results with versions 7/8/9 are rejected.
   - A finding's line is carried only when a new-side source reference of its file covers
     it. A location that only the old side has is placed on the file, with its text intact.
     `build_committed_findings_artifact` applies the same rule to a sealed result, so its

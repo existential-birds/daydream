@@ -63,6 +63,7 @@ def render_committed_review(payload: Mapping[str, Any]) -> str:
             lines.extend([
                 f"### {claim['id']}. {claim['title']}", '',
                 f"Location: {location}.", '',
+                f"**Severity:** {semantic['severity']}", '',
                 semantic['claim'],
             ])
             for key, label in (

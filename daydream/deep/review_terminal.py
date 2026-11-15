@@ -187,8 +187,9 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
     if not no_diff:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-            # Canonical items carry host identities; severity, confidence and lens are optional
-            # because the reviewer asserts none. Never normalize malformed records away.
+            # Canonical items carry host identities; confidence and lens are optional because the reviewer
+            # asserts none, and severity because an extension step may drop it, which withholds approval.
+            # Never normalize malformed records away.
             schema = copy.deepcopy(MERGED_ITEMS_SCHEMA)
             schema["additionalProperties"] = True
             item_schema = schema["properties"]["items"]["items"]

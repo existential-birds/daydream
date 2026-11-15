@@ -268,7 +268,7 @@ def build_findings_artifact(
 
 
 def committed_finding_item(finding: dict[str, Any]) -> dict[str, Any]:
-    """Project one confirmed committed claim onto a canonical item, inventing no severity, confidence or lens."""
+    """Project one confirmed committed claim onto a canonical item, inventing no confidence or lens."""
     semantic = finding['payload']
     rationale = '\n\n'.join([semantic['claim'], *(
         f'**{label}:** {semantic[key]}'
@@ -278,7 +278,7 @@ def committed_finding_item(finding: dict[str, Any]) -> dict[str, Any]:
     return {
         'id': finding['id'], 'uid': finding['uid'], 'item_uid': finding['item_uid'],
         'source_uids': list(finding['source_uids']), 'file': semantic['file'], 'line': semantic['line'],
-        'description': finding['title'], 'rationale': rationale,
+        'description': finding['title'], 'rationale': rationale, 'severity': semantic['severity'],
     }
 
 
@@ -313,12 +313,8 @@ def build_committed_findings_artifact(
 
 
 def _committed_issue(claim: dict[str, Any], line: int | None) -> ParsedIssue:
-    item = committed_finding_item(claim)
-    return ParsedIssue(
-        path=item['file'], line=line, title=item['description'], body=item['rationale'],
-        severity=None, confidence=None, is_cross_stack=False,
-        fingerprint=pr_review.compute_fingerprint(item['file'], item['description'], item['rationale']),
-    )
+    issue, = pr_review.parsed_issues_from_items([{**committed_finding_item(claim), 'line': line}])
+    return issue
 
 
 def committed_export_bytes(coverage: dict[str, Any], immutable_input: dict[str, Any] | None,

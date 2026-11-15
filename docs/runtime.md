@@ -36,9 +36,9 @@ placement instead of live-source line resolution. This does not establish
 completeness.
 
 Approval requires explicit opt-in and no blocking severity among all retained
-findings, including deduplication matches. A finding without severity blocks
-approval under every findings schema, and the reviewer assigns none, so only a
-complete review with no findings is approved. New findings post as COMMENT, while
+findings, including deduplication matches: `high` and `medium` block, `low` does not,
+and a finding without severity blocks under every findings schema. A complete review
+whose findings are all `low` is approved. New findings post as COMMENT, while
 an all-matched review may post nothing. Complete-empty reviews remain eligible for
 approval when coverage and warning checks permit it.
 
@@ -207,8 +207,11 @@ remain admissible; an oversized `review_admit` is a correctable rejection. Daydr
 Review alone owns planned targets, semantic claim revisions, mandatory challenge
 and derived coverage. Every publication claim receives counterevidence-seeking
 challenge in a distinct native conversation against captured source. Changes to
-claim, trigger, consequence, location or grounds renew that obligation; titles do
-not. Retain confirmed, substantively rejected and unresolved concerns separately.
+claim, trigger, consequence, location, severity or grounds renew that obligation; titles do
+not. Each claim carries a required `severity` (`high`, `medium` or `low`, defined by
+consequence in the host instructions); the challenge judges it with the claim and corrects
+it only by revising the claim. Confirmed findings carry it to every consumer of the
+canonical items. Retain confirmed, substantively rejected and unresolved concerns separately.
 Missing/failed challenge is unfinished work. Whole-submission admission rechecks authority,
 revisions and limits before installation; closure precedes cleanup and sealing.
 Cancellation installs interrupted coverage and retained concerns before propagating.
@@ -509,10 +512,11 @@ recorded gitlink commit. Nested dirty files are not captured. This materializati
 is not an OS sandbox. Native configuration/trust/authentication
 still resolve in the original project, while native cwd/read/search use the capture.
 
-Local program results use schema 9 and terminal/coverage version 2; committed
-results 7, immutable results 8 and their committed terminal version 1 stay distinct.
-Results 1–3 predate bounded navigation and sharded per-target coverage, and 4–6 predate
-work records; they are rejected with a restart instruction rather than converted.
+Local program results use schema 12 and terminal/coverage version 2; committed
+results 10, immutable results 11 and their committed terminal version 1 stay distinct.
+Results 1–3 predate bounded navigation and sharded per-target coverage, 4–6 predate
+work records and 7–9 predate claim severity; they are rejected with a restart instruction
+rather than converted.
 Mismatched versions/identities and local-to-PR relabeling are explicitly rejected.
 Every review starts fresh: `--start-at` is refused and nothing restores a stopped
 review, because retained evidence cannot restore assignment authority. Replace

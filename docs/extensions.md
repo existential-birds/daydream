@@ -262,7 +262,7 @@ only in the diagram-only flow.
 ### Finding identity
 
 A canonical item is one confirmed finding of the review: `id`, `uid`, `item_uid`,
-`source_uids`, `file`, `line`, `description` and `rationale`. It carries no severity,
+`source_uids`, `file`, `line`, `description`, `rationale` and `severity`. It carries no
 confidence, lens or `related_files`. Preserve `item_uid` (the durable item), `uid` and
 `source_uids` through filtering/rewriting; `id` is a renumberable display position and
 explicit empty provenance remains empty. `line` is a head-side line or absent. Mint

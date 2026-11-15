@@ -207,8 +207,8 @@ def test_cli_requested_branch_ignores_current_checkout_pr(
     monkeypatch.setattr(subprocess, "run", route_pr_lookup)
     stub = StubBackend(repo)
     # The second claim sits on a line that only the base side has.
-    stub.review_claims = [{"title": "Sample issue", "file": "main.py", "line": 1},
-                          {"title": "Removed return", "file": "main.py", "line": 2, "side": "old"}]
+    stub.review_claims = [{"title": "Sample issue", "file": "main.py", "line": 1, "severity": "high"},
+                          {"title": "Removed return", "file": "main.py", "line": 2, "side": "old", "severity": "low"}]
     monkeypatch.setattr("daydream.runner.create_backend", lambda *a, **kw: stub)
     output = tmp_path / "trajectory.json"
     store = LocalRecordStore(tmp_path / "records")
@@ -232,21 +232,23 @@ def test_cli_requested_branch_ignores_current_checkout_pr(
     assert limits["protected_finalization_s"] == 120
     assert [(finding["title"], finding["payload"]["line"]) for finding in sealed["findings"]] == [
         ("Sample issue", 1), ("Removed return", 2)]
+    assert "**Severity:** high" in (repo / ".daydream/deep/review-output.md").read_text()
     reviews = transport.gh.calls("POST", "repos/acme/widgets/pulls/73/reviews")
     assert len(reviews) == 1 and reviews[0].payload["commit_id"] == requested_head
-    # A confirmed finding asserts no severity, so an opted-in approval is withheld.
-    assert reviews[0].payload["event"] == "COMMENT"
+    # A high finding withholds the opted-in approval, and every comment shows the reviewer's severity.
+    assert reviews[0].payload["event"] == "COMMENT" and "- **Severity:** 1 high, 1 low" in reviews[0].payload["body"]
     (inline,) = reviews[0].payload["comments"]
-    assert (inline["path"], inline["line"]) == ("main.py", 1) and "**Severity:**" not in inline["body"]
+    assert (inline["path"], inline["line"]) == ("main.py", 1) and "**Severity:** high" in inline["body"]
     # The old-side line is never offered as a head line: that finding is placed on the file, text intact.
     (on_file,) = [call.payload for call in transport.gh.calls("POST", "repos/acme/widgets/pulls/73/comments")]
     assert sorted(on_file) == ["body", "commit_id", "path", "subject_type"]
     assert (on_file["path"], on_file["subject_type"]) == ("main.py", "file")
-    assert "**Removed return**" in on_file["body"]
+    assert "**Removed return**" in on_file["body"] and "**Severity:** low" in on_file["body"]
     # Capture and publication read the same canonical items, so they agree on each identity and line.
     (captured,) = read_records(store).runs
     items = captured["findings"]["value"]["items"]
-    assert [(item["description"], item["line"]) for item in items] == [("Sample issue", 1), ("Removed return", None)]
+    assert [(item["description"], item["line"], item["severity"]) for item in items] == [
+        ("Sample issue", 1, "high"), ("Removed return", None, "low")]
     assert finding_marker(items[0]["fingerprint"]) in inline["body"]
     assert finding_marker(items[1]["fingerprint"]) in on_file["body"]
     assert [item["item_uid"] for item in items] == [finding["item_uid"] for finding in sealed["findings"]]

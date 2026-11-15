@@ -12,7 +12,7 @@ import jsonschema
 from daydream.host_tools import _MAX_ARGUMENT_BYTES
 from daydream.immutable_review import IMMUTABLE_REVIEW_INPUT_SCHEMA, validate_immutable_input
 from daydream.json_utils import canonical_json, validate_json_schema
-from daydream.output_schema import strict_object
+from daydream.output_schema import severity_enum_schema, strict_object
 from daydream.review_result import TERMINAL_RESULT_SCHEMA, ReasonCode, validate_terminal_result
 from daydream.review_source_refs import (
     SOURCE_REF_SCHEMA,
@@ -63,6 +63,7 @@ def _claim_schema(*, selectors: bool) -> dict[str, Any]:
         "payload": strict_object({
             **{key: _TEXT for key in ("claim", "trigger", "consequence", "grounds", "file")},
             "line": {"type": ["integer", "null"], "minimum": 1},
+            "severity": severity_enum_schema(),
             "evidence_refs": SOURCE_SELECTORS_SCHEMA if selectors else SOURCE_REFS_SCHEMA,
         }),
     })
@@ -110,8 +111,8 @@ def shard_scope_id(index: int) -> str:
     return f"committed:{index:05d}"
 
 
-# Work records, attribution, per-execution capacity evidence and the cross_assignment phase (#1628).
-RESULT_VERSIONS = {"committed": 7, "immutable": 8, "local": 9}
+# Work records, attribution, per-execution capacity evidence, the cross_assignment phase (#1628) and claim severity.
+RESULT_VERSIONS = {"committed": 10, "immutable": 11, "local": 12}
 REQUIRED_PHASES = ["challenge", "cross_assignment"]
 # Investigation kinds decide owned targets and propose new concerns; challenge judges claim revisions.
 INVESTIGATION_KINDS = frozenset({"discovery", "follow_up", "cross_assignment"})

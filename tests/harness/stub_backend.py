@@ -136,6 +136,7 @@ class StubBackend:
                 "claim": claim.get("claim", "The changed behavior is incorrect."),
                 "trigger": "The changed path is exercised.", "consequence": "Callers observe the defect.",
                 "grounds": f"{claim['file']} changes this behavior.", "file": claim["file"], "line": line,
+                "severity": claim.get("severity", "medium"),
                 "evidence_refs": [{key: option[key] for key in ("source_id", "basis", "source_range")}]}})
         return {"claims": claims, "targets": [
             {"target_id": target["target_id"], "status": "reviewed", "reason": "Captured change inspected.",

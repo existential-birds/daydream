@@ -133,7 +133,7 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
     parser.add_argument(
         "--approve-on-clean",
         action="store_true",
-        help="Approve the PR when a complete review has no findings "
+        help="Approve the PR when a complete review has no high/medium findings "
              "(issue #343): post event: 'APPROVE' instead of 'COMMENT'."
         if full_help else argparse.SUPPRESS,
     )
