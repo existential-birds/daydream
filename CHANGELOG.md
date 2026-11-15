@@ -33,9 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assignment that ends unsubmitted is still reported as `missing_output` unless a budget
   or deadline limit stops it first
   ([#1829](https://github.com/existential-birds/daydream/issues/1829), #1833).
-  Daydream writes nothing to the Codex home. `daydream --backend codex` and every other
-  Codex invocation keep their command line and environment; their one change is the
-  failed-tool-result fix listed under Fixed. Codex shows the model a schema without most
+  Daydream writes nothing to the Codex home. Codex invocations without host tools (fixing,
+  verification, test repair, diagrams and the diagram-only pre-scan) keep their command
+  line and environment; their one change is the failed-tool-result fix listed under
+  Fixed. Codex shows the model a schema without most
   length, range and pattern limits, replaces the user's developer instructions for the
   invocation, cannot deny its own tools before they run, cannot start an assignment whose
   instructions exceed the platform's single-argument size, and on 0.139.0 and 0.153.4
@@ -51,9 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   description bound to a `head_sha` other than the analyzed
   head is refused, and so is one whose encoded size (JSON-escaped twice, as a native
   argument carries it) exceeds 65536 UTF-8 bytes; both refusals precede any model
-  work. An accepted description beside a large
-  catalog and many challenge claims can still exceed a platform's single-argument size on
-  Claude or Codex, and that assignment fails to start with the adapter's own error.
+  work.
   Assignment JSON now escapes DEL, U+0085, U+2028 and U+2029, and quoted text that repeats
   the host's search guidance no longer displaces the host's own copy. See
   [committed review](docs/runtime.md#committed-review-requestresult)
@@ -109,7 +108,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     cancellation propagates; an embedded result callback is not called for it and no
     `--findings-out` artifact is written.
   - `--shallow`, `--stack`, `--precision`, `--latency-profile`, `--no-review-cache` and
-    `--start-at` are usage errors that say what replaces them; the same values on an
+    `--start-at` are usage errors on the built-in review flows that say what replaces them;
+    the same values on an
     embedded `RunConfig` are refused before any work, and `--shallow`,
     `--no-review-cache` and `--start-at` are refused on `--diagram-only` runs too. Every
     review starts fresh. Repository settings that no longer select anything
@@ -590,8 +590,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names only the claims that fit its page (about 60 of typical size) and at most 256
   assignments; a review retains at most what its findings
   export holds (about 470 claims of typical size, fewer with a long pull request
-  description or on a very large change) and refuses the rest at discovery; a reader
-  on an older release rejects a sealed result with more than 128 claims
+  description or on a very large change) and refuses the rest at discovery
   ([#1842](https://github.com/existential-birds/daydream/issues/1842), #1844).
 - Committed review on Codex and Claude now starts the cross-assignment and every challenge
   of a large change. Before, each assignment travelled in the system instructions, which
@@ -724,10 +723,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   work. Before, only `daydream ext validate` caught it, and a run failed when it first
   built that prompt ([#1680](https://github.com/existential-birds/daydream/issues/1680), #1803).
 - Recommendation verification keeps only verdicts for the findings shown to the verifier.
-  A verdict for a skipped, exempt or unknown finding number was saved to
+  A verdict for an unknown finding number was saved to
   `recommendation-verdicts.json`, counted in the verification summary and scored in
-  captured data, and the fixer saw it as that skipped or exempt finding's verdict and
-  evidence ([#1631](https://github.com/existential-birds/daydream/issues/1631), #1808).
+  captured data, and the fixer saw it as evidence ([#1631](https://github.com/existential-birds/daydream/issues/1631), #1808).
 - A replacement test command approved from the interactive retry menu no longer finalizes
   the tree for commit on its own result: Daydream now runs the configured test command on
   the final tree once, with the existing override prompt if that run is red
