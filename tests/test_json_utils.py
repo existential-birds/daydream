@@ -7,14 +7,16 @@ from daydream.json_utils import (
     extract_json_by_schema,
     validates_schema,
 )
-from daydream.phases.schemas import PER_STACK_RECORD_SCHEMA
+from daydream.output_schema import result_array_schema
+
+_ISSUES_SCHEMA = result_array_schema("issues", {"id": {"type": "integer"}, "description": {"type": "string"}})
 
 
 def test_schema_selection_reports_content_free_rejections() -> None:
     """Selection is driven by the boundary's acceptance predicate, never span size."""
     assert extract_json("") is None
     sel = extract_json_by_schema('["module", "moduleVersion", "surface"]',
-                                 schema=PER_STACK_RECORD_SCHEMA, accept=validates_schema)
+                                 schema=_ISSUES_SCHEMA, accept=validates_schema)
     assert sel.value is None
     assert sel.rejected_type == "list"
     assert sel.rejected_reason == "type at $"
@@ -22,13 +24,13 @@ def test_schema_selection_reports_content_free_rejections() -> None:
     assert sel.candidate_count >= 1
     wrapped = extract_json_by_schema(
         'Reviewed ["module", "moduleVersion", "surface"] without findings.',
-        schema=PER_STACK_RECORD_SCHEMA,
+        schema=_ISSUES_SCHEMA,
         accept=validates_schema,
     )
     assert (wrapped.value, wrapped.rejected_type, wrapped.rejected_reason) == (None, "list", "type at $")
     assert wrapped.rejection is None
     selection = extract_json_by_schema(
-        '{"issues": []}', schema=PER_STACK_RECORD_SCHEMA, accept=lambda _value, _schema: False,
+        '{"issues": []}', schema=_ISSUES_SCHEMA, accept=lambda _value, _schema: False,
     )
     assert selection.value is None and selection.candidate_count == 2
     assert selection.rejected_type == "dict"

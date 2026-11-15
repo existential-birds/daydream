@@ -13,7 +13,7 @@ async def test_pi_backend_honors_structured_output_opt_out(tmp_path: pathlib.Pat
     from unittest.mock import patch
 
     from daydream.backends.pi import PiBackend
-    from daydream.phases.schemas import PER_STACK_RECORD_SCHEMA
+    from daydream.output_schema import result_array_schema
     from daydream.trajectory import DaydreamPhase
     from tests.harness.pi_replay import FIXTURES_DIR
     from tests.harness.process_replay import make_mock_process_from_fixture
@@ -22,7 +22,8 @@ async def test_pi_backend_honors_structured_output_opt_out(tmp_path: pathlib.Pat
     with patch('daydream.backends._transport.asyncio.create_subprocess_exec', return_value=process):
         result, _, reason = await agent_module.run_agent(
             PiBackend(model='glm-5.2'), tmp_path, 'Parse', phase=DaydreamPhase.REVIEW,
-            output_schema=PER_STACK_RECORD_SCHEMA, validate_structured_output=validate, tools_disabled=validate,
+            output_schema=result_array_schema('issues', {'id': {'type': 'integer'}}),
+            validate_structured_output=validate, tools_disabled=validate,
         )
     assert reason is None
     assert result == ({'issues': []} if validate else ['module', 'moduleVersion', 'surface'])

@@ -1,13 +1,12 @@
 """Summary, table, and deep-review status components.
 
-Fix-progress indicators, the iteration divider, the run summary table, the
-issues table, the verdict-join table, the exploration-context summary, and the
-deep-mode stage/verification/preflight notices.
+Fix-progress indicators, the verdict-join table, the exploration-context
+summary and the verification summary.
 """
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from rich import box
 from rich.console import Console, Group
@@ -15,7 +14,6 @@ from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
-from daydream.severity import normalize_severity
 from daydream.ui.messages import print_dim
 from daydream.ui.theme import (
     NEON_COLORS,
@@ -29,8 +27,6 @@ from daydream.ui.theme import (
     STYLE_ORANGE,
     STYLE_PINK,
     STYLE_PURPLE,
-    STYLE_RED,
-    STYLE_YELLOW,
     pill,
 )
 
@@ -72,45 +68,6 @@ def print_fix_complete(
     console.print(text)
 
 
-def print_issues_table(console: Console, issues: list[dict[str, Any]]) -> None:
-    """Render an issue table followed by each issue’s details."""
-    table = Table(
-        box=box.SIMPLE_HEAVY,
-        border_style=STYLE_PURPLE,
-        show_header=True,
-        header_style=STYLE_BOLD_CYAN,
-    )
-    table.add_column("#", style=STYLE_YELLOW, width=4)
-    table.add_column("Severity", style=STYLE_ORANGE, width=8)
-    table.add_column("Issue", style=STYLE_FG)
-
-    severity_style = {"high": STYLE_RED, "medium": STYLE_YELLOW, "low": STYLE_GREEN}
-
-    for issue in issues:
-        sev = normalize_severity(issue.get("severity"))
-        table.add_row(
-            str(issue.get("id", "?")),
-            Text(sev or "--", style=severity_style.get(sev or "", STYLE_FG)),
-            issue.get("title", issue.get("description", "No title")),
-        )
-
-    console.print()
-    console.print(table)
-
-    for issue in issues:
-        console.print()
-        issue_id = issue.get("id", "?")
-        title = issue.get("title", "No title")
-        console.print(Text(f"  #{issue_id}: {title}", style=STYLE_BOLD_PINK))
-        if "description" in issue:
-            console.print(Text(f"  {issue['description']}", style=STYLE_FG))
-        if "recommendation" in issue:
-            console.print(Text(f"  Recommendation: {issue['recommendation']}", style=STYLE_CYAN))
-        if "files" in issue and issue["files"]:
-            files_str = ", ".join(issue["files"])
-            console.print(Text(f"  Files: {files_str}", style=STYLE_DIM))
-
-
 def format_verdict_join(
     *,
     matched: list[int | None],
@@ -122,7 +79,7 @@ def format_verdict_join(
 ) -> Table:
     """Show verdict categories and ids, plus an independently computed total.
 
-    Matched and Structural always appear; other empty categories are omitted.
+    Matched always appears; other empty categories are omitted.
     Skipped findings were not selected, whereas unmatched findings lack verdicts."""
     table = Table(
         title="Verdict Join",
@@ -145,7 +102,7 @@ def format_verdict_join(
     )
     computed_total = sum(len(values) for _, values in categories)
     for label, values in categories:
-        if values or label in {"Matched", "Structural"}:
+        if values or label == "Matched":
             table.add_row(label, str(len(values)), ", ".join(str(value) for value in values))
     mismatch = f"  [expected {total}]" if computed_total != total else ""
     table.add_row("Total", str(computed_total) + mismatch, "")
@@ -220,11 +177,6 @@ def render_exploration_summary(ctx: "ExplorationContext") -> "Group | Text":
     return Group(Text(""), table)
 
 
-def print_stage_progress(console: Console, current: int, total: int, name: str) -> None:
-    """Print the 1-based stage boundary banner."""
-    console.print(f"[neon.cyan]▶[/] [neon.fg][stage {current}/{total}: {name}][/]")
-
-
 def print_verification_summary(console: Console, verdicts_path: Path) -> None:
     """Summarize verifier flags and optional selected/skipped counts.
 
@@ -255,40 +207,3 @@ def print_verification_summary(console: Console, verdicts_path: Path) -> None:
 def _is_count(value: object) -> bool:
     """Whether *value* is a real integer count (``bool`` is not)."""
     return isinstance(value, int) and not isinstance(value, bool)
-
-
-def print_preflight_notice(
-    console: Console,
-    *,
-    stages: list[str],
-    stack_lines: list[str],
-    agent_count: int,
-    exploration_available: bool,
-    conditional_arbiter: bool = True,
-) -> None:
-    """Show review assignments and a scoped nominal agent estimate before review."""
-    console.print("[neon.cyan]▶[/] [neon.fg]Deep-review pipeline pre-flight[/]")
-    if exploration_available:
-        console.print("Exploration pre-scan: enabled (runs before stage 1)", style="dim")
-    else:
-        console.print(
-            "Exploration pre-scan: unavailable (deep pipeline runs without grounding)",
-            style="dim yellow",
-        )
-    console.print("[neon.fg]  Stages:[/]")
-    for idx, stage in enumerate(stages, start=1):
-        console.print(f"    {idx}. {stage}")
-    console.print("[neon.fg]  Review assignments:[/]")
-    for line in stack_lines:
-        console.print(f"    - {line}")
-    console.print(f"[neon.fg]  Estimated review agents: {agent_count}[/]")
-    allowance = (
-        "includes 1 conditional arbiter allowance"
-        if conditional_arbiter else "no merge or arbiter allowance"
-    )
-    console.print(f"    Nominal review estimate; {allowance}.", style="dim")
-    console.print(
-        "    Excludes exploration and optional phases; retries and caching can change backend attempts. "
-        "Not a concurrency limit.",
-        style="dim",
-    )

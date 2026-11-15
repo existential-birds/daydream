@@ -16,23 +16,17 @@ def test_accessors_preserve_missing_key_semantics_and_documented_defaults() -> N
     with pytest.raises(KeyError, match="merged_report"):
         _ = state.merged_report
     assert state.merged_report_or_none is None
-    with pytest.raises(KeyError, match="record_pool"):
-        _ = state.record_pool
 
     assert state.mode == "loop"
     assert state.diff_or_empty == ""
-    assert state.intent_authoritative is False
     assert state.diff_truncated is False
     assert state.diagrams is None
     assert state.import_graph == {}
-    assert state.arbiter_continuation is None
     assert state.iteration is None
     assert state.fix_outcomes == {}
     assert state.fix_round_snapshot is None
     assert state.push_receipt is None
     assert state.items_or_empty == []
-    with pytest.raises(KeyError, match="review_coverage"):
-        _ = state.unfinished_scopes
 
     with pytest.raises(RuntimeError, match="fix cycle was not initialized at the accepted gate"):
         _ = state.fix_cycle_state

@@ -1,6 +1,6 @@
 from typing import Any
 
-from daydream.deep.render import insert_diagrams_section, insert_review_context, render_held_section, render_report
+from daydream.deep.render import insert_diagrams_section, insert_review_context, render_report
 from tests.harness.review_result import terminal_result
 
 
@@ -42,7 +42,7 @@ def test_empty_report_retains_attributed_rationale_and_unproduced_checks_through
     assert '\n## forged heading' not in report
     assert 'does not independently prove semantic coverage' in report
     assert 'additional source notes omitted' in report
-    held = render_held_section([_item(9, 'per-stack', 'held.py', 8, 'low', 'held')])
+    held = '## Section of another writer\n1. [held.py:8] retained through replacement'
     complete = 'Review warning\n\n' + report + '\n' + held + '\n\n## Coverage\nExisting coverage\n'
     once = insert_review_context(complete, context, terminal)
     assert insert_review_context(once, context, terminal) == once

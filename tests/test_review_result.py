@@ -57,7 +57,7 @@ def test_terminal_state_requires_positive_usable_coverage() -> None:
     assert result["analysis_state"] == "incomplete" and "interruption" in result["reason_codes"]
     assert [scope["scope_id"] for scope in result["stack_outcomes"]] == ["python", "structure"]
     with pytest.raises(ValueError, match="frozen"):
-        cancelled.require_phase("adjudication")
+        cancelled.record_scope("python", "complete")
 
 
 def test_terminal_rejects_inconsistent_or_unknown_evidence() -> None:

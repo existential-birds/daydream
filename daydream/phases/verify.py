@@ -1,7 +1,6 @@
 """Verify for review and fix phases."""
 
 import json
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -10,18 +9,13 @@ from daydream.backends import (
     Backend,
 )
 from daydream.check_claims import substantiate_check_claims
-from daydream.deep.adjudication_provenance import load_provenance
 from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.verify_selection import (
     SELECTION_RULE_VERSION,
-    SKIP_REASON_CODE,
-    SelectionConfig,
     SelectionDecision,
-    plan_reuse,
     select_items,
 )
 from daydream.extensions import get_registry
-from daydream.json_utils import read_json_object
 from daydream.phases.inputs import _recipe_for_work, append_extended_facts
 from daydream.phases.schemas import (
     FIX_VERIFY_RETARGETABLE_VERDICTS,
@@ -89,57 +83,32 @@ async def phase_verify_recommendations(
     merged_items_path: Path,
     deep_dir: Path,
     strategy: str | None = None,
-    selection: SelectionConfig | None = None,
     run_context: RunContext | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     """Classify every canonical item and persist its selection decision beside verdicts.
 
-    Only selected items reach the prompt; an empty selection still writes an artifact
-    without a backend call. Reuse requires stable UID/content/rule version and a
-    resolved prior verdict; contradicts and uncertain always re-verify. Reused
-    selections carry verdict_reused. No selection config means verify all non-exempt
-    items.
+    Every non-exempt item reaches the prompt; an empty selection still writes an artifact
+    without a backend call.
     """
     run_context = resolve_run_context(run_context)
     output_path = DeepArtifact.VERDICTS.at(deep_dir)
 
     items: list[dict[str, Any]] = json.loads(merged_items_path.read_text()).get("items", [])
-    config = selection if selection is not None else SelectionConfig(verify_all=True)
-    decisions = select_items(
-        items,
-        provenance=load_provenance(deep_dir),
-        diff_text=_read_diff_text(deep_dir),
-        config=config,
-    )
-    # Read prior evidence before overwrite; missing/malformed artifacts force full
-    # re-verification rather than partial reuse or failure.
-    reused, to_verify = plan_reuse(_prior_selection_payload(read_json_object(output_path)), decisions)
-    decisions = [
-        replace(decision, verdict_reused=True) if decision.item_uid in reused else decision
-        for decision in decisions
-    ]
+    decisions = select_items(items)
     selection_block: dict[str, Any] = {
         "rule_version": SELECTION_RULE_VERSION,
-        "mode": "verify_all" if config.verify_all else "selective",
+        "mode": "verify_all",
         "decisions": [decision.as_dict() for decision in decisions],
         "selected": sum(1 for decision in decisions if decision.selected),
-        # Count selected skips, excluding lens exemptions; verify_all reports zero.
-        "skipped": sum(1 for decision in decisions if decision.reason_code == SKIP_REASON_CODE),
-        "reused": len(reused),
+        # No finding is skipped as routine and no verdict is carried over; the stored counters stay.
+        "skipped": 0,
+        "reused": 0,
     }
-    # Exempt decisions have no reusable verdict but must still stay out of prompts.
-    pending_uids = {decision.item_uid for decision in to_verify if decision.selected}
-    pending_items = [
-        item
-        for item, decision in zip(items, decisions, strict=True)
-        if decision.selected and decision.item_uid in pending_uids
-    ]
-    reused_verdicts = [reused[decision.item_uid] for decision in decisions if decision.item_uid in reused]
+    pending_items = [item for item, decision in zip(items, decisions, strict=True) if decision.selected]
 
     if not pending_items:
-        # Nothing new to verify: the reused verdicts (possibly empty) are the
-        # whole artifact, still schema-valid, still written (MH11/MH14).
-        payload: dict[str, Any] = {"verdicts": reused_verdicts, "selection": selection_block}
+        # Nothing to verify: the artifact is still schema-valid and still written (MH11/MH14).
+        payload: dict[str, Any] = {"verdicts": [], "selection": selection_block}
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(payload, indent=2))
         return output_path, payload
@@ -156,7 +125,7 @@ async def phase_verify_recommendations(
         backend, work, prompt, RECOMMENDATION_VERDICTS_SCHEMA, run_context,
     )
     payload = _coerce_verdicts_payload(candidate)
-    payload["verdicts"] = _merge_reused_verdicts(reused_verdicts, payload["verdicts"], decisions, reused)
+    payload["verdicts"] = _asked_verdicts(payload["verdicts"], decisions)
     payload["selection"] = selection_block
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -164,38 +133,10 @@ async def phase_verify_recommendations(
     return output_path, payload
 
 
-def _prior_selection_payload(artifact: dict[str, Any]) -> dict[str, Any] | None:
-    """Combine prior selection metadata and verdicts for reuse; absent/foreign blocks miss."""
-    selection = artifact.get("selection")
-    if not isinstance(selection, dict):
-        return None
-    verdicts = artifact.get("verdicts")
-    return {**selection, "verdicts": verdicts if isinstance(verdicts, list) else []}
-
-
-def _merge_reused_verdicts(
-    reused_verdicts: list[dict[str, Any]],
-    fresh_verdicts: list[dict[str, Any]],
-    decisions: list[SelectionDecision],
-    reused: dict[str, dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Join reused verdicts with fresh ones for the findings this turn was asked to verify."""
-    asked = {
-        decision.item_id
-        for decision in decisions
-        if decision.selected and decision.item_uid not in reused and decision.item_id is not None
-    }
-    return [*reused_verdicts, *(verdict for verdict in fresh_verdicts if verdict.get("issue_id") in asked)]
-
-
-def _read_diff_text(deep_dir: Path) -> str:
-    """Read diff.patch beside deep artifacts first, then at the artifact root; return empty text if absent."""
-    for candidate in (deep_dir / "diff.patch", deep_dir.parent / "diff.patch"):
-        try:
-            return candidate.read_text()
-        except OSError:
-            continue
-    return ""
+def _asked_verdicts(fresh_verdicts: list[dict[str, Any]], decisions: list[SelectionDecision]) -> list[dict[str, Any]]:
+    """Keep only the verdicts for the findings this turn was asked to verify."""
+    asked = {decision.item_id for decision in decisions if decision.selected and decision.item_id is not None}
+    return [verdict for verdict in fresh_verdicts if verdict.get("issue_id") in asked]
 
 
 @bind_resolved_run_context

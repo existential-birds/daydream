@@ -130,17 +130,13 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
     parser.add_argument(
         "--latency-profile",
         metavar="PROFILE",
-        help="Wonder/arbiter effort profile: fast, balanced (default), or "
-             "forensic. Sets the effort floor for the wonder and arbiter "
-             "phases; risk may raise it, never lower it. Codex-only effort "
-             "effects apply where the effort table has an entry. An "
-             "unrecognised value resolves fail-safe to forensic.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--non-interactive",
         action="store_true",
         help="Run without prompting; take each prompt's safe default "
-             "(confirm intent, exit the test/heal loop)."
+             "(decline a fix gate, exit the test/heal loop)."
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(

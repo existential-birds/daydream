@@ -30,6 +30,13 @@ _T = TypeVar("_T")
 _VALIDATE_HINT = "run 'daydream ext validate' to check the extension registry"
 
 
+#: Prompt names of the replaced staged reviewer. An override of one would register and never run.
+REMOVED_PROMPTS = frozenset({
+    "intent", "alternatives", "per-stack", "structural", "generic-fallback", "arbiter", "supervise", "suppression",
+    "merge",
+})
+
+
 class Registry:
     """Mutable per-run store for phases, flows, prompts, renderers, supervision, and tracing."""
 
@@ -77,6 +84,9 @@ class Registry:
 
     def override_prompt(self, name: str, builder: Callable[..., str]) -> None:
         """Upsert the prompt builder for a named prompt."""
+        if name in REMOVED_PROMPTS:
+            raise ExtensionError(f"prompt '{name}' was removed with the staged reviewer and nothing calls it; "
+                                 "remove the override and put review guidance in a review profile")
         if not callable(builder):
             raise ExtensionError(f"prompt '{name}' builder must be callable")
         self._prompts[name] = builder

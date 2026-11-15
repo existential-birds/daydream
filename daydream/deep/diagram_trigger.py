@@ -19,8 +19,7 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from daydream._tree_sitter_safety import TreeSitterBadVersionError
-from daydream.config import STRUCTURE_STACK_NAME
-from daydream.deep.detection import GENERIC_STACK, base_stack_name
+from daydream.deep.detection import GENERIC_STACK
 from daydream.deep.diagram_types import CandidateRoot, DiagramThresholds
 from daydream.deep.framework_detection import JS_SOURCE_SUFFIXES
 from daydream.repository_paths import is_test_path
@@ -106,11 +105,8 @@ def _code_files(stacks: list[StackAssignment], changed_files: list[str]) -> list
     changed = set(changed_files)
     selected: set[str] = set()
     for assignment in stacks:
-        base_stack = base_stack_name(assignment.stack_name)
-        if base_stack == STRUCTURE_STACK_NAME:
-            continue
         for path in assignment.files:
-            if base_stack == GENERIC_STACK and PurePosixPath(path).suffix.lower() not in JS_SOURCE_SUFFIXES:
+            if assignment.stack_name == GENERIC_STACK and PurePosixPath(path).suffix.lower() not in JS_SOURCE_SUFFIXES:
                 continue
             if path in changed and not is_test_path(path):
                 selected.add(path)

@@ -9,7 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.framework_detection import JS_SOURCE_SUFFIXES, FrameworkInspection
 
 # Extension -> stack-key (lowercase, matches the supported built-in stacks).
@@ -44,12 +43,6 @@ _CONFIG_OWNERSHIP_SIGNALS: dict[str, str] = {
 GENERIC_STACK = "generic"
 
 
-def base_stack_name(stack_name: str) -> str:
-    """Select stack policy without replacing a public shard's identity."""
-    base, separator, shard = stack_name.partition("#")
-    return base if separator and shard.isdecimal() else stack_name
-
-
 @dataclass
 class StackAssignment:
     """Nonempty file scope; only generic may mark an entirely docs-only diff."""
@@ -57,12 +50,6 @@ class StackAssignment:
     stack_name: str
     files: list[str] = field(default_factory=list)
     is_docs_only: bool = False
-    # Issue #731: cross-shard frontier. For a shard with a synthetic ``#``
-    # ``stack_name``, the bounded set of files in *other* shards of the same
-    # language that share a tree-sitter import edge with this shard's files.
-    # Never added to ``files`` (union of primary sets stays the changed set).
-    # Empty for unsplit stacks and the structural meta-stack.
-    frontier_files: list[str] = field(default_factory=list)
 
 
 def _ext(path: str) -> str:
@@ -84,8 +71,7 @@ def _is_config_generic_default(path: str) -> bool:
     if base == "Dockerfile":
         return True
     # Repository infrastructure has no ownership relationship to a co-changed
-    # frontend file. Keep it out of the ambiguous single-stack shortcut while
-    # preserving that inference for configs/helpers nested inside an app.
+    # frontend file, unlike configs/helpers nested inside an app.
     # JS project configs use bounded local evidence instead of co-change promotion.
     if PurePosixPath(path).parent == PurePosixPath(".") and (base == "Makefile" or suffix == ".json"):
         return True
@@ -122,8 +108,7 @@ def _nearest_ancestor_stack(path: str, assigned: dict[str, str]) -> str | None:
 def detect_stacks(changed_files: list[str], *, target_dir: Path | None = None) -> list[StackAssignment]:
     """Route changed POSIX paths.
 
-    Return nonempty language scopes alphabetically, then generic, then structure.
-    The structure meta-stack contains all changed files unless the diff is docs-only.
+    Return nonempty language scopes alphabetically, then generic.
     """
     inspection = FrameworkInspection(target_dir)
 
@@ -170,7 +155,6 @@ def detect_stacks(changed_files: list[str], *, target_dir: Path | None = None) -
     # Ambiguous files (D-12).
     for path in ambiguous:
         if len(present_stacks) == 1:
-            # D-12 single-stack shortcut: unconditional join.
             assigned[path] = next(iter(present_stacks))
             continue
         if len(present_stacks) == 0:
@@ -210,19 +194,6 @@ def detect_stacks(changed_files: list[str], *, target_dir: Path | None = None) -
                 stack_name=GENERIC_STACK,
                 files=files,
                 is_docs_only=diff_is_docs_only,
-            )
-        )
-
-    # Structural meta-stack: appended unconditionally for any non-docs-only diff
-    # with at least one changed file (caller gates on ctx.pipeline().structural_enabled).
-    # Carries the union of all changed files so the structural reviewer judges the
-    # whole change across language boundaries.
-    if changed_files and not diff_is_docs_only:
-        results.append(
-            StackAssignment(
-                stack_name=STRUCTURE_STACK_NAME,
-                files=sorted(set(changed_files)),
-                is_docs_only=False,
             )
         )
     return results

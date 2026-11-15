@@ -820,9 +820,10 @@ def _finding_blocks_approval(
     severity_off_vocabulary: bool = False,
     severity_before_demotion: str | None = None,
 ) -> bool:
-    """Block on asserted unknown severity or a blocking severity before location demotion."""
+    """Block on an absent or unknown severity, or a blocking severity before location demotion."""
     return (
-        severity_off_vocabulary
+        severity is None
+        or severity_off_vocabulary
         or _severity_blocks_approval(severity)
         or (location_distrust and _severity_blocks_approval(severity_before_demotion))
     )
@@ -1108,7 +1109,6 @@ def post_findings_from_artifact(
     # module level (one-way by design), so the poster flow resolves them at
     # call time — the same no-cycle pattern as ``daydream.deep.orchestrator``.
     from daydream.findings import (
-        IMMUTABLE_FINDINGS_SCHEMA_VERSION,
         FindingsValidationError,
         load_findings_artifact,
     )
@@ -1222,8 +1222,7 @@ def post_findings_from_artifact(
     # open high finding (#343 R2 F2b). Matched findings are never re-posted
     # as comments — only their severities count here.
     can_approve = approve_on_clean and artifact.analysis_complete and not review_warnings and not any(
-        (artifact.schema_version == IMMUTABLE_FINDINGS_SCHEMA_VERSION and finding.severity is None)
-        or _finding_blocks_approval(
+        _finding_blocks_approval(
             finding.severity,
             finding.location_distrust,
             finding.severity_off_vocabulary,

@@ -173,6 +173,11 @@ async def test_diagram_phase_outcome_and_dispatch_interval_when_one_author_fails
     body = captured_post.body()
     assert SEQUENCE_HEADING in body
     assert FLOWCHART_HEADING not in body
+    # Both local reports carry the rendered diagram once, beside the review itself.
+    for report in (target / ".review-output.md", target / ".daydream/deep/review-output.md"):
+        text = report.read_text()
+        assert (text.count("## Diagrams"), text.count("sequenceDiagram")) == (1, 1), report
+        assert "## Review outcome" in text
 
 # --- Per-phase config override (spec section 9) ------------------------------
 

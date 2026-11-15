@@ -27,10 +27,6 @@ from daydream.backends import (
     TextEvent,
 )
 from daydream.dataset import LocalRecordStore
-from daydream.deep.artifacts import (
-    DeepArtifact,
-    diff_key,
-)
 from daydream.extensions.loader import build_registry
 from daydream.flows.engine import BackendFactory, FlowContext
 from daydream.github_app import GitHubExecutionInput
@@ -50,12 +46,14 @@ from daydream.trajectory import (
     TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
 )
-from daydream.workspace import AuditWorkspace, WorkContext, _resolve_base
+from daydream.workspace import AuditWorkspace, WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.dataset import read_records
 from tests.harness.git_helpers import bare_remote, commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.otlp import attributes, kind_of
+from tests.harness.stub_backend import StubBackend
 from tests.harness.trajectory import make_recorder
+from tests.test_deep_orchestrator import _pin_findings_pr
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
 
@@ -557,6 +555,39 @@ async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
     _, archived_run = _assert_one_published_run(repo, archive_dir)
     assert json.loads((archived_run / "manifest.json").read_text())["archive_status"] == "partial"
 
+    # A review cancelled on the ordinary route seals what it admitted before the cancellation escapes:
+    # its claim and its unfinished coverage are published, and the embedder's result handler is not called.
+    reviewed = _feature_repo(tmp_path / "reviewed")
+    reviewer = StubBackend(reviewed)
+    reviewer.review_claims = [{"title": "Admitted before cancellation", "file": "app.py", "line": 1}]
+    monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: reviewer)
+    caught.clear()
+    exported = tmp_path / "cancelled-findings.json"
+    _pin_findings_pr(monkeypatch, reviewed)
+    config = RunConfig(target=str(reviewed), base="main", archive=False, run_eval=False, non_interactive=True,
+                       findings_out=str(exported), pr_number=7)
+    handled: list[Any] = []
+
+    async def review() -> None:
+        try:
+            await runner.run(config, private_roots=private_root_locations(base=tmp_path / "private"),
+                             review_result_handler=handled.append)
+        except BaseException as exc:
+            caught.append(exc)
+            raise
+    async with anyio.create_task_group() as group:
+        reviewer.review_after_acceptance = lambda kind: group.cancel_scope.cancel() if kind == "discovery" else None
+        group.start_soon(review)
+    assert len(caught) == 1 and isinstance(caught[0], anyio.get_cancelled_exc_class())
+    assert handled == [] and not exported.exists()
+    sealed = json.loads((reviewed / ".daydream/deep/committed-review.json").read_text())
+    assert [claim["title"] for claim in sealed["claims"]] == ["Admitted before cancellation"]
+    assert sealed["findings"] == [] and sealed["terminal_result"]["analysis_state"] == "incomplete"
+    coverage = json.loads((reviewed / ".daydream/deep/review-coverage.json").read_text())
+    assert coverage["run_id"] == sealed["run_id"]
+    assert "Admitted before cancellation" in (reviewed / ".review-output.md").read_text()
+    assert not list((tmp_path / "private").rglob("review-capture-*"))
+
 
 async def test_run_rejects_head_mismatch_on_real_worktree(
     monkeypatch: pytest.MonkeyPatch,
@@ -598,17 +629,19 @@ async def test_owner_preflight_failure_never_reaches_identity_or_backend(
 # --- Per-phase model resolution tests --------------------------------------
 
 async def test_capture_review_workspace_refuses_resume_and_an_unpinned_comment_base(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Captured reviews never resume retained judgments, and comment mode requires a pinned PR base."""
+    """No review resumes retained judgments, and comment mode requires a pinned PR base."""
     work = WorkContext(repo=tmp_path, source=tmp_path, base_branch="main", base_sha="1" * 40, head_branch="feature",
                        head_sha="2" * 40, is_ephemeral=False, run_id="run-1")
     owner: Any = None
     execution: Any = SimpleNamespace(auth=git_ops.INHERIT_GITHUB_AUTH)
-    with pytest.raises(git_ops.GitError, match="cannot resume retained judgments"):
-        async with runner._capture_review_workspace(
-                work, RunConfig(findings_out="f.json", start_at="merge"), owner, execution):
-            pytest.fail("resume yielded a captured workspace")
+    # The resume request is refused before the target is even opened as a repository.
+    monkeypatch.setattr(runner, "open_workspace", lambda *_a, **_k: pytest.fail("a resume opened a workspace"))
+    for resumed in (RunConfig(findings_out="f.json", start_at="merge"), RunConfig(output_mode="loop", assume="yes",
+                                                                                 start_at="fix")):
+        assert await runner.run(replace(resumed, target=str(tmp_path))) == 1
+        assert "--start-at: every review starts fresh" in " ".join(capsys.readouterr().out.replace("║", " ").split())
     monkeypatch.setattr("daydream.pr_review.find_pr_by_number", lambda *_a, **_k: _ARTIFACT_PR)
     monkeypatch.setattr("daydream.pr_review.capture_pr_base_tip", lambda *_a, **_k: None)
     monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda *_a, **_k: _ARTIFACT_PR)
@@ -650,39 +683,6 @@ def test_improve_backend_preflight_fails_closed(tmp_path: Path, monkeypatch: pyt
 
 # --- Deep fix-cycle hero is followed by Model: dim line --------------------
 
-def _seed_fix_resume(target: Path, items: list[dict[str, Any]]) -> Path:
-    """Seed identity-bound completed shallow review evidence for fix-only tests."""
-    from daydream.deep.artifacts import persist_review_coverage
-    from daydream.deep.diff import _diff_changed_files
-    from daydream.deep.orchestrator import _prepare_review_stacks
-    from daydream.deep.records import stamp_item_uids
-    from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
-    from tests.harness.review_result import frozen_target_decisions
-
-    deep = target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    base = _resolve_base(target, None, None)
-    diff = git_ops.diff(target, base) or ""
-    head = git_ops.head_sha(target)
-    merge_base = git_ops.resolve_diff_merge_base(target, base, head)
-    config = RunConfig(target=str(target), shallow=True)
-    stacks, _, _ = _prepare_review_stacks(config, _diff_changed_files(diff), diff, target, "deep")
-    coverage = ReviewCoverage("fix-resume-fixture", AnalyzedRevision(head, merge_base, diff_key(diff)),
-                              [PlannedScope(stack.stack_name, stack.stack_name.split("#", 1)[0],
-                                            files=tuple(sorted(stack.files))) for stack in stacks],
-                              ("intent", "alternatives", "merge"))
-    for stack in stacks:
-        coverage.record_scope(stack.stack_name, "complete", target_decisions=frozen_target_decisions(
-            target, stack, coverage.revision, diff))
-    coverage.record_phase("intent", "complete")
-    coverage.record_phase("alternatives", "complete", noop=True)
-    coverage.record_phase("merge", "complete")
-    DeepArtifact.DIFF_KEY.at(deep).write_text(diff_key(diff), encoding="utf-8")
-    stamp_item_uids(items)
-    DeepArtifact.MERGED_ITEMS.at(deep).write_text(json.dumps({"items": items}))
-    persist_review_coverage(deep, coverage)
-    return deep
-
 def _fix_item(item_id: int = 1, *, severity: str = "medium") -> dict[str, Any]:
     """Build a validated merged item targeting the fixture's tracked file."""
     return {
@@ -719,19 +719,17 @@ async def _drive_fix_cycle_failing(
     stdin_guard_message: str | None = None, stdin_answers: list[str] | None = None,
     clipboard_is_available: bool = False,
 ) -> tuple[int, ScriptedBackend, ScriptedBackend, list[bool]]:
-    """Drive real test-and-heal with seeded resume artifacts. Stub verify/fix, spy on commits, control gate
+    """Drive real test-and-heal after a scripted review. Stub verify/fix, spy on commits, control gate
     answers, and reject excess healing via _BEYOND_SCRIPT. Return exit code, backends, and commit calls.
 
     Test execution runs as a real host process; the read-only summarizer runs on the
     TEST phase's backend. The heal turn runs on the FIX phase's backend (issue #1210) and
     is scripted through ``repair_turn`` rather than through ``script``.
     """
-    _seed_fix_resume(target, [_fix_item()])
+    reviewer = StubBackend(target)
+    reviewer.review_claims = [{"title": _fix_item()["description"], "file": "main.py", "line": 1}]
     config.test_command = "false"
     # The backend script observes phases; mute only terminal output.
-    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **k: None)
-    monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", lambda *a, **k: None)
-    monkeypatch.setattr("daydream.deep.merge_steps.print_stage_progress", lambda *a, **k: None)
     monkeypatch.setattr("daydream.deep.fix_steps.print_verification_summary", lambda *a, **k: None)
     monkeypatch.setattr("daydream.agent.console", Console(file=StringIO()))
     monkeypatch.setattr("daydream.runner.console", type("C", (), {"print": lambda *a, **kw: None})())
@@ -742,7 +740,7 @@ async def _drive_fix_cycle_failing(
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
         lambda _config, phase, cache=None, **_kwargs: (
-            test_backend if phase == "test" else repair_backend
+            reviewer if phase in ("review", "arbiter") else test_backend if phase == "test" else repair_backend
         ),
     )
     monkeypatch.setattr("daydream.deep.fix_steps.phase_verify_recommendations", _stub_verify)
@@ -795,7 +793,7 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
     monkeypatch.setattr("daydream.ui.print_dim", _dim_spy)
     exit_code, test_backend, repair_backend, commit_calls = await _drive_fix_cycle_failing(
         monkeypatch, feature_branch_repo,
-        make_config(feature_branch_repo, output_mode="loop", start_at="fix", shallow=True, assume="yes"),
+        make_config(feature_branch_repo, output_mode="loop", assume="yes"),
         # Suite executions are host processes; reject a second TEST backend turn after the handoff.
         script=[_handoff_turn("# Handoff\n\n--yes bounded fix failure")],
         repair_turn=_FIX_TURN,
@@ -845,6 +843,6 @@ def test_manifest_identity_preserves_mode_capabilities(tmp_path: Path, flow: Day
     assert identity.phases.merge is (flow in (DaydreamRunFlow.NORMAL, DaydreamRunFlow.DEEP, DaydreamRunFlow.TTT))
     assert identity.phases.push is runs_test
     assert identity.phases.remote_ci is runs_test
-    # The labels follow the mode that ran: a review requested with shallow=True is still the full review.
-    review = capture_manifest_run_identity(RunConfig(shallow=True), DaydreamRunFlow.TTT, build_registry(), tmp_path)
+    # The labels follow the mode that ran.
+    review = capture_manifest_run_identity(RunConfig(), DaydreamRunFlow.TTT, build_registry(), tmp_path)
     assert (review.deep, review.review_only) == (True, True)

@@ -1,7 +1,6 @@
 """Bounded persisted reviewer assertions, distinct from host coverage evidence."""
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from daydream.json_utils import validates_schema
@@ -28,13 +27,6 @@ SOURCE_RATIONALE_SCHEMA = strict_object({
     })},
     'notes_omitted': {'type': 'integer', 'minimum': 0},
 })
-_SCOPE_RATIONALE_SCHEMA = strict_object({
-    'scope_id': {'type': 'string', 'minLength': 1, 'maxLength': 512},
-    'originating_run_id': {'type': 'string', 'minLength': 1, 'maxLength': 512},
-    'analyzed_revision': NOTE_ORIGIN_SCHEMA['properties']['analyzed_revision'],
-    'review_context': SOURCE_RATIONALE_SCHEMA,
-})
-
 
 def valid_review_context(value: Any) -> bool:
     """Validate optional persisted assertions without treating them as semantic proof."""
@@ -42,31 +34,3 @@ def valid_review_context(value: Any) -> bool:
         return False
     decisions = value['target_decisions']
     return bool(decisions['reviewed'] + decisions['not_reviewed'] <= decisions['required'])
-
-
-def valid_scope_review_context(
-    value: Any, *, scope_id: str, analyzed_revision: dict[str, Any], originating_run_id: str,
-) -> bool:
-    """Admit an optional host sidecar only for the exact current source records."""
-    try:
-        return bool(validates_schema(value, _SCOPE_RATIONALE_SCHEMA)
-                and value['scope_id'] == scope_id and value['analyzed_revision'] == analyzed_revision
-                and value['originating_run_id'] == originating_run_id
-                and valid_review_context(value['review_context']))
-    except RecursionError:
-        # Error formatting can exhaust the stack on deeply nested optional JSON.
-        return False
-
-
-def bounded_scope_review_context_bytes(envelope: dict[str, Any]) -> bytes:
-    """Fit the exact JSON writer encoding by omitting whole trailing source notes."""
-    context = {**envelope['review_context'], 'notes': list(envelope['review_context']['notes'])}
-    bounded = {**envelope, 'review_context': context}
-    while True:
-        payload = json.dumps(bounded, indent=2).encode('utf-8')
-        if len(payload) <= REPORT_INPUT_MAX_BYTES:
-            return payload
-        if not context['notes']:
-            raise ValueError('source rationale metadata exceeds report input budget')
-        context['notes'].pop()
-        context['notes_omitted'] += 1

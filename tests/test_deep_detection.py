@@ -8,8 +8,7 @@ from pathlib import Path
 import pytest
 
 from daydream.deep.dependency import build_import_graph
-from daydream.deep.detection import StackAssignment, detect_stacks
-from daydream.deep.sharding import shard_stacks
+from daydream.deep.detection import detect_stacks
 
 
 def test_mixed_repository_routes_source_metadata_and_extension_evidence(tmp_path: Path) -> None:
@@ -72,13 +71,11 @@ def test_mixed_repository_routes_source_metadata_and_extension_evidence(tmp_path
     standalone = detect_stacks(["config.yaml", "pyproject.toml"], target_dir=tmp_path)
     assert [(stack.stack_name, stack.files) for stack in standalone] == [
         ("generic", ["config.yaml", "pyproject.toml"]),
-        ("structure", ["config.yaml", "pyproject.toml"]),
     ]
     # A package-only change owns its ambiguous migration before other stacks join the diff.
     initial = detect_stacks(["pyproject.toml", "backend/api/main.py", "migrations/001.sql"], target_dir=tmp_path)
     assert [(s.stack_name, s.files) for s in initial] == [
         ("python", ["backend/api/main.py", "migrations/001.sql", "pyproject.toml"]),
-        ("structure", ["backend/api/main.py", "migrations/001.sql", "pyproject.toml"]),
     ]
     result = detect_stacks(list(reversed(bodies)), target_dir=tmp_path)
     react_names = {
@@ -106,11 +103,10 @@ def test_mixed_repository_routes_source_metadata_and_extension_evidence(tmp_path
         "react": sorted(react),
         "rust": ["src/lib.rs"],
         "generic": sorted(set(bodies) - react - python - {"src/lib.rs"}),
-        "structure": sorted(bodies),
     }
     assert {stack.stack_name: stack.files for stack in result} == expected
     assert all(not stack.is_docs_only for stack in result)
-    primary = [path for stack in result if stack.stack_name != "structure" for path in stack.files]
+    primary = [path for stack in result for path in stack.files]
     assert Counter(primary) == Counter(bodies.keys())
 
 
@@ -170,7 +166,6 @@ def test_unavailable_package_evidence_cannot_borrow_a_valid_siblings_framework(
     assert {stack.stack_name: stack.files for stack in result} == {
         "react": ["react.ts"],
         "generic": sorted(changed[1:]),
-        "structure": sorted(changed),
     }
     assert tmp_path / "unreadable/package.json" in opened
     assert not {escaped, metadata_link, outside_source, outside_metadata}.intersection(opened)
@@ -210,7 +205,6 @@ def test_workspace_inventory_keeps_each_unowned_child_generic(tmp_path: Path) ->
     assert {stack.stack_name: stack.files for stack in result} == {
         "react": ["healthy/App.tsx"],
         "generic": sorted(changed),
-        "structure": sorted([*changed, "healthy/App.tsx"]),
     }
 
     # Only React is present: repository infrastructure cannot hide behind another language.
@@ -256,7 +250,7 @@ def test_local_packages_route_their_own_configs(tmp_path: Path) -> None:
         "packages/web/App.tsx", "packages/web/tsconfig.json", "tsconfig.json",
     ]
     assert scopes["generic"] == sorted(set(files) - set(scopes["react"]))
-    assert Counter(f for s, paths in scopes.items() if s != "structure" for f in paths) == Counter(files)
+    assert Counter(f for paths in scopes.values() for f in paths) == Counter(files)
 
 
 def test_framework_missing_safe_open_capability_falls_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -267,10 +261,7 @@ def test_framework_missing_safe_open_capability_falls_back(tmp_path: Path, monke
     monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
     files = ["App.tsx", "package.json", "tsconfig.json"]
     result = detect_stacks(files, target_dir=tmp_path)
-    primary = [stack for stack in result if stack.stack_name != "structure"]
-    assert [(stack.stack_name, stack.files) for stack in primary] == [("generic", files)]
-    assert Counter(path for stack in primary for path in stack.files) == Counter(files)
-    assert next(stack.files for stack in result if stack.stack_name == "structure") == files
+    assert [(stack.stack_name, stack.files) for stack in result] == [("generic", files)]
 
 
 def test_framework_inspection_budget_boundaries(tmp_path: Path) -> None:
@@ -299,7 +290,7 @@ def test_framework_inspection_budget_boundaries(tmp_path: Path) -> None:
         scopes = {s.stack_name: s.files for s in result}
         assert scopes["react"] == files[:-1]
         assert scopes["generic"] == files[-1:]
-        assert Counter(f for s, paths in scopes.items() if s != "structure" for f in paths) == Counter(files)
+        assert Counter(f for paths in scopes.values() for f in paths) == Counter(files)
 
 
 def test_build_import_graph_resolves_python_edges(tmp_path: Path) -> None:
@@ -323,17 +314,3 @@ def test_build_import_graph_resolves_python_edges(tmp_path: Path) -> None:
         "a.ts": {"b.ts"}, "b.ts": set(), "a.go": {"b.go"}, "b.go": set(),
         "a.rs": {"b.rs"}, "b.rs": set(),
     }
-
-
-def test_coarsening_merges_adjacent_lowest_weights_and_recomputes_frontiers() -> None:
-    py = StackAssignment(stack_name='python', files=['a.py', 'b.py', 'c.py', 'd.py'])
-    other = StackAssignment(stack_name='generic', files=['README.md'])
-    diff = ''.join(f'diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n+{body}\n'
-                   for path, body in [('a.py', 'x' * 500), ('b.py', 'x'), ('c.py', 'x'), ('d.py', 'x' * 600)])
-    result = shard_stacks([py, other], diff, max_files=1, max_bytes=10000, fanout_cap=3,
-                          frontier_max=8, graph={'b.py': {'c.py', 'README.md'}})
-    python = [stack for stack in result if stack.stack_name.startswith('python')]
-    assert [stack.files for stack in python] == [['a.py', 'b.py', 'c.py'], ['d.py']]
-    assert [stack.stack_name for stack in python] == ['python#0', 'python#1']
-    assert next(stack for stack in python if 'b.py' in stack.files).frontier_files == ['README.md']
-    assert sum(len(stack.files) for stack in result) == 5

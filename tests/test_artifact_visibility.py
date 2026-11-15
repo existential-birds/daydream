@@ -57,7 +57,6 @@ from daydream.artifacts import (
     transfer as artifact_transfer,
 )
 from daydream.artifacts.filesystem import _atomic_json
-from daydream.deep.artifacts import check_deep_artifacts
 from daydream.json_utils import _fsync_directory, _fsync_file
 from daydream.run_artifacts import _RunWriteCapture
 from daydream.trajectory import (
@@ -602,7 +601,6 @@ async def test_artifact_session_preserves_resume_mtimes_across_publication_and_r
         live_deep = session.daydream_dir / "deep"
         assert (live_deep / "diff-key").stat().st_mtime_ns == key_mtime_ns
         assert (live_deep / "alternatives.json").stat().st_mtime_ns == prerequisite_mtime_ns
-        check_deep_artifacts("per-stack", live_deep, current_diff_sha=current_diff_sha)
         session.register_destination(source / ".daydream", label=OutputLabel.PUBLIC_DAYDREAM)
         session.register_destination(source / ".review-output.md", label=OutputLabel.PUBLIC_REVIEW_OUTPUT)
         assert session.durable_path_for(live_deep / "summary.md", repo=first) == source / ".daydream/deep/summary.md"
@@ -658,7 +656,6 @@ async def test_artifact_session_preserves_resume_mtimes_across_publication_and_r
         live_deep = resumed.daydream_dir / "deep"
         assert (live_deep / "diff-key").stat().st_mtime_ns == key_mtime_ns
         assert (live_deep / "alternatives.json").stat().st_mtime_ns == prerequisite_mtime_ns
-        check_deep_artifacts("per-stack", live_deep, current_diff_sha=current_diff_sha)
     assert _manifest(source) == published
     assert artifact_dir_for(source, allow_standalone=True) == source / ".daydream"
 

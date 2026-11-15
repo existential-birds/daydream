@@ -12,41 +12,13 @@ from pathlib import Path
 import pytest
 
 from daydream import runner
-from daydream.backends import ResultEvent, TextEvent
 from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
-from tests.harness.backend import ScriptedBackend
 from tests.harness.improve_backend import (
     ImproveStubBackend,
     improve_artifact,
     install_capable_improve_backend,
 )
-from tests.harness.stub_backend import force_interactive, silence
-
-
-async def test_shallow_without_skill_keeps_detected_language_skill(
-    feature_branch_repo: Path, make_config: Callable[..., RunConfig], install_backend: Callable[[object], object],
-    mute_side_effects: Callable[..., None], monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Shallow review without --stack retains detected Python scope and emits no skill token."""
-    silence(monkeypatch)
-    force_interactive(monkeypatch)
-    backend = ScriptedBackend(
-        events=(TextEvent(text="Intent and review complete."),
-                ResultEvent(structured_output={"issues": []}, continuation=None))
-    )
-    install_backend(backend)
-    mute_side_effects("daydream.deep.fix_steps")
-
-    rc = await runner.run(make_config(feature_branch_repo, output_mode="loop", non_interactive=False, shallow=True))
-
-    assert rc == 0
-    per_stack = [p for p in backend.prompts if "python" in p]
-    assert per_stack, ("shallow with no --skill must keep the detected python scope "
-        "rather than fall back to the generic-fallback reviewer"
-    )
-    joined = "\n".join(backend.prompts)
-    assert "/beagle-" not in joined and "beagle-python" not in joined
 
 
 def _plan_writer_override(*, raises_on_first_call: bool = False) -> str:

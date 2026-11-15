@@ -1,12 +1,7 @@
 """Current review-result and findings fixtures shared by unit and consumer tests."""
-import hashlib
-import json
 from collections.abc import Iterable
-from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-from daydream.deep.detection import StackAssignment
-from daydream.deep.records import RecordPool, record_uid, stack_name_from_uid, stamp_record_uids
 from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
 
 
@@ -39,76 +34,6 @@ def findings_artifact(
     return artifact
 
 
-async def review_scopes(backend: Any, work: Any, stacks: list[StackAssignment], **options: Any) -> Any:
-    """Exercise the real provider phase with an explicit planned execution inventory."""
-    from daydream.phases.review import phase_per_stack_reviews
-    head, base = work.head_sha, work.base_sha
-    if head is None or base is None:
-        raise ValueError('review scopes require captured commit anchors')
-    diff_path = options['diff_path']
-    diff_key = hashlib.sha256(Path(diff_path).read_bytes()).hexdigest()
-    coverage = ReviewCoverage("scope-test", AnalyzedRevision(head, base, diff_key),
-                              [PlannedScope(s.stack_name, s.stack_name, tuple(s.files)) for s in stacks], ())
-    return await phase_per_stack_reviews(backend, work, stacks, coverage=coverage, **options)
-
-
 def merge_result(items: Iterable[dict[str, Any]]) -> dict[str, Any]:
     """Current producer envelope with explicit nullable relationships and attribution."""
     return {"items": [{"related_files": None, "source_uids": None, **item} for item in items]}
-
-
-def records_artifact(coverage: ReviewCoverage, scope_id: str, issues: Iterable[dict[str, Any]] = ()) -> dict[str, Any]:
-    """Bind validated producer records to their current scope and captured revision."""
-    return {"issues": list(issues), "scope_id": scope_id, "analyzed_revision": coverage.revision.to_dict(),
-            "originating_run_id": coverage.run_id}
-
-
-def frozen_target_decisions(target: Path, stack: StackAssignment, revision: AnalyzedRevision,
-                            diff: str) -> list[dict[str, Any]]:
-    """Seed a compatible prior review assertion from the actual frozen Git inputs."""
-    from daydream.backends import Backend
-    from daydream.hunk_index import write_hunk_index
-    from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
-    from daydream.workspace import WorkContext
-    from tests.harness.stub_backend import StubBackend
-
-    dd = target / '.daydream'
-    dd.mkdir(exist_ok=True)
-    diff_path = dd / 'diff.patch'
-    diff_path.write_text(diff, encoding='utf-8')
-    index_path = write_hunk_index(dd, diff)
-    work = WorkContext(repo=target, source=target, base_branch='main', base_sha=revision.merge_base_sha,
-        head_branch=None, head_sha=revision.head_sha, is_ephemeral=False, run_id='primed-review-fixture')
-    factory = StageInputFactory(cast(Backend, StubBackend(target)), work, stack,
-        change=CanonicalChange.capture(diff_path, index_path), shared_paths={},
-        revision=revision.to_dict(), artifact_session=None,
-        allow_standalone=True, read_only=True)
-    parts = [part for batch in factory.assignment_batches for part in batch]
-    if stack.stack_name == 'structure':
-        return [{'target_id': 'integration:structure', 'status': 'reviewed', 'reason': '',
-                 'evidence_refs': parts[0]['source_refs'][:1]}]
-    return [{'target_id': part['target_id'], 'status': 'reviewed', 'reason': '',
-             'evidence_refs': part['source_refs'][:1]} for part in parts]
-
-
-def record_pool(root: Path, records: Iterable[dict[str, Any]] = (), structural: Iterable[dict[str, Any]] = (),
-                *, paths: Iterable[Path] = (), structural_path: Path | None = None) -> RecordPool:
-    """Build the current scoped state while sharing caller-owned record objects."""
-    path_map = {path.name.removeprefix("stack-").removesuffix("-records.json"): path for path in paths}
-    grouped: dict[str, list[dict[str, Any]]] = {scope: [] for scope in path_map}
-    for scope_hint, rows in ((next(iter(path_map), "python"), list(records)), ("structure", list(structural))):
-        stamp_record_uids(rows, scope_hint)
-        for row in rows:
-            scope = stack_name_from_uid(record_uid(row))
-            grouped.setdefault(scope, []).append(row)
-            path_map.setdefault(scope, root / f"stack-{scope}-records.json")
-    if structural_path is not None:
-        path_map["structure"] = structural_path
-        grouped.setdefault("structure", [])
-    coverage = review_coverage(scope_ids=grouped)
-    return RecordPool({scope: records_artifact(coverage, scope, rows) for scope, rows in grouped.items()}, path_map)
-
-
-def saved_coverage(root: Path) -> ReviewCoverage:
-    """Read checked current evidence from a real run's deep artifact directory."""
-    return ReviewCoverage.from_dict(json.loads((root / 'review-coverage.json').read_text()))

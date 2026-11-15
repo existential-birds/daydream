@@ -16,7 +16,7 @@ from daydream.archive.git_safe import normalize_remote_url
 from daydream.archive.provenance import capture_executable_provenance
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.deep.diff import _diff_changed_files
-from daydream.deep.records import item_source_uids, record_issues, record_uid
+from daydream.deep.records import item_source_uids
 from daydream.observability.runtime import current_run_trace_id
 from daydream.pr_review import compute_fingerprint, extract_item_fields, parsed_issues_from_items
 from daydream.timeutil import now_iso_utc
@@ -130,16 +130,6 @@ def capture_run_record(
             acquisition_failures[path.name] = {"status": "failed", "reason": "malformed_json", "raw_text": text}
             return None
 
-    claims = []
-    for path in sorted(deep.glob("stack-*-records.json")) if review_sources else []:
-        payload = read_json(path)
-        if payload is None:
-            continue
-        records = record_issues(payload)
-        if records is None or any(not isinstance(record, dict) or not record_uid(record) for record in records):
-            acquisition_failures[path.name] = {"status": "failed", "reason": "malformed_shape", "raw_json": payload}
-            continue
-        claims.append({"stack": path.name[len("stack-"):-len("-records.json")], "records": payload})
     merged_path = deep / "merged-items.json"
     merged = read_json(merged_path) if review_sources and merged_path.is_file() else None
     items = merged.get("items") if isinstance(merged, dict) else None
@@ -160,14 +150,6 @@ def capture_run_record(
                                 "source_uids": item_source_uids(item), "fingerprint": compute_fingerprint(
             fields.path, fields.description, fields.rationale,
         )})
-    derivation_names = {
-        "arbiter-input.json", "suppression-input.json", "dedup-candidates.json",
-        "adjudication-provenance.json", "dropped-speculative.json", "folded-structural.json",
-        "alternatives.json",
-    }
-    derivation = {path.name: payload for path in sorted(deep.glob("*.json"))
-                  if review_sources and (path.name in derivation_names or path.name.startswith("arbiter-group-"))
-                  and (payload := read_json(path)) is not None}
     coverage_path = deep / "review-coverage.json"
     coverage = read_json(coverage_path) if review_sources and coverage_path.is_file() else None
     verification = collect_verification(deep, read_json, canonical_items) if review_sources else {}
@@ -177,7 +159,7 @@ def capture_run_record(
     review_path = next((path for path in (root / "review-output.md", deep / "review-output.md")
                         if review_sources and path.is_file()), None)
     review_text = review_path.read_text(encoding="utf-8") if review_path else None
-    has_scoring = bool(claims or merged is not None or review_text is not None or scoring_inputs.verifier_verdicts
+    has_scoring = bool(merged is not None or review_text is not None or scoring_inputs.verifier_verdicts
                        or not scoring_inputs.format_valid)
     scoring = capture_scoring(scoring_inputs, review_text)
     from daydream.artifact_visibility import ArtifactVisibilityError
@@ -198,22 +180,15 @@ def capture_run_record(
         provenance["profile"] = {"profile_schema_version": profile.schema_version,
                                  "profile_name": profile.name, "profile_source_kind": profile.source_kind,
                                  "profile_digest": profile.digest}
-    from daydream.run_config import (
-        _resolved_backend_name,
-        _resolved_latency_profile,
-        _resolved_model,
-        _resolved_reasoning_effort,
-    )
+    from daydream.run_config import _resolved_backend_name, _resolved_model, _resolved_reasoning_effort
 
     provenance["resolved_phases"] = {phase: {
         "backend": _resolved_backend_name(config, phase), "model": _resolved_model(config, phase),
         "reasoning_effort": _resolved_reasoning_effort(config, phase),
-    } for phase in ("intent", "wonder", "per_stack_review", "parse", "arbiter", "merge", "verify", "fix", "test")}
-    provenance["latency_profile"] = asdict(_resolved_latency_profile(config))
-    provenance["latency_route"] = None if config.latency_route is None else asdict(config.latency_route)
+    } for phase in ("review", "arbiter", "verify", "fix", "test")}
+    # Routing keys of the replaced reviewer stay, empty, so stored-record readers keep one shape.
+    provenance.update(latency_profile=None, latency_route=None, latency_routing=None)
     provenance["file_configuration"] = None if config.file_config is None else asdict(config.file_config)
-    routing_path = deep / "latency-routing.json"
-    provenance["latency_routing"] = read_json(routing_path) if review_sources and routing_path.is_file() else None
     provenance["collection_diagnostics"] = acquisition_failures
     def evidence(value: Any, *, failed: bool = False, absent: str = "unproduced") -> dict[str, Any]:
         return {"status": "available" if value is not None else "failed" if failed else absent,
@@ -235,10 +210,10 @@ def capture_run_record(
         } if patch is not None else None),
         "trajectories": evidence({"root_trajectory_id": selected.root_trajectory_id,
             "status": selected.status, "cutoff_at": selected.cutoff_at} if selected is not None else None),
-        "findings": evidence({"claims": claims, "items": canonical_items, "derivation": derivation,
-            "terminal_coverage": coverage} if claims or merged is not None or coverage is not None else None,
-            failed="merged-items.json" in acquisition_failures or any(
-                name.startswith("stack-") and name.endswith("-records.json") for name in acquisition_failures)),
+        # ``claims`` and ``derivation`` are record keys of earlier builds; this reviewer writes neither.
+        "findings": evidence({"claims": [], "items": canonical_items, "derivation": {},
+            "terminal_coverage": coverage} if merged is not None or coverage is not None else None,
+            failed="merged-items.json" in acquisition_failures),
         "verification": evidence(verification or None, failed="recommendation-verdicts.json" in acquisition_failures),
         "scoring": evidence(scoring if has_scoring else None), "provenance": provenance,
         "completeness": {"artifact_acquisition": "failed" if acquisition_failures else "complete",

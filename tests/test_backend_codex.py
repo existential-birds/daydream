@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from daydream import git_ops
+from daydream import clock, git_ops
 from daydream.agent import StructuredOutputFailure, run_agent
 from daydream.atif import validate
 from daydream.backends import (
@@ -40,9 +40,9 @@ from daydream.backends.codex import (
 )
 from daydream.extensions import Registry, ToolDecision, set_registry
 from daydream.host_tools import HostToolBinding
-from daydream.phases.schemas import review_stage_schema, review_stage_submission_schema
+from daydream.phases.schemas import FIX_VERIFY_VERDICTS_SCHEMA
 from daydream.retry_policy import FailureClass, classify_failure
-from daydream.review_budget import BudgetLedger, ReviewLimits
+from daydream.review_budget import BudgetLedger
 from daydream.trajectory import DaydreamPhase
 from tests.harness.codex_replay import (
     make_mock_process,
@@ -53,7 +53,6 @@ from tests.harness.process_replay import replay_process
 from tests.harness.trajectory import make_recorder
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
-
 
 
 def _case_dir(tmp_path: Path, index: int) -> Path:
@@ -220,7 +219,8 @@ async def test_empty_final_codex_message_cannot_reuse_planning_json(tmp_path: Pa
         result, token, reason = await run_agent(
             CodexBackend(model="fixture-model"), tmp_path, "review", phase=DaydreamPhase.REVIEW,
             output_schema=schema, require_full_schema=True,
-            budget=BudgetLedger.from_limits("stage", ReviewLimits()) if staged else None,
+            budget=BudgetLedger("stage", deadline=clock.monotonic() + 300, limit=40, start_floor=1,
+                                investigation=True) if staged else None,
         )
     assert isinstance(result, StructuredOutputFailure) and result.reason == "missing_output"
     assert token is not None and token.data == {"thread_id": "empty-final"}
@@ -273,11 +273,11 @@ async def test_nonzero_exit_raises_with_captured_output() -> None:
 
 
 async def _continuation_token_resumes_case(tmp_path: Path, read_only: bool) -> None:
-    """A resumed thread persists the staged selector transport schema as native output."""
+    """A resumed thread persists the requested output schema as native output."""
     backend = CodexBackend(model="fixture-model")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     token = ContinuationToken(backend="codex", data={"thread_id": "th_prev"})
-    schema = review_stage_submission_schema(review_stage_schema(['api.py'], [], triage=False))
+    schema = FIX_VERIFY_VERDICTS_SCHEMA
     persisted: dict[str, Any] = {}
 
     async def spawn(*args: str, **kwargs: Any) -> Any:
@@ -744,7 +744,6 @@ def _reset_real_git_resolution() -> Iterator[Any]:
 
 class TestResolveRealGitDir:
     """Darwin real-git resolver (issue #1122): resolve once, validate, fail open."""
-
 
     def test_non_executable_target_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(codex.sys, "platform", "darwin")

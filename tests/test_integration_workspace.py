@@ -12,7 +12,7 @@ from daydream import runner
 from daydream.run_config import RunConfig
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git as _git, tracked_source_state
-from tests.test_github_app_integration import _minimal_backend
+from tests.harness.stub_backend import StubBackend
 
 
 @pytest.fixture(autouse=True)
@@ -45,11 +45,10 @@ async def test_local_review_pins_remote_preferred_base_without_upstream(
     assert _git(repo, "rev-parse", "main") == original_base
     assert _git(repo, "rev-parse", "origin/main") == remote_tip
     fake_gh.set_response("pr-list", value=[])
-    backend = _minimal_backend()
+    backend = StubBackend(repo)
     monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
     before = tracked_source_state(repo)
-    config = RunConfig(target=str(repo), output_mode="review", non_interactive=True, shallow=True,
-                       stack="python", archive=False, branch="feature")
+    config = RunConfig(target=str(repo), output_mode="review", non_interactive=True, archive=False, branch="feature")
 
     assert await runner.run(config) == 0
 

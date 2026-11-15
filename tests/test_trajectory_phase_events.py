@@ -156,6 +156,9 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     backend = _install_stub_backend(monkeypatch, target, pin_skill_availability=False)
     backend.fail_batched_fix_file = "api.py"
     backend.fix_edit_line = "\n"
+    backend.review_claims = [
+        *({"title": f"Greeting defect {number}", "file": "api.py", "line": 1} for number in (1, 2, 3)),
+        {"title": "Caller defect", "file": "App.tsx", "line": 1}]
     suite_dir = tmp_path / "suite"
 
     # Allow discovery/operation time beyond the independently bounded CI wait.
@@ -293,11 +296,10 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
                 continue
             key = (document_descriptors[document_id], invocation["phase"])
             qualified_counts[key] = qualified_counts.get(key, 0) + 1
-    assert qualified_counts == {("root", "intent"): 1, ("root", "merge"): 1, ("root", "verify"): 2,
-        ("deep-generic", "deep"): 1, ("deep-python", "deep"): 1, ("deep-react", "deep"): 1,
-        ("deep-structure", "deep"): 1, ("explore-dependency-tracer", "exploration"): 1, ("fix-api-py", "fix"): 4,
-        ("fix-app-tsx", "fix"): 1,
-    }
+    # Discovery is one review invocation; its fresh challenge is recorded as verification beside the
+    # recommendation verifier and the post-fix verifier.
+    assert qualified_counts == {("root", "review"): 1, ("root", "verify"): 3, ("fix-api-py", "fix"): 4,
+                                ("fix-app-tsx", "fix"): 1}
 
     # The suite is a host operation within the TEST flow scope; it creates no
     # agent invocation and carries its own duration and terminal metadata.
@@ -317,8 +319,9 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
         if invocation.get("phase") == "verify" and "invocation_id" in invocation
     ]
     verify_events = [event for event in root["extra"]["phase_events"] if event["phase"] == "verify"]
-    assert len(verify_invocations) == 2
-    assert [event["event"] for event in verify_events] == ["phase_start", "phase_end", "phase_start", "phase_end"]
+    # The reviewer's fresh challenge is the first verification interval, ahead of the two verifier steps.
+    assert len(verify_invocations) == 3
+    assert [event["event"] for event in verify_events] == ["phase_start", "phase_end"] * 3
     for start, end, invocation in zip(verify_events[::2], verify_events[1::2], verify_invocations, strict=True):
         assert start["scope_id"] == end["scope_id"]
         assert end["status"] == "succeeded"
@@ -329,8 +332,7 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     manifest = json.loads((archive / "manifest.json").read_bytes())
     evaluation = json.loads((archive / "evaluation.json").read_bytes())
     phase_timings = manifest["metrics"]["phase_timings"]
-    assert {"intent", "verify", "fix", "test", "deep"} <= phase_timings.keys()
-    assert "alternatives" not in phase_timings
+    assert {"review", "merge", "verify", "fix", "test"} <= phase_timings.keys()
     completeness = {"total": len(invocation_keys), "attributed": len(invocation_keys), "unattributed": 0}
     assert manifest["metrics"]["timing_coverage"]["agent_completeness"] == completeness
     assert evaluation["timing"]["agent_completeness"] == completeness

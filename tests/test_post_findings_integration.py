@@ -405,7 +405,7 @@ def test_post_findings_matched_blocking_finding_prevents_approval(
     fake_gh: FakeGh, tmp_path: Path, schema_version: int,
 ) -> None:
     """Deduplication must retain blockers without reposting the matched findings."""
-    retained = _inline_finding("Retained concern")
+    retained = _inline_finding("Retained concern", severity="medium")
     if schema_version == 3:
         retained["severity"] = None
     findings = [retained,

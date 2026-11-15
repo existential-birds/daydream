@@ -11,7 +11,6 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
-from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import GENERIC_STACK, StackAssignment
 from daydream.services import RepoRootPolicy, Service, ServiceMatch, owning_services
 
@@ -149,11 +148,9 @@ def build_partitions(
 
 
 def stack_by_path(stacks: Sequence[StackAssignment]) -> dict[str, str]:
-    """Map each routed file to its stack, ignoring the ``structure`` meta-stack."""
+    """Map each routed file to its stack."""
     mapping: dict[str, str] = {}
     for assignment in stacks:
-        if assignment.stack_name == STRUCTURE_STACK_NAME:
-            continue
         for path in assignment.files:
             mapping.setdefault(path, assignment.stack_name)
     return mapping

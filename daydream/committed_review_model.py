@@ -12,12 +12,13 @@ import jsonschema
 from daydream.host_tools import _MAX_ARGUMENT_BYTES
 from daydream.immutable_review import IMMUTABLE_REVIEW_INPUT_SCHEMA, validate_immutable_input
 from daydream.json_utils import canonical_json, validate_json_schema
-from daydream.output_schema import strict_object
+from daydream.output_schema import severity_enum_schema, strict_object
 from daydream.review_result import TERMINAL_RESULT_SCHEMA, ReasonCode, validate_terminal_result
 from daydream.review_source_refs import (
     SOURCE_REF_SCHEMA,
     SOURCE_REFS_SCHEMA,
     SOURCE_SELECTORS_SCHEMA,
+    source_id,
     source_revision,
     validate_source_refs,
 )
@@ -62,6 +63,7 @@ def _claim_schema(*, selectors: bool) -> dict[str, Any]:
         "payload": strict_object({
             **{key: _TEXT for key in ("claim", "trigger", "consequence", "grounds", "file")},
             "line": {"type": ["integer", "null"], "minimum": 1},
+            "severity": severity_enum_schema(),
             "evidence_refs": SOURCE_SELECTORS_SCHEMA if selectors else SOURCE_REFS_SCHEMA,
         }),
     })
@@ -109,8 +111,8 @@ def shard_scope_id(index: int) -> str:
     return f"committed:{index:05d}"
 
 
-# Work records, attribution, per-execution capacity evidence and the cross_assignment phase (#1628).
-RESULT_VERSIONS = {"committed": 7, "immutable": 8, "local": 9}
+# Work records, attribution, per-execution capacity evidence, the cross_assignment phase (#1628) and claim severity.
+RESULT_VERSIONS = {"committed": 10, "immutable": 11, "local": 12}
 REQUIRED_PHASES = ["challenge", "cross_assignment"]
 # Investigation kinds decide owned targets and propose new concerns; challenge judges claim revisions.
 INVESTIGATION_KINDS = frozenset({"discovery", "follow_up", "cross_assignment"})
@@ -359,3 +361,36 @@ class CommittedReviewResult:
     @property
     def complete(self) -> bool:
         return self.output_installed and self.to_dict()["terminal_result"]["analysis_state"] == "complete"
+
+
+def fragment_spans(assignments: list[dict[str, Any]]) -> dict[str, tuple[int, int]]:
+    """Summarized complete-line span of each fragment-only reference, which carries no source range."""
+    spans: dict[str, tuple[int, int]] = {}
+    for part in assignments:
+        if part["kind"] == "continuation":
+            summary = part["source_summary"][0]
+            for ref in part["source_refs"]:
+                span = summary.get(ref["side"]) if ref["side"] in {"old", "new"} else None
+                if span is not None:
+                    spans[source_id(ref)] = (span["start"], span["end"])
+    return spans
+
+
+def reference_covers(ref: dict[str, Any], payload: dict[str, Any], spans: dict[str, tuple[int, int]]) -> bool:
+    """Whether a reference of the claim's file covers its line, by range or summarized fragment span."""
+    if ref["path"] != payload["file"]:
+        return False
+    bounds = ref["source_range"]
+    if bounds is not None:
+        return bool(bounds["start"] <= payload["line"] <= bounds["end"])
+    span = spans.get(source_id(ref)) if ref["role"] == "assigned" else None
+    return span is not None and span[0] <= payload["line"] <= span[1]
+
+
+def head_line(claim: dict[str, Any], spans: dict[str, tuple[int, int]]) -> int | None:
+    """The claim's line as a head line: only when a new-side reference of its file covers it."""
+    payload = claim["payload"]
+    if payload["line"] is not None and any(
+            ref["side"] == "new" and reference_covers(ref, payload, spans) for ref in payload["evidence_refs"]):
+        return int(payload["line"])
+    return None

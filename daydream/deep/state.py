@@ -6,15 +6,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
 
-from daydream.backends import ContinuationToken
-from daydream.deep.latency import ArbiterPlan, LatencyRoute, RiskSummary
-from daydream.deep.records import RecordPool
-from daydream.deep.reuse_store import ReuseCache
 from daydream.review_result import ReviewCoverage
 from daydream.test_execution import TestRecipe
 
 if TYPE_CHECKING:
-    from daydream.deep.detection import StackAssignment
     from daydream.deep.diff import DeepDiffBoundInfo
     from daydream.deep.fix_state import FixCycleState, RetainedTreeSnapshot
     from daydream.exploration_runner import Tier
@@ -151,10 +146,6 @@ class DeepState:
         Path, key='exploration_dir', label='Path or None', default=lambda: None
     )
 
-    intent_path = _StateField[Path](Path, writable=True)
-
-    alts_path = _StateField[Path](Path, writable=True)
-
     items_file = _StateField[Path](Path, writable=True)
 
     items = _StateField[list[dict[str, Any]]](list, writable=True)
@@ -165,8 +156,6 @@ class DeepState:
 
     import_graph = _StateField[dict[str, set[str]]](dict, default=dict)
 
-    intent_authoritative = _StateField[bool](bool, default=bool, writable=True)
-
     changed_files = _StateField[set[str]](set)
 
     changed_files_or_none = _StateField[set[str] | None](
@@ -174,49 +163,6 @@ class DeepState:
     )
 
     dd = _StateField[Path](Path)
-
-    stacks: _StateField[list[StackAssignment]] = _StateField(list)
-
-    single_stack_mode = _StateField[bool](bool)
-
-    latency_route = _StateField["LatencyRoute | None"](
-        LatencyRoute, label="LatencyRoute or None", default=lambda: None
-    )
-
-    reuse_cache = _StateField["ReuseCache | None"](
-        ReuseCache, label="ReuseCache or None", default=lambda: None
-    )
-
-    risk_summary = _StateField["RiskSummary | None"](
-        RiskSummary, label="RiskSummary or None", default=lambda: None
-    )
-
-    arbiter_plan = _StateField["ArbiterPlan | None"](
-        ArbiterPlan, label="ArbiterPlan or None", default=lambda: None, writable=True
-    )
-
-    log = _StateField[str](str)
-
-    branch = _StateField[str](str)
-
-    @property
-    def unfinished_scopes(self) -> dict[str, str]:
-        return self.review_coverage.unfinished_scopes
-
-    intent_summary = _StateField[str](str, writable=True)
-
-    intent_summary_or_none = _StateField[str | None](
-        str, key='intent_summary', label='str or None', default=lambda: None
-    )
-
-    record_pool = _StateField[RecordPool](RecordPool, writable=True)
-
-    arbiter_continuation = _StateField["ContinuationToken | None"](
-        ContinuationToken,
-        label="ContinuationToken or None",
-        default=lambda: None,
-        writable=True,
-    )
 
     merged_report = _StateField[Path](Path, writable=True)
 

@@ -175,8 +175,8 @@ def _build_post_findings_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--approve-on-clean",
         action="store_true",
-        help="Approve the PR when the posted findings contain no high/medium "
-        "severity issues (issue #343): post event: 'APPROVE' instead of "
+        help="Approve the PR when the complete review posted has no findings "
+        "that block approval (issue #343): post event: 'APPROVE' instead of "
         "'COMMENT'.",
     )
     return parser

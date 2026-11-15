@@ -8,7 +8,6 @@ gateway's stdin-only leaf.
 
 from rich import box
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.style import Style
 from rich.text import Text
@@ -81,24 +80,6 @@ def print_menu(console: Console, title: str, options: list[tuple[str, str]]) -> 
         title_align="left",
         box=box.ROUNDED,
         border_style=STYLE_PINK,
-        padding=(0, 1),
-    )
-    console.print(panel)
-
-
-def print_intent_summary(console: Console, text: str) -> None:
-    """Show the full intent at the confirmation gate, or an empty-summary placeholder."""
-    body: Markdown | Text
-    if text.strip():
-        body = Markdown(text)
-    else:
-        body = Text("(the agent produced no intent summary)", style=STYLE_YELLOW)
-    panel = Panel(
-        body,
-        title="🎧 Understanding",
-        title_align="left",
-        box=box.ROUNDED,
-        border_style=STYLE_CYAN,
         padding=(0, 1),
     )
     console.print(panel)

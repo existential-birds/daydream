@@ -12,12 +12,9 @@ from daydream.artifact_visibility import (
 from daydream.backends import READ_ONLY_BASH_ALLOWLIST, Backend
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.prompt_budget import (
-    AdvisoryCandidate,
     PreparedSanctionedInputs,
     SanctionedInputTransport,
-    fits_inline_diff_budget,
     prepare_sanctioned_inputs,
-    select_advisory_inputs,
     uses_diff_reference,
 )
 from daydream.prompts.grounding import render_test_recipe_block
@@ -70,32 +67,7 @@ def _pointer_dir(
     return exploration_dir
 
 
-def _budgeted_exploration_inputs(
-    exploration_dir: Path | None,
-    *,
-    backend: Backend,
-    cwd: Path,
-    read_only: bool = False,
-) -> dict[str, Path | None]:
-    """Admit whole exploration artifacts through the shared advisory budget, summary first.
-
-    Return None for omitted inputs so budgeting and capture use the same policy.
-    """
-    labels = tuple(_EXPLORATION_PHASE_INPUTS)
-    if exploration_dir is None:
-        return dict.fromkeys(labels)
-    candidates = [
-        AdvisoryCandidate(label, exploration_dir / _EXPLORATION_PHASE_INPUTS[label])
-        for label in labels
-    ]
-    selection = select_advisory_inputs(backend, cwd, candidates, read_only=read_only)
-    admitted = selection.selected_paths()
-    return {label: admitted.get(label) for label in labels}
-
-
 TEST_OUTPUT_TAIL_LINES = 100
-
-_PR_BODY_MAX_CHARS = 8000
 
 
 def _tail_test_output(test_output: str) -> tuple[str, bool]:
@@ -106,19 +78,9 @@ def _tail_test_output(test_output: str) -> tuple[str, bool]:
     return test_output, False
 
 
-
 def _render_bash_allowlist() -> str:
     """Render the backend-enforced read-only Bash allowlist identically for every prompt."""
     return ", ".join(f"`{cmd}`" for cmd in READ_ONLY_BASH_ALLOWLIST)
-
-
-def _inlineable_diff(diff_text: str | None) -> str | None:
-    """Inline an under-budget diff (including empty text); return None when absent or oversized."""
-    if diff_text is None:
-        return None
-    if not fits_inline_diff_budget(diff_text):
-        return None
-    return diff_text
 
 
 def _detect_default_branch(cwd: Path) -> str | None:

@@ -338,7 +338,7 @@ def extract_json_by_schema(
     *,
     schema: dict[str, Any],
     accept: Callable[[Any, dict[str, Any]], bool],
-    require_complete_root: bool = False, rejection_guard: Callable[[Any], bool] | None = None,
+    require_complete_root: bool = False,
 ) -> SchemaAwareSelection:
     """Return the *last* candidate in document order that ``accept`` admits.
 
@@ -348,7 +348,7 @@ def extract_json_by_schema(
     that parses but is rejected falls through to the scan.
     """
     if require_complete_root:
-        return _complete_envelope(text, schema, accept, rejection_guard)
+        return _complete_envelope(text, schema, accept)
     candidates = _json_candidates(text)
     if not candidates:
         return SchemaAwareSelection(None, 0, None, None)
@@ -376,7 +376,6 @@ def extract_json_by_schema(
 
 def _complete_envelope(
     text: str, schema: dict[str, Any], accept: Callable[[Any, dict[str, Any]], bool],
-    rejection_guard: Callable[[Any], bool] | None,
 ) -> SchemaAwareSelection:
     """Consume complete outer spans; malformed packaging never exposes descendants."""
     decoder = json.JSONDecoder()
@@ -430,7 +429,6 @@ def _complete_envelope(
         root = roots[0]
         rejection = schema_rejection(root, schema)
         reason = f'{rejection.category} at {rejection.schema_path}' if rejection else None
-        eligible = (rejection is not None and not any(accept(child, schema) for child in root.values())
-                    and (rejection_guard is None or rejection_guard(root)))
+        eligible = rejection is not None and not any(accept(child, schema) for child in root.values())
         return SchemaAwareSelection(None, 1, type(root).__name__, reason, rejection, eligible)
     return SchemaAwareSelection(None, len(roots), None, None)

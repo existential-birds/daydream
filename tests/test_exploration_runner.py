@@ -152,6 +152,12 @@ def test_skip_tier_runs_no_subagents_and_one_specialist_failure_cancels_no_sibli
     assert not ctx.completed
     assert ctx.conventions == []  # pattern scanner failed
     assert any(f.path == "daydream/extra.py" for f in ctx.affected_files)
+    # When every specialist fails, only the static context remains, and it is not a completed scan.
+    def every(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("specialist exploded")
+    ctx = anyio.run(lambda: specialist_pre_scan(cast(Backend, _specialist_backend(responder=every)), tmp_path,
+                                                _py_ts_diff()))
+    assert not ctx.completed and ctx.conventions == [] and ctx.affected_files
     # A malformed specialist section contributes nothing rather than failing its siblings.
     malformed = er._parse_envelope({**_VALID_ENVELOPE, "dependency_tracer": "not an object"})
     assert malformed.dependencies == [] and malformed.conventions
