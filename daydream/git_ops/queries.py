@@ -617,6 +617,16 @@ def status_porcelain(repo: Path) -> str:
     return proc.stdout
 
 
+def has_worktree_edits(repo: Path, *, untracked: bool = False) -> bool:
+    """Whether tracked files, and with ``untracked`` nonignored untracked ones, differ from HEAD outside
+    Daydream's own artifacts, raising on failure."""
+    return any(
+        (untracked or not line.startswith("??")) and not all(
+            path == ".daydream" or _is_untracked_runtime_artifact(path) for path in line[3:].split(" -> "))
+        for line in status_porcelain(repo).splitlines()
+    )
+
+
 def staged_patch(repo: Path) -> bytes:
     """Read the staged index as a binary patch, preserving exact bytes.
 

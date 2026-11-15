@@ -175,11 +175,13 @@ def test_oversized_input_is_never_clean(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_semantic_invariants_rejected_before_write(tmp_path: Path, valid_artifact: dict[str, Any]) -> None:
-    """A PR envelope cannot accept local source identity just because the underlying HEAD matches."""
+    """A PR envelope cannot accept working-tree source identity just because the underlying HEAD matches."""
     mutations: list[Any] = [
         lambda a: a.pop("terminal_result"),
         lambda a: (a['terminal_result'].update(schema_version=2),
                    a['terminal_result']['analyzed_revision'].update(source_id='d' * 64)),
+        lambda a: (a['terminal_result'].update(schema_version=3),
+                   a['terminal_result']['analyzed_revision'].update(tracked_worktree_edits=True)),
         lambda a: a["terminal_result"]["stack_outcomes"].clear(),
     ]
     path = tmp_path / "invalid.json"

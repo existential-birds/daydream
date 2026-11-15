@@ -24,6 +24,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pin they installed (`.github/workflows/package.json`) and that pin's Dependabot npm block are
   gone. Reviews of this repository come from the hosted review service. No package user is
   affected: `daydream setup` and the packaged templates it installs do not depend on them.
+- **Breaking (0.y.z):** The refusals that 0.35.0 kept only to name the replaced staged
+  reviewer's review-profile keys, findings supervisor and prompt names are deleted
+  ([#1859](https://github.com/existential-birds/daydream/issues/1859)):
+  - A review profile's former `[pipeline]` keys (`assignment_policy`, `structural_enabled`,
+    `arbitration_enabled`, `arbitration_min_severity`, `arbitration_contested_location`,
+    `suppression_enabled`, `suppression_severity_classes` and
+    `suppression_confidence_classes`) get the generic `pipeline: unknown key` error that
+    names the first one, instead of one naming each as removed.
+    `review_profile.REMOVED_PROFILE_KEYS` is deleted.
+  - The former strategy names (`intent`, `alternatives`, `discovery.per_stack`,
+    `discovery.structural`, `suppression`, `merge`, `supervision` and `arbitration`) are
+    accepted again, like any strategy name an extension step may read: they count in the
+    profile digest and steer nothing. A profile that set `strategies.arbitration` to steer
+    the challenge now loads silently; set `strategies.challenge` instead.
+  - The `supervisor` repository setting and its `DaydreamFileConfig.supervisor` field are no
+    longer recognized: a review no longer refuses `supervisor = "rules"` or `"llm"`, and the
+    key is handled like any other top-level key Daydream does not read.
+    `supervisor_deny_globs` and `tool_supervisor` are unchanged.
+  - `extensions.registry.REMOVED_PROMPTS` is deleted. Overriding one of the former prompt
+    names (`intent`, `alternatives`, `per-stack`, `structural`, `generic-fallback`,
+    `arbiter`, `supervise`, `suppression`, `merge`) registers like any extension prompt and
+    never runs; `daydream ext validate` no longer fails on it.
 - **Breaking (0.y.z):** The replaced staged reviewer's command-line options, flow aliases and
   `RunConfig` fields, which 0.35.0 kept only to refuse them with guidance, are deleted
   ([#1857](https://github.com/existential-birds/daydream/issues/1857)):
@@ -84,6 +106,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path that names no such file is still refused. Posting reads each cited file from the head
   tree by its exact name, percent-encoded on GitHub's contents API, and never expands it
   ([#1879](https://github.com/existential-birds/daydream/issues/1879)).
+- A `--fix` run on a checkout with tracked uncommitted edits no longer presents the committed
+  head as the whole reviewed subject. It prints that those edits are reviewed with the commits
+  and committed with the fixes, and its review coverage and committed review result mark
+  `analyzed_revision` with `tracked_worktree_edits: true`. That coverage and terminal result use
+  the new version 3, and the committed review result the new schema 13
+  (`RESULT_VERSIONS["worktree"]`), which earlier builds reject; only schema 13 may carry the
+  marker. A clean checkout records and prints what it did before. A commit-bound findings
+  artifact refuses the marker as it refuses a captured `source_id`
+  ([#1828](https://github.com/existential-birds/daydream/issues/1828)).
+- An archived run whose base-to-head diff is empty now has pipeline status `succeeded` instead of
+  `partial`. It returns before any merge, fix or test phase, and the archive now accepts its sealed
+  no-diff review, bound to the same session, as the evidence that it finished
+  ([#1847](https://github.com/existential-birds/daydream/issues/1847)).
+- A run captured with `--capture-data` is no longer recorded, or uploaded, as `success` when
+  archive integrity or publication of its outputs then fails and the command exits 1. Capture
+  and upload now run after archive finalization and publication, and such a run is recorded as
+  `failed` ([#1853](https://github.com/existential-birds/daydream/issues/1853)).
 
 ## [0.35.2] - 2026-11-15
 
