@@ -109,17 +109,9 @@ def _sealed_no_diff(target_dir: Path, session_id: str | None) -> bool:
     from daydream.deep.artifacts import DeepArtifact
 
     coverage = _read_json_artifact(DeepArtifact.REVIEW_COVERAGE.at(target_dir / ".daydream" / "deep"), dict)
-    return (
-        session_id is not None
-        and coverage is not None
-        and coverage.get("run_id") == session_id
-        and coverage.get("required_phases") == ["no_diff"]
-        and any(
-            isinstance(outcome, dict) and outcome.get("phase") == "no_diff"
-            and outcome.get("status") == "complete" and outcome.get("noop") is True
-            for outcome in coverage.get("phase_outcomes") or ()
-        )
-    )
+    return session_id is not None and coverage is not None and coverage.get("run_id") == session_id and (
+        coverage.get("required_phases"), coverage.get("phase_outcomes")) == (["no_diff"], [
+            {"phase": "no_diff", "status": "complete", "reason_codes": [], "noop": True, "usable_evidence": False}])
 
 
 def _manifest_state(
