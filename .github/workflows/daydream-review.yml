@@ -140,12 +140,12 @@ jobs:
         run: npm install -g "@openai/codex@$(node -p "require('./.github/workflows/package.json').dependencies['@openai/codex']")"
 
       # `codex exec` does NOT read OPENAI_API_KEY from the environment for its
-      # own model-API auth (verified against CLI 0.139.0): with the key set but
-      # no auth state on disk, `codex login status` reports "Not logged in" and
-      # requests go out with no bearer → 401. It requires persisted auth in
-      # $CODEX_HOME/auth.json. Pipe the key into `codex login --with-api-key`
-      # (the documented non-interactive path) so the review step authenticates
-      # with no ChatGPT login state on disk.
+      # own model-API auth: with the key set but no auth state on disk, `codex
+      # login status` reports "Not logged in" (CLI 0.139.0 and 0.169.0), and on
+      # 0.139.0 requests went out with no bearer → 401. It requires persisted
+      # auth in $CODEX_HOME/auth.json. Pipe the key into `codex login
+      # --with-api-key` (the documented non-interactive path) so the review step
+      # authenticates with no ChatGPT login state on disk.
       - name: Authenticate Codex CLI
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
