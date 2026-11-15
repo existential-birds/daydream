@@ -235,10 +235,12 @@ def test_setup_verb_full_auto_deposits_secrets_and_opens_pr(
     """Run the setup CLI with real Git/gh and a minted PEM; replace only the browser exchange."""
     pem = generate_rsa_pem()
     registered: list[Path] = []
-    monkeypatch.setattr(
-        "daydream.bot_setup.register_app_via_manifest",
-        lambda repo, org=None: registered.append(repo) or (AppCredentials(7, pem), "acme-bot"),
-    )
+
+    def _register(repo: Path, org: str | None = None) -> tuple[AppCredentials, str]:
+        registered.append(repo)
+        return AppCredentials(7, pem), "acme-bot"
+
+    monkeypatch.setattr("daydream.bot_setup.register_app_via_manifest", _register)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
     # App already installed on the owner → the Install-click wait is satisfied.
     fake_gh.serve_installations([{"account": {"login": "o"}}])
