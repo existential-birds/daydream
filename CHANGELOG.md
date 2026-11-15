@@ -16,9 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single-file templates move together, because the release writes findings schema 2, which the
   old poster rejects. A review started before this change and posted after it may have its
   artifact rejected once; rerun the bot command. The 0.35.0 package's templates still install
-  the old pin, so `daydream setup` users get the new one with the next release; existing
-  installs then read as customized under `daydream setup --verify` until `daydream setup` is
-  rerun ([#1641](https://github.com/existential-birds/daydream/issues/1641), #1863).
+  the old pin; this release's templates install the new one, so `daydream setup` users get it
+  now; existing installs read as customized under `daydream setup --verify` until
+  `daydream setup` is rerun ([#1641](https://github.com/existential-birds/daydream/issues/1641), #1863).
 - The repository's own Codex bot review runs on Codex CLI 0.169.0 instead of 0.139.0. From
   v0.35.0 that review runs committed review through
   [Codex host tools](docs/runtime.md#codex-host-tools), and on 0.139.0 a model shell command
@@ -35,7 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   along a chain only the last is delivered. The sealed result's `findings`, the report, the
   outcome line, the findings export and posting all read that delivered set, on every route.
   A rejected or unresolved synthesis leaves its predecessors delivered, and `claims` keep
-  every claim with its disposition. The result schema versions are unchanged
+  every claim with its disposition. The result schema versions are unchanged, but v0.35.0
+  rejects a 0.35.1 result whose findings leave out a subsumed claim, and 0.35.1 rejects a
+  0.35.0 result that delivered one
   ([#1864](https://github.com/existential-birds/daydream/issues/1864), #1866).
 - A retried review attempt is now told what its failed attempt admitted, and cannot admit
   the same claim twice. A retry is a fresh conversation that saw every target undecided and
@@ -106,12 +108,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `binary change: no text content`; the reviewer owes it no decision but still sees it in the
   catalog and may cite it. Its sealed assignment carries `binary: true` and the report names it. A
   text file the reviewer marks `not_reviewed` still leaves the review incomplete, and a change of
-  only binary files completes without a model call
+  only binary files completes without a model call. v0.35.0 rejects a sealed result that holds
+  such a host decision
   ([#1865](https://github.com/existential-birds/daydream/issues/1865), #1869).
 - A changed path longer than 512 characters no longer stops the review before any model call with
   a "narrow the review base" capacity message. Target ids and scope files now accept paths up to
   4096 characters, as source references do. A path whose diff header alone cannot fit one review
-  assignment is refused at planning with a message that names it
+  assignment is refused at planning with a message that names it. v0.35.0 rejects a sealed
+  result whose target path exceeds 512 characters
   ([#1856](https://github.com/existential-birds/daydream/issues/1856), #1869).
 - A changed file containing bytes that are not valid UTF-8, such as a Latin-1 source file, no
   longer crashes review or fixing with `UnicodeDecodeError` before any work starts. The review diff
