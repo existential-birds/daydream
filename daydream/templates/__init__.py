@@ -6,15 +6,21 @@ built installs (``importlib.resources`` resolves them identically in either
 case). ``workflow_template_files()`` is the single source both the CLI copier
 and the browser guide reference for the canonical template set.
 
+Templates install Daydream at ``RELEASE_COMMIT_PLACEHOLDER``; ``render_workflow``
+replaces it with the full commit SHA the installed workflow pins.
+
 Exports:
     workflow_template_files() -> list[Path]: The three ``*.yml`` workflow
         templates (excludes ``README.md``).
+    render_workflow(template, commit) -> str: Template text pinned to ``commit``.
 """
 
 from __future__ import annotations
 
 from importlib.resources import files
 from pathlib import Path
+
+RELEASE_COMMIT_PLACEHOLDER = "DAYDREAM_RELEASE_COMMIT"
 
 
 def workflow_template_files() -> list[Path]:
@@ -33,3 +39,8 @@ def workflow_template_files() -> list[Path]:
         for entry in workflows.iterdir()
         if entry.name.endswith(".yml")
     )
+
+
+def render_workflow(template: Path, commit: str) -> str:
+    """Return ``template`` with every Daydream install line pinned to ``commit``."""
+    return template.read_text().replace(RELEASE_COMMIT_PLACEHOLDER, commit)
