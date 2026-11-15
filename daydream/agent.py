@@ -364,7 +364,7 @@ async def run_agent(
     search_turn = read_only or review_limits is not None or investigation
     if search_turn and not tools_disabled and phase in {
         DaydreamPhase.REVIEW, DaydreamPhase.DEEP, DaydreamPhase.EXPLORATION,
-        DaydreamPhase.INTENT, DaydreamPhase.ALTERNATIVES, DaydreamPhase.VERIFY,
+        DaydreamPhase.INTENT, DaydreamPhase.ALTERNATIVES, DaydreamPhase.VERIFY, DaydreamPhase.CHALLENGE,
     }:
         # The only insertion of the guidance: composed text can quote either variant as untrusted data.
         # Read-only Pi has only its stock bounded tools: no shell, Git or helper.

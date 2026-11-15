@@ -1594,7 +1594,7 @@ class _Schedule:
                 content = returned.pop("content")
                 prompt += (f"\n{token} Supplied target, as review_source returns it:"
                            f"\n{token} {_instruction_json(returned)}\n{content}")
-            phase = DaydreamPhase.VERIFY if kind == "challenge" else DaydreamPhase.REVIEW
+            phase = DaydreamPhase.CHALLENGE if kind == "challenge" else DaydreamPhase.REVIEW
             # Each work item is its own phase interval, so its invocation's time is attributed to its phase.
             async with phase_scope(phase, stage=f"committed-{kind}"):
                 _, _, stopped = await agent.run_agent(

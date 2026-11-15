@@ -77,6 +77,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failure on the outage circuit, and an assignment that ends unsubmitted again is still
   reported as `missing_output` unless a budget or deadline limit stops it first
   ([#1832](https://github.com/existential-birds/daydream/issues/1832)).
+- The run details of a posted review now label the committed review's challenge
+  "Challenge". It was recorded under the fix flow's verification phase, so every review
+  posted with `--comment` showed a "Verify Recommendations" row for work that verified no
+  recommendation, and a fixing run folded the challenge's cost into its real verification
+  row. Trajectories now record the challenge under a new `challenge` phase; older
+  trajectories keep `verify`
+  ([#1851](https://github.com/existential-birds/daydream/issues/1851)).
+- The `deep` flow's `--findings-out` file no longer fails to write when diagrams or
+  warnings push a review whose findings nearly fill the 1 MiB bound over it. The run
+  printed "Findings Artifact", exited 1 and left no file for the poster. The writer now
+  drops the review context, then the diagrams, then the warnings, each only while still
+  over, and logs what it dropped; findings and coverage always stay
+  ([#1848](https://github.com/existential-birds/daydream/issues/1848)).
+- Diagrams requested with a review keep their time after a large review. Once a review's
+  allowances scaled with the change, its window could reach the flow's outer deadline and
+  leave the diagram step about 120 seconds, so diagrams that needed longer were not
+  produced. With the default profile the diagram step now runs until at least
+  `review_wall_budget_s - reviewer_investigation_budget_s - 120` seconds (1,980 s) after it
+  starts, what an unscaled review leaves it; runs without diagrams are unchanged. Other
+  profiles keep `review_wall_budget_s` as the ceiling for diagrams too
+  ([#1841](https://github.com/existential-birds/daydream/issues/1841)).
 - A change with a binary file no longer leaves the review incomplete when the reviewer marks that
   file `not_reviewed`. A changed file whose captured diff is binary (Git's `Binary files … differ`,
   with no text hunk) is now decided by the host as `reviewed` with the reason

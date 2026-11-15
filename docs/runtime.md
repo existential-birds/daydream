@@ -335,9 +335,12 @@ bounds a review's claims beyond that; a batch still holds at most 128. A sealed 
 therefore hold more than 128 claims and findings, which a reader on an older release rejects.
 The `deep` flow's `--findings-out` artifact is another export: it also carries run
 information, warnings, the review context and diagrams, which this bound does not count.
-Its writer drops review context to fit 1 MiB but nothing else, so a review whose claims
-nearly fill the bound can fail to write it; the sealed result and the report keep every
-finding.
+To fit 1 MiB its writer drops the review context, then the diagrams, then the warnings,
+each only while the artifact is still over, and names what it dropped in a logged warning.
+Findings and coverage always stay, so a review whose warnings were dropped still reports
+its unfinished coverage and withholds approval. Run information also stays: an artifact
+still over 1 MiB without the others is refused, and the sealed result and the report keep
+every finding.
 
 All work draws on one [budget ledger](#budget-ledger) for the review window; each
 dispatch runs on its own child ledger carved from it, so parallel siblings never share a
@@ -369,10 +372,14 @@ extension steps, sealing, the fix cycle) are not bounded by the review window.
 Diagrams generated after the review share the flow's outer review deadline with it:
 `review_wall_budget_s`, times the tier in the default profile, from when the flow
 starts its steps. When `INV * scale + 120` reaches it, the review window equals that
-deadline, and a review that runs to its end leaves them about the 120 s finalization
-reserve. With the default profile that is any change of more than four batches in the
-first tier and a scale of at least 6, 12 or 17 in tiers 3, 6 and 9. Nothing extends the
-deadline for them.
+deadline: with the default profile, any change of more than four batches in the first
+tier and a scale of at least 6, 12 or 17 in tiers 3, 6 and 9. So in the default profile
+the diagram step runs until the later of that deadline and `WALL - INV - 120` seconds
+(1,980 s) after it starts, the time an unscaled review leaves it, and a review that runs
+to its end cannot consume that time; a run without diagrams is never lengthened. In every
+other profile `review_wall_budget_s` bounds diagrams too: a review that runs to its end
+leaves them about the 120 s finalization reserve, and a diagram kind that runs out of
+time fails with a budget stop the run reports.
 `settings.limits` records the profile's `tool_calls` and `investigation_s` beside
 `scale`, `effective_tool_calls` (`T'`) and `effective_investigation_s` (`W`). For
 example, a change of 134 batches under the default profile (120 calls, 2,400 s, wall
