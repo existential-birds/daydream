@@ -3,7 +3,7 @@
 ## Containers and identity
 
 The local store usually has `~/.daydream/dataset/runs/<digest>.jsonl`. Each
-nonblank line is a `daydream.run.v1` record, frequently hundreds of KB or more.
+nonblank line is a `daydream.run.v2` record, frequently hundreds of KB or more.
 Use the record's `run_id`, not the basename. Physical line numbers locate the
 record; JSON pointers locate evidence inside it. For a cohort row, pass both its
 `--run-id` and physical `--line` to the trace helper so repeated IDs select the
@@ -15,7 +15,7 @@ the recorded ID, not its array position.
 | `schema_version`, `run_id`, `captured_at`, `outcome`, `trace_id` | Run identity and terminal outcome; trace ID can be null |
 | `original_task`, `trajectories`, `findings`, `verification`, `scoring`, `recommended_patch`, `final_state` | `{status, reason, value}` evidence wrappers |
 | `completeness` | Separate acquisition, trajectory and terminal review availability |
-| `provenance` | Producer identity, repository/revision, configuration/profile, resolved phases, latency routing, collection diagnostics |
+| `provenance` | Producer identity, repository/revision, configuration/profile, resolved phases, collection diagnostics |
 | `trajectories.value.root_trajectory_id` | Root document identity; do not assume documents are root-first |
 | `trajectories.value.documents[]` | Embedded ATIF documents, normally `ATIF-v1.7` |
 | `findings.value.claims`, `.derivation`, `.terminal_coverage` | Stack claims, adjudication/dedup artifacts, scope and phase outcomes |

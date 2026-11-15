@@ -195,32 +195,6 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
     return parser
 
 
-# Per-phase model/backend settings remain in RunConfig and config tables; removed CLI flags name
-# those replacements.
-_REMOVED_PHASE_FLAGS: dict[str, str] = {
-    "--review-backend": "[tool.daydream.phases.review] backend = \"...\"",
-    "--fix-backend": "[tool.daydream.phases.fix] backend = \"...\"",
-    "--test-backend": "[tool.daydream.phases.test] backend = \"...\"",
-    "--exploration-model": "[tool.daydream.phases.exploration] model = \"...\"",
-    "--review-model": "[tool.daydream.phases.review] model = \"...\"",
-    "--arbiter-model": "[tool.daydream.phases.arbiter] model = \"...\"",
-    "--fix-model": "[tool.daydream.phases.fix] model = \"...\"",
-    "--test-model": "[tool.daydream.phases.test] model = \"...\"",
-}
-
-
-def _reject_removed_phase_flags(parser: argparse.ArgumentParser, argv: list[str]) -> None:
-    """Reject removed phase flags, including --flag=value, with their config-table replacement."""
-    for token in argv:
-        flag = token.split("=", 1)[0]
-        replacement = _REMOVED_PHASE_FLAGS.get(flag)
-        if replacement is not None:
-            parser.error(
-                f"{flag} was removed; set it in the config file instead: "
-                f"{replacement} (pyproject.toml or .daydream.toml)."
-            )
-
-
 def _parse_args(argv: list[str] | None = None) -> RunConfig:
     """Parse target, output mode, branch/worktree selection, and modifiers; deep is the default."""
     raw_argv = sys.argv[1:] if argv is None else list(argv)
@@ -230,7 +204,6 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         raw_argv = raw_argv[1:]
 
     parser = _build_main_parser()
-    _reject_removed_phase_flags(parser, raw_argv)
     args = parser.parse_args(raw_argv)
 
     output_mode: str = "review"

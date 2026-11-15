@@ -6,12 +6,12 @@ and `daydream --help-all` for settings rather than copying defaults into docs.
 
 ## Terminal review findings contract
 
-Ordinary `--findings-out` uses schema version 2 with committed `terminal_result` version 1.
+Ordinary `--findings-out` uses schema version 4 with committed `terminal_result` version 1.
 Local captured review coverage uses terminal version 2 and a distinct `source_id`;
 commit-bound findings envelopes reject that identity instead of relabeling it.
 A fixing run over tracked uncommitted edits uses terminal version 3
 ([captured local source](#captured-local-source)).
-Immutable PR exports use schema 3, retaining original PR provenance separately
+Immutable PR exports use schema 5, retaining original PR provenance separately
 from the materialized analyzed revision (see [immutable PR inputs](#immutable-pr-inputs)).
 Diagram artifacts carry no review coverage; unsupported schemas are rejected.
 
@@ -715,7 +715,7 @@ invalidate captured analysis. Trusted repository/PR/provenance stays on result a
 ATIF control surfaces; only the approved bounded historical context enters model
 assignments. Model-facing profile serialization never carries trusted provenance.
 
-Strict immutable findings schema 3 binds the outer original repository/PR/head to
+Strict immutable findings schema 5 binds the outer original repository/PR/head to
 the envelope and typed coverage to its local head/comparison/diff key. Export does
 not grant publication authority. Its publisher must independently supply and
 validate repository, PR, original head, requested base and comparison SHA;
@@ -1066,10 +1066,10 @@ extension registers them.
 No stored format is converted. A fresh review rebuilds its own `.daydream/deep/`
 working directory, as every fresh run did, so the previous run's files there are
 replaced, including the staged reviewer's; an older build run after this one does the
-same to this build's `deep/` files. Everything else an earlier build wrote is left as it
-is: an existing `.daydream/review-cache/` is preserved and never read, and exploration
-output and earlier runs' records stay. Archive indexes, dataset stores, findings
-artifacts and repair checkpoints keep their own
+same to this build's `deep/` files. A run deletes an earlier build's
+`.daydream/review-cache/` directory, which this build never reads. Everything else an
+earlier build wrote is left as it is: exploration output and earlier runs' records stay.
+Archive indexes, dataset stores, findings artifacts and repair checkpoints keep their own
 [refuse-or-read rules](#artifacts-and-recovery).
 
 Findings carry head-side lines only. A finding whose location exists only on the old

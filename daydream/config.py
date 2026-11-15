@@ -80,15 +80,14 @@ VET_BATCH_MAX_FINDINGS: int = 20
 # tiers once so backends cannot drift when a phase is added. Pi is absent because
 # PiBackend first honors Pi's own settings, then DEFAULT_PI_MODEL.
 _MODEL_PHASE_TIERS = (
-    ("parse",),
-    ("fix", "test", "verify", "exploration", "per_stack_review", "diagram", "intent", "recon", "audit"),
-    ("review", "arbiter", "wonder", "merge", "vet", "plan_write"),
+    ("fix", "test", "verify", "exploration", "diagram", "recon", "audit"),
+    ("review", "arbiter", "vet", "plan_write"),
 )
 PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
     backend: {phase: model for phases, model in zip(_MODEL_PHASE_TIERS, models, strict=True) for phase in phases}
     for backend, models in {
-        "claude": ("claude-haiku-5-5", "claude-sonnet-5-5", DEFAULT_CLAUDE_MODEL),
-        "codex": ("gpt-5.6-luna", DEFAULT_CODEX_MODEL, DEFAULT_CODEX_MODEL),
+        "claude": ("claude-sonnet-5-5", DEFAULT_CLAUDE_MODEL),
+        "codex": (DEFAULT_CODEX_MODEL, DEFAULT_CODEX_MODEL),
     }.items()
 }
 
@@ -103,18 +102,13 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
 # the effort their own native settings give.
 DEEP_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
     "codex": {
-        "parse": "low",
         "fix": "medium",
         "test": "medium",
         "verify": "medium",
         "exploration": "low",
-        "per_stack_review": "medium",
         "review": "medium",
         "arbiter": "high",
         "diagram": "medium",
-        "wonder": "medium",
-        "merge": "medium",
-        "intent": "medium",
     },
 }
 

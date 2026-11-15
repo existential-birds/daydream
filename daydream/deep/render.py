@@ -9,10 +9,10 @@ _DIAGRAMS_HEADING = "## Diagrams"
 _REVIEW_HEADING = "# Review"
 
 
-def _finding_line(item: dict[str, Any], *, prefix: str = "") -> str:
+def _finding_line(item: dict[str, Any]) -> str:
     """Render the canonical id and location as an unbolded numbered finding line."""
     location = item['file'] if item.get('line') is None else f"{item['file']}:{item['line']}"
-    return f"{item['id']}. {prefix}[{location}] {item['description']}"
+    return f"{item['id']}. [{location}] {item['description']}"
 
 
 def _is_heading(line: str) -> bool:
@@ -93,30 +93,15 @@ def render_report(
     items: list[dict[str, Any]], *, review_context: dict[str, Any] | None = None,
     terminal_result: dict[str, Any] | None = None,
 ) -> str:
-    """Render nonempty lens groups in structural, per-stack, cross-stack, then wonder order.
-
-    Use canonical ids, plain numbered location lines, and [cross-stack] title prefixes.
-    """
+    """Render the findings as one Issues group of canonical ids and plain numbered location lines."""
     sections: list[str] = ["# Review"]
     if review_context is not None:
         from daydream.review_reporting import render_review_context
 
         sections.append(render_review_context(review_context, terminal_result, findings_count=len(items)))
 
-    # Omit empty lenses; each entry specifies its heading and finding prefix.
-    lens_sections = [
-        ("structural", "## Structural Review", ""),
-        ("per-stack", "## Issues", ""),
-        ("cross-stack", "## Cross-Stack Issues", "[cross-stack] "),
-        ("wonder", "## Wonder Findings", ""),
-    ]
-
-    for lens, title, prefix in lens_sections:
-        # A finding that asserts no lens is listed with the plain issues.
-        rows = [i for i in items if (i.get("lens") or "per-stack") == lens]
-        if rows:
-            body = "\n".join(_finding_line(i, prefix=prefix) for i in rows)
-            sections.append(f"{title}\n{body}")
+    if items:
+        sections.append("## Issues\n" + "\n".join(_finding_line(i) for i in items))
 
     text = "\n\n".join(sections) + "\n"
     return text

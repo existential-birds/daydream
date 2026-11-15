@@ -17,7 +17,7 @@ def _item(id: Any, lens: Any, file: Any, line: Any, sev: Any, desc: Any) -> dict
 _BLOCKS = "<details><summary><h3>Flowchart</h3></summary>\n\n```mermaid\nflowchart TD\n```\n\n</details>"
 
 def _items() -> list[dict[str, Any]]:
-    return [_item(1, "per-stack", "a.py", 9, "medium", "bug"), _item(2, "cross-stack", "b.py", 2, "high", "drift")]
+    return [_item(1, "per-stack", "a.py", 9, "medium", "bug"), _item(2, "wonder", "b.py", 2, "high", "drift")]
 
 def test_empty_report_retains_attributed_rationale_and_unproduced_checks_through_replacement() -> None:
     """Empty finding rendering previously discarded all existing scope reasoning and limits."""
@@ -33,6 +33,8 @@ def test_empty_report_retains_attributed_rationale_and_unproduced_checks_through
         'verification': {'status': 'unproduced', 'value': None},
         'author_reported': {'source': 'pull_request_body', 'head_sha': 'reported-head',
                             'body': 'CI and make check pass.'}}
+    # Every finding is one plain issue in order: no lens groups or prefixes, and none is dropped for its lens.
+    assert render_report(_items()) == "# Review\n\n## Issues\n1. [a.py:9] bug\n2. [b.py:2] drift\n"
     report = render_report([], review_context=context, terminal_result=terminal)
     assert 'No confirmed findings' in report and 'Recorded scope completion: 1/1' in report
     assert 'The caller handles the failure.' in report and 'source-run' in report

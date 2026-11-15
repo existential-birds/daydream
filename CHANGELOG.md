@@ -66,8 +66,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     Passing one of these fields raises `TypeError` (unexpected keyword argument), where
     `runner.run` used to refuse it with exit 1 or ignore it.
   - The `daydream.stack` trace span attribute and the `stack` parameter of `step_scope`.
-    The archive index keeps its `skill` column, now always written as null; the archive
-    schema is unchanged.
+    The archive index's `skill` column goes with the stored-format change below.
+- **Breaking (0.y.z):** Readers of files that only the replaced staged reviewer wrote are
+  deleted ([#1860](https://github.com/existential-birds/daydream/issues/1860)):
+  - `daydream.deep.routing_record.read_routing_record`, which read `latency-routing.json`. The
+    archived `evaluation.json` no longer has the `latency_profile` and `routing` keys, and
+    archive finalization no longer requires them.
+  - The evaluation's `findings.stacks`, `findings.dedup` and `findings.per_lens`, which counted
+    `stack-*-records.json`, `dedup-candidates.json` and `alternatives.json`. Evaluating an old
+    run directory reports no per-lens, per-stack or dedup counts, and its finding total comes
+    only from `merged-items.json` or the rendered review, else 0.
+  - The verifier's selection residue. `recommendation-verdicts.json`, and so the
+    `verification` evidence a dataset record captures, no longer carries the selection's
+    `mode`, `skipped`, `reused` and `rule_version`, or each decision's `provenance`,
+    `content_digest` and `verdict_reused`. Each decision keeps `item_uid`, `item_id`,
+    `selected`, `reason_code` and `reason`.
+- **Breaking (0.y.z):** Leftovers of the replaced reviewer's phases, flags and public
+  directories are deleted ([#1861](https://github.com/existential-birds/daydream/issues/1861)):
+  - `DaydreamPhase.PARSE`, `INTENT` and `ALTERNATIVES`, and the run-info labels "Parse
+    Feedback", "Understand Intent", "Alternatives" and "Merge Findings". No build emits these
+    phases; a stored trajectory that names one is rendered under its own name ("Parse"), like
+    any phase the renderer does not know.
+  - The refusals of `--review-backend`, `--fix-backend`, `--test-backend`,
+    `--exploration-model`, `--review-model`, `--arbiter-model`, `--fix-model` and
+    `--test-model` that named their configuration-table replacement. Each now gets the
+    parser's own usage error and exit 2, for example
+    `daydream: error: unrecognized arguments: --fix-backend=claude`; set
+    `[tool.daydream.phases.<phase>] backend` or `model` instead.
+  - The `intents` and `review-cache` public `.daydream/` directories. Nothing writes either
+    one. A run now deletes an existing `.daydream/review-cache/` from an earlier build when it
+    starts, instead of carrying it into its published outputs.
+- **Breaking (0.y.z):** Stored formats drop the names of the replaced reviewer's phases and
+  lenses, and each changed format has a new version. Earlier versions are refused with their
+  existing messages and never converted or deleted
+  ([#1852](https://github.com/existential-birds/daydream/issues/1852)):
+  - Findings artifacts (`--findings-out`, the bot's `findings.json`) drop each finding's
+    `is_cross_stack` and move from schema 2 to 4, and immutable PR exports from 3 to 5.
+    `post-findings` refuses an earlier artifact with `artifact failed schema validation:
+    unsupported schema version 2`. The packaged producer and poster install the same release,
+    so only a review started on an earlier release and posted after the upgrade is refused
+    (the bot reports the failure on the PR); rerun the bot command. A consumer that reads
+    findings artifacts must accept the new versions and stop reading `is_cross_stack`.
+  - Dataset run records move from `daydream.run.v1` to `daydream.run.v2`: `provenance` no
+    longer has `latency_profile`, `latency_route` or `latency_routing`, and its
+    `effective_configuration` no longer has `skill` or `phases.per_stack_review` and takes the
+    archive's renamed `review_backend` and `review_model` (below). A record store or Hub
+    dataset holding version 1 records is refused (`invalid_or_unknown_record_schema`,
+    `invalid_or_unknown_manifest`); capture into a fresh store and Hub dataset.
+  - The archive index moves from schema 9 to 10 and the run manifest from `2.0` to `3.0`. The
+    `skill` column and `run.skill` field are gone. `per_stack_review_backend` and
+    `per_stack_review_model`, which already held the review phase's resolved backend and model,
+    are renamed `review_backend` and `review_model`; `review_backend` therefore no longer holds
+    only an explicitly configured review backend, and both are empty for a run without a
+    review. An existing index is refused with `unsupported archive index schema ... use a
+    fresh archive directory`; use one.
+  - The default model and reasoning-effort tables (`PHASE_DEFAULT_MODELS`,
+    `DEEP_PHASE_DEFAULT_EFFORT`) lose their `parse`, `per_stack_review`, `intent`, `wonder`
+    and `merge` rows; no phase with these names runs.
+  - Canonical items accept only `per-stack` as a `lens`; an extension step that writes
+    `cross-stack`, `structural` or `wonder` fails the review's findings check. The report lists
+    every finding under one Issues heading, without the Structural Review, Cross-Stack Issues
+    and Wonder Findings groups or the `[cross-stack]` prefix, and the verifier no longer exempts
+    a lens: every finding is verified. The Verdict Join table has no Structural row.
+  - The extension API moves from 10 to 11: `CommentFinding`, which a finding renderer
+    receives, no longer has `is_cross_stack`. Declare `DAYDREAM_EXT_API = 11`.
+- **Breaking (0.y.z):** The tool-free agent mode that only the staged reviewer used is deleted
+  ([#1850](https://github.com/existential-birds/daydream/issues/1850)): `run_agent`'s
+  `tools_disabled` argument, the backend capability `supports_tools_disabled` and `PiBackend`'s
+  tools-disabled path, which sent the prompt on standard input. Passing `tools_disabled` raises
+  `TypeError`, and `review_system_instructions` now requires an investigation ledger. The
+  packaged Pi extension no longer reads a submission assignment that nothing sets, the Pi
+  preamble no longer mentions staged reviews, and `git_ops.committed_diff`, which nothing
+  called, is gone.
 
 ### Fixed
 

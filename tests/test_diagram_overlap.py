@@ -146,4 +146,4 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
         assert await runner.run(on_pi, execution=replace(execution, backends={"pi": inputs["pi"]}),
                                 private_roots=roots) == 0
         (manifest,) = (tmp_path / "archive").glob("**/manifest.json")
-        assert json.loads(manifest.read_text())["run"]["per_stack_review_model"] == "embedded-pi-default"
+        assert json.loads(manifest.read_text())["run"]["review_model"] == "embedded-pi-default"

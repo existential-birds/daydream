@@ -100,9 +100,7 @@ export default async function (pi: ExtensionAPI) {
       if (!submitted && !warned && allowance !== undefined && allowance - starts === 1) {
         warned = true;
         instructions.push("Final-submission budget warning: Only submission capacity remains. "
-          + "Submit now using structured_output alone; report unfinished assigned work with truthful incomplete decisions."
-          + (packet.submission_assignment
-            ? " Assigned objective and identities: " + JSON.stringify(packet.submission_assignment) : ""));
+          + "Submit now using structured_output alone; report unfinished assigned work with truthful incomplete decisions.");
       }
       if (pendingRecovery) {
         pendingRecovery = false;
