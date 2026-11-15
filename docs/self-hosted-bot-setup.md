@@ -9,7 +9,8 @@ daydream setup /path/to/repo --repo OWNER/REPO --verify
 ```
 
 Setup registers an App through a localhost manifest callback, deposits secrets,
-and opens a workflow PR. A human must click **Install** to grant repository
+and opens a workflow PR whose workflows install the Daydream release running setup
+([Daydream pin](../daydream/templates/workflows/README.md#daydream-pin)). A human must click **Install** to grant repository
 access. The bot runs on the repository's own Actions and credentials.
 `--verify` is read-only; it checks secret names, not their values. App installation
 and permission checks need local `DAYDREAM_APP_ID` and raw-PEM

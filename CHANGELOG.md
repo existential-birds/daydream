@@ -7,16 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+### Fixed
 
-- The packaged bot workflow templates install Daydream at the v0.35.2 release commit
-  (`5e6eba92`) instead of the v0.35.1 one, so a bot installed from them delivers findings on
-  route files whose names have `[`, `]` or `$` and prints those paths whole. The 0.35.2
-  package's templates install the v0.35.1 pin, so `daydream setup` users get v0.35.2 with the
-  next release; existing installs then read as customized under `daydream setup --verify`
-  until `daydream setup` is rerun. Both releases write findings schema 2, so the artifact of a
-  review started before an install is updated is still accepted when posted after it
-  ([#1641](https://github.com/existential-birds/daydream/issues/1641)).
+- `daydream setup` now installs the Daydream version that ran it. The packaged bot workflows
+  carried a hard-coded commit that always lagged the release shipping them (the 0.35.2 templates
+  installed v0.35.1, and every release from 0.28 to 0.35.0 installed a 0.28.0-era commit). They now
+  carry a placeholder, and setup pins every Daydream install line, producer and poster alike, to
+  the full commit of the release tag `v<version>` of the Daydream running it, peeling an
+  annotated tag to its commit. A build whose version has no release tag (a development build)
+  refuses before registering or depositing anything. `daydream setup --verify` compares
+  installed workflows with the templates pinned to the running release, so workflows installed by
+  an earlier release read as customized: rerun `daydream setup` to move an existing install to
+  the release you run. **Breaking (0.y.z)** for manual copies only: replace the placeholder as
+  the [workflow README](daydream/templates/workflows/README.md#daydream-pin) describes
+  ([#1884](https://github.com/existential-birds/daydream/issues/1884)).
 
 ### Removed
 
@@ -25,6 +29,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pin they installed (`.github/workflows/package.json`) and that pin's Dependabot npm block are
   gone. Reviews of this repository come from the hosted review service. No package user is
   affected: `daydream setup` and the packaged templates it installs do not depend on them.
+- **Breaking (0.y.z):** The replaced staged reviewer's command-line options, flow aliases and
+  `RunConfig` fields, which 0.35.0 kept only to refuse them with guidance, are deleted
+  ([#1857](https://github.com/existential-birds/daydream/issues/1857)):
+  - `--shallow`, `--stack`/`-s`, `--precision`, `--latency-profile`, `--no-review-cache`,
+    `--start-at`, `--parse-model` and `--per-stack-review-model` now get the parser's own
+    usage error and exit 2, for example `daydream: error: unrecognized arguments: --shallow`.
+    Command lines that accepted some of them and ignored them are rejected the same way:
+    `--start-at` or `--stack` with a custom `--flow`; `--stack`, `--precision` or
+    `--latency-profile` with `--diagram-only`; and `--latency-profile` on `daydream improve`.
+    Drop them.
+  - `deep` is the only built-in flow alias. `review` and `shallow` (`--flow review`,
+    `flow_name="shallow"`) are ordinary custom flow names: unless an extension registers
+    one, the run stops with the Extension Error `flow 'shallow' is not registered; run
+    'daydream ext validate' to check the extension registry` and exit 1. Omit the flow
+    (`flow_name=None`) for the default review.
+  - `RunConfig.stack`, `start_at`, `latency_profile`, `parse_model`, `shallow`,
+    `precision_mode` and `review_cache_enabled`, and `run_config.replaced_review_options`.
+    Passing one of these fields raises `TypeError` (unexpected keyword argument), where
+    `runner.run` used to refuse it with exit 1 or ignore it.
+  - The `daydream.stack` trace span attribute and the `stack` parameter of `step_scope`.
+    The archive index keeps its `skill` column, now always written as null; the archive
+    schema is unchanged.
 
 ### Fixed
 
