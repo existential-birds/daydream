@@ -14,10 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The bot workflows install Daydream at the v0.35.1 release commit (`7e036838`) instead of the
   v0.35.0 one: the repository's review and post workflows, which take effect on merge, and the
   packaged split and single-file templates. The 0.35.1 package's templates still install the
-  v0.35.0 pin, so `daydream setup` users get the v0.35.1 pin with the next release; existing
-  installs then read as customized under `daydream setup --verify` until `daydream setup` is
-  rerun. Both releases write findings schema 2, so the artifact of a review started before
-  this change and posted after it is still accepted
+  v0.35.0 pin; this release's templates install the v0.35.1 pin, so `daydream setup` users get
+  it now; existing installs read as customized under `daydream setup --verify` until
+  `daydream setup` is rerun. Both releases write findings schema 2, so the artifact of a review
+  started before this change and posted after it is still accepted. That pin predates the
+  route-file fixes below; the bot gets them when it moves to the v0.35.2 release commit
   ([#1641](https://github.com/existential-birds/daydream/issues/1641), #1876).
 
 ### Fixed
