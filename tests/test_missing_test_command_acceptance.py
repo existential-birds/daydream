@@ -64,14 +64,13 @@ async def test_runner_rejects_missing_canonical_before_fix_or_test(
     The rejection is persisted as a no-execution verdict and recipe; the manifest
     candidate is never executed. Command-miss reasons have owner-level proof.
     The owner's tracked edit is part of the reviewed subject: the run says so first and records it.
+    Untracked files alone leave the reviewed subject exactly the commits, with no notice.
     """
     reason, source = "empty-argv", "config"
     _, target = linked_worktree
     backend = _arrange(target, monkeypatch)
     (target / ".daydream.toml").write_text('test_command = \'""\'\n')
-    (target / "base.txt").write_text("owner dirty bytes\n")
     (target / "owner-untracked.txt").write_text("owner untracked bytes\n")
-    before = _state(target)
     counter = tmp_path / "candidate-runs"
     candidate = tmp_path / "pytest"
     candidate.write_text(f"#!/bin/sh\nprintf ran >> '{counter}'\nexit 0\n")
@@ -80,10 +79,19 @@ async def test_runner_rejects_missing_canonical_before_fix_or_test(
     trajectory = tmp_path / "trajectory.json"
     config = make_config(target, output_mode="loop", assume="yes", test_command=None,
                          file_config=load_file_config(target), trajectory_path=trajectory)
-    rc = await run(config)
-    assert rc != 0, "unconfigured validation cannot authorize a successful fix flow"
-    assert ("Fixing reviews the checkout as is: its tracked uncommitted edits are reviewed with the commits "
-            "and committed with the fixes.") in collapse_panel_text(capsys)
+    notice = ("Fixing reviews the checkout as is: its tracked uncommitted edits are reviewed with the commits "
+              "and committed with the fixes.")
+    deep = target / ".daydream" / "deep"
+    for dirty in (False, True):
+        if dirty:
+            (target / "base.txt").write_text("owner dirty bytes\n")
+            before = _state(target)
+        rc = await run(config)
+        assert rc != 0, "unconfigured validation cannot authorize a successful fix flow"
+        assert (notice in collapse_panel_text(capsys)) is dirty
+        coverage = json.loads((deep / "review-coverage.json").read_text())
+        assert (coverage["schema_version"], coverage["analyzed_revision"].get("tracked_worktree_edits")) == (
+            (3, True) if dirty else (1, None))
     assert _state(target) == before, "configuration rejection changed owner source/index/HEAD"
     assert not counter.exists(), "the manifest candidate was executed without admission"
     assert backend.test_suite_calls == 0
@@ -93,9 +101,6 @@ async def test_runner_rejects_missing_canonical_before_fix_or_test(
     assert not {"test", "fix"}.intersection(phases)
     starts = _scan_phase_events(target / ".daydream", trajectory, "phase_start")
     assert not {"test", "test-execution", "fix"}.intersection(event["phase"] for event in starts)
-    deep = target / ".daydream" / "deep"
-    coverage = json.loads((deep / "review-coverage.json").read_text())
-    assert coverage["schema_version"] == 3 and coverage["analyzed_revision"]["tracked_worktree_edits"] is True
     verdict = json.loads((deep / "test-verdict.json").read_text())
     assert verdict["status"] == "no-execution"
     assert verdict["passed"] is False and verdict["retries"] == 0 and verdict["ignored"] is False

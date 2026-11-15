@@ -456,8 +456,9 @@ visible exclusion notice when the checkout is dirty. Improve retains its separat
 audit-workspace population policy. Fixing-flow migration is outside this contract:
 fixing reviews the checkout as is, so its diff is the commits plus tracked working-tree
 edits. When such edits exist the run says so before it reviews, and its coverage and
-committed result (schema 10) mark `analyzed_revision` with `tracked_worktree_edits: true`
-and terminal/coverage version 3; a clean checkout keeps version 1 and no marker.
+committed result mark `analyzed_revision` with `tracked_worktree_edits: true`, with
+terminal/coverage version 3 and committed result schema 13; a clean checkout keeps
+version 1, schema 10 and no marker.
 
 Local capture compares the pinned merge base with final working bytes, combining
 committed and later tracked edits. The index is not another change layer. Undone
@@ -554,8 +555,9 @@ is not an OS sandbox. Native configuration/trust/authentication
 still resolve in the original project, while native cwd/read/search use the capture.
 
 Local program results use schema 12 and terminal/coverage version 2; committed
-results 10, immutable results 11 and their committed terminal version 1 (3 for a fixing
-run over tracked uncommitted edits) stay distinct.
+results 10, immutable results 11 and their committed terminal version 1, and results 13
+with terminal version 3 for a fixing run over tracked uncommitted edits, stay distinct.
+Only schema 13 carries `tracked_worktree_edits`, and it always does.
 Results 1–3 predate bounded navigation and sharded per-target coverage, 4–6 predate
 work records and 7–9 predate claim severity; they are rejected with a restart instruction
 rather than converted.
