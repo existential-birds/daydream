@@ -160,25 +160,7 @@ def _resolved_reasoning_effort(config: RunConfig, phase: str) -> str | None:
 
 DEEP_FLOW_ALIASES = ("deep",)
 
-# Top-level repository settings and phase tables that only the replaced staged reviewer, or the
-# verifier selection that depended on it, read.
-REPLACED_REVIEW_FILE_KEYS = (
-    "latency_profile", "shallow_fanout_threshold", "precision_mode", "deep_shard_enabled", "deep_shard_max_files",
-    "deep_shard_max_bytes", "deep_shard_fanout_cap", "deep_shard_frontier_max", "review_cache_enabled",
-    "review_cache_max_entries", "review_cache_max_bytes", "review_cache_max_age_days", "verify_all",
-)
-REPLACED_REVIEW_PHASES = ("intent", "merge", "parse", "per_stack_review", "supervise", "suppression", "wonder")
-
 
 def runs_review(config: RunConfig) -> bool:
     """Whether this request runs the reviewer: every built-in flow mode except diagram-only."""
     return config.flow_name in (None, *DEEP_FLOW_ALIASES) and config.output_mode != "diagram"
-
-
-def ignored_review_settings(config: RunConfig) -> list[str]:
-    """Repository settings of the replaced reviewer that a review now ignores."""
-    if not runs_review(config):
-        return []
-    file_config = _file_config_or_empty(config)
-    return [*(key for key in REPLACED_REVIEW_FILE_KEYS if getattr(file_config, key) is not None),
-            *(f"phases.{phase}" for phase in REPLACED_REVIEW_PHASES if phase in file_config.phases)]

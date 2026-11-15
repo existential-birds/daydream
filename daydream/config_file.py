@@ -36,9 +36,7 @@ class DaydreamFileConfig:
     Test commands preserve whitespace and a safe invalid-type marker for actionable readiness
     diagnostics instead of silently coercing malformed values to absent.
 
-    ``latency_profile`` is parsed without validating its vocabulary: a review ignores
-    it and only names it. ``review_profile`` is only a path here; review_profile.py
-    owns strict profile validation.
+    ``review_profile`` is only a path here; review_profile.py owns strict profile validation.
 
     Improve service roots/groups and partition bounds come from ``[improve]``;
     issue publication requires explicit ``[improve.github] publish_issues=true``.
@@ -47,18 +45,13 @@ class DaydreamFileConfig:
 
     ``test_required_suites`` declares which suites the single configured command
     covers; it never creates a second runner or substitutes a targeted check.
-    The review-cache keys select nothing: a review names them in its warning
-    about replaced settings.
     Field defaults and the full configuration reference live in config.py and README.
     """
 
     model: str | None = None
     backend: str | None = None
     reasoning_effort: str | None = None
-    latency_profile: str | None = None
     phases: dict[str, dict[str, str]] = field(default_factory=dict)
-    shallow_fanout_threshold: int | None = None
-    precision_mode: bool | None = None
     scope_issue_filing: bool | None = None
     group_max_wall_s: float | None = None
     group_max_serial_items: int | None = None
@@ -66,16 +59,6 @@ class DaydreamFileConfig:
     repair_job_wall_s: float | None = None
     repair_max_executions: int | None = None
     repair_grant_job_wall_s: float | None = None
-    deep_shard_enabled: bool | None = None
-    deep_shard_max_files: int | None = None
-    deep_shard_max_bytes: int | None = None
-    deep_shard_fanout_cap: int | None = None
-    deep_shard_frontier_max: int | None = None
-    review_cache_enabled: bool | None = None
-    review_cache_max_entries: int | None = None
-    review_cache_max_bytes: int | None = None
-    review_cache_max_age_days: int | None = None
-    verify_all: bool | None = None
     quality_gate_enabled: bool | None = None
     quality_gate_erosion_delta: float | None = None
     quality_gate_verbosity_delta: float | None = None
@@ -165,13 +148,6 @@ def _coerce_phases(raw: Any) -> dict[str, dict[str, str]]:
     return result
 
 
-def _coerce_int(raw: Any) -> int | None:
-    """Return ``raw`` as an int, or None for bool/non-int (degrade to default)."""
-    if isinstance(raw, bool):
-        return None
-    return raw if isinstance(raw, int) else None
-
-
 def _coerce_non_negative_int(raw: Any) -> int | None:
     """Preserve integer zero; reject negative values, booleans, and non-integers."""
     if isinstance(raw, bool):
@@ -180,14 +156,13 @@ def _coerce_non_negative_int(raw: Any) -> int | None:
 
 
 def _coerce_optional_bool(raw: Any) -> bool | None:
-    """Accept only actual booleans: precision_mode=1 must remain unset."""
+    """Accept only actual booleans: scope_issue_filing=1 must remain unset."""
     return raw if isinstance(raw, bool) else None
 
 
 def _coerce_positive_int(table: dict[str, Any], key: str) -> int | None:
     """Read a positive integer, with hyphenated spelling as fallback."""
-    value = _coerce_int(table.get(key, table.get(key.replace("_", "-"))))
-    return value if value is not None and value > 0 else None
+    return _coerce_non_negative_int(table.get(key, table.get(key.replace("_", "-")))) or None
 
 
 def _coerce_float(raw: Any) -> float | None:
@@ -215,13 +190,6 @@ def _coerce_positive_float(raw: Any) -> float | None:
     return value
 
 
-def _coerce_string(raw: Any) -> str | None:
-    """Return a non-empty string, or None for absent/malformed values."""
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    return raw
-
-
 def _coerce_string_list(raw: Any) -> list[str]:
     """Return a list of strings, or an empty list for malformed values."""
     if not isinstance(raw, list) or not all(isinstance(value, str) for value in raw):
@@ -244,7 +212,9 @@ def _coerce_review_profile_path(raw: Any) -> Path | None:
 def load_file_config(root: Path) -> DaydreamFileConfig:
     """Merge repository policy, returning empty defaults when neither file exists.
 
-    Malformed TOML raises ValueError naming the offending file.
+    Malformed TOML, and any top-level key this loader does not read, raise ValueError
+    naming the offending file or keys. Each read takes its key from the merged settings,
+    so the keys left over are exactly the unread ones.
     """
     pyproject = _load_toml(root / "pyproject.toml")
     tool_section = pyproject.get("tool", {})
@@ -253,23 +223,17 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
 
     dotfile = _load_toml(root / ".daydream.toml")
 
-    merged = _merge_section(base, dotfile)
+    settings = _merge_section(base, dotfile)
+    take = settings.pop
 
-    # Warn on removed policy rather than silently accepting a stale configuration.
-    if "bench" in merged:
-        logger.warning(
-            "daydream: [tool.daydream.bench] is no longer a supported daydream "
-            "config section (legacy benchmark verb removed); ignoring it"
-        )
-
-    model = merged.get("model")
-    backend = merged.get("backend")
-    reasoning_effort = merged.get("reasoning_effort")
-    threshold = _coerce_int(merged.get("shallow_fanout_threshold"))
+    model = take("model", None)
+    backend = take("backend", None)
+    reasoning_effort = take("reasoning_effort", None)
+    test_command = take("test_command", None)
     # Non-table sections behave as absent, preserving defaults.
-    diagram = merged.get("diagram")
+    diagram = take("diagram", None)
     diagram = diagram if isinstance(diagram, dict) else {}
-    improve = merged.get("improve")
+    improve = take("improve", None)
     improve = improve if isinstance(improve, dict) else {}
     service_groups = improve.get("service_groups")
     service_groups = service_groups if isinstance(service_groups, dict) else {}
@@ -281,41 +245,28 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     improve_github_publish_issues = (
         raw_improve_publish if isinstance(raw_improve_publish, bool) else False
     )
-    return DaydreamFileConfig(
+    config = DaydreamFileConfig(
         model=str(model) if model is not None else None,
         backend=str(backend) if backend is not None else None,
         reasoning_effort=str(reasoning_effort) if reasoning_effort is not None else None,
-        latency_profile=_coerce_string(merged.get("latency_profile")),
-        phases=_coerce_phases(merged.get("phases")),
-        shallow_fanout_threshold=threshold,
-        precision_mode=_coerce_optional_bool(merged.get("precision_mode")),
-        scope_issue_filing=_coerce_optional_bool(merged.get("scope_issue_filing")),
-        group_max_wall_s=_coerce_non_negative_float(merged.get("group_max_wall_s")),
-        group_max_serial_items=_coerce_non_negative_int(merged.get("group_max_serial_items")),
-        repair_execution_wall_s=_coerce_non_negative_float(merged.get("repair_execution_wall_s")),
-        repair_job_wall_s=_coerce_non_negative_float(merged.get("repair_job_wall_s")),
-        repair_max_executions=_coerce_non_negative_int(merged.get("repair_max_executions")),
-        repair_grant_job_wall_s=_coerce_non_negative_float(merged.get("repair_grant_job_wall_s")),
-        review_profile=_coerce_review_profile_path(merged.get("review_profile")),
-        deep_shard_enabled=_coerce_optional_bool(merged.get("deep_shard_enabled")),
-        deep_shard_max_files=_coerce_non_negative_int(merged.get("deep_shard_max_files")),
-        deep_shard_max_bytes=_coerce_non_negative_int(merged.get("deep_shard_max_bytes")),
-        deep_shard_fanout_cap=_coerce_non_negative_int(merged.get("deep_shard_fanout_cap")),
-        deep_shard_frontier_max=_coerce_non_negative_int(merged.get("deep_shard_frontier_max")),
-        review_cache_enabled=_coerce_optional_bool(merged.get("review_cache_enabled")),
-        review_cache_max_entries=_coerce_non_negative_int(merged.get("review_cache_max_entries")),
-        review_cache_max_bytes=_coerce_non_negative_int(merged.get("review_cache_max_bytes")),
-        review_cache_max_age_days=_coerce_non_negative_int(merged.get("review_cache_max_age_days")),
-        verify_all=_coerce_optional_bool(merged.get("verify_all")),
-        quality_gate_enabled=_coerce_optional_bool(merged.get("quality_gate_enabled")),
-        quality_gate_erosion_delta=_coerce_non_negative_float(merged.get("quality_gate_erosion_delta")),
-        quality_gate_verbosity_delta=_coerce_non_negative_float(merged.get("quality_gate_verbosity_delta")),
-        quality_gate_erosion_absolute=_coerce_non_negative_float(merged.get("quality_gate_erosion_absolute")),
-        quality_gate_verbosity_absolute=_coerce_non_negative_float(merged.get("quality_gate_verbosity_absolute")),
-        supervisor=_coerce_choice(merged.get("supervisor"), {"off", "rules", "llm"}),
-        supervisor_deny_globs=_coerce_string_list(merged.get("supervisor_deny_globs")),
-        tool_supervisor=_coerce_choice(merged.get("tool_supervisor"), {"off", "rules"}),
-        tool_bash_deny=_coerce_string_list(merged.get("tool_bash_deny")),
+        phases=_coerce_phases(take("phases", None)),
+        scope_issue_filing=_coerce_optional_bool(take("scope_issue_filing", None)),
+        group_max_wall_s=_coerce_non_negative_float(take("group_max_wall_s", None)),
+        group_max_serial_items=_coerce_non_negative_int(take("group_max_serial_items", None)),
+        repair_execution_wall_s=_coerce_non_negative_float(take("repair_execution_wall_s", None)),
+        repair_job_wall_s=_coerce_non_negative_float(take("repair_job_wall_s", None)),
+        repair_max_executions=_coerce_non_negative_int(take("repair_max_executions", None)),
+        repair_grant_job_wall_s=_coerce_non_negative_float(take("repair_grant_job_wall_s", None)),
+        review_profile=_coerce_review_profile_path(take("review_profile", None)),
+        quality_gate_enabled=_coerce_optional_bool(take("quality_gate_enabled", None)),
+        quality_gate_erosion_delta=_coerce_non_negative_float(take("quality_gate_erosion_delta", None)),
+        quality_gate_verbosity_delta=_coerce_non_negative_float(take("quality_gate_verbosity_delta", None)),
+        quality_gate_erosion_absolute=_coerce_non_negative_float(take("quality_gate_erosion_absolute", None)),
+        quality_gate_verbosity_absolute=_coerce_non_negative_float(take("quality_gate_verbosity_absolute", None)),
+        supervisor=_coerce_choice(take("supervisor", None), {"off", "rules", "llm"}),
+        supervisor_deny_globs=_coerce_string_list(take("supervisor_deny_globs", None)),
+        tool_supervisor=_coerce_choice(take("tool_supervisor", None), {"off", "rules"}),
+        tool_bash_deny=_coerce_string_list(take("tool_bash_deny", None)),
         improve_service_roots=_coerce_string_list(improve.get("service_roots")),
         improve_service_groups={
             str(group): _coerce_string_list(roots)
@@ -329,8 +280,15 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         diagram_min_modules=_coerce_positive_int(diagram, "min_modules"),
         diagram_min_branch_points=_coerce_positive_int(diagram, "min_branch_points"),
         diagram_service_roots=_coerce_string_list(diagram.get("service_roots")),
-        test_command=merged.get("test_command") if isinstance(merged.get("test_command"), str) else None,
-        test_command_invalid=merged.get("test_command") is not None and not isinstance(merged["test_command"], str),
-        test_command_wall_s=_coerce_positive_float(merged.get("test_command_wall_s")),
-        test_required_suites=_coerce_string_list(merged.get("test_required_suites")),
+        test_command=test_command if isinstance(test_command, str) else None,
+        test_command_invalid=test_command is not None and not isinstance(test_command, str),
+        test_command_wall_s=_coerce_positive_float(take("test_command_wall_s", None)),
+        test_required_suites=_coerce_string_list(take("test_required_suites", None)),
     )
+    if "workspace" not in dotfile:
+        take("workspace", None)  # workspace.py reads [tool.daydream.workspace] from pyproject.toml itself.
+    if settings:
+        raise ValueError(
+            "Unrecognized daydream settings in .daydream.toml or [tool.daydream]: " + ", ".join(sorted(settings))
+        )
+    return config
