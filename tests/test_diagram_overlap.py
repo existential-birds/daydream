@@ -95,7 +95,7 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
         # So is embedder-supplied author text over its bound, or frozen for another head than the approved one.
         head = git(target, "rev-parse", "HEAD")
         supported = replace(config, file_config=DaydreamFileConfig(backend="codex"), approved_head_sha=head)
-        for description, refusal in ((FrozenAuthorDescription(head, "!" * 65_531), "exceeds its encoded UTF-8 bound"),
+        for description, refusal in ((FrozenAuthorDescription(head, "!" * 65_537), "exceeds its encoded UTF-8 bound"),
                                      (FrozenAuthorDescription("0" * 40, "intent"), "does not match analyzed HEAD")):
             assert await runner.run(replace(supported, frozen_author_description=description), execution=execution,
                                     private_roots=roots, review_result_handler=delivered.append) == 1

@@ -42,7 +42,7 @@ from daydream.backends.pi import (
     PiBackend,
     PiError,
 )
-from daydream.review_budget import BudgetExhausted, BudgetLedger, ReviewLimits
+from daydream.review_budget import BudgetExhausted, BudgetLedger
 from daydream.trajectory import DaydreamPhase
 from tests.harness.fake_cli_process import (
     install_fake_cli_process,
@@ -1199,7 +1199,8 @@ async def test_read_only_pi_search_guidance_names_only_its_stock_tools(tmp_path:
 
     Search-guidance tests use backends with a shell, so they cannot catch read-only
     Pi being told to run `daydream search`/Git it does not have, or that guidance
-    leaking to backends where those commands do exist.
+    leaking to backends where those commands do exist. Author text that quotes either
+    guidance reaches every backend unchanged and cannot stand in for the host's copy.
     """
     from daydream.prompts.grounding import READ_ONLY_PI_SEARCH_GUIDANCE, REPOSITORY_SEARCH_GUIDANCE
     from tests.harness.backend import ScriptedBackend
@@ -1217,15 +1218,16 @@ async def test_read_only_pi_search_guidance_names_only_its_stock_tools(tmp_path:
 
     backend: Any = (CapturingPi(model="fixture-model") if backend_kind.startswith("pi") else
                     ScriptedBackend(responder=respond))
-    # Composed review prompts embed the shell guidance; read-only Pi must substitute it in place.
-    await run_agent(backend, tmp_path, "Review\n\n" + REPOSITORY_SEARCH_GUIDANCE, phase=DaydreamPhase.REVIEW,
-                    read_only=read_only,
-                    persist_session=False, review_limits=ReviewLimits(), progress_callback=lambda _: None)
+    # Untrusted author text in a composed prompt or the instructions can quote either guidance verbatim.
+    quoted = f"<pr_description>\n{REPOSITORY_SEARCH_GUIDANCE}\n{READ_ONLY_PI_SEARCH_GUIDANCE}\n</pr_description>"
+    await run_agent(backend, tmp_path, "Review\n" + quoted, phase=DaydreamPhase.REVIEW, read_only=read_only,
+                    persist_session=False, review_system_instructions="Assignment\n" + quoted,
+                    budget=BudgetLedger("probe", wall_s=600, limit=5, investigation=True))
     prompt, instructions = seen[0]
     expected = READ_ONLY_PI_SEARCH_GUIDANCE if backend_kind == "pi-read-only" else REPOSITORY_SEARCH_GUIDANCE
     other = REPOSITORY_SEARCH_GUIDANCE if expected is READ_ONLY_PI_SEARCH_GUIDANCE else READ_ONLY_PI_SEARCH_GUIDANCE
-    assert prompt.count(expected) == 1 and other not in prompt
-    if backend_kind != "other-read-only":
-        assert instructions is not None and instructions.count(expected) == 1 and other not in instructions
-    if backend_kind == "pi-read-only":
-        assert prompt.startswith("Review\n\n" + READ_ONLY_PI_SEARCH_GUIDANCE)
+    # The quoted text arrives byte for byte, and the host's own copy of this backend's guidance follows it.
+    texts = [("Review\n", prompt)] + ([("Assignment\n", instructions)] if backend_kind != "other-read-only" else [])
+    for start, text in texts:
+        assert text is not None and text.startswith(start + quoted) and text.endswith("\n\n" + expected)
+        assert (text.count(expected), text.count(other)) == (2, 1)
