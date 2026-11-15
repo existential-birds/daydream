@@ -234,8 +234,10 @@ def test_setup_verb_full_auto_deposits_secrets_and_opens_pr(
 ) -> None:
     """Run the setup CLI with real Git/gh and a minted PEM; replace only the browser exchange."""
     pem = generate_rsa_pem()
+    registered: list[Path] = []
     monkeypatch.setattr(
-        "daydream.bot_setup.register_app_via_manifest", lambda repo, org=None: (AppCredentials(7, pem), "acme-bot"),
+        "daydream.bot_setup.register_app_via_manifest",
+        lambda repo, org=None: registered.append(repo) or (AppCredentials(7, pem), "acme-bot"),
     )
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
     # App already installed on the owner → the Install-click wait is satisfied.
@@ -248,12 +250,12 @@ def test_setup_verb_full_auto_deposits_secrets_and_opens_pr(
     refused = " ".join(capsys.readouterr().out.replace("║", " ").split())
     assert f"Could not resolve Daydream release tag v{daydream.__version__}" in refused
     assert "run setup from a released Daydream" in refused
-    assert fake_gh.secret_set_calls() == []
+    assert registered == [] and fake_gh.secret_set_calls() == []
 
     fake_gh.set_response("GET", _RELEASE_TAG, value={"sha": _RELEASE_COMMIT})
     code = cli_main(["setup", str(repo_with_origin), "--repo", "o/r"])
 
-    assert code == 0
+    assert code == 0 and registered == [repo_with_origin]
     assert {c.name for c in fake_gh.secret_set_calls()} == set(config.SETUP_SECRET_NAMES)
     variable = fake_gh.variable_set_calls()[-1]
     assert variable.name == config.BOT_HANDLE_VAR
