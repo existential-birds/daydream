@@ -48,7 +48,7 @@ def _post_argv(
 def _finding(fingerprint: str, *, path: str, line: int | None, placement: str, title: str, severity: str = "high",
 ) -> dict[str, Any]:
     return {"fingerprint": fingerprint, "path": path, "line": line, "placement": placement, "title": title,
-        "body": "Body text", "severity": severity, "confidence": "HIGH", "is_cross_stack": False,
+        "body": "Body text", "severity": severity, "confidence": "HIGH",
     }
 
 
@@ -334,14 +334,14 @@ def test_post_findings_classifies_api_head_reads(
 def test_post_findings_blames_the_artifact_for_a_malformed_citation_path(
     fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A trailing newline can pass schema re.search but must fail path fullmatch.
+    """A path that is no relative Git name passes the schema but is never read.
 
     No head read occurred; attribute the bad path to the artifact."""
     payload = _flowchart_payload()
     flowchart = payload["results"]["flowchart"]
-    flowchart["spec_final"]["root"]["file"] = "a.py\n"
+    flowchart["spec_final"]["root"]["file"] = "../a.py"
     for node in flowchart["spec_final"]["nodes"]:
-        node["evidence"]["file"] = "a.py\n"
+        node["evidence"]["file"] = "../a.py"
     artifact = _api_head_artifact(
         tmp_path, [_finding("a" * 64, path="a.py", line=1, placement="inline", title="Real finding")], diagrams=payload,
     )
@@ -350,7 +350,7 @@ def test_post_findings_blames_the_artifact_for_a_malformed_citation_path(
 
     assert code == 0
     printed = _console_text(capsys)
-    assert "flowchart diagram evidence cites an invalid repository path: 'a.py\\n'" in printed
+    assert "flowchart diagram evidence cites an invalid repository path: '../a.py'" in printed
     assert "could not be read from immutable head" not in printed
     assert _contents_calls(fake_gh) == []
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
@@ -400,23 +400,23 @@ def test_post_findings_repo_config_cannot_approve(fake_gh: FakeGh, tmp_path: Pat
     assert len(posts) == 1
     assert posts[0].payload["event"] == "COMMENT"
 
-@pytest.mark.parametrize("schema_version", [2, 3])
+@pytest.mark.parametrize("schema_version", [4, 5])
 def test_post_findings_matched_blocking_finding_prevents_approval(
     fake_gh: FakeGh, tmp_path: Path, schema_version: int,
 ) -> None:
     """Deduplication must retain blockers without reposting the matched findings."""
     retained = _inline_finding("Retained concern", severity="medium")
-    if schema_version == 3:
+    if schema_version == 5:
         retained["severity"] = None
     findings = [retained,
         _finding("b" * 64, path="b.py", line=5, placement="inline", title="New nit", severity="low"),
     ]
     artifact = tmp_path / "f.json"
-    data = immutable_findings_artifact(findings) if schema_version == 3 else findings_artifact(findings)
+    data = immutable_findings_artifact(findings) if schema_version == 5 else findings_artifact(findings)
     write_findings_artifact(artifact, data)
-    argv = _post_argv(artifact, head_sha="a" * 40 if schema_version == 3 else None,
-                      base_sha="b" * 40 if schema_version == 3 else None,
-                      comparison_sha="c" * 40 if schema_version == 3 else None)
+    argv = _post_argv(artifact, head_sha="a" * 40 if schema_version == 5 else None,
+                      base_sha="b" * 40 if schema_version == 5 else None,
+                      comparison_sha="c" * 40 if schema_version == 5 else None)
     argv += ["--approve-on-clean", "--bot-login", "daydream"]
     fake_gh.serve_prior_threads(fingerprints=["a" * 64], viewer_did_author=True)
     assert cli_main(argv) == 0

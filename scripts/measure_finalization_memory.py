@@ -149,10 +149,9 @@ def _scenario(forks: int, body_kb: int, turns: int, root_invocations: int) -> di
             render_run_info_block(collect_trajectory_paths(default_trajectory_path(frozen, SESSION).parent))
         (tmp / "source").mkdir()
         identity = ManifestRunIdentity(
-            skill=None, model=None, backend="claude", review_backend=None, fix_backend=None, test_backend=None,
-            per_stack_review_backend=None, per_stack_review_model=None, review_only=True, deep=True, profile=None,
-            phases=RunPhaseCapabilities(per_stack_review=True, merge=True, fix=False, test=False, push=False,
-                                        remote_ci=False),
+            model=None, backend="claude", review_backend=None, review_model=None, fix_backend=None, test_backend=None,
+            review_only=True, deep=True, profile=None,
+            phases=RunPhaseCapabilities(merge=True, fix=False, test=False, push=False, remote_ci=False),
         )
         provenance = archive_recorder_provenance_from_snapshot(write_snapshot=final, run_flow=DaydreamRunFlow.DEEP)
         with Stage(result, "archive"):

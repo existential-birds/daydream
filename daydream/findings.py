@@ -32,8 +32,8 @@ from daydream.review_result import (
     validate_terminal_result,
 )
 
-FINDINGS_SCHEMA_VERSION = 2
-IMMUTABLE_FINDINGS_SCHEMA_VERSION = 3
+FINDINGS_SCHEMA_VERSION = 4
+IMMUTABLE_FINDINGS_SCHEMA_VERSION = 5
 
 MAX_ARTIFACT_BYTES = 1_048_576
 MAX_RAW_ARTIFACT_BYTES = MAX_ARTIFACT_BYTES + RUN_TARGET_DECISIONS_MAX_BYTES
@@ -50,7 +50,7 @@ _FINDING_PROPERTIES = {
     **{name: {'type': 'string'} for name in ('path', 'title', 'body')},
     'line': {'type': ['integer', 'null']}, 'placement': {'enum': ['inline', 'file', 'body']},
     **{name: {'type': ['string', 'null']} for name in ('severity', 'confidence', 'severity_before_demotion')},
-    **{name: {'type': 'boolean'} for name in ('is_cross_stack', 'location_distrust', 'severity_off_vocabulary')},
+    **{name: {'type': 'boolean'} for name in ('location_distrust', 'severity_off_vocabulary')},
 }
 FINDINGS_SCHEMA: dict[str, Any] = strict_object({
     'schema_version': {'const': FINDINGS_SCHEMA_VERSION}, 'repo': {'type': 'string'},
@@ -102,8 +102,8 @@ def _validate_artifact(data: Any) -> None:
         validate_json_schema(data, IMMUTABLE_FINDINGS_SCHEMA if version == IMMUTABLE_FINDINGS_SCHEMA_VERSION
                             else FINDINGS_SCHEMA)
         if data["kind"] == "review":
-            if 'source_id' in data['terminal_result']['analyzed_revision']:
-                raise ValueError('local captured findings cannot be relabeled as a committed PR artifact')
+            if {'source_id', 'tracked_worktree_edits'} & data['terminal_result']['analyzed_revision'].keys():
+                raise ValueError('working-tree findings cannot be relabeled as a committed PR artifact')
             immutable = version == IMMUTABLE_FINDINGS_SCHEMA_VERSION
             if immutable:
                 _validate_immutable_binding(data)
@@ -154,7 +154,6 @@ class ArtifactFinding:
     body: str
     severity: str | None
     confidence: str | None
-    is_cross_stack: bool
     location_distrust: bool = False
     severity_before_demotion: str | None = None
     severity_off_vocabulary: bool = False

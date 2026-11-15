@@ -87,11 +87,6 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
         # workspace or artifact exists, and nothing is delivered.
         assert exit_code == 1
         assert "'osprey' does not serve them" in capsys.readouterr().out
-        # So is the findings supervisor, which ended with the staged reviewer.
-        supervised = replace(config, file_config=DaydreamFileConfig(backend="codex", supervisor="rules"))
-        assert await runner.run(supervised, execution=execution, private_roots=roots,
-                                review_result_handler=delivered.append) == 1
-        assert "The findings supervisor" in " ".join(capsys.readouterr().out.replace("│", " ").split())
         # So is embedder-supplied author text over its bound, or frozen for another head than the approved one.
         head = git(target, "rev-parse", "HEAD")
         supported = replace(config, file_config=DaydreamFileConfig(backend="codex"), approved_head_sha=head)
@@ -151,4 +146,4 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
         assert await runner.run(on_pi, execution=replace(execution, backends={"pi": inputs["pi"]}),
                                 private_roots=roots) == 0
         (manifest,) = (tmp_path / "archive").glob("**/manifest.json")
-        assert json.loads(manifest.read_text())["run"]["per_stack_review_model"] == "embedded-pi-default"
+        assert json.loads(manifest.read_text())["run"]["review_model"] == "embedded-pi-default"

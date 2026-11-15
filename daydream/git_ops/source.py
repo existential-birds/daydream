@@ -26,17 +26,6 @@ def _validate_commit(repo: Path, revision: str) -> None:
         raise GitError("committed source revision is not a commit ID")
 
 
-def committed_diff(repo: Path, base_sha: str, head_sha: str) -> str:
-    """Diff exact captured commits without checkout bytes or configured diff transforms."""
-    _validate_commit(repo, base_sha)
-    _validate_commit(repo, head_sha)
-    return process._run_git(
-        repo, ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/",
-               base_sha, head_sha, "--"],
-        timeout=30, error_context="committed source diff unavailable",
-    ).stdout
-
-
 def validate_committed_worktree(repo: Path, revision: str) -> None:
     """Reject native bytes changed by checkout transforms, even in a clean index."""
     _validate_commit(repo, revision)

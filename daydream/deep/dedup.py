@@ -42,11 +42,9 @@ def jaccard(a: set[str], b: set[str]) -> float:
 
 @dataclass(frozen=True)
 class RecordDuplicatePair:
-    """Candidate pair whose field names are the dedup-candidates.json wire format.
+    """One compared pair of the shipped-duplication metrics.
 
-    Serialization preserves every field. Reviewer IDs may repeat across stacks;
-    host UIDs disambiguate them, or are empty for post-merge inputs without that
-    identity. Renaming or dropping fields changes the persisted schema.
+    IDs may repeat; host UIDs disambiguate them, or are empty for inputs without that identity.
     """
 
     record_a_id: str

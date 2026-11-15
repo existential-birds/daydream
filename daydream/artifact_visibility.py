@@ -1203,6 +1203,7 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
         try:
             source_owner.validate()
             transactions._recover_transactions(state_root, source_owner)
+            publication._delete_retired_review_cache(source_owner)
             validated_canonical_entries = publication._validated_canonical_entries(state_root)
             validated_public_entries = publication._validate_public_tree(
                 source,

@@ -22,11 +22,11 @@ _SEVERITY_EMOJI: dict[str, str] = {
 }
 
 
-def _issue_header(issue: CommentFinding, *, prefix: str = "", always_bold: bool = False) -> str:
+def _issue_header(issue: CommentFinding, *, always_bold: bool = False) -> str:
     """Compose the emoji/title/tag header line for one issue."""
     emoji = _SEVERITY_EMOJI.get((issue.severity or "").lower(), "")
     title_prefix = f"{emoji} " if emoji else ""
-    header = f"{title_prefix}**{prefix}{issue.title}**" if issue.title or always_bold else ""
+    header = f"{title_prefix}**{issue.title}**" if issue.title or always_bold else ""
     tags = _format_tag_line(issue)
     if header and tags:
         return f"{header} | {tags}"
@@ -35,13 +35,12 @@ def _issue_header(issue: CommentFinding, *, prefix: str = "", always_bold: bool 
 
 def default_render_finding(finding: CommentFinding, ctx: FindingRenderContext) -> str:
     """Render a finding's human block; the host adds identity markers and footer."""
-    prefix = "[cross-stack] " if finding.is_cross_stack and ctx.placement != "inline" else ""
     if ctx.placement == "summary":
-        summary_parts = [_issue_header(finding, prefix=prefix, always_bold=True)]
+        summary_parts = [_issue_header(finding, always_bold=True)]
         if finding.body:
             summary_parts.append(f"\n{finding.body}\n")
         return "\n".join(summary_parts)
-    header = _issue_header(finding, prefix=prefix, always_bold=ctx.placement != "inline")
+    header = _issue_header(finding, always_bold=ctx.placement != "inline")
     parts = [p for p in (header, finding.body) if p]
     return "\n\n".join(parts)
 
@@ -53,7 +52,6 @@ def _comment_finding(issue: ParsedIssue) -> CommentFinding:
         line=issue.line,
         title=issue.title,
         body=issue.body,
-        is_cross_stack=issue.is_cross_stack,
         severity=issue.severity,
         confidence=issue.confidence,
         fingerprint=issue.fingerprint,

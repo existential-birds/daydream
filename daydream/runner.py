@@ -303,10 +303,6 @@ def _review_refusal(config: RunConfig) -> str | None:
     """Explain why the reviewer cannot serve this request, before any workspace or GitHub call."""
     if not runs_review(config):
         return None
-    if _file_config_or_empty(config).supervisor in {"rules", "llm"}:
-        return ('The findings supervisor (supervisor = "rules" or "llm") ended with the staged reviewer; its deny '
-                "rules would no longer hold findings back. Remove the setting; an extension flow step can "
-                "rewrite the canonical items, and --ignore-path excludes paths from review.")
     from daydream.committed_review import REVIEW_PHASES, bounded_author_description, host_tools_refusal
 
     for kind, phase in REVIEW_PHASES:
@@ -712,6 +708,9 @@ async def _capture_review_workspace(
     if (config.flow_name not in (None, *DEEP_FLOW_ALIASES)
             or mode == "diagram"
             or (mode not in {"review", "comment"} and config.findings_out is None)):
+        if config.flow_name in (None, *DEEP_FLOW_ALIASES) and mode == "loop" and git_ops.has_worktree_edits(work.repo):
+            print_info(console, "Fixing reviews the checkout as is: its tracked uncommitted edits are reviewed "
+                                "with the commits and committed with the fixes.")
         yield work
         return
     assert work.head_sha is not None and work.base_sha is not None

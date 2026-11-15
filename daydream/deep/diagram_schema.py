@@ -23,9 +23,16 @@ from daydream.deep.diagram_types import (
 )
 from daydream.output_schema import strict_object
 from daydream.repository_paths import (
-    REPOSITORY_FILE_PATH_SCHEMA as _REPOSITORY_FILE_PATH_SCHEMA,
-    valid_repository_file_path,
+    REPOSITORY_FILE_PATH_MAX_LENGTH,
+    strip_dot_slash,
+    valid_git_observed_path,
 )
+
+# A citation is model-written, but it may name a Git-observed file outside the model
+# grammar (``src/routes/[slug]/+page.ts``); grounding applies the grammar to any other path.
+_REPOSITORY_FILE_PATH_SCHEMA: dict[str, Any] = {
+    "type": "string", "minLength": 1, "maxLength": REPOSITORY_FILE_PATH_MAX_LENGTH,
+}
 
 # 1-based source line. ``minimum`` keeps a nonsense 0 out of the spec before
 # grounding has to spend a LINE_OUT_OF_RANGE on it.
@@ -158,9 +165,9 @@ def _index(value: Any, *, minimum: int) -> int | None:
 
 
 def _path(value: Any) -> str | None:
-    """Apply the shared lexical repository-path gate used by privileged schema validation."""
+    """Keep a legal relative Git name; grounding decides between the grammar and Git-observed paths."""
     text = _text(value)
-    if text is None or not valid_repository_file_path(text):
+    if text is None or not valid_git_observed_path(strip_dot_slash(text)):
         return None
     return text
 

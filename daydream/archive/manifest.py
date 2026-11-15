@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from daydream.archive.provenance import ExecutableProvenance
     from daydream.trajectory import RunSummary, RunWriteSnapshot
 
-MANIFEST_SCHEMA_VERSION = "2.0"
+MANIFEST_SCHEMA_VERSION = "3.0"
 
 
 def archive_recorder_provenance_from_snapshot(
@@ -79,11 +79,9 @@ def _omit_falsy(**fields: Any) -> dict[str, Any]:
 class Manifest:
     """Archive metadata with separate executable, repository, and workflow provenance.
 
-    ``backend`` is the general default. ``review_backend`` records an override
-    marker, which a CLI default may mask; fix/test fields record effective
-    backends only for executed phases. Per-stack backend/model identify the
-    actual review tier, including the Pi default, and are absent for flows
-    without per-stack review.
+    ``backend`` is the general default. Review backend/model identify the review phase
+    that ran, including the Pi default, and are absent for flows without a review;
+    fix/test fields record effective backends only for executed phases.
 
     Missing metrics mean uncomputed or undefined, never an imputed zero.
     ``location_in_hunk_rate`` scores the originally cited line before snapping;
@@ -122,14 +120,12 @@ class Manifest:
 
     # Run config
     run_flow: str = ""
-    skill: str | None = None
     model: str | None = None
     backend: str = "claude"
     review_backend: str | None = None
+    review_model: str | None = None
     fix_backend: str | None = None
     test_backend: str | None = None
-    per_stack_review_backend: str | None = None
-    per_stack_review_model: str | None = None
     review_only: bool = False
     deep: bool = False
     fix_failures: dict[str, str] | None = None
@@ -194,15 +190,13 @@ class Manifest:
             ),
             "run": {
                 "flow": self.run_flow,
-                "skill": self.skill,
                 "model": self.model,
                 "backend": self.backend,
                 **_omit_falsy(
                     review_backend=self.review_backend,
+                    review_model=self.review_model,
                     fix_backend=self.fix_backend,
                     test_backend=self.test_backend,
-                    per_stack_review_backend=self.per_stack_review_backend,
-                    per_stack_review_model=self.per_stack_review_model,
                 ),
                 "review_only": self.review_only,
                 "deep": self.deep,
@@ -283,14 +277,12 @@ def build_manifest_from_snapshot(
         archived_at=datetime.now(timezone.utc).isoformat(),
         status=status,
         run_flow=recorder_provenance.run_flow.value,
-        skill=identity.skill,
         model=identity.model,
         backend=identity.backend,
         review_backend=identity.review_backend,
+        review_model=identity.review_model,
         fix_backend=identity.fix_backend,
         test_backend=identity.test_backend,
-        per_stack_review_backend=identity.per_stack_review_backend,
-        per_stack_review_model=identity.per_stack_review_model,
         archive_status=status,
         pipeline_status=pipeline_status,
         phase_states=dict(phase_states) if phase_states is not None else None,

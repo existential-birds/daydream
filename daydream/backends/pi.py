@@ -75,7 +75,7 @@ from daydream.backends._transport import (
 )
 from daydream.backends.lifecycle import current_backend_lifecycle
 from daydream.config import DEFAULT_PI_MODEL
-from daydream.host_tools import HostToolBinding
+from daydream.host_tools import HostToolBinding, UnsubmittedTurn
 from daydream.redaction import _PEM_HEADER, _PEM_KEY_REDACTED_MARKER, redact_structured_text
 from daydream.retry_policy import classify_failure, parse_message_retry_hint
 from daydream.review_budget import BudgetExhausted
@@ -270,9 +270,9 @@ WORK STRATEGY:
 - Read the diff first. If a diff file or git output is in your context, start
   there; only explore files referenced by the diff or their direct imports.
 - Don't re-read what you've already read. If a file's content is already in
-  your context, reuse it for understanding. For staged reviews, diff or prompt
-  contents are enough when they support a decision; use ordinary file tools or
-  supplied captured context when another source is useful.
+  your context, reuse it for understanding. Diff or prompt contents are enough
+  when they support a decision; use ordinary file tools or supplied captured
+  context when another source is useful.
 - Answer directly when you can. If the existing context (commit log, diff,
   prior tool results) already answers the question, respond without additional
   tool calls.
@@ -597,7 +597,6 @@ class PiBackend:
     """Translate the Pi JSONL event stream into normalized AgentEvent records."""
 
     supports_finalization = True
-    supports_tools_disabled = True
     supports_host_tools = True
     supports_review_instructions = True
     supports_budget_preamble = True
@@ -812,7 +811,6 @@ class PiBackend:
         persist_session: bool = True,
         finalization: bool = False,
         review_instructions: str | None = None,
-        tools_disabled: bool = False,
         validate_structured_output: bool = True,
         deadline: float | None = None,
         tool_call_budget: int | None = None,
@@ -826,7 +824,7 @@ class PiBackend:
 
         read_only allows read/find/ls/grep. finalization disables tools, substitutes
         serialization instructions, and caps thinking at low while preserving lower
-        settings. tools_disabled keeps normal instructions/thinking and uses stdin.
+        settings.
         The absolute ``deadline`` (else the host-tool ledger's) and tool_call_budget
         state the allowances the caller enforces; the preamble renders the remaining
         seconds. A read cut short by that deadline raises BudgetExhausted. Stdout
@@ -851,7 +849,7 @@ class PiBackend:
         if self._hosted_read_only:
             from daydream.hosted_review import HOSTED_PI_TOOLS
 
-            if (not read_only or persist_session or finalization or tools_disabled or host_tools is None
+            if (not read_only or persist_session or finalization or host_tools is None
                     or output_schema is None or not validate_structured_output or continuation is not None
                     or self._review_context is None):
                 raise _unsupported_hosted_policy(
@@ -863,8 +861,7 @@ class PiBackend:
         args: list[str] = ["pi", "--mode", "json"]
         if self._hosted_read_only:
             args.extend(["--no-approve", "--no-mcp", "--no-prompt-templates", "--no-themes"])
-        native_output = (output_schema is not None and validate_structured_output
-                         and not (finalization or tools_disabled))
+        native_output = output_schema is not None and validate_structured_output and not finalization
         if host_tools is not None:
             if not native_output:
                 raise PiError("Host admission requires a tools-enabled native terminal schema",
@@ -962,7 +959,7 @@ class PiBackend:
         selected_tools = [*_PI_READ_ONLY_TOOLS.split(","),
                           *(sorted(host_tools.host_tools) if host_tools is not None else ()),
                           *(["structured_output"] if native_output else [])]
-        if finalization or tools_disabled:
+        if finalization:
             args.append("--no-tools")
         elif read_only:
             args.extend(["--tools", ",".join(selected_tools)])
@@ -1179,11 +1176,11 @@ class PiBackend:
                 continuation_mode="resume" if resume_id is not None else "fresh",
                 model_mode="single",
                 selected_tools_count=(
-                    0 if finalization or tools_disabled else
+                    0 if finalization else
                     len(selected_tools) if read_only else None
                 ),
-                selected_tools_present=read_only and not (finalization or tools_disabled),
-                no_tools=finalization or tools_disabled,
+                selected_tools_present=read_only and not finalization,
+                no_tools=finalization,
                 no_skills=True,
                 schema_emulated=output_schema is not None and not native_output,
                 no_extensions=read_only and (native_output or host_tools is not None or review_context is not None),
@@ -1288,8 +1285,7 @@ class PiBackend:
                 child_env[variable] = str(_write_prompt_attachment(json.dumps(packet, ensure_ascii=False), attachments))
                 extension = attachments.enter_context(as_file(files("daydream.backends").joinpath(resource)))
                 args.extend(["--extension", str(extension)])
-            if not tools_disabled:
-                args.append(f"@{_write_prompt_attachment(full_prompt, attachments)}")
+            args.append(f"@{_write_prompt_attachment(full_prompt, attachments)}")
             if review_instructions and not finalization:
                 # Pi resolves existing system-prompt paths directly (without @).
                 # Review instructions are caller-controlled and need the same
@@ -1300,7 +1296,6 @@ class PiBackend:
             transport = CliTransport(
                 "pi",
                 args,
-                stdin_data=full_prompt.encode("utf-8") if tools_disabled else None,
                 limit=_PI_STDOUT_LIMIT_BYTES,
                 env=child_env,
                 cwd=str(process_cwd),
@@ -1753,8 +1748,9 @@ class PiBackend:
                 or finish_reason in {"aborted", "length", "error"}
                 or not (saw_turn_start and saw_finish_reason and saw_native_settlement)
                 or (host_tools is not None and not host_ready)
-                or (host_tools is not None and (
-                    not host_tools.accepted or pending_submission != host_tools.accepted_result
+                # A native success the host never accepted is inconsistent evidence, not an unsubmitted turn.
+                or (host_tools is not None and (host_tools.accepted or pending_submission is not None) and (
+                    pending_submission != host_tools.accepted_result
                     or pending_submission_generation != last_generation_id))
                 or ambiguous_host_identity
                 or host_submission_indeterminate
@@ -1810,6 +1806,9 @@ class PiBackend:
                     retryable=True,
                     category="STREAM_TRUNCATION",
                 )
+            if host_tools is not None and not host_tools.accepted:
+                # A settled turn that neither submitted nor failed: one fresh retry, then missing_output.
+                raise UnsubmittedTurn("Pi completed its turn without an accepted structured_output submission")
 
         except Exception as exc:
             native_failed = True

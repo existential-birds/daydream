@@ -11,7 +11,6 @@ from daydream.backends import (
 from daydream.check_claims import substantiate_check_claims
 from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.verify_selection import (
-    SELECTION_RULE_VERSION,
     SelectionDecision,
     select_items,
 )
@@ -87,7 +86,7 @@ async def phase_verify_recommendations(
 ) -> tuple[Path, dict[str, Any]]:
     """Classify every canonical item and persist its selection decision beside verdicts.
 
-    Every non-exempt item reaches the prompt; an empty selection still writes an artifact
+    Every item reaches the prompt; an empty selection still writes an artifact
     without a backend call.
     """
     run_context = resolve_run_context(run_context)
@@ -96,13 +95,8 @@ async def phase_verify_recommendations(
     items: list[dict[str, Any]] = json.loads(merged_items_path.read_text()).get("items", [])
     decisions = select_items(items)
     selection_block: dict[str, Any] = {
-        "rule_version": SELECTION_RULE_VERSION,
-        "mode": "verify_all",
         "decisions": [decision.as_dict() for decision in decisions],
         "selected": sum(1 for decision in decisions if decision.selected),
-        # No finding is skipped as routine and no verdict is carried over; the stored counters stay.
-        "skipped": 0,
-        "reused": 0,
     }
     pending_items = [item for item, decision in zip(items, decisions, strict=True) if decision.selected]
 

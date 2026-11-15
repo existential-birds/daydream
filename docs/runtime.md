@@ -6,10 +6,12 @@ and `daydream --help-all` for settings rather than copying defaults into docs.
 
 ## Terminal review findings contract
 
-Ordinary `--findings-out` uses schema version 2 with committed `terminal_result` version 1.
+Ordinary `--findings-out` uses schema version 4 with committed `terminal_result` version 1.
 Local captured review coverage uses terminal version 2 and a distinct `source_id`;
 commit-bound findings envelopes reject that identity instead of relabeling it.
-Immutable PR exports use schema 3, retaining original PR provenance separately
+A fixing run over tracked uncommitted edits uses terminal version 3
+([captured local source](#captured-local-source)).
+Immutable PR exports use schema 5, retaining original PR provenance separately
 from the materialized analyzed revision (see [immutable PR inputs](#immutable-pr-inputs)).
 Diagram artifacts carry no review coverage; unsupported schemas are rejected.
 
@@ -451,7 +453,12 @@ before/after contents, eligible population, scope, full target inventory and nat
 materialization. Ordinary review mode uses this same owner; comment and commit-bound
 `--findings-out` select an independently pinned committed PR subject instead, with a
 visible exclusion notice when the checkout is dirty. Improve retains its separate
-audit-workspace population policy. Fixing-flow migration is outside this contract.
+audit-workspace population policy. Fixing-flow migration is outside this contract:
+fixing reviews the checkout as is, so its diff is the commits plus tracked working-tree
+edits. When such edits exist the run says so before it reviews, and its coverage and
+committed result mark `analyzed_revision` with `tracked_worktree_edits: true`, with
+terminal/coverage version 3 and committed result schema 13; a clean checkout keeps
+version 1, schema 10 and no marker.
 
 Local capture compares the pinned merge base with final working bytes, combining
 committed and later tracked edits. The index is not another change layer. Undone
@@ -548,7 +555,9 @@ is not an OS sandbox. Native configuration/trust/authentication
 still resolve in the original project, while native cwd/read/search use the capture.
 
 Local program results use schema 12 and terminal/coverage version 2; committed
-results 10, immutable results 11 and their committed terminal version 1 stay distinct.
+results 10, immutable results 11 and their committed terminal version 1, and results 13
+with terminal version 3 for a fixing run over tracked uncommitted edits, stay distinct.
+Only schema 13 carries `tracked_worktree_edits`, and it always does.
 Results 1–3 predate bounded navigation and sharded per-target coverage, 4–6 predate
 work records and 7–9 predate claim severity; they are rejected with a restart instruction
 rather than converted.
@@ -706,7 +715,7 @@ invalidate captured analysis. Trusted repository/PR/provenance stays on result a
 ATIF control surfaces; only the approved bounded historical context enters model
 assignments. Model-facing profile serialization never carries trusted provenance.
 
-Strict immutable findings schema 3 binds the outer original repository/PR/head to
+Strict immutable findings schema 5 binds the outer original repository/PR/head to
 the envelope and typed coverage to its local head/comparison/diff key. Export does
 not grant publication authority. Its publisher must independently supply and
 validate repository, PR, original head, requested base and comparison SHA;
@@ -747,10 +756,11 @@ provider failure leads to a retry, the failed attempt's tool calls are refunded 
 the retry dispatches, because it is a fresh native conversation that must redo the
 lost work; a retry stopped before dispatch refunds nothing. Elapsed time is never refunded. Retries stay bounded by the
 attempt count, the absolute deadline and the outage circuit; a failure after possible
-host acceptance still permits no retry. A Claude or Codex turn that completes with nothing
+host acceptance still permits no retry. A Pi, Claude or Codex turn that completes with nothing
 accepted is retried under this rule only as the invocation's first retry, and the outage
 circuit records it as a completed turn, never as a failure
-([Claude](#claude-host-tools) and [Codex host tools](#codex-host-tools)).
+([Pi](#pi-host-tool-lifetime-and-limits), [Claude](#claude-host-tools) and
+[Codex host tools](#codex-host-tools)).
 Apart from that rejected submission, paths that do not retry are never refunded,
 including a committed challenge re-dispatch. Committed
 batches admitted before a provider failure stay installed while that attempt's starts
@@ -823,7 +833,11 @@ continuation and retry, and never invite removing the contradiction to obtain
 complete coverage. Foreign or duplicate contradiction IDs remain correctable
 payload faults.
 
-Ordinary transient preacceptance retries follow the [renewal rule](#budget-ledger). Attempt
+Ordinary transient preacceptance retries follow the [renewal rule](#budget-ledger). A Pi turn
+that settles and exits zero with nothing accepted and no host failure is not a stream
+truncation: as on [Codex](#codex-host-tools), it gets one fresh conversation as the
+invocation's first retry, and `missing_output` if that conversation ends unsubmitted too. A
+stream that ends before it settles is still a retryable truncation. Attempt
 closure revokes its endpoint before cleanup; only an unaccepted, nonfatal binding
 with completed cleanup may open another attempt. Explicit capability closure is
 permanent. A retired endpoint cannot revoke or mutate a later attempt. The
@@ -1042,28 +1056,20 @@ extension registers them.
   `intent`, `merge`, `parse`, `per_stack_review`, `supervise`, `suppression` and `wonder`.
   Every finding is verified before a fix, so `verify_all` selects nothing.
   `[phases.review]` configures discovery and `[phases.arbiter]` configures the challenge.
-- **Refused:** `supervisor = "rules"` or `"llm"`. The findings supervisor ended with the
-  staged reviewer; an extension flow step can rewrite the canonical items, and
-  `--ignore-path` excludes paths. `tool_supervisor` is unaffected.
 - **Refused:** a review or challenge backend without native host tools. Pi, Claude and
   Codex serve them; Osprey does not and cannot run a review.
-- **Refused when a review profile is parsed**, before any work, with one message naming
-  each key as removed: every key in `review_profile.REMOVED_PROFILE_KEYS`. These are the
-  `[pipeline]` keys `assignment_policy`, `structural_enabled`, `arbitration_enabled`,
-  `arbitration_min_severity`, `arbitration_contested_location`, `suppression_enabled`,
-  `suppression_severity_classes` and `suppression_confidence_classes`, and the strategies
-  `intent`, `alternatives`, `discovery.per_stack`, `discovery.structural`, `suppression`,
-  `merge`, `supervision` and `arbitration`. The packaged default carries none of them, so
-  none counts in a profile digest. A profile that sets `strategies.arbitration` to steer the
-  challenge is refused until the key is dropped; set `strategies.challenge` instead.
+- **Review profiles:** the former `[pipeline]` keys fail with the generic
+  `pipeline: unknown key` error. Strategy names stay open to extension steps, so a former
+  strategy such as `strategies.arbitration` loads, counts in the profile digest and steers
+  nothing; the challenge reads `strategies.challenge`.
 
 No stored format is converted. A fresh review rebuilds its own `.daydream/deep/`
 working directory, as every fresh run did, so the previous run's files there are
 replaced, including the staged reviewer's; an older build run after this one does the
-same to this build's `deep/` files. Everything else an earlier build wrote is left as it
-is: an existing `.daydream/review-cache/` is preserved and never read, and exploration
-output and earlier runs' records stay. Archive indexes, dataset stores, findings
-artifacts and repair checkpoints keep their own
+same to this build's `deep/` files. A run deletes an earlier build's
+`.daydream/review-cache/` directory, which this build never reads. Everything else an
+earlier build wrote is left as it is: exploration output and earlier runs' records stay.
+Archive indexes, dataset stores, findings artifacts and repair checkpoints keep their own
 [refuse-or-read rules](#artifacts-and-recovery).
 
 Findings carry head-side lines only. A finding whose location exists only on the old
@@ -1171,10 +1177,11 @@ retained or written whole. [The finalization measurement](../scripts/measure_fin
 reports each stage's peak memory and runtime and the archive's bytes read.
 
 Finalization reports local JSONL capture, configured upload, archive/evaluation,
-and public installation separately. Later failure cannot revoke a successful
-capture receipt or imply successful public installation. Valid frozen analysis
-can be archived with explicitly unavailable live-source quality (null metrics
-and an unavailable diagnostic); a valid operational workspace can still supply
+and public installation separately. Capture and upload run last, so a record's
+outcome is the run's final one: a run that archive integrity or public installation
+fails is recorded as failed, and nothing is stored or uploaded before that failure.
+Valid frozen analysis can be archived with explicitly unavailable live-source
+quality (null metrics and an unavailable diagnostic); a valid operational workspace can still supply
 quality independently of public-source availability when its current Git routing
 matches the captured worktree and common directories. Genuine evaluation or
 integrity failures continue to abort atomic archive installation. Body failures
@@ -1193,6 +1200,10 @@ index; preserve unsupported indexes and use a fresh directory.
 Models supply evidence-bearing JSON; the host grounds it against immutable head
 source and renders Mermaid. Forcing a kind changes eligibility, never grounding.
 Flowchart grounding proves statements/calls exist, not arrow execution order.
+A citation's `file` follows the model-path grammar unless it exactly names a Git-observed
+path of the captured change or the checked-out tree, such as `src/routes/[slug]/+page.ts`
+or `app/routes/users.$userId.tsx`. Posting reads every cited file from the head tree by
+that exact name (percent-encoded on GitHub's contents API); no path is expanded.
 Review diagram failures warn and retain findings; diagram-only failures exit 1.
 Custom flow ordering remains authoritative. Read [diagram flow](extensions.md#diagram)
 and [grounding](../daydream/deep/diagram_grounding/) before changing this boundary.

@@ -18,6 +18,7 @@ import pytest
 from rich.console import Console
 
 from daydream import git_ops, json_utils, review_reporting, runner
+from daydream.artifact_visibility import ArtifactSession, ArtifactVisibilityError
 from daydream.dataset import LocalRecordStore
 from daydream.deep import review_terminal
 from daydream.findings import FindingsValidationError, load_findings_artifact
@@ -49,7 +50,7 @@ class ReviewRun:
     def load(self) -> dict[str, Any]:
         artifact = load_findings_artifact(self.output, expected_repo='o/r', expected_pr_number=7,
                                          expected_head_sha=self.pr.head_sha)
-        assert artifact.schema_version == 2 and artifact.head_sha == self.pr.head_sha
+        assert artifact.schema_version == 4 and artifact.head_sha == self.pr.head_sha
         data: dict[str, Any] = json.loads(self.output.read_text())
         revision = data['terminal_result']['analyzed_revision']
         assert (data['head_sha'], revision['head_sha'], revision['merge_base_sha']) == (
@@ -358,8 +359,8 @@ async def test_atomic_public_failure(
 
 # Source-loss and replacement-checkout rows are runner rows: only the real terminal export after
 # admission can lose its checkout, read retained bytes, and install privately.
-@pytest.mark.parametrize('fault', ['coverage', 'fix', 'projection', 'unconfined-path', 'report', 'pipeline',
-                                   'source-loss', 'placement-replacement-worktree'])
+@pytest.mark.parametrize('fault', ['coverage', 'fix', 'projection', 'unconfined-path', 'retired-lens', 'report',
+                                   'pipeline', 'source-loss', 'placement-replacement-worktree', 'publication'])
 async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str) -> None:
     """A failure after admission publishes typed coverage atomically, never live or replaced Git."""
     force_worktree = fault.endswith('-worktree')
@@ -397,14 +398,17 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         return allocate(*args, **kwargs)
     def faulty_read(path: Path, *args: Any, **kwargs: Any) -> str:
         text = read(path, *args, **kwargs)
-        if path.name != 'merged-items.json' or fault not in ('projection', 'unconfined-path'):
+        if path.name != 'merged-items.json' or fault not in ('projection', 'unconfined-path', 'retired-lens'):
             return text
         if fault == 'projection':
             return '{"items": "invalid"}'
-        # An extension step rewrote the items onto paths outside the repository.
+        # An extension step rewrote the items onto paths outside the repository, or onto a retired lens.
         payload = json.loads(text)
         for item in payload['items']:
-            item['file'] = '../' + item['file']
+            if fault == 'retired-lens':
+                item['lens'] = 'wonder'
+            else:
+                item['file'] = '../' + item['file']
         return json.dumps(payload)
     def retained_source_only(target: Path, *args: Any, **kwargs: Any) -> bytes:
         if target == review.repo and fault == 'source-loss' and state['failed']:
@@ -483,18 +487,30 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         assert '**Review incomplete.**' in notice and '## Review outcome' in report
         assert all('used up its allowance' not in text for text in (panel, notice, report))
         return
+    store = LocalRecordStore(review.tmp / 'records')
+    if fault == 'publication':
+        # Public installation of a sealed, complete review fails; no record may be stored or uploaded before it.
+        def fail_publication(*_a: Any, **_k: Any) -> None:
+            state['records_before_publication'] = store.record_index()['runs']
+            raise ArtifactVisibilityError('public installation failed')
+        review.patch.setattr(ArtifactSession, 'finalize_frozen', fail_publication)
     # The reviewer retains its own failures, so every row ends as an exit status, never as an exception.
-    assert await review.run(dataset_capture=fault == 'source-loss', dataset_store_path=review.tmp / 'records',
+    assert await review.run(dataset_capture=fault in ('source-loss', 'publication'), dataset_store_path=store.root,
                             force_worktree=force_worktree) == 1
     panel = collapse_panel_text(capsys)
+    if fault == 'publication':
+        assert 'public installation failed' in panel and state['records_before_publication'] == []
+        raw = read_records(store).runs
+        assert len(raw) == 1 and raw[0]['outcome'] == 'failed'
+        return
     if fault == 'coverage':
         assert state['writes'] and state['export'] is None and not review.output.exists()
         assert 'Terminal review finalization failed: coverage staging failed' in panel
         with pytest.raises(FindingsValidationError):
             review.load()
         return
-    if fault == 'unconfined-path':
-        # The confirmed finding is never delivered on an unconfined path; the sealed result keeps it.
+    if fault in ('unconfined-path', 'retired-lens'):
+        # The confirmed finding is never delivered on an unconfined path or a retired lens; the sealed result keeps it.
         data = review.load()
         result = data['terminal_result']
         assert data['findings'] == [] and result['reason_codes'] == ['malformed_artifact']
@@ -531,7 +547,7 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
     assert 'Terminal review finalization failed' not in panel
     if fault == 'source-loss':
         assert not review.repo.exists() and 'artifact source is unavailable' in panel
-        raw = read_records(LocalRecordStore(review.tmp / 'records')).runs
+        raw = read_records(store).runs
         # The run exits 1 because its source is gone, so its record cannot say it succeeded.
         assert len(raw) == 1 and raw[0]['outcome'] == 'failed'
         assert raw[0]['completeness']['terminal_review'] == 'available'

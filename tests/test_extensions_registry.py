@@ -92,7 +92,7 @@ def test_tool_supervisor_registration_rejects_async_callable_object() -> None:
 def test_comment_contract_types_are_frozen_and_public() -> None:
     """Fork renderers receive exported, immutable contexts; ``diagrams`` stays optional (#1113)."""
     cf = ext.CommentFinding(
-        path="a.py", line=3, title="T", body="B", is_cross_stack=False, severity="high", confidence="HIGH",
+        path="a.py", line=3, title="T", body="B", severity="high", confidence="HIGH",
         fingerprint="a" * 64,
     )
     sc = ext.SummaryContext(

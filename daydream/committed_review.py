@@ -890,6 +890,8 @@ class Review:
             result.update(schema_version=RESULT_VERSIONS["immutable"], immutable_input=self.immutable_input.to_dict())
         elif 'source_id' in self.inputs.revision:
             result['schema_version'] = RESULT_VERSIONS["local"]
+        elif 'tracked_worktree_edits' in self.inputs.revision:
+            result['schema_version'] = RESULT_VERSIONS["worktree"]
         validate_committed_result(result)
         return deepcopy(result)
 

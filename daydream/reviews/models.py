@@ -33,7 +33,6 @@ class ParsedIssue:
     line: int | None
     title: str
     body: str
-    is_cross_stack: bool = False
     confidence: str | None = None
     severity: str | None = None
     fingerprint: str | None = None
@@ -127,7 +126,6 @@ class ItemFields:
     rationale: str
     severity: str | None
     confidence: str | None
-    is_cross_stack: bool
     location_distrust: bool = False
     severity_before_demotion: str | None = None
     severity_off_vocabulary: bool = False

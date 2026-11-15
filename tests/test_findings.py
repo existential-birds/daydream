@@ -9,6 +9,7 @@ import pytest
 
 from daydream import git_ops
 from daydream.findings import (
+    IMMUTABLE_FINDINGS_SCHEMA_VERSION,
     MAX_ARTIFACT_BYTES,
     FindingsValidationError,
     build_findings_artifact,
@@ -30,7 +31,7 @@ def _load(path: Path, *, head_sha: str = "h" * 40, **options: Any) -> Any:
 def valid_artifact() -> dict[str, Any]:
     return findings_artifact([{
         "fingerprint": "f" * 64, "path": "a.py", "line": 12, "placement": "inline", "title": "T", "body": "B",
-        "severity": "high", "confidence": "HIGH", "is_cross_stack": False,
+        "severity": "high", "confidence": "HIGH",
     }], run_info=None)
 
 
@@ -64,7 +65,7 @@ def immutable_findings_artifact(
                           'source_range': {'start': 1, 'end': 1}, 'fragment': None,
                           'basis': 'source_inspection', 'role': 'assigned'}],
     }]
-    return findings_artifact(findings or [], schema_version=3, head_sha='a' * 40,
+    return findings_artifact(findings or [], schema_version=IMMUTABLE_FINDINGS_SCHEMA_VERSION, head_sha='a' * 40,
                              terminal_result=terminal, immutable_input=immutable)
 
 
@@ -91,7 +92,7 @@ def test_build_write_load_preserves_the_diagram_contract(tmp_path: Path, git_rep
     path = tmp_path / "findings.json"
     write_findings_artifact(path, artifact)
     loaded = _load(path, head_sha=head)
-    assert json.loads(path.read_text())["schema_version"] == loaded.schema_version == 2
+    assert json.loads(path.read_text())["schema_version"] == loaded.schema_version == 4
     assert loaded.kind == "diagram" and loaded.diagrams == payload
     assert loaded.findings == [] and not loaded.analysis_complete
 
@@ -124,6 +125,13 @@ def test_truncated_nested_or_unencodable_input_is_never_clean(tmp_path: Path) ->
             _load(path)
     path.write_text(json.dumps(findings_artifact(run_info='\ud800')))
     with pytest.raises(FindingsValidationError, match='encoding failed'):
+        _load(path)
+    # Findings of an earlier release (schema 2, carrying is_cross_stack) are refused, never read as current.
+    earlier = findings_artifact([{"fingerprint": "f" * 64, "path": "a.py", "line": 12, "placement": "inline",
+                                  "title": "T", "body": "B", "severity": "high", "confidence": "HIGH",
+                                  "is_cross_stack": False}], schema_version=2)
+    path.write_text(json.dumps(earlier))
+    with pytest.raises(FindingsValidationError, match='unsupported schema version 2'):
         _load(path)
 
 
@@ -175,11 +183,13 @@ def test_oversized_input_is_never_clean(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_semantic_invariants_rejected_before_write(tmp_path: Path, valid_artifact: dict[str, Any]) -> None:
-    """A PR envelope cannot accept local source identity just because the underlying HEAD matches."""
+    """A PR envelope cannot accept working-tree source identity just because the underlying HEAD matches."""
     mutations: list[Any] = [
         lambda a: a.pop("terminal_result"),
         lambda a: (a['terminal_result'].update(schema_version=2),
                    a['terminal_result']['analyzed_revision'].update(source_id='d' * 64)),
+        lambda a: (a['terminal_result'].update(schema_version=3),
+                   a['terminal_result']['analyzed_revision'].update(tracked_worktree_edits=True)),
         lambda a: a["terminal_result"]["stack_outcomes"].clear(),
     ]
     path = tmp_path / "invalid.json"

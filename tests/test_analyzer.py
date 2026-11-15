@@ -683,21 +683,13 @@ def test_quality_parser_failure_keeps_scope_without_metrics(tmp_path: Path, monk
         _quality(tmp_path / "bad", {"mod.py": "def f():\n    return 1\n"})
 
 
-# Count authoritative merged items, falling back to review text, then pre-merge stack totals.
-
-
-def seed_stack_records(deep: Path, stack_name: str, *, n: int) -> None:
-    """Seed an earlier build's HIGH stack records, whose host UIDs use 1-based birth ordinals.
-
-    Reviewer ids deliberately remain 0-based: display ids are not record identity."""
-    records: list[dict[str, Any]] = [{"id": i, "confidence": "HIGH", "uid": f"{stack_name}:{i + 1}"}
-        for i in range(n)
-    ]
-    (deep / f"stack-{stack_name}-records.json").write_text(json.dumps({"issues": records}))
+# Count authoritative merged items, falling back to review text.
 
 
 def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
-    """One persisted finding population owns canonical counts and each missing-artifact fallback."""
+    """One persisted finding population owns canonical counts and each missing-artifact fallback.
+
+    Files that only earlier builds wrote (stack records, alternatives, routing) count for nothing."""
     sid = "a80b9373-56d6-4062-9ab5-4c75e475ab67"
     dd, deep = _deep_dirs(tmp_path)
     snapshot = _snapshot(_root_trajectory(sid) | {"final_metrics": {"total_cost_usd": 18.2056}})
@@ -707,17 +699,14 @@ def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
     shipped += [_item(4 + i, file="b.py", line=i + 1, description=f"med-{i}") for i in range(4)]
     shipped[4]["lens"] = shipped[5]["lens"] = "wonder"
     seed_merged_items(deep, shipped)
-    seed_stack_records(deep, "python", n=3)
-    seed_stack_records(deep, "structure", n=2)
-    seed_stack_records(deep, "uncovered", n=1)
-    (deep / "alternatives.json").write_text(json.dumps([{"id": i} for i in range(6)]))
+    (deep / "stack-python-records.json").write_text(json.dumps({"issues": [{"id": 0, "confidence": "HIGH"}]}))
+    (deep / "alternatives.json").write_text(json.dumps([{"id": 0}]))
+    (deep / "latency-routing.json").write_text(json.dumps({"profile": {"selected": "forensic"}}))
     res = analyze_session(dd, summary=summarize_run(snapshot))
     assert res["findings"]["total"] == 8
     assert res["findings"]["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
-    assert res["findings"]["per_lens"] == {"wonder": 6, "per-stack": 3, "structure": 2}
-    assert res["findings"]["stacks"] == [
-        {"name": "python", "finding_count": 3}, {"name": "structure", "finding_count": 2}
-    ]
+    assert sorted(res["findings"]) == ["by_confidence", "merged_review", "shipped_duplication", "total"]
+    assert "latency_profile" not in res and "routing" not in res
     assert res["derived"]["cost_per_finding_usd"] == pytest.approx(18.2056 / 8, rel=1e-4)
     # Shipped rendering wins over raw reviewer populations when canonical JSON is unavailable.
     (deep / "merged-items.json").unlink()
@@ -726,16 +715,9 @@ def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
     assert rendered["findings"]["total"] == 8 and rendered["findings"]["by_confidence"] == {}
     assert rendered["derived"]["cost_per_finding_usd"] == pytest.approx(18.2056 / 8, rel=1e-4)
     (deep / "review-output.md").unlink()
-    premerge = analyze_session(dd, summary=summarize_run(snapshot))
-    assert premerge["findings"]["total"] == 5 and premerge["findings"]["by_confidence"] == {"HIGH": 5}
-    assert premerge["derived"]["cost_per_finding_usd"] == pytest.approx(18.2056 / 5, rel=1e-4)
-    (deep / "stack-python-records.json").unlink()
-    (deep / "stack-structure-records.json").unlink()
-    wonder_only = analyze_session(dd, summary=summarize_run(snapshot))
-    assert wonder_only["findings"]["per_lens"] == {"wonder": 6, "per-stack": 0, "structure": 0}
-    assert wonder_only["findings"]["total"] == 0
-    (deep / "alternatives.json").write_text("{not json")
-    assert analyze_findings(dd)["per_lens"]["wonder"] == 0
+    unshipped = analyze_session(dd, summary=summarize_run(snapshot))
+    assert unshipped["findings"]["total"] == 0 and unshipped["findings"]["by_confidence"] == {}
+    assert unshipped["derived"]["cost_per_finding_usd"] is None
 
 
 def test_analyze_session_preserves_frozen_analysis_when_quality_is_unavailable(
@@ -761,7 +743,6 @@ def _assert_frozen_analysis_survives(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         seed_merged_items(deep, [
             _item(0, file="a.py", line=1, description="high-0", confidence="HIGH", severity="high"),
         ])
-        (deep / "latency-routing.json").write_text(json.dumps({"profile": {"selected": "forensic"}}))
         root = _root_trajectory("quality-unavailable")
         root["final_metrics"] = {"total_cost_usd": 0.5}
         root["steps"] = [{"timestamp": "2026-01-01T00:00:02Z"}, {"timestamp": "2026-01-01T00:00:03Z"}]
@@ -844,7 +825,6 @@ def _assert_frozen_analysis_survives(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         assert result["cost"]["total_cost_usd"] == 0.5
         assert result["findings"]["total"] == 1
         assert result["timing"]["by_agent"] == [{"agent": "main", "duration_seconds": 1.0}]
-        assert result["routing"]["profile"] == "forensic"
         assert result["training_signals"]["total_trajectories"] == result["training_signals"]["clean_for_training"] == 1
         if unavailable.startswith("source-during-"):
             assert not ws.exists()
@@ -906,7 +886,6 @@ def test_location_and_duplication_propagate_corrupt_merged_items(tmp_path: Path)
 
     A bogus shipped set is never silently counted -- and never silently scored."""
     dd, deep = _worked_example_dirs(tmp_path)
-    seed_stack_records(deep, "python", n=4)
     for payload, expected_error in (("{not json", json.JSONDecodeError), ("{}", ValueError)):
         (deep / "merged-items.json").write_text(payload)
         with pytest.raises(expected_error):
@@ -947,10 +926,6 @@ def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path
     ]
     assert all(RECORD_SOURCE_UIDS_KEY not in item for item in (items[0], items[3], items[4]))
     seed_merged_items(deep, items)
-    (deep / "dedup-candidates.json").write_text(json.dumps({
-        "record_alt_pairs": [{"similarity": 0.75}, {"similarity": 0.55}],
-        "record_duplicate_pairs": [{"similarity": 0.9}],
-    }))
     result = analyze_session(
         dd, summary=summarize_run(_snapshot(_root_trajectory("loc-session") | {"schema_version": "ATIF-v1.7"}))
     )
@@ -1007,8 +982,3 @@ def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path
         assert row["a_source_uids"] == sources[row["a_id"]] and row["b_source_uids"] == sources[row["b_id"]]
         assert (row["a_lens"], row["b_lens"]) == (lenses[row["a_id"]], lenses[row["b_id"]])
         assert row["same_file"] == ("4" not in (row["a_id"], row["b_id"]))
-    assert result["findings"]["dedup"] == {
-        "record_duplicate_candidates": 1,
-        "record_alt_overlaps": 2,
-        "avg_overlap_similarity": 0.65,
-    }

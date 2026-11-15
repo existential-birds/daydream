@@ -101,6 +101,7 @@ from daydream.git_ops.queries import (
     git_dirs as git_dirs,
     grep_fixed_matches as grep_fixed_matches,
     has_executable_pre_push_hook as has_executable_pre_push_hook,
+    has_worktree_edits as has_worktree_edits,
     head_sha as head_sha,
     init_repository as init_repository,
     is_ancestor as is_ancestor,
@@ -138,7 +139,6 @@ from daydream.git_ops.queries import (
 from daydream.git_ops.repository import resolve_github_repository as resolve_github_repository
 from daydream.git_ops.snapshot import prepare_independent_snapshot as prepare_independent_snapshot
 from daydream.git_ops.source import (
-    committed_diff as committed_diff,
     validate_committed_worktree as validate_committed_worktree,
 )
 from daydream.git_ops.state import (

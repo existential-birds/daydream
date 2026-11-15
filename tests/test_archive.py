@@ -173,9 +173,9 @@ def _strict_archive(*, target: Path, session_id: str, config: Any, write_snapsho
 def _manifest_identity(**overrides: Any) -> ManifestRunIdentity:
     """Build the public, already-resolved identity supplied by the runner."""
     identity = ManifestRunIdentity(
-        skill="python", model=None, backend="claude", review_backend=None, fix_backend="claude", test_backend="claude",
-        per_stack_review_backend="claude", per_stack_review_model="sonnet", review_only=False, deep=True, profile=None,
-        phases=RunPhaseCapabilities(per_stack_review=True, merge=True, fix=True, test=True, push=True, remote_ci=True,),
+        model=None, backend="claude", review_backend="claude", review_model="sonnet", fix_backend="claude",
+        test_backend="claude", review_only=False, deep=True, profile=None,
+        phases=RunPhaseCapabilities(merge=True, fix=True, test=True, push=True, remote_ci=True,),
     )
     return replace(identity, **overrides)
 
@@ -675,6 +675,14 @@ def test_current_merge_event_controls_pipeline_status(tmp_path: Path) -> None:
         states = merge_states(events)
         assert states["merge"] == {"ran": True, "status": "unknown"}
         assert derive_pipeline_status("complete", None, states, runs_merge=True) == "unknown"
+    # An empty-diff run seals a no-diff review and returns before any merge, fix or test: it succeeded,
+    # but only on this session's own coverage.
+    no_diff = review_coverage(run_id="current", scope_ids=(), phases=("no_diff",))
+    no_diff.record_phase("no_diff", "complete", noop=True)
+    run = _archive_snapshot(_manifest_write_snapshot(session_id="current"))
+    for run_id, expected in (("current", "succeeded"), ("prior", "partial")):
+        _write_deep(tmp_path, "review-coverage.json", {**no_diff.to_dict(), "run_id": run_id})
+        assert pipeline._manifest_state(target_dir=tmp_path, run=run, frozen_extra={})["pipeline_status"] == expected
 
 
 def test_merge_artifacts_cannot_supply_missing_run_identity(tmp_path: Path) -> None:

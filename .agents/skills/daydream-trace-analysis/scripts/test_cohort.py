@@ -18,12 +18,11 @@ SCRIPT = Path(__file__).with_name("cohort.py")
 
 
 def capture(run_id, captured_at, outcome="success", padding=0):
-    return {"schema_version": "daydream.run.v1", "run_id": run_id, "captured_at": captured_at,
+    return {"schema_version": "daydream.run.v2", "run_id": run_id, "captured_at": captured_at,
             "outcome": outcome, "completeness": {"trajectory": "complete"},
             "provenance": {"producer": {"version": "1", "commit": "producer-sha"},
                            "resolved_phases": {"fix": {"backend": "codex", "model": "model"}},
                            "effective_configuration": {"backend": "codex"},
-                           "latency_profile": {"name": "balanced", "fix_budget_s": 100},
                            "file_configuration": {"review_max_turns": 10}},
             "original_task": {"status": "available", "value": {
                 "repository": {"repo_slug": "owner/repo"},
@@ -78,7 +77,6 @@ class CohortCliTests(unittest.TestCase):
         self.assertEqual(row["bytes"], len(encoded))
         self.assertEqual(row["context"]["producer"]["commit"], "producer-sha")
         self.assertEqual(row["context"]["analyzed_revision"]["head_sha"], "reviewed-sha")
-        self.assertEqual(row["context"]["latency_profile"]["fix_budget_s"], 100)
         self.assertEqual(row["context"]["file_configuration"]["review_max_turns"], 10)
         self.assertNotIn("private diff", json.dumps(first))
         self.assertIsNone(row["context"]["profile"])

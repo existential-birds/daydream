@@ -27,18 +27,6 @@ class ProfileError(Exception):
         super().__init__(f"invalid review profile: {kind} (source: {source})")
 
 
-# Keys of the replaced staged reviewer and of the assignment policy: no review reads them.
-REMOVED_PROFILE_KEYS: frozenset[str] = frozenset({
-    *(f"pipeline.{key}" for key in (
-        "assignment_policy", "structural_enabled", "arbitration_enabled", "arbitration_min_severity",
-        "arbitration_contested_location", "suppression_enabled", "suppression_severity_classes",
-        "suppression_confidence_classes")),
-    *(f"strategies.{key}" for key in (
-        "intent", "alternatives", "discovery.per_stack", "discovery.structural", "suppression", "merge",
-        "supervision", "arbitration")),
-})
-
-
 # Profiles tune strategy and bounded pipeline fields, never the host evaluator,
 # executable behavior, schemas, credentials, or trust/privacy policy.
 HOST_OWNED_KEYS: frozenset[str] = frozenset(
@@ -277,12 +265,6 @@ def parse_profile(toml_text: str, *, source: str = "<string>") -> ReviewProfile:
     raw_strategies = data.get("strategies", {})
     if not isinstance(raw_strategies, dict):
         raise ProfileError("strategies must be a table", source)
-    found = sorted(name for section in ("pipeline", "strategies") if isinstance(data.get(section), dict)
-                   for name in (f"{section}.{key}" for key in data[section]) if name in REMOVED_PROFILE_KEYS)
-    if found:
-        raise ProfileError("; ".join(f"{name}: removed" for name in found)
-                           + (" (no review reads it; drop it)" if len(found) == 1
-                              else " (no review reads them; drop them)"), source)
     for key, raw in raw_strategies.items():
         if not isinstance(raw, dict):
             raise ProfileError(f"strategies.{key} must be a table", source)

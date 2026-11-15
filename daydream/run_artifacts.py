@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Literal, NamedTuple
 
@@ -30,7 +31,6 @@ from daydream.run_config import (
     _default_backend_name,
     _resolved_backend_name,
     _resolved_model,
-    _resolved_review_backend_name,
 )
 from daydream.run_snapshot import ArchiveRunSnapshot, ManifestRunIdentity, RunPhaseCapabilities, RunProfileIdentity
 from daydream.trajectory import (
@@ -300,39 +300,30 @@ def capture_manifest_run_identity(
         runs_merge = any("merge" in step for step in step_names)
     else:
         runs_merge = True
-    runs_per_stack_review = (
-        (config.flow_name is None or config.flow_name in DEEP_FLOW_ALIASES)
-        and flow_kind is not DaydreamRunFlow.DIAGRAM
-    )
     phases = RunPhaseCapabilities(
-        per_stack_review=runs_per_stack_review,
         merge=runs_merge,
         fix=runs_fix,
         test=runs_test,
         push=flow_kind not in (DaydreamRunFlow.TTT, DaydreamRunFlow.PR) and "commit" in step_names,
         remote_ci=flow_kind not in (DaydreamRunFlow.TTT, DaydreamRunFlow.PR) and "remote-ci" in step_names,
     )
-    per_stack_backend: str | None = None
-    per_stack_model: str | None = None
-    if phases.per_stack_review:
-        # The stored names predate the single reviewer; their values name the review phase that runs.
-        per_stack_backend = _resolved_backend_name(config, "review")
-        per_stack_model = _resolved_model(config, "review")
-        if per_stack_model is None and per_stack_backend == "pi":
+    review_backend: str | None = None
+    review_model: str | None = None
+    if (config.flow_name is None or config.flow_name in DEEP_FLOW_ALIASES) and flow_kind is not DaydreamRunFlow.DIAGRAM:
+        review_backend = _resolved_backend_name(config, "review")
+        review_model = _resolved_model(config, "review")
+        if review_model is None and review_backend == "pi":
             from daydream.backends.pi import _configured_pi_model
 
-            configured_model = _configured_pi_model(cwd, execution_input=execution_input)
-            per_stack_model = configured_model or DEFAULT_PI_MODEL
+            review_model = _configured_pi_model(cwd, execution_input=execution_input) or DEFAULT_PI_MODEL
     profile = config.review_profile
     return ManifestRunIdentity(
-        skill=None,
         model=None,
         backend=_default_backend_name(config),
-        review_backend=_resolved_review_backend_name(config),
+        review_backend=review_backend,
+        review_model=review_model,
         fix_backend=_resolved_backend_name(config, "fix") if phases.fix else None,
         test_backend=_resolved_backend_name(config, "test") if phases.test else None,
-        per_stack_review_backend=per_stack_backend,
-        per_stack_review_model=per_stack_model,
         review_only=flow_kind is DaydreamRunFlow.TTT and config.output_mode == "review",
         deep=True,
         profile=None if profile is None else RunProfileIdentity(
@@ -350,7 +341,7 @@ def _finalize_run_artifacts(
     work: WorkContext, successful: bool, interrupted: bool = False,
     progress: Callable[[str], None],
 ) -> _FinalizationOutcomes:
-    """Freeze once, collect optional data, and publish the joined runtime outputs."""
+    """Freeze once, publish the joined runtime outputs, then collect optional data with the final outcome."""
     from daydream.archive import (
         ArchiveFinalizationError,
         ArchiveIntegrityError,
@@ -360,12 +351,6 @@ def _finalize_run_artifacts(
     from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
 
     outcomes = run_artifacts.outcomes
-    # Publication to a lost or replaced source fails after capture and ends the run non-zero,
-    # so the record captured below must not report that run as successful.
-    try:
-        run_artifacts.session.validate_source()
-    except ArtifactVisibilityError:
-        successful = False
     if config.dataset_capture:
         outcomes.capture = "not attempted"
         if config.trajectory_hub_repo:
@@ -373,14 +358,20 @@ def _finalize_run_artifacts(
     if config.archive or config.dump_artifacts:
         outcomes.archive = "not attempted"
     progress("Freezing run evidence")
+    # The record and its upload follow every step that can still fail the run, so its outcome is final.
     if selected is None:
         snapshot = run_artifacts.session.freeze_unproduced()
-        _capture_dataset(run_artifacts, snapshot=snapshot, selected=None, config=config,
-                         work=work, successful=successful, interrupted=interrupted, progress=progress)
-        progress("Restoring run outputs")
-        outcomes.publication = "failed"
-        run_artifacts.session.finalize_frozen(snapshot, disposition=ArtifactDisposition.ROLLBACK)
-        outcomes.publication = "restored prior outputs"
+        capture = partial(_capture_dataset, run_artifacts, snapshot=snapshot, selected=None, config=config,
+                          work=work, interrupted=interrupted, progress=progress)
+        try:
+            progress("Restoring run outputs")
+            outcomes.publication = "failed"
+            run_artifacts.session.finalize_frozen(snapshot, disposition=ArtifactDisposition.ROLLBACK)
+            outcomes.publication = "restored prior outputs"
+        except Exception:
+            capture(successful=False)
+            raise
+        capture(successful=successful)
         return outcomes
     if run_artifacts.capture.run_flow is None:
         raise ArtifactVisibilityError("run flow provenance was not retained")
@@ -392,9 +383,8 @@ def _finalize_run_artifacts(
         raise ArtifactVisibilityError("frozen run snapshot was not retained")
     dropped_children = len(snapshot.trajectories.documents) != len(selected.documents)
     selected = snapshot.trajectories
-    _capture_dataset(run_artifacts, snapshot=snapshot, selected=selected, config=config,
-                     work=work, successful=successful, interrupted=interrupted, progress=progress,
-                     dropped_children=dropped_children)
+    capture = partial(_capture_dataset, run_artifacts, snapshot=snapshot, selected=selected, config=config,
+                      work=work, interrupted=interrupted, progress=progress, dropped_children=dropped_children)
     recorder_provenance = archive_recorder_provenance_from_snapshot(
         write_snapshot=selected, run_flow=run_artifacts.capture.run_flow
     )
@@ -404,30 +394,35 @@ def _finalize_run_artifacts(
         else run_artifacts.session.finalization_merge_path(run_artifacts.dump, snapshot=snapshot)
     )
     try:
-        if config.archive or config.dump_artifacts:
-            outcomes.archive = "failed"
-        finalize_archive_run(
-            run=ArchiveRunSnapshot(recorder_provenance, identity, selected), artifacts=snapshot,
-            artifact_provenance=run_artifacts.session.provenance, config=config,
-            work=work, dump_path=dump_path, progress=progress,
-            code_workspace=run_artifacts.session.code_workspace,
-        )
-    except (ArchiveIntegrityError, ArchivePublicationError) as exc:
-        raise ArtifactVisibilityError(str(exc)) from exc
-    except ArchiveFinalizationError as exc:
-        # Exception text can include credentials, repository content, or private
-        # runtime paths. Collection diagnostics report only the error category.
-        print_error(console, "Data Collection", f"Archive/evaluation failed ({type(exc).__name__}).")
-        if dump_path is not None and dump_path.is_dir() and not any(dump_path.iterdir()):
-            dump_path.rmdir()
-    else:
-        if config.archive or config.dump_artifacts:
-            outcomes.archive = "retained"
-    disposition = ArtifactDisposition.COMPLETE if successful else ArtifactDisposition.PARTIAL_EVIDENCE
-    progress("Publishing run outputs")
-    outcomes.publication = "failed"
-    run_artifacts.session.finalize_frozen(snapshot, disposition=disposition)
-    outcomes.publication = "installed"
+        try:
+            if config.archive or config.dump_artifacts:
+                outcomes.archive = "failed"
+            finalize_archive_run(
+                run=ArchiveRunSnapshot(recorder_provenance, identity, selected), artifacts=snapshot,
+                artifact_provenance=run_artifacts.session.provenance, config=config,
+                work=work, dump_path=dump_path, progress=progress,
+                code_workspace=run_artifacts.session.code_workspace,
+            )
+        except (ArchiveIntegrityError, ArchivePublicationError) as exc:
+            raise ArtifactVisibilityError(str(exc)) from exc
+        except ArchiveFinalizationError as exc:
+            # Exception text can include credentials, repository content, or private
+            # runtime paths. Collection diagnostics report only the error category.
+            print_error(console, "Data Collection", f"Archive/evaluation failed ({type(exc).__name__}).")
+            if dump_path is not None and dump_path.is_dir() and not any(dump_path.iterdir()):
+                dump_path.rmdir()
+        else:
+            if config.archive or config.dump_artifacts:
+                outcomes.archive = "retained"
+        disposition = ArtifactDisposition.COMPLETE if successful else ArtifactDisposition.PARTIAL_EVIDENCE
+        progress("Publishing run outputs")
+        outcomes.publication = "failed"
+        run_artifacts.session.finalize_frozen(snapshot, disposition=disposition)
+        outcomes.publication = "installed"
+    except Exception:
+        capture(successful=False)
+        raise
+    capture(successful=successful)
     return outcomes
 
 

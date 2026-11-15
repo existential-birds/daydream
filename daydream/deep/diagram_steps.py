@@ -40,6 +40,7 @@ from daydream.deep.state import DeepState
 from daydream.extensions import get_registry
 from daydream.extensions.api import Stop
 from daydream.flows.engine import FlowContext
+from daydream.git_ops import ls_tree_files
 from daydream.json_utils import atomic_write_bytes, atomic_write_json
 from daydream.prompt_budget import (
     INLINE_DIFF_BUDGET_BYTES,
@@ -364,6 +365,8 @@ async def _run_diagram_kind(
     """
     deep_state = DeepState(ctx.data)
     schema = SEQUENCE_SPEC_SCHEMA if kind == "sequence" else FLOWCHART_SPEC_SCHEMA
+    # Paths of the captured change (its hunk index) and the checked-out tree, as Git spells them.
+    observed_paths = {*hunk_ranges, *ls_tree_files(ctx.work.repo, "HEAD")}
 
     def _ground(spec: dict[str, Any]) -> Any:
         if kind == "sequence":
@@ -372,6 +375,7 @@ async def _run_diagram_kind(
                 repo_root=ctx.work.repo,
                 hunk_ranges=hunk_ranges,
                 symbols=symbols,
+                observed_paths=observed_paths,
             )
         else:
             report = ground_flowchart(
@@ -380,6 +384,7 @@ async def _run_diagram_kind(
                 hunk_ranges=hunk_ranges,
                 candidate_roots=eligibility.candidate_roots,
                 symbols=symbols,
+                observed_paths=observed_paths,
             )
         return report
 

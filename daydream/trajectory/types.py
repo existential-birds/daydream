@@ -21,11 +21,8 @@ class DaydreamPhase(str, Enum):
     """
 
     REVIEW = "review"
-    PARSE = "parse"
     FIX = "fix"
     TEST = "test"
-    INTENT = "intent"
-    ALTERNATIVES = "alternatives"
     DEEP = "deep"
     EXPLORATION = "exploration"
     VERIFY = "verify"

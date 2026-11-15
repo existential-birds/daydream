@@ -20,13 +20,9 @@ from daydream.trajectory.invocation import _GENERIC_MODEL_LABELS
 # Display labels use serialized DaydreamPhase values.
 _PHASE_LABELS: dict[str, str] = {
     "review": "Review",
-    "parse": "Parse Feedback",
     "fix": "Fix",
     "test": "Test & Heal",
-    "intent": "Understand Intent",
-    "alternatives": "Alternatives",
     "deep": "Deep Review",
-    "merge": "Merge Findings",
     "exploration": "Exploration",
     "verify": "Verify Recommendations",
     "challenge": "Challenge",

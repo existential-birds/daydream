@@ -14,7 +14,6 @@ from urllib.parse import urlparse
 from daydream import git_ops
 from daydream.archive.git_safe import normalize_remote_url
 from daydream.archive.provenance import capture_executable_provenance
-from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.deep.diff import _diff_changed_files
 from daydream.deep.records import item_source_uids
 from daydream.observability.runtime import current_run_trace_id
@@ -46,11 +45,7 @@ def retain_original_task(
     dirty_tracked: bool | None = None
     if captured is None:
         try:
-            status = git_ops.status_porcelain(work.repo)
-            dirty_tracked = any(
-                not line.startswith("??") and not line[3:].startswith(".daydream/")
-                and line[3:] not in (".daydream", REVIEW_OUTPUT_FILE) for line in status.splitlines()
-            )
+            dirty_tracked = git_ops.has_worktree_edits(work.repo)
         except git_ops.GitError:
             pass
     # An accepted capture has its own index. Live checkout status after that
@@ -186,8 +181,6 @@ def capture_run_record(
         "backend": _resolved_backend_name(config, phase), "model": _resolved_model(config, phase),
         "reasoning_effort": _resolved_reasoning_effort(config, phase),
     } for phase in ("review", "arbiter", "verify", "fix", "test")}
-    # Routing keys of the replaced reviewer stay, empty, so stored-record readers keep one shape.
-    provenance.update(latency_profile=None, latency_route=None, latency_routing=None)
     provenance["file_configuration"] = None if config.file_config is None else asdict(config.file_config)
     provenance["collection_diagnostics"] = acquisition_failures
     def evidence(value: Any, *, failed: bool = False, absent: str = "unproduced") -> dict[str, Any]:
@@ -197,7 +190,7 @@ def capture_run_record(
     documents = None if selected is None else (
         document.validated_payload(artifacts.session_id) for document in selected.documents
     )
-    LocalRecordStore(store_path).commit_run({"schema_version": "daydream.run.v1",
+    LocalRecordStore(store_path).commit_run({"schema_version": "daydream.run.v2",
         "run_id": artifacts.session_id, "captured_at": selected.cutoff_at if selected else now_iso_utc(),
         "trace_id": current_run_trace_id(),
         "outcome": outcome, "original_task": evidence(original_task, absent="unavailable"),

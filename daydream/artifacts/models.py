@@ -13,11 +13,8 @@ if TYPE_CHECKING:
 _SCHEMA_VERSION = 1
 _DAYDREAM = ".daydream"
 _REVIEW_OUTPUT = ".review-output.md"
-#: Recognized public directory anchors. ``review-cache`` must survive public
-#: .daydream publication and reopen without a per-run destination route.
-_PUBLIC_DIRECTORY_ANCHORS = frozenset(
-    ("runs", "deep", "exploration", "partial-fixes", "improve", "intents", "review-cache")
-)
+#: Recognized public directory anchors.
+_PUBLIC_DIRECTORY_ANCHORS = frozenset(("runs", "deep", "exploration", "partial-fixes", "improve"))
 _PUBLIC_FILE_ANCHORS = frozenset(("diff.patch", "hunk-index.json", "recommended.patch", ".DS_Store"))
 _PUBLIC_ANCHORS = _PUBLIC_DIRECTORY_ANCHORS | _PUBLIC_FILE_ANCHORS
 _OPERATIONAL_NAMES = frozenset(("worktrees", "audit"))

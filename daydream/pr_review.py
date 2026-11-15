@@ -158,7 +158,6 @@ def extract_item_fields(
     rationale = str(raw.get("rationale", "")).strip()
     severity = normalize_severity(raw.get("severity"))
     confidence = str(raw.get("confidence", "")).strip().upper() or None
-    is_cross_stack = str(raw.get("lens", "")).strip() == "cross-stack"
     location_distrust = bool(raw.get("location_distrust"))
     before = raw.get("severity_before_demotion")
     severity_before_demotion = str(before).strip().lower() or None if before else None
@@ -169,7 +168,6 @@ def extract_item_fields(
         rationale=rationale,
         severity=severity,
         confidence=confidence,
-        is_cross_stack=is_cross_stack,
         location_distrust=location_distrust,
         severity_before_demotion=severity_before_demotion,
         severity_off_vocabulary=_severity_off_vocabulary(raw),
@@ -209,7 +207,6 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
                 line=fields.line_int,
                 title=fields.description,
                 body=body,
-                is_cross_stack=fields.is_cross_stack,
                 confidence=fields.confidence,
                 severity=fields.severity,
                 fingerprint=compute_fingerprint(
@@ -619,7 +616,7 @@ def classify(
             out.body_only.append(issue)
 
     for issue in issues:
-        if issue.is_cross_stack or frozen_only:
+        if frozen_only:
             _unplaced(issue)
             continue
         # Skip the file_hunks() diff lookup -- a git-diff subprocess call with

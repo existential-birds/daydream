@@ -25,7 +25,6 @@ class ArchiveRecorderProvenance:
 class RunPhaseCapabilities:
     """Phases the resolved run can execute."""
 
-    per_stack_review: bool
     merge: bool
     fix: bool
     test: bool
@@ -47,14 +46,12 @@ class RunProfileIdentity:
 class ManifestRunIdentity:
     """Effective non-recorder identity serialized in a run manifest."""
 
-    skill: str | None
     model: str | None
     backend: str
     review_backend: str | None
+    review_model: str | None
     fix_backend: str | None
     test_backend: str | None
-    per_stack_review_backend: str | None
-    per_stack_review_model: str | None
     review_only: bool
     deep: bool
     profile: RunProfileIdentity | None

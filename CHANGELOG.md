@@ -7,6 +7,138 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The committed-review tests now pin the immutable review envelope's UTF-8 byte bounds for
+  `title`, `body` and `context` (512, 8,192 and 65,536 bytes) from both sides, and every fault arm
+  of their case helpers is either exercised or deleted. Newly exercised rows cover refusals no
+  test protected before, including a review diff key that does not match the reconstructed diff
+  and blank hosted provider or model names. Test-only; no runtime behaviour changes
+  ([#1826](https://github.com/existential-birds/daydream/issues/1826),
+  [#1827](https://github.com/existential-birds/daydream/issues/1827)).
+
+### Removed
+
+- This repository no longer runs its own Daydream review bot: its repository-only
+  `daydream-command.yml`, `daydream-review.yml` and `daydream-post.yml` workflows, the Codex CLI
+  pin they installed (`.github/workflows/package.json`) and that pin's Dependabot npm block are
+  gone. Reviews of this repository come from the hosted review service. No package user is
+  affected: `daydream setup` and the packaged templates it installs do not depend on them.
+- **Breaking (0.y.z):** The refusals that 0.35.0 kept only to name the replaced staged
+  reviewer's review-profile keys, findings supervisor and prompt names are deleted
+  ([#1859](https://github.com/existential-birds/daydream/issues/1859)):
+  - A review profile's former `[pipeline]` keys (`assignment_policy`, `structural_enabled`,
+    `arbitration_enabled`, `arbitration_min_severity`, `arbitration_contested_location`,
+    `suppression_enabled`, `suppression_severity_classes` and
+    `suppression_confidence_classes`) get the generic `pipeline: unknown key` error that
+    names the first one, instead of one naming each as removed.
+    `review_profile.REMOVED_PROFILE_KEYS` is deleted.
+  - The former strategy names (`intent`, `alternatives`, `discovery.per_stack`,
+    `discovery.structural`, `suppression`, `merge`, `supervision` and `arbitration`) are
+    accepted again, like any strategy name an extension step may read: they count in the
+    profile digest and steer nothing. A profile that set `strategies.arbitration` to steer
+    the challenge now loads silently; set `strategies.challenge` instead.
+  - The `supervisor` repository setting and its `DaydreamFileConfig.supervisor` field are no
+    longer recognized: a review no longer refuses `supervisor = "rules"` or `"llm"`, and the
+    key is handled like any other top-level key Daydream does not read.
+    `supervisor_deny_globs` and `tool_supervisor` are unchanged.
+  - `extensions.registry.REMOVED_PROMPTS` is deleted. Overriding one of the former prompt
+    names (`intent`, `alternatives`, `per-stack`, `structural`, `generic-fallback`,
+    `arbiter`, `supervise`, `suppression`, `merge`) registers like any extension prompt and
+    never runs; `daydream ext validate` no longer fails on it.
+- **Breaking (0.y.z):** The replaced staged reviewer's command-line options, flow aliases and
+  `RunConfig` fields, which 0.35.0 kept only to refuse them with guidance, are deleted
+  ([#1857](https://github.com/existential-birds/daydream/issues/1857)):
+  - `--shallow`, `--stack`/`-s`, `--precision`, `--latency-profile`, `--no-review-cache`,
+    `--start-at`, `--parse-model` and `--per-stack-review-model` now get the parser's own
+    usage error and exit 2, for example `daydream: error: unrecognized arguments: --shallow`.
+    Command lines that accepted some of them and ignored them are rejected the same way:
+    `--start-at` or `--stack` with a custom `--flow`; `--stack`, `--precision` or
+    `--latency-profile` with `--diagram-only`; and `--latency-profile` on `daydream improve`.
+    Drop them.
+  - `deep` is the only built-in flow alias. `review` and `shallow` (`--flow review`,
+    `flow_name="shallow"`) are ordinary custom flow names: unless an extension registers
+    one, the run stops with the Extension Error `flow 'shallow' is not registered; run
+    'daydream ext validate' to check the extension registry` and exit 1. Omit the flow
+    (`flow_name=None`) for the default review.
+  - `RunConfig.stack`, `start_at`, `latency_profile`, `parse_model`, `shallow`,
+    `precision_mode` and `review_cache_enabled`, and `run_config.replaced_review_options`.
+    Passing one of these fields raises `TypeError` (unexpected keyword argument), where
+    `runner.run` used to refuse it with exit 1 or ignore it.
+  - The `daydream.stack` trace span attribute and the `stack` parameter of `step_scope`.
+    The archive index's `skill` column goes with the stored-format change below.
+- **Breaking (0.y.z):** Readers of files that only the replaced staged reviewer wrote are
+  deleted ([#1860](https://github.com/existential-birds/daydream/issues/1860)):
+  - `daydream.deep.routing_record.read_routing_record`, which read `latency-routing.json`. The
+    archived `evaluation.json` no longer has the `latency_profile` and `routing` keys, and
+    archive finalization no longer requires them.
+  - The evaluation's `findings.stacks`, `findings.dedup` and `findings.per_lens`, which counted
+    `stack-*-records.json`, `dedup-candidates.json` and `alternatives.json`. Evaluating an old
+    run directory reports no per-lens, per-stack or dedup counts, and its finding total comes
+    only from `merged-items.json` or the rendered review, else 0.
+  - The verifier's selection residue. `recommendation-verdicts.json`, and so the
+    `verification` evidence a dataset record captures, no longer carries the selection's
+    `mode`, `skipped`, `reused` and `rule_version`, or each decision's `provenance`,
+    `content_digest` and `verdict_reused`. Each decision keeps `item_uid`, `item_id`,
+    `selected`, `reason_code` and `reason`.
+- **Breaking (0.y.z):** Leftovers of the replaced reviewer's phases, flags and public
+  directories are deleted ([#1861](https://github.com/existential-birds/daydream/issues/1861)):
+  - `DaydreamPhase.PARSE`, `INTENT` and `ALTERNATIVES`, and the run-info labels "Parse
+    Feedback", "Understand Intent", "Alternatives" and "Merge Findings". No build emits these
+    phases; a stored trajectory that names one is rendered under its own name ("Parse"), like
+    any phase the renderer does not know.
+  - The refusals of `--review-backend`, `--fix-backend`, `--test-backend`,
+    `--exploration-model`, `--review-model`, `--arbiter-model`, `--fix-model` and
+    `--test-model` that named their configuration-table replacement. Each now gets the
+    parser's own usage error and exit 2, for example
+    `daydream: error: unrecognized arguments: --fix-backend=claude`; set
+    `[tool.daydream.phases.<phase>] backend` or `model` instead.
+  - The `intents` and `review-cache` public `.daydream/` directories. Nothing writes either
+    one. A run now deletes an existing `.daydream/review-cache/` from an earlier build when it
+    starts, instead of carrying it into its published outputs.
+- **Breaking (0.y.z):** Stored formats drop the names of the replaced reviewer's phases and
+  lenses, and each changed format has a new version. Earlier versions are refused with their
+  existing messages and never converted or deleted
+  ([#1852](https://github.com/existential-birds/daydream/issues/1852)):
+  - Findings artifacts (`--findings-out`, the bot's `findings.json`) drop each finding's
+    `is_cross_stack` and move from schema 2 to 4, and immutable PR exports from 3 to 5.
+    `post-findings` refuses an earlier artifact with `artifact failed schema validation:
+    unsupported schema version 2`. The packaged producer and poster install the same release,
+    so only a review started on an earlier release and posted after the upgrade is refused
+    (the bot reports the failure on the PR); rerun the bot command. A consumer that reads
+    findings artifacts must accept the new versions and stop reading `is_cross_stack`.
+  - Dataset run records move from `daydream.run.v1` to `daydream.run.v2`: `provenance` no
+    longer has `latency_profile`, `latency_route` or `latency_routing`, and its
+    `effective_configuration` no longer has `skill` or `phases.per_stack_review` and takes the
+    archive's renamed `review_backend` and `review_model` (below). A record store or Hub
+    dataset holding version 1 records is refused (`invalid_or_unknown_record_schema`,
+    `invalid_or_unknown_manifest`); capture into a fresh store and Hub dataset.
+  - The archive index moves from schema 9 to 10 and the run manifest from `2.0` to `3.0`. The
+    `skill` column and `run.skill` field are gone. `per_stack_review_backend` and
+    `per_stack_review_model`, which already held the review phase's resolved backend and model,
+    are renamed `review_backend` and `review_model`; `review_backend` therefore no longer holds
+    only an explicitly configured review backend, and both are empty for a run without a
+    review. An existing index is refused with `unsupported archive index schema ... use a
+    fresh archive directory`; use one.
+  - The default model and reasoning-effort tables (`PHASE_DEFAULT_MODELS`,
+    `DEEP_PHASE_DEFAULT_EFFORT`) lose their `parse`, `per_stack_review`, `intent`, `wonder`
+    and `merge` rows; no phase with these names runs.
+  - Canonical items accept only `per-stack` as a `lens`; an extension step that writes
+    `cross-stack`, `structural` or `wonder` fails the review's findings check. The report lists
+    every finding under one Issues heading, without the Structural Review, Cross-Stack Issues
+    and Wonder Findings groups or the `[cross-stack]` prefix, and the verifier no longer exempts
+    a lens: every finding is verified. The Verdict Join table has no Structural row.
+  - The extension API moves from 10 to 11: `CommentFinding`, which a finding renderer
+    receives, no longer has `is_cross_stack`. Declare `DAYDREAM_EXT_API = 11`.
+- **Breaking (0.y.z):** The tool-free agent mode that only the staged reviewer used is deleted
+  ([#1850](https://github.com/existential-birds/daydream/issues/1850)): `run_agent`'s
+  `tools_disabled` argument, the backend capability `supports_tools_disabled` and `PiBackend`'s
+  tools-disabled path, which sent the prompt on standard input. Passing `tools_disabled` raises
+  `TypeError`, and `review_system_instructions` now requires an investigation ledger. The
+  packaged Pi extension no longer reads a submission assignment that nothing sets, the Pi
+  preamble no longer mentions staged reviews, and `git_ops.committed_diff`, which nothing
+  called, is gone.
+
 ### Fixed
 
 - Data capture commits again when the dataset store is on a Docker Desktop (macOS) bind mount, as
@@ -28,36 +160,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the release you run. **Breaking (0.y.z)** for manual copies only: replace the placeholder as
   the [workflow README](daydream/templates/workflows/README.md#daydream-pin) describes
   ([#1884](https://github.com/existential-birds/daydream/issues/1884)).
-
-### Removed
-
-- This repository no longer runs its own Daydream review bot: its repository-only
-  `daydream-command.yml`, `daydream-review.yml` and `daydream-post.yml` workflows, the Codex CLI
-  pin they installed (`.github/workflows/package.json`) and that pin's Dependabot npm block are
-  gone. Reviews of this repository come from the hosted review service. No package user is
-  affected: `daydream setup` and the packaged templates it installs do not depend on them.
-- **Breaking (0.y.z):** The replaced staged reviewer's command-line options, flow aliases and
-  `RunConfig` fields, which 0.35.0 kept only to refuse them with guidance, are deleted
-  ([#1857](https://github.com/existential-birds/daydream/issues/1857)):
-  - `--shallow`, `--stack`/`-s`, `--precision`, `--latency-profile`, `--no-review-cache`,
-    `--start-at`, `--parse-model` and `--per-stack-review-model` now get the parser's own
-    usage error and exit 2, for example `daydream: error: unrecognized arguments: --shallow`.
-    Command lines that accepted some of them and ignored them are rejected the same way:
-    `--start-at` or `--stack` with a custom `--flow`; `--stack`, `--precision` or
-    `--latency-profile` with `--diagram-only`; and `--latency-profile` on `daydream improve`.
-    Drop them.
-  - `deep` is the only built-in flow alias. `review` and `shallow` (`--flow review`,
-    `flow_name="shallow"`) are ordinary custom flow names: unless an extension registers
-    one, the run stops with the Extension Error `flow 'shallow' is not registered; run
-    'daydream ext validate' to check the extension registry` and exit 1. Omit the flow
-    (`flow_name=None`) for the default review.
-  - `RunConfig.stack`, `start_at`, `latency_profile`, `parse_model`, `shallow`,
-    `precision_mode` and `review_cache_enabled`, and `run_config.replaced_review_options`.
-    Passing one of these fields raises `TypeError` (unexpected keyword argument), where
-    `runner.run` used to refuse it with exit 1 or ignore it.
-  - The `daydream.stack` trace span attribute and the `stack` parameter of `step_scope`.
-    The archive index keeps its `skill` column, now always written as null; the archive
-    schema is unchanged.
+- Test healing saves and restores a forbidden generated-file edit whose bytes are not UTF-8,
+  instead of stopping the fixing run with `UnicodeDecodeError`. Its recovery patch shows each
+  such byte as U+FFFD, as review diffs do; the smart-quote scrub still skips an attribution diff
+  that is not UTF-8 ([#1870](https://github.com/existential-birds/daydream/issues/1870)).
+- A changed path that fits the checkout but sits over the OS path limit at the capture
+  destination fails capture with the path, its length there and the limit, instead of
+  "captured native source population changed", which describes a concurrent change
+  ([#1870](https://github.com/existential-birds/daydream/issues/1870)).
+- A Pi committed-review turn that settles with nothing accepted and no host failure now raises
+  the shared `host_tools.UnsubmittedTurn`, as Claude and Codex do, instead of a retryable stream
+  truncation: it gets one fresh conversation (none after an earlier retryable provider failure)
+  and seals `missing_output` if that one ends unsubmitted too, and the outage circuit records it
+  as a completed turn. Before, it was retried up to the full attempt count and each try counted
+  as a provider failure, which could open the circuit for the whole run. A stream that ends
+  before it settles is still a truncation
+  ([#1872](https://github.com/existential-birds/daydream/issues/1872)).
+- A diagram can cite a route file such as `src/routes/[slug]/+page.ts` or
+  `app/routes/users.$userId.tsx`. Its spec's `file` fields no longer carry the model-path
+  pattern; grounding accepts a citation that exactly names a Git-observed path of the captured
+  change or the checked-out tree and holds every other path to the model grammar, so a bracket
+  path that names no such file is still refused. Posting reads each cited file from the head
+  tree by its exact name, percent-encoded on GitHub's contents API, and never expands it
+  ([#1879](https://github.com/existential-birds/daydream/issues/1879)).
+- A `--fix` run on a checkout with tracked uncommitted edits no longer presents the committed
+  head as the whole reviewed subject. It prints that those edits are reviewed with the commits
+  and committed with the fixes, and its review coverage and committed review result mark
+  `analyzed_revision` with `tracked_worktree_edits: true`. That coverage and terminal result use
+  the new version 3, and the committed review result the new schema 13
+  (`RESULT_VERSIONS["worktree"]`), which earlier builds reject; only schema 13 may carry the
+  marker. A clean checkout records and prints what it did before. A commit-bound findings
+  artifact refuses the marker as it refuses a captured `source_id`
+  ([#1828](https://github.com/existential-birds/daydream/issues/1828)).
+- An archived run whose base-to-head diff is empty now has pipeline status `succeeded` instead of
+  `partial`. It returns before any merge, fix or test phase, and the archive now accepts its sealed
+  no-diff review, bound to the same session, as the evidence that it finished
+  ([#1847](https://github.com/existential-birds/daydream/issues/1847)).
+- A run captured with `--capture-data` is no longer recorded, or uploaded, as `success` when
+  archive integrity or publication of its outputs then fails and the command exits 1. Capture
+  and upload now run after archive finalization and publication, and such a run is recorded as
+  `failed` ([#1853](https://github.com/existential-birds/daydream/issues/1853)).
 
 ## [0.35.2] - 2026-11-15
 

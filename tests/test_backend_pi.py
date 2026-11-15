@@ -12,6 +12,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
+import httpx
 import pytest
 
 from daydream.agent import run_agent
@@ -42,7 +43,9 @@ from daydream.backends.pi import (
     PiBackend,
     PiError,
 )
+from daydream.host_tools import HostToolBinding, UnsubmittedTurn
 from daydream.review_budget import BudgetExhausted, BudgetLedger
+from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import DaydreamPhase
 from tests.harness.fake_cli_process import (
     install_fake_cli_process,
@@ -691,11 +694,14 @@ async def test_pi_response_diagnostics_admit_only_bounded_redacted_fields() -> N
         await _pi_response_diagnostics_admit_only_bounded_redacted_fields_case(status=status)
 
 
-async def test_pi_truncated_streams_and_exits_classify_without_misattributing_responses() -> None:
+async def test_pi_truncated_streams_and_exits_classify_without_misattributing_responses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Truncated streams and process exits get their retry class; an interrupted request keeps no stale ID.
 
     Complete native responses always emit message_start; only a partial transport
-    replay can isolate headers followed by EOF before that boundary.
+    replay can isolate headers followed by EOF before that boundary. A settled host-tools
+    turn with nothing accepted is no truncation: it gets one fresh conversation.
     """
     message = {"role": "assistant", "content": [], "stopReason": "stop"}
     process = make_mock_process(
@@ -737,6 +743,62 @@ async def test_pi_truncated_streams_and_exits_classify_without_misattributing_re
     )
     assert response.metadata["generation_id"] is None
     assert response.metadata["headers"] == {"x-request-id": "interrupted-request"}
+    # A turn that settles with nothing submitted is the provider answering: one fresh conversation, which
+    # completes when it submits or else ends missing output, and under a one-failure threshold the outage
+    # circuit stays closed.
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: 0.0)
+    monkeypatch.setattr("daydream.config.RETRY_CIRCUIT_FAILURE_THRESHOLD", 1)
+    schema = {"type": "object", "properties": {"done": {"type": "boolean"}}, "required": ["done"]}
+    call = {"type": "toolCall", "id": "submit", "name": "structured_output", "arguments": {"done": True}}
+    for submits in ([False, True], [False, False]):
+        conversations: list[tuple[bool, str]] = []
+        run_context = RunContext(InteractionPolicy(interactive=False))
+
+        async def spawn(*args: str, env: dict[str, str], **kwargs: Any) -> Any:
+            if args[1:] == ("--version",):
+                return make_mock_process(["1.4.0"])
+            submitted = submits[len(conversations)]
+            conversations.append((submitted, run_context.outage_circuit.state()))
+            packet = json.loads(Path(env["DAYDREAM_PI_HOST_PACKET"]).read_text())
+            async with httpx.AsyncClient(base_url=packet["url"], trust_env=False,
+                                         headers={"Authorization": packet["authorization"]}) as client:
+                await client.post("/ready", json={"tool_name": packet["tool_name"], "schema": packet["schema"]})
+                if submitted:
+                    await client.post("/admit", json={"id": "submit", "name": "structured_output",
+                                                      "arguments": {"done": True}, "terminal": True})
+                    await client.post("/submit", json={"id": "submit", "arguments": {"done": True}})
+            stop = "toolUse" if submitted else "stop"
+            reply = {"role": "assistant", "content": [call] if submitted else [], "stopReason": stop}
+            return make_mock_process([json.dumps(frame) for frame in [
+                {"type": "session", "id": "host-tools"}, {"type": "daydream_host_tools_ready"},
+                {"type": "agent_start"}, {"type": "turn_start"},
+                {"type": "message_start", "message": {"role": "assistant"}},
+                {"type": "message_end", "message": reply},
+                *([{"type": "tool_execution_start", "toolCallId": "submit", "toolName": "structured_output",
+                    "args": {"done": True}},
+                   {"type": "tool_execution_end", "toolCallId": "submit", "toolName": "structured_output",
+                    "isError": False, "result": {"content": [], "details": {"done": True}}},
+                   {"type": "message_end", "message": {"role": "toolResult", "toolName": "structured_output",
+                                                       "toolCallId": "submit", "isError": False,
+                                                       "details": {"done": True}}}] if submitted else []),
+                {"type": "turn_end", "message": reply}, {"type": "agent_end"}, {"type": "agent_settled"},
+            ]])
+
+        monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", spawn)
+        backend = PiBackend(model="fixture-model")
+        backend.retry_attempts = 4
+        binding = HostToolBinding(deadline=anyio.current_time() + 60, accept=lambda value: value)
+        invocation = run_agent(backend, tmp_path, "Review", phase=DaydreamPhase.REVIEW, output_schema=schema,
+                               host_tools=binding, run_context=run_context)
+        if submits[-1]:
+            assert (await invocation)[0] == {"done": True}
+        else:
+            with pytest.raises(UnsubmittedTurn) as unsubmitted:
+                await invocation
+            assert unsubmitted.value.reason_code == "missing_output"
+        # Each conversation is fresh and dispatches with the circuit closed.
+        assert conversations == [(submitted, "closed") for submitted in submits]
+        assert run_context.outage_circuit.state() == "closed"
 
 
 def test_pi_retry_policy_is_built_from_ambient_environment(caplog: pytest.LogCaptureFixture) -> None:
@@ -773,15 +835,12 @@ async def _pi_request_event_config_matches_exact_argv_case(monkeypatch: pytest.M
     process = make_mock_process(
         (FIXTURES_DIR / "simple_text.jsonl").read_text().splitlines() + ['{"type":"agent_settled"}']
     )
-    if mode == "disabled":
-        process.stdin = MagicMock()
     events, spawn = await replay_process(
         backend,
         process,
         Path("/tmp"),
         "structured please",
         output_schema=schema,
-        tools_disabled=mode == "disabled",
         finalization=mode == "finalization",
         validate_structured_output=mode != "validation-opt-out",
         read_only=True,
@@ -797,15 +856,11 @@ async def _pi_request_event_config_matches_exact_argv_case(monkeypatch: pytest.M
         # Large review instructions travel as a system-prompt file, never as an oversized argument.
         system_arg = flat_args[flat_args.index("--append-system-prompt") + 1]
         assert Path(system_arg).is_absolute() and len(system_arg) < 4096
-    if mode == "disabled":
-        # Tools-disabled prompts travel on stdin, never as an argv attachment.
-        written = b"".join(call.args[0] for call in process.stdin.write.call_args_list)
-        assert b"structured please" in written and not any(arg.startswith("@") for arg in flat_args)
     request = next(event for event in events if isinstance(event, RequestEvent))
     config = request.config
     assert isinstance(config, PiRequestConfig)
     assert config.read_only is True
-    if mode in {"disabled", "finalization"}:
+    if mode == "finalization":
         assert "--no-tools" in flat_args and config.selected_tools_count == 0
     else:
         assert flat_args[flat_args.index("--tools") + 1] == "read,find,ls,grep" + (
@@ -826,10 +881,12 @@ async def _pi_request_event_config_matches_exact_argv_case(monkeypatch: pytest.M
     if mode != "finalization":
         assert "Attempt dispatch-time snapshot:" in request.system_prompt
         assert "tool-call allocation is uncapped" in request.system_prompt
+        # No review mode the preamble names is gone: it speaks of no staged review.
+        assert "staged" not in request.system_prompt
 
 
 async def test_pi_request_event_config_matches_exact_argv() -> None:
-    for mode in ["native", "no-schema", "disabled", "finalization", "validation-opt-out"]:
+    for mode in ["native", "no-schema", "finalization", "validation-opt-out"]:
         with pytest.MonkeyPatch.context() as mp:
             try:
                 await _pi_request_event_config_matches_exact_argv_case(monkeypatch=mp, mode=mode)
