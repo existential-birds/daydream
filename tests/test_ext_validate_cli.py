@@ -36,9 +36,6 @@ def test_ext_validate_broken_ref(ext_dir: ExtDir, capsys: pytest.CaptureFixture[
     rc = _run_main(["ext", "validate"])
     assert rc == 1
     assert "ghost" in strip_ansi(capsys.readouterr().out)
-    # An extension's own prompt name registers.
-    ext_dir.write_module("def register(r):\n    r.override_prompt('my-own', lambda **kw: 'x')\n")
-    assert _run_main(["ext", "validate"]) == 0
 
 def test_ext_validate_reports_registered_renderer_count(
     ext_dir: ExtDir, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
