@@ -84,8 +84,7 @@ def _scan_phase_events(run_root: Path, traj: Path, event: str) -> list[dict[str,
     return found
 
 
-def _direct_fix_context(repo: Path, items: list[dict[str, Any]], *, changed_files: set[str], start_at: str = "review",
-) -> Any:
+def _direct_fix_context(repo: Path, items: list[dict[str, Any]], *, changed_files: set[str]) -> Any:
     """Build the smallest real-Git FlowContext for fix-boundary unit tests."""
 
     dd = repo / ".daydream" / "deep"
@@ -93,7 +92,7 @@ def _direct_fix_context(repo: Path, items: list[dict[str, Any]], *, changed_file
     items_file = dd / "merged-items.json"
     items_file.write_text(json.dumps({"items": items}))
     return FlowContext(config=RunConfig(
-        target=str(repo), test_command=f"{sys.executable} -c pass", assume="yes", cleanup=False, start_at=start_at,
+        target=str(repo), test_command=f"{sys.executable} -c pass", assume="yes", cleanup=False,
     ),
         work=work_context(repo, run_id="session-current"), registry=Registry(), allow_standalone_artifacts=True,
         data={"dd": dd, "items_file": items_file, "merged_report": dd / "merged-review.md",

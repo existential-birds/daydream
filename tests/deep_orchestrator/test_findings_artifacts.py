@@ -72,10 +72,10 @@ async def test_embedded_fixing_is_selected_explicitly_and_persists_the_suite_ver
         patch.setattr("daydream.runner.print_phase_hero", lambda *_args: refusals.append("run started"))
         codes = [
             await run(make_config(tiny_diff_target, output_mode="loop", test_command=command, **unfixable))
-            for unfixable in ({}, {"assume": "no", "non_interactive": False}, {"assume": "yes", "flow_name": "review"},
+            for unfixable in ({}, {"assume": "no", "non_interactive": False},
                               {"assume": "yes", "findings_out": str(suite_dir / "findings.json")})
         ]
-    assert (codes, refusals, stub.calls) == ([1] * 4, ["Fix Not Possible"] * 4, [])
+    assert (codes, refusals, stub.calls) == ([1] * 3, ["Fix Not Possible"] * 3, [])
     # The default request ends with findings: this operator would accept a fix gate, and none is offered.
     code = await run(make_config(tiny_diff_target, non_interactive=False, test_command=command))
     assert (

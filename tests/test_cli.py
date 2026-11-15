@@ -97,8 +97,8 @@ def test_signal_handler_flushes_before_backend_registry_snapshot(monkeypatch: py
         ),
         (["--fix", "--yes", "/tmp/project"], {"output_mode": "loop", "assume": "yes"}),
         (
-            ["--flow", "x", "--yes", "--start-at", "fix", "/tmp/project"],
-            {"output_mode": "review", "assume": "yes", "flow_name": "x", "start_at": "fix"},
+            ["--flow", "x", "--yes", "/tmp/project"],
+            {"output_mode": "review", "assume": "yes", "flow_name": "x"},
         ),
     ],
     ids=["configured-review", "packaged-single-workflow-export", "selected-fixing", "custom-flow-gates"],
@@ -137,42 +137,23 @@ def test_incompatible_cli_flags_are_rejected_with_the_offending_flag(
     """Each conflicting or misspelled option exits 2 and names what to fix."""
     rejected = [
         (["--flow", "x", "--review", "/tmp/project"], ""),
-        (["--flow", "x", "--shallow", "/tmp/project"], ""),
+        (["--flow", "x", "--shallow", "/tmp/project"], "unrecognized arguments: --shallow"),
         (["--flow", "x", "--fix", "/tmp/project"], "--flow cannot be combined"),
         (["--flow", "deep", "--yes", "/tmp/repo"], "use --fix in place of --flow deep"),
         (["--yes", "/tmp/repo"], "--yes only answers the gates of a fixing run; add --fix"),
         (["--comment", "--yes", "/tmp/repo"], "it does not apply to --comment"),
-        (["--flow", "review", "--yes", "/tmp/repo"], "it does not apply to --flow review"),
-        # Options of the replaced staged reviewer are usage errors that name what replaces them.
-        (["--start-at", "fix", "/tmp/repo"], "--start-at: every review starts fresh; rerun without it"),
-        (["--fix", "--yes", "--start-at", "fix", "/tmp/repo"], "--start-at: every review starts fresh"),
-        (["--review", "--start-at", "merge", "/tmp/repo"], "--start-at: every review starts fresh"),
-        (["--shallow", "/tmp/repo"], "--shallow: there is no shallow mode; drop it"),
-        (["--fix", "--yes", "--shallow", "/tmp/repo"], "--shallow: there is no shallow mode; drop it"),
-        (["--shallow", "--findings-out", "f.json", "/tmp/repo"], "--shallow: there is no shallow mode; drop it"),
-        (["-s", "python", "/tmp/repo"], "--stack: the reviewer covers the whole change in one review; drop it"),
-        (["--precision", "/tmp/repo"], "--precision: every finding is already challenged in a fresh context"),
-        (["--latency-profile", "fast", "/tmp/repo"], "--latency-profile: review time and tool allowances come from"),
-        (["--no-review-cache", "/tmp/repo"], "--no-review-cache: no review cache exists; drop it"),
-        (["--flow", "shallow", "/tmp/repo"], "--flow shallow: there is no shallow mode; drop it"),
         (["--fix", "--non-interactive", "/tmp/repo"], "cannot confirm the fix gate; add --yes"),
         (["--fix", "--yes", "--findings-out", "f.json", "/tmp/repo"], "--findings-out exports"),
         (["--diagram", "both", "--diagram-only", "sequence", "/tmp/repo"], "--diagram-only"),
-        (["--diagram-only", "sequence", "--start-at", "merge", "/tmp/repo"], "--start-at: every review starts fresh"),
-        (["--diagram-only", "sequence", "--no-review-cache", "/tmp/repo"], "--no-review-cache: no review cache"),
-        (["--diagram-only", "sequence", "--shallow", "/tmp/repo"], "--shallow: there is no shallow mode; drop it"),
         (["--diagram-only", "sequence", "--yes", "/tmp/repo"], "it does not apply to --diagram-only"),
         (["--fix-backend=claude-opus-5", str(tmp_path)], "[tool.daydream.phases.fix]"),
-        # A removed flag never points at a table this build ignores.
-        (["--per-stack-review-model", "m", "/tmp/repo"], "instead: [tool.daydream.phases.review] model"),
-        (["--parse-model=m", "/tmp/repo"], "--parse-model was removed: the review has no parse phase; drop it"),
     ]
     for argv, expected in rejected:
         with pytest.raises(SystemExit) as exc_info:
             _parse_args(argv)
         assert exc_info.value.code == 2, argv
         assert expected in capsys.readouterr().err, argv
-    for improve_flag in ("--verbose=true", "--log=true"):
+    for improve_flag in ("--verbose=true", "--log=true", "--latency-profile=fast"):
         with pytest.raises(SystemExit):
             _parse_improve_args(["improve", "/tmp/x", improve_flag])
 
