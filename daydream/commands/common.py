@@ -128,11 +128,6 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
              "--thinking. Takes precedence over any per-phase config-file override.",
     )
     parser.add_argument(
-        "--latency-profile",
-        metavar="PROFILE",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
         "--non-interactive",
         action="store_true",
         help="Run without prompting; take each prompt's safe default "

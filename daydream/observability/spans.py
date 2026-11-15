@@ -89,7 +89,6 @@ _INHERITED_ATTRIBUTES = frozenset(
         "daydream.step",
         "daydream.phase",
         "daydream.iteration",
-        "daydream.stack",
         "daydream.backend",
         "daydream.attempt",
         "daydream.agent.name",
@@ -307,7 +306,6 @@ def step_scope(
     *,
     iteration: Any = None,
     phase: str | None = None,
-    stack: str | None = None,
 ) -> SpanScope:
     return SpanScope(
         current_session(),
@@ -317,7 +315,6 @@ def step_scope(
             "daydream.step": name,
             "daydream.phase": phase or name,
             "daydream.iteration": iteration,
-            "daydream.stack": stack,
         },
     )
 
