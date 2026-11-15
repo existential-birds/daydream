@@ -658,9 +658,22 @@ def test_file_hunks_fall_back_to_the_pr_diff_only_when_git_cannot_read_the_base(
     monkeypatch: pytest.MonkeyPatch,
     git_repo: Path,
 ) -> None:
-    """A gh-wrapper fake supplies hunks after real Git rejects the base SHA; failures degrade to no hunks."""
+    """A gh-wrapper fake supplies hunks after real Git rejects the base SHA; failures degrade to no hunks.
+
+    Real Git reads a bracketed route name literally, never as a glob that also matches its sibling."""
+    numbered = "".join(f"{n}\n" for n in range(1, 21))
+    for name in ("r/[id].py", "r/i.py"):
+        (git_repo / name).parent.mkdir(exist_ok=True)
+        (git_repo / name).write_text(numbered)
+    _git(git_repo, "add", ".")
+    _git(git_repo, "commit", "-m", "routes")
+    base = _git(git_repo, "rev-parse", "HEAD")
+    (git_repo / "r/[id].py").write_text(numbered.replace("2\n", "two\n", 1))
+    (git_repo / "r/i.py").write_text(numbered.replace("19\n", "nineteen\n"))
+    _git(git_repo, "commit", "-am", "edit routes")
     missing_base = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
     monkeypatch.setattr(git_ops, "gh_pr_diff", _raise_on_gh_fallback)
+    assert pr_review.file_hunks(git_repo, base, "HEAD", "r/[id].py") == [(1, 5)]
     assert pr_review.file_hunks(git_repo, missing_base, "HEAD", "x.py") == []
     monkeypatch.setattr(git_ops, "gh_pr_diff", lambda _r, _n, **_kwargs: _GH_PR_DIFF)
     # Must come from the x.py block only; the other.py hunk must NOT leak into x.py's result.

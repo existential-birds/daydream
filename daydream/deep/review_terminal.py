@@ -21,6 +21,7 @@ from daydream.json_utils import atomic_write_bytes, atomic_write_json, validate_
 from daydream.phases.schemas import MERGED_ITEMS_SCHEMA
 from daydream.pr_review import PRInfo, parsed_issues_from_items, resolve_review_renderers
 from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
+from daydream.repository_paths import git_observed_path_is_confined
 from daydream.review_budget import render_review_warnings, review_warnings
 from daydream.review_result import ReasonCode, deliver_finalized_review
 from daydream.trajectory import DaydreamPhase, get_current_recorder, phase_scope
@@ -198,6 +199,9 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
             item_schema["properties"]["line"] = {"type": ["integer", "null"]}
             item_schema["properties"]["confidence"] = {"enum": ["HIGH", "MEDIUM", "LOW"]}
             validate_json_schema(payload, schema)
+            if not all(git_observed_path_is_confined(ctx.work.repo, item["file"], allow_leaf_symlink=True)
+                       for item in payload["items"]):
+                raise ValueError("a finding path is not a confined repository path")
             items = payload["items"]
             projection_valid = True
         except (OSError, ValueError, AttributeError, jsonschema.ValidationError) as exc:

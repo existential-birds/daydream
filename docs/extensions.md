@@ -265,7 +265,8 @@ A canonical item is one confirmed finding of the review: `id`, `uid`, `item_uid`
 `source_uids`, `file`, `line`, `description`, `rationale` and `severity`. It carries no
 confidence, lens or `related_files`. Preserve `item_uid` (the durable item), `uid` and
 `source_uids` through filtering/rewriting; `id` is a renumberable display position and
-explicit empty provenance remains empty. `line` is a head-side line or absent. Mint
+explicit empty provenance remains empty. `line` is a head-side line or absent; `file` is
+a confined repository path ([terminal check](runtime.md#terminal-review-findings-contract)). Mint
 identities only at host birth/validation, never from content. Accessors live in
 [records.py](../daydream/deep/records.py).
 

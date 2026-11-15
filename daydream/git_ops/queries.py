@@ -427,7 +427,7 @@ def diff_worktree_against(repo: Path, ref: str, paths: list[str]) -> str:
     """
     if not paths:
         return ""
-    args = ["diff", ref, "--", *paths]
+    args = ["diff", ref, "--", *(_literal_pathspec(path) for path in paths)]
     proc = process._run_git(
         repo, args, timeout=30, retries=0, error_context=f"git diff {ref} -- {paths} failed in {repo}"
     )

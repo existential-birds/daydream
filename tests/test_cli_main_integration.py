@@ -79,12 +79,20 @@ def test_cli_main_only_fix_selects_fixing(
 ) -> None:
     """Only --fix selects fixing: a bare review ends with findings and --yes alone is refused.
 
-    The operator answers yes to every question, so an offered fix gate would edit the tree."""
+    The operator answers yes to every question, so an offered fix gate would edit the tree. The change
+    also adds route files whose legal names fall outside the model-path grammar; the fix edits them too."""
     _silence_all(monkeypatch)
     _force_interactive(monkeypatch)
+    routes = ("src/routes/[slug]/+page.ts", "app/routes/users.$userId.tsx")
+    for route in routes:
+        (tiny_diff_target / route).parent.mkdir(parents=True)
+        (tiny_diff_target / route).write_text("export const a = 1;\n")
+    git(tiny_diff_target, "add", ".")
+    git(tiny_diff_target, "commit", "-m", "add routes")
     stub = _install_stub_backend(monkeypatch, tiny_diff_target)
     stub.fix_edit_line = "# fixed by the selected loop\n"
-    stub.review_claims = [{"title": "Sample issue", "file": "api.py", "line": 1}]
+    stub.review_claims = [{"title": "Sample issue", "file": "api.py", "line": 1},
+                          *({"title": f"Route issue in {route}", "file": route, "line": 1} for route in routes)]
     mute_side_effects()
     asked: list[str] = []
 
@@ -107,7 +115,7 @@ def test_cli_main_only_fix_selects_fixing(
     assert "add --fix" in capsys.readouterr().err
 
     assert _cli_main_exit(monkeypatch, *target, "--fix", "--yes") == 0
-    assert "# fixed by the selected loop" in (tiny_diff_target / "api.py").read_text()
+    assert all("# fixed by the selected loop" in (tiny_diff_target / path).read_text() for path in ("api.py", *routes))
 
     # With nothing to review, a review and a selected fix loop both say so; the base-branch guard binds fixing only.
     empty = (str(git_repo), "--no-archive")

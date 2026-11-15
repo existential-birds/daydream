@@ -2,12 +2,13 @@
 
 
 from daydream.output_schema import result_array_schema, severity_enum_schema
-from daydream.repository_paths import REPOSITORY_FILE_PATH_SCHEMA
+from daydream.repository_paths import REPOSITORY_FILE_PATH_MAX_LENGTH, REPOSITORY_FILE_PATH_SCHEMA
 
 _FINDING_FIELDS = {
     "id": {"type": "integer"},
     "description": {"type": "string"},
-    "file": REPOSITORY_FILE_PATH_SCHEMA,
+    # A path of the captured change: finalize_review confines it as Git-observed, never by the model grammar.
+    "file": {"type": "string", "minLength": 1, "maxLength": REPOSITORY_FILE_PATH_MAX_LENGTH},
     "line": {"type": "integer"},
     "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
     "rationale": {"type": "string"},

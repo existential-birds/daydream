@@ -492,7 +492,7 @@ def file_hunks(
     The GitHub fallback selects this path's block from the full PR diff."""
     try:
         diff_text = git_ops.diff_paths(
-            target_dir, base_sha, head_sha, [path], unified=3, merge_base_diff=False
+            target_dir, base_sha, head_sha, [f":(literal){path}"], unified=3, merge_base_diff=False
         )
     except GitError:
         diff_text = (

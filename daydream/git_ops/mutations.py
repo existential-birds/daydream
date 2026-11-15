@@ -211,7 +211,7 @@ def restore_paths_from_ref(repo: Path, ref: str, paths: list[str]) -> None:
     """
     if not paths:
         return
-    args = ["checkout", ref, "--", *(str(p) for p in paths)]
+    args = ["checkout", ref, "--", *(queries._literal_pathspec(str(p)) for p in paths)]
     process._run_git(repo, args, timeout=30, retries=0, error_context=f"git checkout {ref} -- {paths} failed in {repo}")
 
 
