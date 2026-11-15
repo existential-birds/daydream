@@ -2,6 +2,6 @@
   "private": true,
   "description": "Tracks npm packages pinned in workflow run: steps so Dependabot can bump them.",
   "dependencies": {
-    "@openai/codex": "0.139.0"
+    "@openai/codex": "0.169.0"
   }
 }

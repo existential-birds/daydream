@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the old pin, so `daydream setup` users get the new one with the next release; existing
   installs then read as customized under `daydream setup --verify` until `daydream setup` is
   rerun ([#1641](https://github.com/existential-birds/daydream/issues/1641)).
+- The repository's own Codex bot review runs on Codex CLI 0.169.0 instead of 0.139.0. From
+  v0.35.0 that review runs committed review through
+  [Codex host tools](docs/runtime.md#codex-host-tools), and on 0.139.0 a model shell command
+  can read the per-attempt callback secret; 0.169.0 does not expose it. The packaged
+  templates do not install Codex.
 
 ## [0.35.0] - 2026-11-15
 
