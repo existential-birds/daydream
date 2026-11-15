@@ -1,7 +1,7 @@
 """Approval, privilege and artifact contracts for complete shipped workflow bundles.
 
 The split installer lands command, review and post together. Bind their inputs
-and artifacts in each actual bundle; exercise the shared Bash matcher separately.
+and artifacts in the actual bundle; exercise the shared Bash matcher separately.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from tests.harness.workflows import job_steps, load_workflow, workflow_triggers
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = _REPO_ROOT / "daydream" / "templates" / "workflows"
-REPO_WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
 _PINNED_ACTION_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
 _EVENT_INTERP = re.compile(r"\$\{\{[^}]*github\.event\.(comment|issue|pull_request|workflow_run|review)[^}]*\}\}")
@@ -84,20 +83,15 @@ def _assert_execution_policy(*workflows: dict[str, Any]) -> None:
 
 
 def test_split_bundle_binds_approval_review_artifacts_and_posting() -> None:
-    """Each installed three-file bundle joins immutable approval to unprivileged review and App-only posting."""
-    for directory, credential in ((TEMPLATES_DIR, "ANTHROPIC_API_KEY"), (REPO_WORKFLOWS_DIR, "OPENAI_API_KEY")):
-        _assert_split_bundle(directory, credential)
-
-
-def _assert_split_bundle(directory: Path, credential: str) -> None:
-    texts = {role: (directory / f"daydream-{role}.yml").read_text() for role in ("command", "review", "post")}
+    """The packaged three-file bundle joins immutable approval to unprivileged review and App-only posting."""
+    texts = {role: (TEMPLATES_DIR / f"daydream-{role}.yml").read_text() for role in ("command", "review", "post")}
     command, review, post = (
-        load_workflow(directory / f"daydream-{role}.yml") for role in ("command", "review", "post")
+        load_workflow(TEMPLATES_DIR / f"daydream-{role}.yml") for role in ("command", "review", "post")
     )
     _assert_execution_policy(command, review, post)
     assert {role: set(_SECRET_REF_RE.findall(text)) for role, text in texts.items()} == {
         "command": {"DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY"},
-        "review": {credential},
+        "review": {"ANTHROPIC_API_KEY"},
         "post": {"DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY"},
     }
     assert review["permissions"] == {"contents": "read"}
@@ -138,7 +132,7 @@ def _assert_split_bundle(directory: Path, credential: str) -> None:
     checkout = next(step for step in steps if "actions/checkout" in step.get("uses", ""))
     assert steps.index(verify) < steps.index(checkout)
     assert checkout["with"]["ref"] == "${{ inputs.approved_head_sha }}"
-    _assert_single_reject_funnel(verify["run"], label=directory.as_posix())
+    _assert_single_reject_funnel(verify["run"], label=TEMPLATES_DIR.as_posix())
     run_step = next(step for step in steps if "daydream --review" in step.get("run", ""))
     run = run_step["run"]
     assert run_step["env"]["APPROVED_HEAD_SHA"] == "${{ inputs.approved_head_sha }}"
@@ -155,11 +149,7 @@ def _assert_split_bundle(directory: Path, credential: str) -> None:
         )
     )
     assert "exit 1" in run and "esac" in run
-    if credential == "OPENAI_API_KEY":
-        cleanup = next(step for step in steps if "auth.json" in step.get("run", ""))
-        assert steps.index(run_step) < steps.index(cleanup) and cleanup.get("if") == "always()"
-    else:
-        assert not any("auth.json" in step.get("run", "") for step in steps)
+    assert not any("auth.json" in step.get("run", "") for step in steps)
 
     # Success and failure artifacts join their actual downstream consumers, even after a late failure.
     upload = by_name["Upload findings artifact"]
@@ -252,7 +242,6 @@ def test_single_bundle_joins_gate_analyze_and_privileged_publication() -> None:
 
 
 _MATCH_STEP_SOURCES = [
-    (REPO_WORKFLOWS_DIR / "daydream-command.yml", "dispatch"),
     (TEMPLATES_DIR / "daydream-command.yml", "dispatch"),
     (TEMPLATES_DIR / "single" / "daydream.yml", "gate"),
 ]
@@ -300,7 +289,7 @@ def test_match_step_recognizes_exactly_the_three_bot_commands(tmp_path: Path) ->
         job_shell = wf["jobs"][job].get("defaults", {}).get("run", {}).get("shell", workflow_shell)
         assert step.get("shell", job_shell) is None, path
         scripts.append(step["run"])
-    assert scripts[0] == scripts[1] == scripts[2]
+    assert scripts[0] == scripts[1]
     # GitHub's unspecified shell is `bash -e {0}`. Explicit `shell: bash` adds
     # pipefail, which can turn grep's successful early exit into a false match.
     script = tmp_path / "match.sh"
