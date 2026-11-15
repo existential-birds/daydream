@@ -44,7 +44,8 @@ split). Install it by hand:
    difference**: the App needs only **Pull requests: Read and write**,
    **Contents: Read-only**, and **Metadata: Read-only** — **omit** *Actions: Read
    and write*.
-2. Copy this `daydream.yml` into the target repository's `.github/workflows/`.
+2. Copy this `daydream.yml` into the target repository's `.github/workflows/` and
+   pin both of its Daydream installs as the [parent `README.md`](../README.md#daydream-pin) describes.
 3. Do **not** also install the three split files — running both would review and
    post twice. If you are migrating from the split setup, delete
    `daydream-review.yml`, `daydream-command.yml`, and `daydream-post.yml`.

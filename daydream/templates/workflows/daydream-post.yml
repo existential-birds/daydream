@@ -41,9 +41,9 @@ jobs:
         uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
 
       - name: Install daydream
-        # Pinned to the same immutable reviewed commit as analysis so this phase
-        # can validate and post the diagram artifact that analysis produces.
-        run: uv tool install --python 3.14 git+https://github.com/existential-birds/daydream@5e6eba92d99a1207b2140693cfd268b91f01fb04
+        # Pinned to the same release commit as analysis so this phase can
+        # validate and post the artifact that analysis produces.
+        run: uv tool install --python 3.14 git+https://github.com/existential-birds/daydream@DAYDREAM_RELEASE_COMMIT
 
       - name: Mint posting token
         id: token

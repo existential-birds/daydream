@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import getpass
 import os
+import re
 import shutil
 import sys
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from typing import Any
 
 import yaml
 
+import daydream
 from daydream import config, git_ops
 from daydream.agent import console
 from daydream.bot_manifest import register_app_via_manifest
@@ -25,7 +27,8 @@ from daydream.github_app import (
     get_app_metadata,
     resolve_credentials,
 )
-from daydream.templates import workflow_template_files
+from daydream.reviews.identity import DAYDREAM_REPO_URL
+from daydream.templates import render_workflow, workflow_template_files
 from daydream.ui import print_error, print_info, print_success, print_warning
 
 _ANTHROPIC_KEY_ENV = "ANTHROPIC_API_KEY"
@@ -93,6 +96,30 @@ def deposit_secrets(
         raise GitHubAppError(f"Failed to set variable {config.BOT_HANDLE_VAR}: {exc}") from exc
 
 
+def _release_commit(repo_dir: Path) -> str:
+    """Resolve this release's ``v<version>`` tag to the full commit SHA installed workflows pin.
+
+    GitHub peels an annotated tag to its commit. A build whose version has no
+    release tag (a development build), or a failed lookup, raises GitError with guidance.
+    """
+    tag = f"v{daydream.__version__}"
+    slug = DAYDREAM_REPO_URL.removeprefix("https://github.com/")
+    endpoint = f"repos/{slug}/commits/refs/tags/{tag}"
+    try:
+        commit = git_ops.gh_api(repo_dir, endpoint, idempotent=True)
+    except GitError as exc:
+        raise GitError(
+            f"Could not resolve Daydream release tag {tag} on {slug} to a commit: {exc}. Setup pins the bot "
+            "workflows to the commit of the release that runs it, so a development build without a release tag "
+            "cannot install them: run setup from a released Daydream (check out a release tag before "
+            "`uv tool install`)."
+        ) from exc
+    sha = commit.get("sha") if isinstance(commit, dict) else None
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise GitError(f"gh api {endpoint} returned no full commit SHA")
+    return sha
+
+
 # Returned by :func:`land_workflows` when all three workflow files already exist
 # verbatim, so no branch/PR was opened. Deliberately not a URL (does not start
 # with ``http``) so the caller can distinguish a no-op from a freshly opened PR.
@@ -112,8 +139,8 @@ _PR_BODY = (
 )
 
 
-def land_workflows(repo_dir: Path, *, branch: str) -> str:
-    """Land packaged workflows through a branch and reviewable PR.
+def land_workflows(repo_dir: Path, *, branch: str, commit: str) -> str:
+    """Land packaged workflows, pinned to ``commit``, through a branch and reviewable PR.
 
     Commit only changed workflow files. Customized files are replaced with a
     warning. If every file already matches, return WORKFLOWS_ALREADY_INSTALLED
@@ -125,7 +152,7 @@ def land_workflows(repo_dir: Path, *, branch: str) -> str:
     copied: list[Path] = []
     for template in workflow_template_files():
         target = workflows_dir / template.name
-        content = template.read_text()
+        content = render_workflow(template, commit)
         if target.exists() and target.read_text() == content:
             continue
         if target.exists():
@@ -397,11 +424,15 @@ def _workflow_contract_intact(name: str, content: str) -> bool:
 
 
 def _check_workflows(repo_dir: Path) -> Check:
-    """Check default-branch workflows against templates and the approval contract.
+    """Check default-branch workflows against templates pinned to this release and the approval contract.
 
-    Missing or gate-breaking files fail. Intact customized variants pass with
-    an unsupported-customization warning.
+    Missing or gate-breaking files fail. Intact customized variants, including
+    a pin from another release, pass with an unsupported-customization warning.
     """
+    try:
+        commit = _release_commit(repo_dir)
+    except GitError as exc:
+        return Check(name="workflows", passed=False, detail=str(exc))
     try:
         base = git_ops.default_branch(repo_dir)
     except git_ops.BranchNotFoundError as exc:
@@ -421,7 +452,7 @@ def _check_workflows(repo_dir: Path) -> Check:
         except GitError:
             missing.append(path)
             continue
-        if installed == template.read_bytes():
+        if installed == render_workflow(template, commit).encode():
             continue
         if _workflow_contract_intact(template.name, installed.decode("utf-8", errors="replace")):
             customized.append(path)
@@ -553,9 +584,11 @@ def run_setup(
 ) -> int:
     """Resolve the API key, register/reuse the App, confirm installation and deposit secrets.
 
-    Workflow files land through a reviewable PR. ``force`` re-registers even when
-    secrets exist. Return 0 for success/no-op and 1 for recoverable preflight or
-    installation failures; registration, deposit and Git errors propagate.
+    Workflow files, pinned to this release's commit, land through a reviewable PR; the
+    commit is resolved before registration, so a build without a release tag changes
+    nothing. ``force`` re-registers even when secrets exist. Return 0 for success/no-op
+    and 1 for recoverable preflight or installation failures; registration, deposit and
+    Git errors propagate.
     """
     if shutil.which("gh") is None:
         print_error(
@@ -577,6 +610,7 @@ def run_setup(
         )
         return 1
 
+    commit = _release_commit(target_dir)
     already = set(git_ops.gh_secret_list(target_dir, **scope._secret_kwargs(), auth=git_ops.INHERIT_GITHUB_AUTH))
     creds_present = all(name in already for name in config.SETUP_SECRET_NAMES)
 
@@ -622,7 +656,7 @@ def run_setup(
     )
     print_success(console, "Deposited App credentials and bot handle as Actions secrets/variables.")
 
-    pr_url = land_workflows(target_dir, branch=_SETUP_BRANCH)
+    pr_url = land_workflows(target_dir, branch=_SETUP_BRANCH, commit=commit)
     if pr_url == WORKFLOWS_ALREADY_INSTALLED:
         print_info(console, "Workflow files already present on this repository; nothing to land.")
     else:
