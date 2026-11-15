@@ -227,6 +227,32 @@ def test_failed_commit_is_not_visible_and_abandoned_staging_recovers_privately(
     assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in (store.root / "runs").iterdir())
 
 
+def test_commit_keeps_its_own_stage_where_locks_never_exclude_the_holding_process(
+    store: LocalRecordStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docker Desktop's macOS bind mounts (virtiofs "fakeowner") grant flock to a second
+    descriptor in the process that already holds it, so the stage lock can't stop the
+    writer's own recovery from unlinking its live stage before publish (#1883)."""
+    monkeypatch.setattr(fcntl, "flock", lambda descriptor, operation: None)
+    assert store.commit_run(run_record("bind-mount")).committed
+
+    def documents() -> Iterator[dict[str, Any]]:
+        """While this stage is live, another commit recovers only the abandoned one."""
+        live, = (store.root / "runs").glob("*.tmp")
+        abandoned = store.root / "runs" / "record-abandoned.tmp"
+        abandoned.write_bytes(b'{"partial":')
+        assert store.commit_run(run_record("concurrent")).diagnostics == ("recovered_interrupted_write",)
+        assert live.exists() and not abandoned.exists()
+        yield {"schema_version": "ATIF-v1.7", "session_id": "streamed", "trajectory_id": "streamed",
+               "agent": {"name": "daydream", "version": "test"},
+               "steps": [{"step_id": 1, "source": "user", "message": "review"}]}
+    streamed = run_record("streamed", trajectories={"status": "available", "value": {
+        "root_trajectory_id": "streamed", "status": "complete", "cutoff_at": "2026-10-04T12:01:00Z"}})
+    assert store.commit_run(streamed, documents()).committed
+    assert {run["run_id"] for run in read_records(store).runs} == {"run-1", "bind-mount", "concurrent", "streamed"}
+    assert not list((store.root / "runs").glob("*.tmp"))
+
+
 def test_snapshot_reads_validate_only_pinned_shards(tmp_path: Path) -> None:
     for fault, diagnostic in (("changed", "snapshot_record_digest_mismatch"), ("duplicate", "malformed_snapshot"),
                               ("null", "malformed_snapshot")):

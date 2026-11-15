@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Data capture commits again when the dataset store is on a Docker Desktop (macOS) bind mount, as
+  it did before 0.35.0 (#1883). There, flock never refuses a lock to a second descriptor in the
+  process that holds it, so a commit's own interrupted-write recovery took its live staged record
+  for abandoned and deleted it before publishing, and `commit_run` failed with
+  `persistence_failed`. A writer now registers its live stages in-process, and recovery never
+  removes one of them; another process's stage still stays live through its writer's lock, which
+  those mounts do enforce between processes.
 - `daydream setup` now installs the Daydream version that ran it. The packaged bot workflows
   carried a hard-coded commit that always lagged the release shipping them (the 0.35.2 templates
   installed v0.35.1, and every release from 0.28 to 0.35.0 installed a 0.28.0-era commit). They now

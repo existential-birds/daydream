@@ -8,6 +8,7 @@ import os
 import re
 import stat
 import tempfile
+import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
@@ -507,13 +508,34 @@ def record_name(identity: str) -> str:
     return _sha(identity.encode()) + ".jsonl"
 
 
+# Stages this process is still writing, by (st_dev, st_ino). A writer's stage lock keeps
+# other processes' recovery away, but some filesystems never refuse a lock to a second
+# descriptor in the holding process: on Docker Desktop's macOS bind mounts (virtiofs,
+# "fakeowner"), flock and OFD locks exclude other processes yet always succeed within one.
+# There the writer's own recovery pass would take its live stage for abandoned and unlink
+# it before publish (#1883), so recovery consults this set before the lock.
+_LIVE_STAGES: set[tuple[int, int]] = set()
+_LIVE_STAGES_GUARD = threading.Lock()
+
+
+def _stage_key(metadata: os.stat_result) -> tuple[int, int]:
+    return metadata.st_dev, metadata.st_ino
+
+
 def _abandoned(staged: Path) -> bool:
-    """Whether a staged temp is still linked and no live writer holds its lock."""
+    """Whether a staged temp is still linked and no live writer holds it.
+
+    A stage this process is writing is live without asking the lock (see ``_LIVE_STAGES``);
+    another process's stage is live while its writer holds the stage lock.
+    """
     try:
         handle = open(staged, "rb")
     except FileNotFoundError:
         return False
     with handle:
+        with _LIVE_STAGES_GUARD:
+            if _stage_key(os.fstat(handle.fileno())) in _LIVE_STAGES:
+                return False
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -688,14 +710,18 @@ class LocalRecordStore:
     def _commit_run(self, envelope: Record, documents: Iterable[Any] | None) -> CommitResult:
         """Stage one run record outside the store lock, then compare or publish it under the lock.
 
-        The stage is a ``*.tmp`` file created under the lock and locked by its writer until
-        it is published or removed, so interrupted-write recovery skips it while the writer lives.
+        The stage is a ``*.tmp`` file created under the lock, locked by its writer and listed in
+        ``_LIVE_STAGES`` until it is published or removed, so interrupted-write recovery skips
+        it while the writer lives, even where locks never exclude the writer's own process.
         """
         identity = envelope["run_id"]
         path = self._shard("runs", identity)
         with self._locked() as recovered:
             stage = tempfile.NamedTemporaryFile("wb", dir=path.parent, suffix=".tmp", delete=False)
             fcntl.flock(stage, fcntl.LOCK_EX)
+            live = _stage_key(os.fstat(stage.fileno()))
+            with _LIVE_STAGES_GUARD:
+                _LIVE_STAGES.add(live)
         staged = Path(stage.name)
         digest = hashlib.sha256()
         size = 0
@@ -736,6 +762,8 @@ class LocalRecordStore:
                     return CommitResult(identity, digest.hexdigest(), True, diagnostics)
             finally:
                 staged.unlink(missing_ok=True)  # before closing the stage releases its lock
+                with _LIVE_STAGES_GUARD:
+                    _LIVE_STAGES.discard(live)
 
     @staticmethod
     def _holds(path: Path, size: int, sha256: str) -> bool:
