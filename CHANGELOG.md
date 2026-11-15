@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.1] - 2026-11-15
+
 ### Changed
 
 - The bot workflows install Daydream at the v0.35.0 release commit (`feeda70f`) instead of a
@@ -14,14 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single-file templates move together, because the release writes findings schema 2, which the
   old poster rejects. A review started before this change and posted after it may have its
   artifact rejected once; rerun the bot command. The 0.35.0 package's templates still install
-  the old pin, so `daydream setup` users get the new one with the next release; existing
-  installs then read as customized under `daydream setup --verify` until `daydream setup` is
-  rerun ([#1641](https://github.com/existential-birds/daydream/issues/1641)).
+  the old pin; this release's templates install the new one, so `daydream setup` users get it
+  now; existing installs read as customized under `daydream setup --verify` until
+  `daydream setup` is rerun ([#1641](https://github.com/existential-birds/daydream/issues/1641), #1863).
 - The repository's own Codex bot review runs on Codex CLI 0.169.0 instead of 0.139.0. From
   v0.35.0 that review runs committed review through
   [Codex host tools](docs/runtime.md#codex-host-tools), and on 0.139.0 a model shell command
   can read the per-attempt callback secret; 0.169.0 does not expose it. The packaged
-  templates do not install Codex.
+  templates do not install Codex (#1863).
 
 ### Fixed
 
@@ -33,8 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   along a chain only the last is delivered. The sealed result's `findings`, the report, the
   outcome line, the findings export and posting all read that delivered set, on every route.
   A rejected or unresolved synthesis leaves its predecessors delivered, and `claims` keep
-  every claim with its disposition. The result schema versions are unchanged
-  ([#1864](https://github.com/existential-birds/daydream/issues/1864)).
+  every claim with its disposition. The result schema versions are unchanged, but v0.35.0
+  rejects a 0.35.1 result whose findings leave out a subsumed claim, and 0.35.1 rejects a
+  0.35.0 result that delivered one
+  ([#1864](https://github.com/existential-birds/daydream/issues/1864), #1866).
 - A retried review attempt is now told what its failed attempt admitted, and cannot admit
   the same claim twice. A retry is a fresh conversation that saw every target undecided and
   no claims, so it could install a claim the failed attempt had already admitted, deliver it
@@ -43,7 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new claim whose payload exactly equals a retained claim's is refused as a correctable
   rejection. A Codex turn that ends unsubmitted after admitting a claim is now retried like
   any other unsubmitted turn
-  ([#1831](https://github.com/existential-birds/daydream/issues/1831)).
+  ([#1831](https://github.com/existential-birds/daydream/issues/1831), #1866).
 - The reviewer can run the search helper its guidance names when Daydream is embedded in
   another process or runs from a virtual environment whose `bin` is not on `PATH`. The
   guidance named a bare `daydream search`, which such a shell answered with
@@ -53,21 +57,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read-only Codex turn that runs in a clone of the checkout keeps that interpreter path
   even when it lies in the checkout's ignored virtual environment, which the clone lacks
   ([#1830](https://github.com/existential-birds/daydream/issues/1830),
-  [#1868](https://github.com/existential-birds/daydream/issues/1868)).
+  [#1868](https://github.com/existential-birds/daydream/issues/1868), #1867).
 - Author text that quotes the host's search guidance reaches the reviewer unchanged. On
   read-only Pi, a description that quoted it was rewritten before delivery, so the model
   did not read what the sealed result records, and on every backend quoted guidance in a
   prompt could stand in for the host's own copy. The host now appends its guidance, with
   read-only Pi's variant chosen there, once to every search turn's prompt and instructions
   and never rewrites composed text; committed review's first message no longer carries a
-  token line for it ([#1825](https://github.com/existential-birds/daydream/issues/1825)).
+  token line for it ([#1825](https://github.com/existential-birds/daydream/issues/1825), #1867).
 - An author description, frozen by an embedder or fetched from the pull request, is
   measured against its 65536-byte bound in UTF-8 bytes, as the immutable envelope's
   `context` is. It was measured JSON-escaped twice, for a command-line transport it no
   longer uses: it travels in each assignment's first message, never in the system
   instructions that Codex and Claude pass as one argument. A description heavy in quotes,
   backslashes or control characters was refused, or cut when fetched, well below 64 KiB
-  ([#1849](https://github.com/existential-birds/daydream/issues/1849)).
+  ([#1849](https://github.com/existential-birds/daydream/issues/1849), #1867).
 - A committed-review turn on Claude that ends without an accepted `structured_output` is now
   retried instead of leaving its assignment unfinished. The assignment was sealed
   `missing_output` at once, however much of its tool and time allowance remained. Such a
@@ -76,20 +80,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   claim. It is not retried after an earlier retryable provider failure, it never counts as a
   failure on the outage circuit, and an assignment that ends unsubmitted again is still
   reported as `missing_output` unless a budget or deadline limit stops it first
-  ([#1832](https://github.com/existential-birds/daydream/issues/1832)).
+  ([#1832](https://github.com/existential-birds/daydream/issues/1832), #1871).
 - The run details of a posted review now label the committed review's challenge
   "Challenge". It was recorded under the fix flow's verification phase, so every review
   posted with `--comment` showed a "Verify Recommendations" row for work that verified no
   recommendation, and a fixing run folded the challenge's cost into its real verification
   row. Trajectories now record the challenge under a new `challenge` phase; older
   trajectories keep `verify`
-  ([#1851](https://github.com/existential-birds/daydream/issues/1851)).
+  ([#1851](https://github.com/existential-birds/daydream/issues/1851), #1873).
 - The `deep` flow's `--findings-out` file no longer fails to write when diagrams or
   warnings push a review whose findings nearly fill the 1 MiB bound over it. The run
   printed "Findings Artifact", exited 1 and left no file for the poster. The writer now
   drops the review context, then the diagrams, then the warnings, each only while still
   over, and logs what it dropped; findings and coverage always stay
-  ([#1848](https://github.com/existential-birds/daydream/issues/1848)).
+  ([#1848](https://github.com/existential-birds/daydream/issues/1848), #1873).
 - Diagrams requested with a review keep their time after a large review. Once a review's
   allowances scaled with the change, its window could reach the flow's outer deadline and
   leave the diagram step about 120 seconds, so diagrams that needed longer were not
@@ -97,25 +101,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `review_wall_budget_s - reviewer_investigation_budget_s - 120` seconds (1,980 s) after it
   starts, what an unscaled review leaves it; runs without diagrams are unchanged. Other
   profiles keep `review_wall_budget_s` as the ceiling for diagrams too
-  ([#1841](https://github.com/existential-birds/daydream/issues/1841)).
+  ([#1841](https://github.com/existential-birds/daydream/issues/1841), #1873).
 - A change with a binary file no longer leaves the review incomplete when the reviewer marks that
   file `not_reviewed`. A changed file whose captured diff is binary (Git's `Binary files … differ`,
   with no text hunk) is now decided by the host as `reviewed` with the reason
   `binary change: no text content`; the reviewer owes it no decision but still sees it in the
   catalog and may cite it. Its sealed assignment carries `binary: true` and the report names it. A
   text file the reviewer marks `not_reviewed` still leaves the review incomplete, and a change of
-  only binary files completes without a model call
-  ([#1865](https://github.com/existential-birds/daydream/issues/1865)).
+  only binary files completes without a model call. v0.35.0 rejects a sealed result that holds
+  such a host decision
+  ([#1865](https://github.com/existential-birds/daydream/issues/1865), #1869).
 - A changed path longer than 512 characters no longer stops the review before any model call with
   a "narrow the review base" capacity message. Target ids and scope files now accept paths up to
   4096 characters, as source references do. A path whose diff header alone cannot fit one review
-  assignment is refused at planning with a message that names it
-  ([#1856](https://github.com/existential-birds/daydream/issues/1856)).
+  assignment is refused at planning with a message that names it. v0.35.0 rejects a sealed
+  result whose target path exceeds 512 characters
+  ([#1856](https://github.com/existential-birds/daydream/issues/1856), #1869).
 - A changed file containing bytes that are not valid UTF-8, such as a Latin-1 source file, no
   longer crashes review or fixing with `UnicodeDecodeError` before any work starts. The review diff
   shows those bytes as U+FFFD, so the file is reviewed as text, while the captured source keeps the
   raw bytes and their identity. The hosted immutable route reads its diff the same way
-  ([#1854](https://github.com/existential-birds/daydream/issues/1854)).
+  ([#1854](https://github.com/existential-birds/daydream/issues/1854), #1869).
 
 ## [0.35.0] - 2026-11-15
 
@@ -2919,7 +2925,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.35.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.35.1...HEAD
+[0.35.1]: https://github.com/existential-birds/daydream/compare/v0.35.0...v0.35.1
 [0.35.0]: https://github.com/existential-birds/daydream/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/existential-birds/daydream/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/existential-birds/daydream/compare/v0.32.0...v0.33.0
