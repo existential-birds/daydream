@@ -24,7 +24,7 @@ from daydream.backends import (
     TextEvent,
     ToolStartEvent,
 )
-from daydream.backends.codex import CodexBackend, CodexUnsubmittedTurn
+from daydream.backends.codex import CodexBackend
 from daydream.backends.pi import PiBackend
 from daydream.config import RETRY_CIRCUIT_FAILURE_THRESHOLD
 from daydream.host_tools import (
@@ -33,6 +33,7 @@ from daydream.host_tools import (
     HostToolCallBudgetExceeded,
     HostToolFatal,
     HostToolRejected,
+    UnsubmittedTurn,
 )
 from daydream.prompt_budget import prepare_sanctioned_inputs
 from daydream.retry_policy import derive_retry_summary
@@ -504,11 +505,11 @@ async def test_concurrent_invocations_share_one_run_scoped_circuit(
     assert RunContext(InteractionPolicy(interactive=False)).outage_circuit.state() == "closed"
     # Reviewers that never submit, each retried once, leave the circuit closed; the provider failures that
     # follow one more unsubmitted turn still get the whole threshold of retries.
-    unsubmitted = CodexUnsubmittedTurn("no accepted submission", category="STREAM_TRUNCATION")
+    unsubmitted = UnsubmittedTurn("no accepted submission")
     policy = RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0)
     for _ in range(RETRY_CIRCUIT_FAILURE_THRESHOLD):
         silent = ScriptedBackend(events=[unsubmitted], model="mock-model", retry_policy=policy)
-        with pytest.raises(CodexUnsubmittedTurn):
+        with pytest.raises(UnsubmittedTurn):
             await run_agent(silent, tmp_path, "go", phase=DaydreamPhase.FIX, run_context=run_context)
         assert silent.call_count == 2 and run_context.outage_circuit.state() == "closed"
     flaky = ScriptedBackend(model="mock-model", retry_policy=policy, script=[

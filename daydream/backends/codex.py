@@ -69,6 +69,7 @@ from daydream.host_tools import (
     HostToolEndpoint,
     HostToolFatal,
     HostToolRejected,
+    UnsubmittedTurn,
 )
 from daydream.pricing import ModelPrice, compute_cost_from_totals, load_user_prices, resolve_prices
 from daydream.prompts import grounding
@@ -452,13 +453,6 @@ class CodexLifecycleError(CodexError):
         super().__init__(lifecycle_failure_diagnostic(failure) or "Codex lifecycle diagnostic unavailable",
                          category="TIMEOUT",
                          retryable=not failure.terminal_received if failure.stage == "process_reap" else False)
-
-
-class CodexUnsubmittedTurn(CodexError):
-    """A completed host-tools turn with nothing accepted: one fresh attempt, then ``missing_output``."""
-
-    max_retries = 1
-    reason_code = "missing_output"
 
 
 def _file_change_events(
@@ -1463,12 +1457,10 @@ class CodexBackend:
                 # completed turn, zero exit and cleanup settle it.
                 _pending_result.structured_output = host.binding.accepted_result
                 host.binding.native_settled = host.binding.accepted
-            if _pending_result is not None:
-                yield _pending_result
+            yield _pending_result
             if host is not None and not host.binding.closed:
                 # Neither accepted nor failed.
-                raise CodexUnsubmittedTurn("Codex completed its turn without an accepted structured_output submission",
-                                           category="STREAM_TRUNCATION")
+                raise UnsubmittedTurn("Codex completed its turn without an accepted structured_output submission")
 
         except StreamStalledError as exc:
             stage: LifecycleStage = "terminal_drain" if terminal_deadline is not None else "preterminal_stream"

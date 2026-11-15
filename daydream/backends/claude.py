@@ -65,7 +65,7 @@ from daydream.backends import (
 )
 from daydream.backends.lifecycle import current_backend_lifecycle
 from daydream.config import TEST_WALL_BUDGET_S
-from daydream.host_tools import HostToolBinding, HostToolEndpoint, HostToolFatal, HostToolRejected
+from daydream.host_tools import HostToolBinding, HostToolEndpoint, HostToolFatal, HostToolRejected, UnsubmittedTurn
 
 # Non-posix shlex splits controls into characters, including redirection.
 # Leading parentheses are checked separately; mid-word parentheses produce
@@ -1438,6 +1438,9 @@ class ClaudeBackend:
                 )
                 if host_tools is not None and host_tools.fatal_error is not None:
                     raise host_tools.fatal_error
+                if host_tools is not None and not host_tools.closed:
+                    # Neither accepted nor failed.
+                    raise UnsubmittedTurn("Claude completed its turn without an accepted structured_output submission")
             except GeneratorExit:
                 if host_tools is not None:
                     host_tools.close_attempt()

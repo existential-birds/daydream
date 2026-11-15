@@ -2618,8 +2618,8 @@ async def test_committed_review_completes_through_native_host_tools(
     """A native CLI reviews captured source and challenges in a distinct conversation.
 
     Discovery reads exact captured bytes through review_source, corrects a domain rejection and
-    submits; the fresh challenge confirms the claim. Codex's first discovery turn ends unsubmitted
-    and is retried once, and its unsubmitted turns that cannot be recovered stay missing output.
+    submits; the fresh challenge confirms the claim. The first discovery turn ends unsubmitted and
+    is retried once, and unsubmitted turns that cannot be recovered stay missing output.
     Outputs, trajectory, native contexts and execution entries come from the production program,
     not a substituted dispatcher. Claude is its real bundled CLI on the run-local SDK route; Codex
     is an external process that is a real MCP client of the invocation's loopback server, since
@@ -2640,6 +2640,7 @@ async def test_committed_review_completes_through_native_host_tools(
         review_profile=replace(profile, profile=replace(profile.profile, strategies=strategies))))
     delivered: list[tuple[str, str]] = []
     capture_reads: list[bool] = []
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: 0.0)
     monkeypatch.setenv("PATH", os.pathsep.join(entry for entry in os.environ["PATH"].split(os.pathsep)
                                                if shutil.which("daydream", path=entry) is None))
     assert shutil.which("daydream") is None
@@ -2679,6 +2680,12 @@ async def test_committed_review_completes_through_native_host_tools(
                 # The host's own copy of the guidance closes the first message.
                 command = named_search.findall(delivered[-1][1])[-1]
                 return tool("search", "Bash", {"command": f"{command} VALUE api.py"})
+            if step == 5:
+                # The first conversation ends with its batch admitted and nothing submitted.
+                return Turn(text="Discovery paused.")
+            if step == 6:
+                # The fresh retry admits the first conversation's claim again.
+                return tool("again", "mcp__daydream__review_admit", {"targets": [], "claims": claims})
             failed, texts = last_result(body)
             if step == 2:
                 searched.append((failed, texts))
@@ -2698,7 +2705,10 @@ async def test_committed_review_completes_through_native_host_tools(
                             {"targets": [{**decisions[0], "target_id": "unplanned"}], "claims": []})
             if step == 4:
                 assert failed and "choose a planned target" in texts[0]
-                return tool("submit", "mcp__daydream__structured_output", {"targets": decisions, "claims": claims})
+                return tool("admit", "mcp__daydream__review_admit", {"targets": decisions, "claims": claims})
+            if step == 7:
+                assert failed and "a retained claim already states exactly this claim" in texts[0]
+                return tool("submit", "mcp__daydream__structured_output", {"targets": [], "claims": []})
             return Turn(text="Discovery complete.")
 
         provider = LoopbackProvider(respond)
@@ -2715,7 +2725,6 @@ async def test_committed_review_completes_through_native_host_tools(
         monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
         monkeypatch.setenv("no_proxy", "proxied.invalid")
         monkeypatch.delenv("NO_PROXY", raising=False)
-        monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: 0.0)
         real_open = os.open
 
         def read(path: Any, *args: Any, **kwargs: Any) -> int:
@@ -2738,11 +2747,11 @@ async def test_committed_review_completes_through_native_host_tools(
     assert all(len(context["configuration_identity"]) == 64 for context in contexts.values())
     assert [{key: entry[key] for key in ("assignment", "accepted", "settled", "cleanup_complete", "reason",
                                          "observed_starts", "overshoot")} for entry in value["execution"]] == [
-        # Codex also starts two tools of its own and admits a batch, each counted once, and its one
-        # host call after acceptance is observed without being charged. Its first attempt ended unsubmitted
-        # after five starts, which the retry's dispatch refunded.
+        # The first attempt ended unsubmitted after four starts (five on Codex), which the retry's dispatch
+        # refunded. Codex also starts two tools of its own and admits a batch, each counted once, and its one
+        # host call after acceptance is observed without being charged.
         {"assignment": "discovery", "accepted": True, "settled": True, "cleanup_complete": True, "reason": None,
-         "observed_starts": 4 if backend == "claude" else 12, "overshoot": 0 if backend == "claude" else 1},
+         "observed_starts": 6 if backend == "claude" else 12, "overshoot": 0 if backend == "claude" else 1},
         {"assignment": "challenge", "accepted": True, "settled": True, "cleanup_complete": True, "reason": None,
          "observed_starts": 1, "overshoot": 0}]
     trajectory = root_trajectory(repo)
@@ -2764,6 +2773,20 @@ async def test_committed_review_completes_through_native_host_tools(
         challenge = next(body for body in provider.requests if assignment(body)["kind"] == "challenge")
         assert not any(message["role"] == "assistant" for message in challenge["messages"])
         assert "discovery assignment" not in json.dumps(challenge["messages"])
+        # A discovery that never submits gets one fresh conversation and stays missing output. Its turns are
+        # the provider answering: under a one-failure threshold, counting them would open the outage circuit.
+        quiet = LoopbackProvider(lambda body: Turn(text="Nothing to report."))
+        claude_cli_env(monkeypatch, quiet, tmp_path / "home")
+        monkeypatch.setattr("daydream.config.RETRY_CIRCUIT_FAILURE_THRESHOLD", 1)
+        with quiet.serving():
+            incomplete = (await run_committed_review(request)).to_dict()
+        fresh = [all(message["role"] != "assistant" for message in body["messages"]) for body in quiet.requests]
+        assert fresh == [True, True] and [(entry["assignment"], entry["accepted"], entry["reason"]) for entry in
+                                          incomplete["execution"]] == [("discovery", False, "missing_output")]
+        events = json.loads((repo / ".daydream/runs" / incomplete["run_id"] / "trajectory.json").read_text())
+        assert [(event["metadata"]["retry_stop_reason"], event["metadata"]["attempts"],
+                 event["metadata"]["circuit_state"]) for event in events["extra"]["phase_events"]
+                if event["event"] == "agent_budget_stop"] == [("retry_attempts_exhausted", 1, "closed")]
     else:
         # One process per attempt, each registered with this attempt's server and nothing weaker. The
         # first discovery process ended its turn unsubmitted, so the host retried it once in a fresh one.
@@ -2800,18 +2823,11 @@ async def test_committed_review_completes_through_native_host_tools(
         # Each attempt has its own secret, and the bound identity follows the phase's native selection.
         assert len({row["host"]["token"] for row in hosts.values()}) == 3
         assert contexts["discovery"]["configuration_identity"] != contexts["challenge"]["configuration_identity"]
-        # The unsubmitted attempt's admitted decisions and claim are retained, and its retry's first message
-        # ends with a host line saying so. The claim the retry admits again is refused, so one claim is sealed.
+        # The claim the retry admits again is refused, so one claim is sealed.
         unsubmitted, served = hosts["discovery"]["host"]["calls"], hosts["retry"]["host"]["calls"]
         assert [(name, failed) for name, failed, _ in unsubmitted] == [
             ("review_source", False), ("structured_output", True), ("review_admit", False)]
         assert '"admitted":{"decisions":2,"claims":[{' in unsubmitted[2][2][0]
-        retry_prompt = hosts["retry"]["host"]["prompt"]
-        told = retry_prompt.split(f"\n{retry_prompt.split(' ', 1)[0]} {_ADMITTED} ", 1)[1]
-        admitted = json.JSONDecoder().raw_decode(told)[0]
-        assert admitted["undecided_targets"]["ids"] == [] and [
-            (claim["title"], claim["disposition"]) for claim in admitted["claims"]] == [
-            ("Zero divides the caller", "unresolved")]
         assert [(name, failed) for name, failed, _ in served] == [
             ("review_source", False), ("structured_output", True), ("review_admit", True),
             ("structured_output", False), ("review_source", True)]
@@ -2880,6 +2896,14 @@ async def test_committed_review_completes_through_native_host_tools(
                 for work, _ in processes if work["kind"] == "cross_assignment"] == [([], 0)]
         assert all(len(row["host"]["instructions"].encode()) < 10 * 1024
                    for row in [*codex.observations(), *silent.observations(), *split.observations()])
+    # The unsubmitted attempt's admitted decisions and claim are retained, and its one retry's first message
+    # ends with a host line saying so.
+    (retry_prompt,) = {prompt for _, prompt in delivered if _ADMITTED in prompt}
+    told = retry_prompt.split(f"\n{retry_prompt.split(' ', 1)[0]} {_ADMITTED} ", 1)[1]
+    admitted = json.JSONDecoder().raw_decode(told)[0]
+    assert admitted["undecided_targets"]["ids"] == [] and [
+        (claim["title"], claim["disposition"]) for claim in admitted["claims"]] == [
+        ("Zero divides the caller", "unresolved")]
     assert len(delivered) >= 2
     for system, prompt in delivered:
         assert "at most four selectors, and evidence_refs=[] records up to four of a target's sources." in system

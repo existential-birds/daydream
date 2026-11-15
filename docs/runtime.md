@@ -725,9 +725,10 @@ provider failure leads to a retry, the failed attempt's tool calls are refunded 
 the retry dispatches, because it is a fresh native conversation that must redo the
 lost work; a retry stopped before dispatch refunds nothing. Elapsed time is never refunded. Retries stay bounded by the
 attempt count, the absolute deadline and the outage circuit; a failure after possible
-host acceptance still permits no retry. A Codex turn that completes with nothing accepted
-is retried under this rule only as the invocation's first retry, and the outage circuit
-records it as a completed turn, never as a failure ([Codex host tools](#codex-host-tools)).
+host acceptance still permits no retry. A Claude or Codex turn that completes with nothing
+accepted is retried under this rule only as the invocation's first retry, and the outage
+circuit records it as a completed turn, never as a failure
+([Claude](#claude-host-tools) and [Codex host tools](#codex-host-tools)).
 Apart from that rejected submission, paths that do not retry are never refunded,
 including a committed challenge re-dispatch. Committed
 batches admitted before a provider failure stay installed while that attempt's starts
@@ -897,7 +898,11 @@ under the same platform bound as Codex's; the first message reaches the CLI on s
   starts are denied without charge or failure and observed once as overshoot, and a
   sibling call admitted before acceptance is refused without failing the assignment.
 - Settlement: a successful result after acceptance settles; a native error keeps the
-  admission and usage and is not retried. A host fatal interrupts the conversation,
+  admission and usage and is not retried. A successful result with nothing accepted and
+  no host fatal is a retryable truncation, recovered as on [Codex](#codex-host-tools): one
+  fresh conversation as the invocation's first retry under the
+  [renewal rule](#budget-ledger), and `missing_output` if that conversation ends
+  unsubmitted too. A host fatal interrupts the conversation,
   which is not an instant stop. Every exit, including cancellation, closes the attempt
   before its own client disconnects; consumer closure also interrupts and drains that
   client first. Disconnecting closes the SDK bridge within its 5 s grace, and a retired
