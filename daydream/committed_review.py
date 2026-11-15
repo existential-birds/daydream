@@ -893,11 +893,11 @@ final batch and ends this assignment; call it alone in a completed generation. E
 rejected batch changes nothing and may be corrected within the original cumulative allowance. Undecided
 targets remain typed unfinished work. Empty findings are legitimate.
 Limits: a batch holds at most 128 targets or verdicts and 128 claims in 131072 bytes of arguments, and one
-evidence_refs array 8192 bytes. reason holds at most 1024 characters, an id 512 (a new claim's uid is empty),
-source_uids 128 unique ids and any other text 1 to 4096; a not_reviewed reason and verdict grounds are never
-blank. Retained claims share one byte capacity, what the review's findings export holds (verdicts are not
-counted), and target reasons another. target_id is a catalog id: a file split into parts is decided by its
-part ids, never by its path.
+evidence_refs array 8192 bytes. reason holds at most 1024 characters, a target_id 4096, any other id 512 (a new
+claim's uid is empty), source_uids 128 unique ids and any other text 1 to 4096; a not_reviewed reason and verdict
+grounds are never blank. Retained claims share one byte capacity, what the review's findings export holds
+(verdicts are not counted), and target reasons another. target_id is a catalog id: a file split into parts is
+decided by its part ids, never by its path.
 A claim names a changed file. Non-empty evidence_refs of a reviewed target include one of its own
 source_ids; a claim's are never empty and, like a verdict's, include an assigned source_id. An assigned
 source_range only narrows the offered range. A supporting selector names a regular UTF-8 file of at most

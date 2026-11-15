@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A changed path longer than 512 characters no longer stops the review before any model call with
+  a "narrow the review base" capacity message. Target ids and scope files now accept paths up to
+  4096 characters, as source references do. A path whose diff header alone cannot fit one review
+  assignment is refused at planning with a message that names it
+  ([#1856](https://github.com/existential-birds/daydream/issues/1856)).
 - A changed file containing bytes that are not valid UTF-8, such as a Latin-1 source file, no
   longer crashes review or fixing with `UnicodeDecodeError` before any work starts. The review diff
   shows those bytes as U+FFFD, so the file is reviewed as text, while the captured source keeps the

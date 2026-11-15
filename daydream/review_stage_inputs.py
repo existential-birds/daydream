@@ -310,7 +310,8 @@ class StageInputFactory:
             # encoded prefix so multi-MB hunks are not re-encoded per fragment.
             low = len(inputs.truncate_utf8_to_budget(rest[:max(0, allowance)], max(0, allowance)))
             if low == 0:
-                raise inputs.SanctionedInputUnavailable("required change header exceeds the assignment allowance")
+                raise inputs.SanctionedInputUnavailable(
+                    f"required change header of {path[:160]!r} exceeds the assignment allowance")
             boundary = rest.rfind("\n", 0, low)
             take = boundary + 1 if boundary >= 0 else low
             chunk = rest[:take]

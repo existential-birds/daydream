@@ -188,7 +188,8 @@ At sealing every planned target has exactly one typed decision: an admitted mode
 decision or a host-authored `not_reviewed` decision whose reason starts with
 `unsubmitted:`. Coverage shards targets in inventory order into scopes of 12
 (`committed:NNNNN`, `shard` = index); a full shard of worst-case decisions (four
-references, 1024-character reasons) fits the 256 KiB scope bound. Review reserves
+references, 1024-character reasons, target ids that are paths of up to 4096 bytes without
+control characters) fits the 256 KiB scope bound. Review reserves
 that typed unfinished attribution before model work and refuses, before any model
 work, a plan whose minimal attribution exceeds the 8 MiB run allocation. Claim lines must fall inside a cited `source_range` or, for exact
 continuation fragments, inside that fragment's summarized complete-line span; the
@@ -409,7 +410,10 @@ and split into whole parts sized to the transport's assignment allowance
 ([review assignments](../daydream/review_stage_inputs.py)). Changed canonical bytes
 are refused, never re-read. Review diffs show bytes that are not UTF-8 as U+FFFD, so
 such a file is reviewed as text; identity stays with the raw Git objects, and a
-supporting selector still requires a UTF-8 file.
+supporting selector still requires a UTF-8 file. An unsplit file's target id is its
+path, and paths up to 4096 characters fit every coverage and result schema, as source
+references do. A path whose diff header alone cannot fit one assignment allowance is
+refused at planning by name.
 
 ### Captured local source
 

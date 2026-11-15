@@ -13,6 +13,7 @@ from daydream.host_tools import _MAX_ARGUMENT_BYTES
 from daydream.immutable_review import IMMUTABLE_REVIEW_INPUT_SCHEMA, validate_immutable_input
 from daydream.json_utils import canonical_json, validate_json_schema
 from daydream.output_schema import severity_enum_schema, strict_object
+from daydream.repository_paths import REPOSITORY_FILE_PATH_MAX_LENGTH
 from daydream.review_result import TERMINAL_RESULT_SCHEMA, ReasonCode, validate_terminal_result
 from daydream.review_source_refs import (
     SOURCE_REF_SCHEMA,
@@ -25,6 +26,8 @@ from daydream.review_source_refs import (
 
 _TEXT = {"type": "string", "minLength": 1, "maxLength": 4096}
 _ID = {"type": "string", "maxLength": 512}
+# An unsplit file's target id is its path.
+_TARGET_ID = {"type": "string", "maxLength": REPOSITORY_FILE_PATH_MAX_LENGTH}
 _NULLABLE_SELECTOR = {"type": ["string", "null"], "maxLength": 4096}
 # Each native submission admits a bounded batch; the population itself is unbounded
 # here and limited only by capture, retained-coverage and transport bounds below.
@@ -33,7 +36,8 @@ COMMITTED_SUBMISSION_MAX_BYTES = _MAX_ARGUMENT_BYTES
 # Instructions ask for batches this size; preflight requires one to fit native output.
 COMMITTED_BATCH_OUTPUT_BYTES = 32 * 1024
 # Reasons stay small enough that a full shard of worst-case decisions (four refs
-# each) always fits the shared 256 KiB per-scope retained attribution bound.
+# each, target ids up to 4096 path bytes without control characters) always fits
+# the shared 256 KiB per-scope retained attribution bound.
 COMMITTED_REASON_MAX_CHARS = 1024
 COVERAGE_SHARD_TARGETS = 12
 COVERAGE_MAX_SHARDS = 10000
@@ -72,7 +76,7 @@ def _claim_schema(*, selectors: bool) -> dict[str, Any]:
 def assignment_schema(kind: str, *, selectors: bool) -> dict[str, Any]:
     """Use the same assignment shape for model selectors and canonical host output."""
     fields: dict[str, Any] = (
-        {"target_id": _ID, "status": {"enum": ["reviewed", "not_reviewed"]},
+        {"target_id": _TARGET_ID, "status": {"enum": ["reviewed", "not_reviewed"]},
          "reason": {"type": "string", "maxLength": COMMITTED_REASON_MAX_CHARS}}
         if kind == "discovery" else
         {"uid": _ID, "revision": {"type": "integer", "minimum": 1},
@@ -96,7 +100,7 @@ def receipt_schema(kind: str) -> dict[str, Any]:
             "uid": _ID, "revision": {"type": "integer", "minimum": 1}, "title": _TEXT}))}),
         "progress": strict_object({
             "decided": count, "total": count, "remaining": count,
-            "next_undecided": _array(_ID, 8), "pending_challenge": count,
+            "next_undecided": _array(_TARGET_ID, 8), "pending_challenge": count,
         }),
     })
 
@@ -138,10 +142,10 @@ _REVISION_REF = strict_object({"uid": _ID, "revision": {"type": "integer", "mini
 _WORK_SCHEMA = strict_object({
     "work_id": _ID, "kind": {"enum": WORK_KINDS}, "parents": {"type": "array", "items": _ID},
     "state": {"enum": ["planned", "open", "accepted", "closed", "superseded"]},
-    "targets": {"type": "array", "items": _ID},
+    "targets": {"type": "array", "items": _TARGET_ID},
     "claims": {"type": "array", "items": _REVISION_REF},
     "superseded_by": {"type": "array", "items": _ID},
-    "admitted_targets": {"type": "array", "items": _ID},
+    "admitted_targets": {"type": "array", "items": _TARGET_ID},
     "admitted_claims": {"type": "array", "items": _REVISION_REF},
     "verdicts": {"type": "array", "items": _REVISION_REF},
 })
@@ -155,7 +159,7 @@ COMMITTED_RESULT_SCHEMA = strict_object({
         "type": "object",
         "required": ["target_id", "file", "source_refs"],
         "properties": {
-            "target_id": _ID, "file": _TEXT,
+            "target_id": _TARGET_ID, "file": _TEXT,
             "source_refs": {"type": "array", "minItems": 1, "items": SOURCE_REF_SCHEMA},
         },
     }, COVERAGE_SHARD_TARGETS * COVERAGE_MAX_SHARDS),
