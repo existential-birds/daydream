@@ -178,9 +178,10 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
     Codex-owned starts, a rejected submission, an admitted batch, the terminal submission
     and two host calls after acceptance) or challenged, every assigned claim in one turn;
     one with no targets submits an empty batch. The first review attempt admits its
-    targets and ends its turn unsubmitted; the host's retry admits the claim and submits.
-    Mode ``unsubmitted`` admits its claim, then its targets, and never submits its review, and
-    judges nothing until a challenge supersedes the unsubmitted one. Otherwise the user prompt
+    targets and its claim and ends its turn unsubmitted; the host's retry admits the same
+    claim again, whatever its first message says, and submits. Mode ``unsubmitted`` admits its
+    claim, then its targets, and never submits its review, its retry repeating the claim twice,
+    and judges nothing until a challenge supersedes the unsubmitted one. Otherwise the user prompt
     is the JSON submission, followed by as many Codex-owned shell starts as its ``shells`` asks.
     """
     from mcp import ClientSession
@@ -276,8 +277,9 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
                     await call("structured_output", {"targets": [{**decisions[0], "target_id": "unplanned"}],
                                                      "claims": []})
                 retry = "Retry dispatch-time snapshot" in prompt
-                await call("review_admit", {"targets": [] if retry else decisions, "claims": [claim] if retry else []})
-                if retry:
+                await call("review_admit", {"targets": [] if retry else decisions,
+                                            "claims": [] if mode == "unsubmitted" and not retry else [claim]})
+                if retry and mode != "unsubmitted":
                     await call("structured_output", {"targets": [], "claims": []})
                     # After acceptance: one host call the host refuses, one Codex fails itself.
                     await call("review_source", lookup)

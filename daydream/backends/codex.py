@@ -539,7 +539,6 @@ class _CodexHostEndpoint(HostToolEndpoint):
         self.token = secrets.token_urlsafe(32)
         self.url = ""
         self._calls = 0
-        self.claims_admitted = False
         self._stop = asyncio.Event()
         self._serving: asyncio.Task[None] | None = None
 
@@ -621,10 +620,7 @@ class _CodexHostEndpoint(HostToolEndpoint):
                                        "the call was not served", code="authority_closed")
             binding.admit(call_id, name, arguments, terminal=name == NATIVE_SUBMIT)
             if name != NATIVE_SUBMIT:
-                receipt = binding.call(call_id, name, arguments)
-                # A committed-review admission receipt lists the claims its batch touched.
-                self.claims_admitted |= bool(receipt.get("admitted", {}).get("claims"))
-                return False, self.result_blocks(receipt)
+                return False, self.result_blocks(binding.call(call_id, name, arguments))
             result = binding.submit(call_id, arguments)
             # Acceptance closes authority at once: later starts become observed overshoot.
             binding.close_authority()
@@ -1463,9 +1459,8 @@ class CodexBackend:
                 host.binding.native_settled = host.binding.accepted
             if _pending_result is not None:
                 yield _pending_result
-            if host is not None and not host.binding.closed and not host.claims_admitted:
-                # Neither accepted nor failed. A fresh conversation is not told what this one admitted,
-                # so a turn that admitted a claim is never replayed.
+            if host is not None and not host.binding.closed:
+                # Neither accepted nor failed.
                 raise CodexUnsubmittedTurn("Codex completed its turn without an accepted structured_output submission",
                                            category="STREAM_TRUNCATION")
 
