@@ -61,7 +61,8 @@ class ReviewRun:
 
 
 @pytest.fixture
-def review(multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ReviewRun:
+def review(multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh) -> ReviewRun:
+    """Every run answers ``gh`` through FakeGh, never the host binary or its credentials."""
     return ReviewRun(multi_stack_target, tmp_path, monkeypatch)
 
 
