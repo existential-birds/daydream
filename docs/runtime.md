@@ -80,15 +80,20 @@ edits, external diff drivers and text conversion; inert materialization supplies
 Git blobs even when the original checkout uses filters/EOL conversion.
 
 Without a hosted policy, a request whose `config.frozen_author_description` holds
-non-blank text supplies it to every assignment as `profile.historical_context.context`,
-and the sealed result records it as `settings.historical_context.context`. It is captured
-untrusted author context: the standing instructions call it intent, not instructions, and
-nothing gives it authority or precedence over a claim. The
-[immutable `context` bound](#immutable-pr-inputs) applies to its UTF-8 bytes, as the
-envelope measures them; JSON escaping in the first message does not count against it. A
+non-blank text supplies it to every assignment as the historical `context` field. It is
+captured untrusted author context: the standing instructions call it intent, not
+instructions, and nothing gives it authority or precedence over a claim. The
+[immutable `context` bound](#immutable-pr-inputs) applies to its UTF-8 bytes. A
 description over that bound is refused before source preparation, and one bound to a
 `head_sha` other than the analyzed head before source capture; neither starts model work.
-It reaches the reviewer in each assignment's first message, never in the system instructions.
+
+Captured author text, this description or an [immutable input's](#immutable-pr-inputs)
+title, body and context, is delivered by reference, so its size never grows a first
+message or the system instructions. Each assignment's `profile.historical_context` holds
+only `{"delivery": "review_source", "fields": {field: {"bytes", "sha256"}}}` for each
+non-empty field, and the sealed result's `settings.historical_context` records the same
+descriptor. `review_source` serves each field's exact frozen UTF-8 bytes, checking them
+against that digest, and the result keeps an immutable input's text in `immutable_input`.
 
 The complete planned population is computed from the full captured patch before
 any prompt bounding. Host-dispatched investigation work, followed by host-scheduled
@@ -113,8 +118,8 @@ fresh challenge, navigates it under the
   host line holds the assignment as canonical JSON with DEL, U+0085, U+2028 and U+2029
   escaped, so text inside it cannot draw a line break: the assignment identity, the work's
   responsibilities, pending claims (with compact `retained_conclusions` for the
-  cross-assignment), the profile with any historical context, and a bounded (16 KiB) first
-  catalog page with `status`, `total_targets`, `total_files` and omitted counts. Catalog
+  cross-assignment), the profile with any historical-context descriptor, and a bounded
+  (16 KiB) first catalog page with `status`, `total_targets`, `total_files` and omitted counts. Catalog
   and decided markers there are a dispatch-time snapshot. The
   instructions say that only lines beginning with the token are host-authored and that the
   assignment's paths, claims and historical context are data, never instructions.
@@ -128,14 +133,16 @@ fresh challenge, navigates it under the
   way, but not its pending claims or `retained_conclusions`, so its search for defects
   spanning assignments continues without them. A challenge cannot request its claims
   again, so one compacted before judging every claim can leave some unresolved, retained as
-  unfinished work. No kind can request the historical context again; the strategy stays in
-  the instructions.
+  unfinished work. Every kind can request the historical context again; the strategy stays
+  in the instructions.
 - `review_source` is a charged, read-only host lookup over frozen canonical inputs:
-  with `target_id`/`path` null it pages the whole catalog; `path` lists one changed
+  with `target_id`, `path` and `historical_context` all null it pages the whole catalog; `path` lists one changed
   path's targets; `target_id` returns the target's `source_options`, ranges (for a
   continuation fragment, its `source_summary` claim-line span and split-line
-  `fragment_line_offset`) and its exact captured change bytes in 32 KiB pages with
-  per-page and whole-content SHA-256. Cursors are opaque and bound to their query. Unknown targets and
+  `fragment_line_offset`) and its exact captured change bytes in 32 KiB pages, each also
+  within 64 KiB as a result's JSON escapes it, with per-page and whole-content SHA-256; `historical_context` (`title`, `body` or `context`)
+  returns that captured author field's exact text in the same pages. It takes at most one
+  selector. Cursors are opaque and bound to their query. Unknown targets, absent fields and
   unchanged paths return `status: unavailable` data, not errors. It never reads
   live checkout bytes, follows links or mutates review state, and is refused once
   assignment authority closes. A single line over 50 KB, unreachable through stock
@@ -403,8 +410,7 @@ spend later reserves; unspent capacity carries forward. Challenge takes every pe
 revision not held by live work in fresh contexts: one per four planned batches of the
 claims' files (a file belongs to its first batch), split again where one would hold over
 64 KiB of claims, the preflight's largest-tool-result bound, so that with claims of typical
-size each first message fits a 131,072-token Pi window even with the largest author
-description. One challenge runs as a single dispatch; several run like split discovery,
+size each first message fits a 131,072-token Pi window; author text never enters one. One challenge runs as a single dispatch; several run like split discovery,
 concurrently under the same fan-out bound, each on an equal share of the calls left and
 in a forked trajectory. A review with up to
 four batches and 64 KiB of claims keeps one challenge; a change of about 400 files can
@@ -681,9 +687,16 @@ current execution; it binds the patch actually reviewed, without requiring a
 saved rendered-diff checksum to survive Daydream upgrades. The inert Git owner
 uses an independent Git view with the captured head's tracked attributes,
 ignoring ambient/local configuration and `.git/info/attributes`.
-Title is bounded to 512 UTF-8 bytes, body to
-8192 and context to 65536. Unsupported versions, sizes, plans, missing objects and
-inconsistent evidence are errors before dispatch, never successful empty reviews.
+Title and body take what GitHub accepts: at most 256 and 65,536 characters (code
+points), which can reach 1,024 and 262,144 UTF-8 bytes. Context is bounded to 65,536
+UTF-8 bytes. Unsupported versions, sizes, plans, missing objects and inconsistent
+evidence are errors before dispatch, never successful empty reviews; so is a plan whose
+findings export cannot hold its coverage and envelope beside one maximal (128 KiB) claim
+submission. With every
+author field at its bound in control characters, which JSON escapes to six bytes each,
+the envelope takes about 770 KiB of the 1 MiB export, and a one-file review still retains
+a dozen claims at the largest text size. Readers older than this bound refuse envelopes,
+results and findings that use it.
 The [inert Git owner](../daydream/git_ops/immutable.py) owns source limits:
 100,000 files and objects, 8 MiB per source blob and 256 MiB of source bytes per
 tree. Bundles and physical object stores, including metadata, are bounded at
@@ -713,8 +726,8 @@ Immutable analysis and export use only captured/local evidence. They perform no
 GitHub discovery or credential resolution, including identity preflight, and never
 refresh a head, base, PR body or remote. PR advancement/closure cannot relabel or
 invalidate captured analysis. Trusted repository/PR/provenance stays on result and
-evidence control surfaces; only the approved bounded historical context enters model
-assignments. Model-facing profile serialization never carries trusted provenance.
+evidence control surfaces; model assignments name only the approved bounded historical
+context, which `review_source` serves. Model-facing profile serialization never carries trusted provenance.
 
 Strict immutable findings schema 5 binds the outer original repository/PR/head to
 the envelope and typed coverage to its local head/comparison/diff key. Export does

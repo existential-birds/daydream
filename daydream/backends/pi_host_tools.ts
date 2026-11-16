@@ -39,7 +39,8 @@ export default function (pi: ExtensionAPI) {
       snippet: "Look up the frozen captured review's targets and exact change bytes",
       description: "Read-only host lookup of the frozen captured review: target_id=null and path=null page the target "
         + "catalog; target_id returns exact captured change bytes with its source_options; path lists that changed "
-        + "path's targets. Pass the returned cursor for the next page. Every call is charged and reports current "
+        + "path's targets; historical_context returns a captured author field the assignment lists. Pass null for "
+        + "the other selectors and the returned cursor for the next page. Every call is charged and reports current "
         + "host capacity.",
     },
     review_admit: {

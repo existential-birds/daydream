@@ -120,11 +120,10 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
         assert item["item_uid"] and item["rationale"].startswith("The changed behavior is incorrect.")
         assert not {"confidence", "lens"} & item.keys()
         assert json.loads((target / ".daydream/deep/merged-items.json").read_text())["items"] == review.items
-        # The embedder's description for this head reached both assignments as captured context.
-        sealed = json.loads((target / ".daydream/deep/committed-review.json").read_text())
-        assert sealed["settings"]["historical_context"] == {"context": "EMBEDDER_STATED_INTENT"}
-        assert [call["prompt"].count("EMBEDDER_STATED_INTENT")
-                for call in backend.calls if call.get("review_instructions")] == [1, 1]
+        # The embedder's description for this head reached both assignments as captured context, by reference.
+        assert [(call["prompt"].count("EMBEDDER_STATED_INTENT"), call["historical_context"])
+                for call in backend.calls if call.get("review_instructions")] == [
+            (0, {"context": "EMBEDDER_STATED_INTENT"})] * 2
         # A description frozen for another head, with no approved head to check it against earlier, is
         # refused when the review is planned: the run fails and no model is asked.
         calls = len(backend.calls)

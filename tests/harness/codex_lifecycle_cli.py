@@ -256,7 +256,7 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
                 targets = work["work"]["targets"]["ids"]
                 decisions = [{"target_id": target, "status": "reviewed", "reason": "Captured change inspected.",
                               "evidence_refs": []} for target in targets]
-                lookup = {"target_id": targets[0], "path": None, "cursor": None}
+                lookup = {"target_id": targets[0], "path": None, "historical_context": None, "cursor": None}
                 texts = await call("review_source", lookup)
                 option = next(item for item in json.loads(texts[0])["target"]["source_options"]
                               if item["side"] == "new")

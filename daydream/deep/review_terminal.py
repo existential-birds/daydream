@@ -121,9 +121,6 @@ async def plan_committed_review(
 
     settings = committed_review.review_settings(ctx.config)
     description = _author_description(ctx)
-    if description is not None:
-        # Captured untrusted author context: never authoritative over a claim.
-        settings["historical_context"] = {"context": description}
     backends = {}
     # A bound review context stays on its adapter instance, so the reviewer never shares one with a later phase.
     reviewers = replace(ctx, _backend_cache={})
@@ -135,6 +132,8 @@ async def plan_committed_review(
     program = await committed_review.plan_review(
         ctx.config, ctx.work, backends, settings, run_id=run_id, revision=revision, diff_path=state.diff_path,
         index_path=index_path, files=files, started=started,
+        # Captured untrusted author context: never authoritative over a claim.
+        historical_context=None if description is None else {"context": description},
     )
     ctx.data["committed_review"] = program
     ctx.data["review_coverage"] = program.review.coverage

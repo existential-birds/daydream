@@ -113,13 +113,24 @@ class StubBackend:
         """
         token = prompt.split(" ", 1)[0]
         assignment = json.loads(prompt.split("\n")[1].removeprefix(f"{token} Committed review assignment: "))
+        lookup = binding.host_tools["review_source"].callback
+        # Captured author text arrives by reference: fetch each field the assignment names, page by page.
+        fetched: dict[str, str] = {}
+        self.calls[-1]["historical_context"] = fetched
+        for field in assignment["profile"].get("historical_context", {}).get("fields", ()):
+            pages: list[str] = []
+            cursor: str | None = None
+            while not pages or cursor is not None:
+                page = lookup({"target_id": None, "path": None, "historical_context": field, "cursor": cursor})
+                pages.append(page["content"])
+                cursor = page["next_cursor"]
+            fetched[field] = "".join(pages)
         if assignment["kind"] == "challenge":
             return {"claims": [], "verdicts": [
                 {"uid": claim["uid"], "revision": claim["revision"], "verdict": self.review_verdict,
                  "grounds": "Captured source was searched for counterevidence.", "evidence_refs": []}
                 for claim in assignment["claims"]]}
-        lookup = binding.host_tools["review_source"].callback
-        targets = [lookup({"target_id": target, "path": None, "cursor": None})["target"]
+        targets = [lookup({"target_id": target, "path": None, "historical_context": None, "cursor": None})["target"]
                    for target in assignment["work"]["targets"]["ids"]]
         decided = targets[:len(targets) - self.review_undecided] if self.review_undecided else targets
         wanted = self.review_claims
