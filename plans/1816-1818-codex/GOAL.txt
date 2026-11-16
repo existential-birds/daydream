@@ -1,0 +1,27 @@
+/goal Deliver a merge-ready PR for existential-birds/daydream #1816 + #1818 in one PR. When persist_session=False, Codex runs with --ephemeral. Codex's process-exit error keeps its own cause line. Codex MCP tool results are recorded as text or canonical JSON instead of a Python repr.
+
+Context: prep notes live only on branch claude/peaceful-gates-ri0icp. Run: git fetch origin claude/peaceful-gates-ri0icp && git restore --source=FETCH_HEAD --worktree -- plans/1816-1818-codex. plans/ is gitignored, so they stay untracked; never git add -f them. Read plans/1816-1818-codex/CONTEXT.md (decisions D1-D7, real-build evidence, code map, test plan, lanes, samples/, probe/). Then reread AGENTS.md, CONTRIBUTING.md, both issues and docs/runtime.md#codex-host-tools. If the restore fails, stop and report.
+
+Scope: daydream/backends/codex.py, tests/test_backend_codex.py, docs/runtime.md, docs/observability.md, CHANGELOG.md.
+Acceptance:
+- A non-persisted call adds --ephemeral, reports config.persist_session=False, never resumes and returns no continuation.
+- Persisted and resume argv are unchanged.
+- An unreachable required MCP server's cause line survives the excerpt, with the redaction, 256-char cap and 20 kept/10 printed preserved. The shared process_exit_message stays unchanged.
+- A recorded MCP result is its text blocks newline-joined, else canonical JSON.
+- Extend the 3 existing tests named in CONTEXT.md. Add no test functions.
+Pi's renderer and isError handling stay unchanged.
+
+Branch: the base is origin/main, at c41e07c1903bfecdf33b64febe615740370f35df on 2026-11-16. Fetch main and record its actual SHA. Work on this session's designated branch from that base. With no designated branch, create a unique fix/1816-1818-codex-ephemeral-evidence. Do not build on claude/peaceful-gates-ri0icp. Run make hooks.
+
+Implementation: use workers with disjoint ownership.
+- Lane A owns codex.py and the test file.
+- Lane B owns the docs and CHANGELOG after A's behavior is settled.
+Tell workers others are editing; never revert their changes. Then get a read-only independent review of the integrated diff via the code-review skill, and run test-audit on the changed tests. Fix verified findings.
+
+Validation: run make install, then the focused pytest from CONTEXT.md while working, git diff --check, then the full make check. Fix failures on the branch, even ones that predate this work, or report a blocker. Test Plan: the preparation's real-build evidence plus every command and result, separating ran from unavailable.
+
+Publication: stage paths explicitly, make signed Conventional Commits and push with hooks enabled; never use --no-verify or any other bypass. Open a ready-for-review PR via the GitHub MCP tools using the PR template and the pr skill, with Fixes #1816 and Fixes #1818, the SemVer impact (patch) and the changelog items.
+
+Review loop: verify the PR's base/head refs and SHAs. From the checkout, run daydream . --backend pi --comment --non-interactive --capture-data, adding only --base <verified SHA> if the default base is wrong. Record the command, SHAs, comparison base and result. Then run fetch-pr-feedback --include-author --include-self, receive-feedback and respond-pr-feedback for every reviewer and bot, including greptile-apps. Verify findings against the current code, fix, rerun the checks, push, reply and resolve eligible threads. Rerun Daydream on the latest HEAD and wait for pending bot runs and required CI. A Daydream or Pi failure, or missing auth, stays an explicit blocker.
+
+Authority: scoped edits, signed commits, pushes, PR open/update, replies and thread resolution are authorized without asking again. Done means every acceptance criterion is met; make check and CI pass on the latest HEAD; the reviews are addressed; the PR is ready for review; the PR diff has no plans/ files; and the tree is otherwise clean. Report the PR URL, final HEAD, checks and feedback dispositions. Stop before merging.
