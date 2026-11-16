@@ -272,8 +272,11 @@ async def test_nonzero_exit_raises_with_captured_output() -> None:
     assert len(bounded) <= 64 and "ghp_" not in bounded and "[REDACTED" in bounded
 
 
-async def _continuation_token_resumes_case(tmp_path: Path, read_only: bool) -> None:
-    """A resumed thread persists the requested output schema as native output."""
+async def _continuation_token_resumes_case(tmp_path: Path, read_only: bool, persist_session: bool) -> None:
+    """A persisted call resumes a Codex thread; an ephemeral one starts fresh and offers no continuation.
+
+    Both keep the requested output schema as native output.
+    """
     backend = CodexBackend(model="fixture-model")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     token = ContinuationToken(backend="codex", data={"thread_id": "th_prev"})
@@ -292,30 +295,37 @@ async def _continuation_token_resumes_case(tmp_path: Path, read_only: bool) -> N
                 "Continue",
                 continuation=token,
                 read_only=read_only,
+                persist_session=persist_session,
                 output_schema=schema,
             )
         ]
         call_args = mock_exec.call_args
         flat_args = list(call_args.args) if call_args.args else []
-        assert "resume" in flat_args
-        assert "th_prev" in flat_args and "--output-schema" in flat_args
+        assert ("resume" in flat_args, "th_prev" in flat_args) == (persist_session, persist_session)
+        assert ("--ephemeral" in flat_args) is not persist_session and "--output-schema" in flat_args
         request = next(event for event in events if isinstance(event, RequestEvent))
         assert isinstance(request.config, CodexRequestConfig)
-        assert request.config.continuation_mode == "resume" and request.config.native_output_schema is True
+        assert request.config.persist_session is persist_session and request.config.native_output_schema is True
+        assert request.config.continuation_mode == ("resume" if persist_session else "fresh")
         assert request.output_schema == schema == persisted
-        assert (request.session_id, request.session_source) == ("th_prev", "configured")
+        assert (request.session_id, request.session_source) == (
+            ("th_prev", "configured") if persist_session else (None, None)
+        )
         result = next(event for event in events if isinstance(event, ResultEvent))
-        assert result.continuation is not None
-        assert result.continuation.data["thread_id"] == "th_abc123"
+        assert (result.continuation.data["thread_id"] if result.continuation else None) == (
+            "th_abc123" if persist_session else None
+        )
         assert result.session_id == "th_abc123"
 
 
 async def test_continuation_token_resumes(tmp_path: Path) -> None:
-    for index, read_only in enumerate([False, True]):
+    for index, (read_only, persist_session) in enumerate([(False, True), (True, True), (False, False)]):
         try:
-            await _continuation_token_resumes_case(tmp_path=_case_dir(tmp_path, index), read_only=read_only)
+            await _continuation_token_resumes_case(
+                tmp_path=_case_dir(tmp_path, index), read_only=read_only, persist_session=persist_session,
+            )
         except BaseException as exc:
-            exc.add_note(f"case: read_only={read_only}")
+            exc.add_note(f"case: read_only={read_only} persist_session={persist_session}")
             raise
 
 
@@ -723,7 +733,22 @@ async def test_parser_diagnostic_precedes_nonzero_process_exit() -> None:
         "not-json token=opaque-parser-secret /Users/private-person/.codex/config.toml "
         + "x" * 500
     )
-    mock_proc = make_mock_process([secret_line] * 30)
+    # Codex's real required-MCP failure report: the cause twice, then a blank line and anyhow's backtrace.
+    cause = (
+        "required MCP servers failed to initialize: daydream: handshaking with MCP server failed: Send message error "
+        "Transport [codex_rmcp_client::tool_list_changes::ToolListChanges<rmcp::transport::worker::WorkerTransport>] "
+        "error: Client error: HTTP request failed: error sending request for url, when send initialize request"
+    )
+    lines = [
+        *[secret_line] * 30,
+        f"2026-11-16T20:46:32.480714Z ERROR codex_core::session: Failed to create session: {cause}",
+        f"Error: thread/start: thread/start failed: error creating thread: Fatal error: Failed to initialize session: "
+        f"{cause}",
+        "",
+        "Stack backtrace:",
+        *[f"  {frame}: <unknown>" for frame in range(24)],
+    ]
+    mock_proc = make_mock_process(lines)
     mock_proc.returncode = 9
     observed: list[Any] = []
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -731,9 +756,13 @@ async def test_parser_diagnostic_precedes_nonzero_process_exit() -> None:
             async for event in backend.execute(Path("/tmp"), "Fail"):
                 observed.append(event)
     assert isinstance(observed[-1], DiagnosticEvent)
-    assert observed[-1].metadata["non_json_lines"] == 30
+    assert observed[-1].metadata["non_json_lines"] == len(lines)
     assert "opaque-parser-secret" not in json.dumps(observed[-1].metadata)
     message = str(exc_info.value)
+    assert "last 10 non-JSON lines" in message
+    assert message.count("required MCP servers failed to initialize") == 2
+    assert message.splitlines()[-1].startswith("Error: thread/start:")
+    assert "<unknown>" not in message and "Stack backtrace" not in message
     assert "opaque-parser-secret" not in message
     assert "/Users/private-person" not in message
     assert len(message) <= 3_000
@@ -925,7 +954,8 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
                 "type": "mcp_tool_call",
                 "id": "write",
                 "tool": "Write",
-                "result": {"content": "permission denied"},
+                "result": {"content": [{"type": "text", "text": "permission denied"},
+                                       {"type": "image", "data": "aGk=", "mimeType": "image/png"}]},
                 "error": "permission denied",
             },
         },
@@ -933,7 +963,8 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
         {  # The CLI reports a result its MCP server marked as an error only through the status.
             "type": "item.completed",
             "item": {"type": "mcp_tool_call", "id": "refused", "server": "user", "tool": "Write", "error": None,
-                     "status": "failed", "result": {"content": [{"type": "text", "text": "refused"}],
+                     "status": "failed", "result": {"content": [{"type": "text", "text": "refused"},
+                                                                {"type": "text", "text": "second"}],
                                                     "structured_content": None}},
         },
         {
@@ -1008,7 +1039,12 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
     patch_start = next(event for event in events if isinstance(event, ToolStartEvent) and event.id == "patch")
     assert patch_start.input == {"file": "main.py", "action": "modified"}
     assert results["patch"].output == "modified: main.py" and not results["patch"].is_error
-    assert results["read"].output == "file contents" and results["write"].is_error
+    # MCP text blocks join with newlines; any other content is canonical JSON, never a Python repr.
+    mcp_outputs = {
+        "read": "file contents", "refused": "refused\nsecond",
+        "write": '[{"text":"permission denied","type":"text"},{"data":"aGk=","mimeType":"image/png","type":"image"}]',
+    }
+    assert {key: results[key].output for key in mcp_outputs} == mcp_outputs and results["write"].is_error
     assert results["refused"].is_error and results["refused"].status == "failed"
     terminal = [event for event in events if isinstance(event, ResultEvent)]
     assert len(terminal) == 1 and terminal[0].structured_output == {"issues": []}
@@ -1038,7 +1074,11 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
     assert steps[-1]["message"] == "Verified"
     assert steps[0]["reasoning_content"] == "I will inspect"
     assert [call["tool_call_id"] for call in steps[0]["tool_calls"]] == ["shell", "patch", "read", "write", "refused"]
-    assert {result["source_call_id"] for result in steps[0]["observation"]["results"]} == set(results)
+    recorded = {result["source_call_id"]: result.get("content") for result in steps[0]["observation"]["results"]}
+    assert recorded.keys() == results.keys()
+    # The trajectory redactor re-serializes JSON content, so the recorded JSON is compared by value.
+    assert [recorded["read"], recorded["refused"], json.loads(recorded["write"])] == [
+        mcp_outputs["read"], mcp_outputs["refused"], json.loads(mcp_outputs["write"])]
     assert process.returncode == 0 and backend._transports == []
     process.wait.assert_awaited()
     process.stdin.close.assert_called()
