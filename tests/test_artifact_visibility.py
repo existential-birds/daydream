@@ -632,6 +632,8 @@ async def test_artifact_session_preserves_resume_mtimes_across_publication_and_r
         dump_route = session.register_destination(dump, label=OutputLabel.DUMP_DIRECTORY)
         assert dump_route.write_path is None and not any(path.is_file() for path in dump.rglob("*"))
         document = _reference(session.daydream_dir / "runs" / session_id / RUN_DOCUMENT_NAME, session_id, payload)
+        # A directory beside a sibling whose name extends it (`evidence/`, `evidence.otlp.jsonl`) stays publishable.
+        _reference(session.daydream_dir / "runs" / session_id / "evidence/child.json", session_id, b"child")
         frozen = session.freeze(_snapshot(session_id, (document,)))
         assert (frozen.root / ".daydream/runs" / session_id / RUN_DOCUMENT_NAME).read_bytes() == payload
         with pytest.raises(ArtifactVisibilityError, match="frozen"):
@@ -639,15 +641,20 @@ async def test_artifact_session_preserves_resume_mtimes_across_publication_and_r
         late = session.finalization_merge_path(dump_route, snapshot=frozen)
         (late / "replace.txt").write_bytes(b"new")
         (late / "added.txt").write_bytes(b"added")
+        (late / "name").mkdir()
+        (late / "name/child").write_bytes(b"child")
+        (late / "name.ext").write_bytes(b"ext")
         _publish(session, frozen)
     assert findings.read_bytes() == b"published explicit bytes"
     assert (dump / "unrelated.bin").read_bytes() == b"preserve me"
     assert (dump / "replace.txt").read_bytes() == b"new" and (dump / "added.txt").read_bytes() == b"added"
+    assert (dump / "name/child").read_bytes() == b"child" and (dump / "name.ext").read_bytes() == b"ext"
     assert not unused_dump.exists() and not unused_dump.parent.exists()
     assert (source / ".daydream/deep/prior.md").read_bytes() == b"prior reasoning\n"
     assert not (source / ".daydream/review-cache").exists()
     assert not any((owner.artifact_state_root / "transactions").iterdir())
     assert (source / ".daydream/runs" / session_id / RUN_DOCUMENT_NAME).read_bytes() == payload
+    assert (source / ".daydream/runs" / session_id / "evidence/child.json").read_bytes() == b"child"
     canonical = owner.artifact_state_root / "canonical"
     for copied_deep in (source / ".daydream/deep", canonical / ".daydream/deep"):
         assert (copied_deep / "diff-key").stat().st_mtime_ns == key_mtime_ns

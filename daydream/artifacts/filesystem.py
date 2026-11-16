@@ -278,6 +278,11 @@ def _read_regular(path: Path, metadata: os.stat_result) -> bytes:
         raise ArtifactVisibilityError("artifact file could not be read safely") from exc
 
 
+def _manifest_order_key(path: str) -> tuple[bytes, ...]:
+    """Order manifest paths depth-first by encoded component, the order the tree walk writes."""
+    return tuple(os.fsencode(part) for part in path.split("/"))
+
+
 def _walk(
     root: Path,
     path: Path,
@@ -298,7 +303,7 @@ def _walk(
     if stat.S_ISDIR(metadata.st_mode):
         entries.append(ArtifactManifestEntry(relative, "directory", 0, mode, None))
         try:
-            children = sorted(path.iterdir(), key=lambda child: os.fsencode(child.name))
+            children = sorted(path.iterdir(), key=lambda child: _manifest_order_key(child.name))
         except OSError as exc:
             raise ArtifactVisibilityError("artifact directory could not be inspected") from exc
         normalized: set[str] = set()
@@ -342,7 +347,7 @@ def manifest_tree(
         raise ArtifactVisibilityError("artifact manifest root must be a real directory")
     entries: list[ArtifactManifestEntry] = []
     inodes: set[tuple[int, int]] = set()
-    selected = sorted(names if names is not None else (child.name for child in root.iterdir()), key=os.fsencode)
+    selected = sorted(names if names is not None else (child.name for child in root.iterdir()), key=_manifest_order_key)
     normalized: set[str] = set()
     for name in selected:
         _validate_relative_name(name)
@@ -380,7 +385,7 @@ def _parse_manifest(path: Path) -> tuple[ArtifactManifestEntry, ...]:
         seen.add(entry.path)
         normalized.add(normalized_path)
         result.append(entry)
-    if [entry.path for entry in result] != sorted((entry.path for entry in result), key=os.fsencode):
+    if [entry.path for entry in result] != sorted((entry.path for entry in result), key=_manifest_order_key):
         raise ArtifactVisibilityError("artifact manifest entries are not sorted")
     return tuple(result)
 
