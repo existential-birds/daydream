@@ -110,6 +110,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `o/r`, so the outcome depended on the host's `gh` and any credential it could still find.
   Every such call now goes to the FakeGh harness
   ([#1801](https://github.com/existential-birds/daydream/issues/1801)).
+- The post-findings test that forbids live trajectory reads no longer leaves stubs behind.
+  Posting imported the built-in flow modules while the test's patches were active, so
+  those modules kept the failing stubs and review and findings-artifact tests that ran
+  later in the same process failed. The modules are now imported before patching, and the
+  test patches the recorder's ContextVar instead of the package attribute, so it also
+  catches code that imported `get_current_recorder` by name
+  ([#1800](https://github.com/existential-birds/daydream/issues/1800)).
+- The CLI signal test no longer writes into the real `~/.daydream`. Its `daydream`
+  subprocess inherited `HOME`, so every run left runtime and workspace directories
+  for a temporary repository in the operator's home; the child now runs with `HOME`
+  under the test's temporary directory
+  ([#1790](https://github.com/existential-birds/daydream/issues/1790)).
 - `ImmutableReviewInput` accepts every pull request title and description GitHub accepts,
   so hosted reviews of PRs with descriptions over 8 KiB no longer fail before analysis
   ([#1761](https://github.com/existential-birds/daydream/issues/1761)). `title` and `body`
