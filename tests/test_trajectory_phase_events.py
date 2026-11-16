@@ -11,29 +11,28 @@ import pytest
 
 import daydream.trajectory as trajectory_module
 from daydream import remote_ci
-from daydream.atif import validate as atif_validate
 from daydream.runner import run
 from daydream.trajectory import (
+    DOCUMENT_SUFFIX,
     DaydreamPhase,
-    RunWriteSnapshot,
-    TrajectoryDocumentSnapshot,
+    DocumentSummary,
+    RunSummary,
+    StepFacts,
     phase_scope,
-    summarize_run,
 )
 from tests.harness.execution import host_test_command
 from tests.harness.git_helpers import bare_remote, git
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.review_profile import independent_exploration_profile
-from tests.harness.trajectory import make_recorder, observe_text_and_result, read_trajectory
+from tests.harness.trajectory import (
+    make_recorder,
+    observe_text_and_result,
+    read_trajectory,
+)
 from tests.test_deep_orchestrator import _install_stub_backend
 
 
-def _snapshot_document(path: Path, payload: dict[str, Any]) -> TrajectoryDocumentSnapshot:
-    return TrajectoryDocumentSnapshot(
-        trajectory_id=str(payload["trajectory_id"]), path=path, json_bytes=json.dumps(payload, sort_keys=True).encode(),
-    )
-
-def test_timing_diagnostics_clip_scoped_events_without_synthesizing_forks(tmp_path: Path) -> None:
+def test_timing_unions_clipped_scoped_intervals_across_documents() -> None:
     """Sibling documents' review intervals overlap each other and the root's; only their union counts.
 
     Hand-computed over the wall [0s, 10s]: root [-1s, 4s] clips to [0, 4]; child-a [3, 6]; child-b [5, 7] and
@@ -53,7 +52,7 @@ def test_timing_diagnostics_clip_scoped_events_without_synthesizing_forks(tmp_pa
     invocation = {"trajectory_id": session, "invocation_id": "duplicate", "phase": "review",
         "started_at": start, "ended_at": end,
     }
-    root = {"session_id": session, "trajectory_id": session, "steps": [],
+    root = {"session_id": session, "trajectory_id": session,
         "extra": {"run_started_at": start, "run_ended_at": end, "phase_events": [
             event("phase_start", "clipped", "2025-12-31T23:59:59Z"),
             event("phase_end", "clipped", at(4), status="succeeded"),
@@ -71,9 +70,8 @@ def test_timing_diagnostics_clip_scoped_events_without_synthesizing_forks(tmp_pa
         ]},
     }
     def child(name: str, intervals: dict[str, tuple[str, str]], started: float, ended: float) -> dict[str, Any]:
-        """A sibling whose steps span the whole wall but whose only intervals are its phase events."""
-        return {"session_id": session, "trajectory_id": name,
-            "steps": [{"timestamp": start}, {"timestamp": end}], "extra": {
+        """A sibling whose only intervals are its phase events."""
+        return {"session_id": session, "trajectory_id": name, "extra": {
                 "phase_events": [bound for scope, (started_at, ended_at) in intervals.items() for bound in (
                     event("phase_start", scope, started_at), event("phase_end", scope, ended_at, status="succeeded"))],
                 "subtrajectories": [{"trajectory_id": name, "invocation_id": f"{name}-review", "phase": "review",
@@ -82,12 +80,10 @@ def test_timing_diagnostics_clip_scoped_events_without_synthesizing_forks(tmp_pa
         }
     siblings = (child("child-a", {"a": (at(3), at(6))}, 1, 6.5),
         child("child-b", {"b": (at(5), at(7)), "b-clipped": (at(9), "2026-01-01T00:00:11Z")}, 6.5, 9.5))
-    snapshot = RunWriteSnapshot(status="complete", cutoff_at=end, root_trajectory_id=session,
-        documents=(_snapshot_document(tmp_path / "trajectory.json", root),
-            *(_snapshot_document(tmp_path / f"{sibling['trajectory_id']}.json", sibling) for sibling in siblings)),
-    )
-
-    summary = summarize_run(snapshot).timing
+    summary = RunSummary("complete", end, session, tuple(
+        DocumentSummary(str(document["trajectory_id"]), f"{document['trajectory_id']}{DOCUMENT_SUFFIX}",
+                        document, StepFacts())
+        for document in (root, *siblings))).timing
 
     assert summary is not None
     assert summary.phase_timings == {"review": {"wall_clock_seconds": 8.0, "occurrences": 4},
@@ -191,10 +187,9 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     assert len(api_batch) == 1
     assert len(api_serial) == 3
 
-    roots = list((target / ".daydream" / "runs").glob("*/trajectory.json"))
+    roots = list((target / ".daydream" / "runs").glob("*/evidence.otlp.jsonl"))
     assert len(roots) == 1
-    root = json.loads(roots[0].read_bytes())
-    assert atif_validate(root, validate_images=False) is True
+    root = read_trajectory(roots[0])
     commit_ends = [event for event in root["extra"]["phase_events"]
         if event["phase"] == "commit" and event["event"] == "phase_end"]
     assert len(commit_ends) == 1
@@ -225,7 +220,7 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     assert len(api_result["subagent_trajectory_ref"]) == 1
     api_ref = api_result["subagent_trajectory_ref"][0]
     assert Path(api_ref["trajectory_path"]).name.startswith("fix-api-py--")
-    api_child = json.loads((target / ".daydream" / api_ref["trajectory_path"]).read_bytes())
+    api_child = read_trajectory((target / ".daydream" / api_ref["trajectory_path"]))
     assert api_child["trajectory_id"] == api_ref["trajectory_id"]
     assert api_child["session_id"] == root["session_id"]
 
@@ -276,7 +271,7 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
             if sibling_path is None:
                 continue
             wrapper_count += 1
-            child = json.loads((target / ".daydream" / sibling_path).read_bytes())
+            child = read_trajectory(target / ".daydream" / sibling_path)
             if child["trajectory_id"] not in documents:
                 documents[child["trajectory_id"]] = child
                 document_descriptors[child["trajectory_id"]] = Path(sibling_path).name.split("--", 1)[0]

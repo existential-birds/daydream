@@ -27,6 +27,7 @@ from daydream.test_execution import (
     recipe_to_payload,
     resolve_test_recipe,
 )
+from daydream.trajectory import RUN_DOCUMENT_NAME
 from tests.deep_orchestrator.support import _scan_phase_events, _scan_trajectory_extra
 from tests.harness.backend import ScriptedBackend
 from tests.harness.console import collapse_panel_text
@@ -76,7 +77,7 @@ async def test_runner_rejects_missing_canonical_before_fix_or_test(
     candidate.write_text(f"#!/bin/sh\nprintf ran >> '{counter}'\nexit 0\n")
     candidate.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
-    trajectory = tmp_path / "trajectory.json"
+    trajectory = tmp_path / RUN_DOCUMENT_NAME
     config = make_config(target, output_mode="loop", assume="yes", test_command=None,
                          file_config=load_file_config(target), trajectory_path=trajectory)
     notice = ("Fixing reviews the checkout as is: its tracked uncommitted edits are reviewed with the commits "

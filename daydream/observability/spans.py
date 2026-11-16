@@ -47,6 +47,7 @@ from daydream.diagnostics import exception_text
 from daydream.observability.privacy import PrivacyPolicy
 from daydream.observability.runtime import current_session
 from daydream.trajectory import get_current_recorder
+from daydream.trajectory.generation import _GenerationLedger
 
 if TYPE_CHECKING:
     from daydream.observability.runtime import TraceSession
@@ -98,12 +99,18 @@ _INHERITED_ATTRIBUTES = frozenset(
 )
 
 
+def session_identity_attributes(session_id: str) -> dict[str, str]:
+    """The run's root evidence identity, shared by the run span and every later scope."""
+    return {
+        "daydream.session.id": session_id,
+        "daydream.trajectory.id": session_id,
+        "traceloop.association.properties.session_id": session_id,
+    }
+
+
 def associate_trajectory_identity(session_id: str) -> None:
-    """Seed inherited session identity for scopes opened after root trajectory association."""
-    inherited = dict(_scope_attributes.get())
-    inherited["daydream.session.id"] = session_id
-    inherited["daydream.trajectory.id"] = session_id
-    inherited["traceloop.association.properties.session_id"] = session_id
+    """Seed inherited session identity for scopes opened after root evidence association."""
+    inherited = {**_scope_attributes.get(), **session_identity_attributes(session_id)}
     _scope_attributes.set(
         {key: value for key, value in inherited.items() if key in _INHERITED_ATTRIBUTES and value is not None}
     )
@@ -426,8 +433,9 @@ class AttemptObserver:
         self.models: list[str] = []
         self.providers: list[str] = []
         self.reason: str | None = None
-        # Pending spans await the trajectory ledger's final billing owner.
+        # Pending spans await this attempt's own generation ledger's final billing owner.
         self.generations: dict[str, dict[str, Any]] = {}
+        self._ledger = _GenerationLedger()
         self._saw_authoritative_total = False
 
     @property
@@ -466,10 +474,22 @@ class AttemptObserver:
         if self.scope.session is None:
             return
         try:
+            self._account(event)
             self._identity(event)
             self._observe(event, self.scope.session.policy)
         except Exception:
             _logger.warning("Trace event could not be recorded; execution continues")
+
+    def _account(self, event: AgentEvent) -> None:
+        """Keep this attempt's generation accounting, as the evidence invocation does for its own."""
+        if isinstance(event, GenerationStartEvent):
+            self._ledger.open(event)
+        elif isinstance(event, GenerationEndEvent):
+            self._ledger.seal(event)
+        elif isinstance(event, MetricsEvent) and event.generation_id:
+            self._ledger.record_usage(event)
+        elif isinstance(event, CostEvent) and event.measurement_source in ("terminal", "session"):
+            self._ledger.record_authoritative_total(event)
 
     def record_backend_lifecycle(self, snapshot: BackendLifecycleSnapshot) -> None:
         """Attach finalized host observations to this attempt without generation billing."""
@@ -744,7 +764,7 @@ class AttemptObserver:
             span.set_attribute("daydream.generation.choice_parts", session.policy.json(parts))
 
     def _resolve_billing_owner(self) -> str:
-        """Read frozen trajectory ownership, or bill the attempt on an authoritative total.
+        """Freeze this attempt's generation ownership, or bill the attempt on an authoritative total.
 
         Absent generation evidence and absent authoritative total leave ownership unresolved.
         """
@@ -754,22 +774,11 @@ class AttemptObserver:
         return "structural_attempt" if self._saw_authoritative_total else "unresolved"
 
     def _generation_lifecycle(self) -> dict[str, Any] | None:
-        """Read this attempt's frozen lifecycle after invocation finalization.
-
-        The invocation exits before its attempt scope, so the final subtrajectory
-        belongs to this attempt, including when earlier retries exist.
-        """
-        try:
-            recorder = get_current_recorder()
-            if recorder is None:
-                return None
-            subtrajectories = getattr(recorder, "_subtrajectories", None) or []
-            if not subtrajectories:
-                return None
-            lifecycle = subtrajectories[-1].get("generation_lifecycle")
-            return lifecycle if isinstance(lifecycle, dict) else None
-        except Exception:
+        """This attempt's finalized generation lifecycle, when it observed any generation."""
+        if not self._ledger.has_drafts():
             return None
+        self._ledger.finalize()
+        return self._ledger.to_dict()
 
     def _end_generations(self, owner: str) -> None:
         """End pending spans once at sealed historical ends; only billed children get aliases.

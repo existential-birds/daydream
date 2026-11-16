@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (0.y.z):** Run evidence is local OpenTelemetry instead of ATIF
+  ([#1717](https://github.com/existential-birds/daydream/issues/1717),
+  [#1719](https://github.com/existential-birds/daydream/issues/1719),
+  [#1720](https://github.com/existential-birds/daydream/issues/1720),
+  [#1721](https://github.com/existential-birds/daydream/issues/1721),
+  [#1723](https://github.com/existential-birds/daydream/issues/1723)):
+  - Every recorded run writes append-only OTLP/JSON log documents,
+    `.daydream/runs/<session_id>/evidence.otlp.jsonl` and one
+    `forks/<descriptor>.otlp.jsonl` per fork, in place of `trajectory.json` and
+    `trajectories/*.json`. Each record is accepted as it is written, with no in-memory
+    queue; a document is complete only when its seal's record count and SHA-256 verify.
+    A write, encoding or fsync failure warns once and leaves the run's evidence
+    truthfully partial. No tracing destination, network access or credential is needed.
+  - Steps are appended as each invocation finishes, so no whole-run transcript stays in
+    memory, and recording costs about the same CPU as the ATIF recorder did on identical
+    events. Each step records the boundary that closed it as `extra.turn_boundary`.
+  - Archive bundles, `--dump-artifacts`, `daydream summarize` and evaluation read the
+    new documents. Dataset run records move to `daydream.run.v3`, which embeds each
+    document's exact OTLP/JSON lines and their SHA-256; earlier records are refused with
+    the existing message and nothing is converted or deleted.
+  - `--trajectory PATH` and the hosted `output_dir` receive a copy of the root evidence
+    document (`evidence.otlp.jsonl` under `output_dir`) instead of ATIF JSON.
+  - The failure summarizer reads a rendered `handoff-evidence.json` view instead of a
+    `.partial` trajectory.
+- **Breaking (0.y.z):** `TrajectoryRecorder` is now `EvidenceRecorder`;
+  `review_usage()` is replaced by the host-owned `trajectory.run_usage()`, and
+  `build_trajectory()` and the `Redactor` class are deleted. `daydream.atif` moves to
+  `daydream.benchmarks.atif`, which ordinary runs never import.
+
+### Added
+
+- `python -m daydream.benchmarks.harbor RUN_DIR OUT_DIR` exports a finished run's evidence
+  as Harbor-compatible ATIF: `trajectory.json` with every fork embedded as a subagent
+  trajectory, plus flat `trajectory.subagent-*.json` files for Harbor's trace extraction.
+  Each file is checked with Harbor's validator.
+- `daydream evidence verify RUN_DIR` reads a run's evidence back and reports each
+  document's record count, size, SHA-256 and seal, exiting 1 when anything is incomplete.
+
 ### Fixed
 
 - The test suite passes on macOS again: the committed-review test for a changed path whose

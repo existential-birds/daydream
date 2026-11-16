@@ -13,7 +13,7 @@ from functools import cached_property
 from typing import Any, Literal
 
 from daydream.timeutil import parse_iso_timestamp
-from daydream.trajectory.layout import PARTIAL_SUFFIX, RUN_DOCUMENT_NAME
+from daydream.trajectory.layout import RUN_DOCUMENT_NAME
 from daydream.trajectory.timing import TimingSummary, compute_timing_summary
 from daydream.trajectory.types import RunWriteSnapshot
 
@@ -191,7 +191,7 @@ def summarize_run(write_snapshot: RunWriteSnapshot) -> RunSummary:
     for document in write_snapshot.documents:
         metadata = document.validated_payload(root_id)
         forked = document.trajectory_id != root_id
-        source_file = document.path.name.removesuffix(PARTIAL_SUFFIX) if forked else RUN_DOCUMENT_NAME
+        source_file = document.path.name if forked else RUN_DOCUMENT_NAME
         steps = _step_facts(metadata.pop("steps", []), content=forked)
         documents.append(DocumentSummary(document.trajectory_id, source_file, metadata, steps))
     return RunSummary(write_snapshot.status, write_snapshot.cutoff_at, root_id, tuple(documents))

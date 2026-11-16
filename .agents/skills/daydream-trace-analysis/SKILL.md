@@ -29,8 +29,9 @@ python3 "$SKILL/scripts/trace.py" timeline "$RUN" --limit 12
 python3 "$SKILL/scripts/trace.py" mine "$RUN" --limit 8 --chars 240
 ```
 
-If installed elsewhere, use this skill's actual directory. Capture filenames
-are digests, not run IDs. JSONL often holds a complete run on one enormous line;
+If installed elsewhere, use this skill's actual directory. `RUN` can also be one
+local evidence document (`.daydream/runs/<id>/evidence.otlp.jsonl` or a
+`forks/*.otlp.jsonl` sibling). Capture filenames are digests, not run IDs. JSONL often holds a complete run on one enormous line;
 use bounded helper output instead of whole records. Read
 [format.md](references/format.md) for schemas, accounting, missing artifacts,
 retries, or backend differences. Helpers print JSON and leave source files intact.

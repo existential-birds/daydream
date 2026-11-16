@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 
 from daydream.agent import run_agent
-from daydream.atif import validate as atif_validate
 from daydream.backends import (
     AgentEvent,
     CostEvent,
@@ -105,7 +104,6 @@ async def test_authoritative_usage_reconciles_onto_steps(tmp_path: Path) -> None
     assert final.get("total_completion_tokens") == 25
     assert step_sum == 25
     traj = await _run_three_turns(tmp_path / "phases")
-    assert atif_validate(traj) is True
 
     agent_steps = [s for s in traj["steps"] if s["source"] == "agent"]
 

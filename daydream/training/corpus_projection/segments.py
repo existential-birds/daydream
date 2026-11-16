@@ -1,4 +1,4 @@
-"""Segment sibling trajectories in recorder fork-registration order; reject duplicate ids."""
+"""Segment a root evidence document view's forks in registration order; reject duplicate ids."""
 
 from dataclasses import dataclass
 from typing import Any
@@ -27,8 +27,6 @@ def segment(trajectory: dict[str, Any]) -> list[Segment]:
     summaries = (trajectory.get("extra") or {}).get("subtrajectories") or []
     refs = [summary for summary in summaries if "invocation_id" not in summary
             and summary.get("trajectory_id") != trajectory.get("trajectory_id")]
-    if not refs:
-        refs = trajectory.get("subagent_trajectory_ref") or []
     if not refs:
         root_id = str(trajectory.get("trajectory_id", ""))
         return [

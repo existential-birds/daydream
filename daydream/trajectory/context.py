@@ -6,20 +6,20 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from daydream.trajectory.recorder import TrajectoryRecorder
+    from daydream.trajectory.recorder import EvidenceRecorder
 
 
 # Recorder propagation uses a ContextVar (not a module-level dataclass, per
 # PROJECT.md "propagated via ContextVar (not AgentState)"). Access via
 # get_current_recorder() ONLY. Test isolation resets _RECORDER_VAR and
 # _ACTIVE_SIGNAL_RUNS directly (CORE-10 / D-17).
-_RECORDER_VAR: ContextVar["TrajectoryRecorder | None"] = ContextVar(
+_RECORDER_VAR: ContextVar["EvidenceRecorder | None"] = ContextVar(
     "_RECORDER_VAR",
     default=None,
 )
 
 
-def get_current_recorder() -> "TrajectoryRecorder | None":
+def get_current_recorder() -> "EvidenceRecorder | None":
     """Return the active async-context recorder, or None outside a recorded run."""
     return _RECORDER_VAR.get()
 

@@ -23,12 +23,12 @@ from daydream.trajectory.types import (
 )
 
 if TYPE_CHECKING:
-    from daydream.trajectory.recorder import TrajectoryRecorder
+    from daydream.trajectory.recorder import EvidenceRecorder
 _console = ui.create_console()
 
 
 def maybe_fork(
-    recorder: "TrajectoryRecorder | None",
+    recorder: "EvidenceRecorder | None",
     descriptor: str,
     *,
     dispatch: "DispatchHandle | None" = None,
@@ -158,7 +158,7 @@ def _phase_scope_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
 
 
 def _emit_phase_start(
-    recorder: "TrajectoryRecorder | None",
+    recorder: "EvidenceRecorder | None",
     phase: DaydreamPhase,
     scope_id: str,
     safe_metadata: dict[str, Any],
@@ -177,7 +177,7 @@ def _emit_phase_start(
 
 
 def _emit_phase_end(
-    recorder: "TrajectoryRecorder | None",
+    recorder: "EvidenceRecorder | None",
     phase: DaydreamPhase,
     scope_id: str,
     safe_metadata: dict[str, Any],
@@ -296,7 +296,7 @@ class DispatchHandle:
     dispatch_id: str
     phase: DaydreamPhase
     descriptors: tuple[str, ...]
-    _recorder: "TrajectoryRecorder" = field(repr=False)
+    _recorder: "EvidenceRecorder" = field(repr=False)
     _started_at: str = field(repr=False)
     status: LifecycleStatus = LifecycleStatus.SUCCEEDED
     reason_code: LifecycleReasonCode | None = None
@@ -416,7 +416,7 @@ def finish_partial_or_failed(dispatch: DispatchHandle, has_results: object) -> N
 
 @asynccontextmanager
 async def dispatch_scope(
-    recorder: "TrajectoryRecorder | None",
+    recorder: "EvidenceRecorder | None",
     *,
     phase: DaydreamPhase,
     descriptors: Sequence[str],

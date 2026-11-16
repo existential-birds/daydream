@@ -1,9 +1,10 @@
-"""Record backend events as ATIF trajectories.
+"""Record backend events as durable local OpenTelemetry evidence.
 
-The recorder owns persistence; invocation buffers events; lifecycle brackets
-phases and fan-outs. Layout, frozen run summaries, frozen timing analysis, and
-billing each have one owner. Credential redaction is shared independently by
-daydream.redaction.
+The recorder owns each document's append-only OTLP/JSON log journal; invocation
+buffers events into transcript steps; lifecycle brackets phases and fan-outs.
+Journal encoding, the document view, layout, frozen run summaries, frozen timing
+analysis, and usage billing each have one owner. Credential redaction is shared
+independently by daydream.redaction.
 """
 
 from daydream.redaction import (
@@ -12,6 +13,7 @@ from daydream.redaction import (
     redact_value as redact_value,
 )
 from daydream.timeutil import now_iso as now_iso
+from daydream.trajectory.billing import UsageLedger as UsageLedger, run_usage as run_usage
 from daydream.trajectory.context import (
     current_session_id as current_session_id,
     get_current_recorder as get_current_recorder,
@@ -22,6 +24,7 @@ from daydream.trajectory.generation import (
 )
 from daydream.trajectory.invocation import INCOMPLETE_CALL_CONTENT as INCOMPLETE_CALL_CONTENT, Invocation as Invocation
 from daydream.trajectory.layout import (
+    DOCUMENT_SUFFIX as DOCUMENT_SUFFIX,
     PARTIAL_SUFFIX as PARTIAL_SUFFIX,
     RUN_DOCUMENT_NAME as RUN_DOCUMENT_NAME,
     RUNS_DIRNAME as RUNS_DIRNAME,
@@ -47,12 +50,11 @@ from daydream.trajectory.lifecycle import (
     phase_scope as phase_scope,
 )
 from daydream.trajectory.recorder import (
+    EvidenceRecorder as EvidenceRecorder,
     TrajectoryDocumentWriter as TrajectoryDocumentWriter,
-    TrajectoryRecorder as TrajectoryRecorder,
     TrajectoryWriteCallback as TrajectoryWriteCallback,
     flush_active_signal_recorders as flush_active_signal_recorders,
 )
-from daydream.trajectory.redactor import Redactor as Redactor
 from daydream.trajectory.summary import (
     DocumentSummary as DocumentSummary,
     RunSummary as RunSummary,
@@ -71,3 +73,4 @@ from daydream.trajectory.types import (
     TrajectoryDocumentReference as TrajectoryDocumentReference,
     TrajectoryDocumentSnapshot as TrajectoryDocumentSnapshot,
 )
+from daydream.trajectory.view import read_document_view as read_document_view

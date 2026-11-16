@@ -6,7 +6,7 @@ from pathlib import Path
 from daydream.archive.scan import _scan_file, scan_run_dir
 from daydream.backends import ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
 from daydream.trajectory import DaydreamPhase, redact_text
-from tests.harness.trajectory import make_recorder
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 
 async def test_recorded_url_shapes_are_redacted_and_pass_publication_scan(tmp_path: Path) -> None:
@@ -37,7 +37,7 @@ async def test_recorded_url_shapes_are_redacted_and_pass_publication_scan(tmp_pa
             invocation.observe(ToolResultEvent(id="read-1", output=json.dumps(payload), is_error=False))
             invocation.observe(ResultEvent(structured_output=None, continuation=None))
     serialized = recorder.path.read_text()
-    step = next(step for step in json.loads(serialized)["steps"] if step["source"] == "agent")
+    step = next(step for step in read_trajectory(recorder.path)["steps"] if step["source"] == "agent")
     assert json.loads(step["message"]) == expected
     assert step["tool_calls"][0]["arguments"] == expected
     assert json.loads(step["observation"]["results"][0]["content"]) == expected

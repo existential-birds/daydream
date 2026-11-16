@@ -16,7 +16,6 @@ import pytest
 
 from daydream import clock, git_ops
 from daydream.agent import StructuredOutputFailure, run_agent
-from daydream.atif import validate
 from daydream.backends import (
     BackendExecutionInput,
     CodexRequestConfig,
@@ -51,7 +50,7 @@ from tests.harness.codex_replay import (
 )
 from tests.harness.git_helpers import git as _git
 from tests.harness.process_replay import replay_process
-from tests.harness.trajectory import make_recorder
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
 
@@ -1033,7 +1032,7 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
     assert isinstance(request.config, CodexRequestConfig)
     assert request.model_name == "gpt-5.5" and request.provider_name is None
     assert not any(isinstance(event, (GenerationStartEvent, GenerationEndEvent)) for event in events)
-    document = json.loads(recorder.path.read_text())
+    document = read_trajectory(recorder.path)
     steps = [step for step in document["steps"] if step["source"] == "agent"]
     assert [json.loads(step["message"]) for step in steps[:-1]] == [json.loads(text) for text in expected_text[:-1]]
     assert steps[-1]["message"] == "Verified"
@@ -1052,4 +1051,3 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
     assert document["final_metrics"]["total_completion_tokens"] == 120
     assert document["final_metrics"]["total_cached_tokens"] == 70
     assert document["final_metrics"]["total_cost_usd"] == pytest.approx(0.011875)
-    assert validate(recorder.path, validate_images=False)

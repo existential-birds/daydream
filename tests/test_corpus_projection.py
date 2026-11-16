@@ -64,14 +64,9 @@ def test_gold_requires_decisive_timely_evidence() -> None:
     assert classify_tier(_resolution("accepted")) == "gold"
 
 
-def _traj(siblings: list[tuple[str, str]]) -> dict[str, Any]:
-    return {"trajectory_id": "s1:root", "session_id": "s1",
-            "subagent_trajectory_ref": [{"trajectory_id": t, "session_id": "s1",
-                                          "trajectory_path": p} for t, p in siblings]}
-
-
 def test_duplicate_sibling_keys_raise() -> None:
-    traj = _traj([("s1:fix-0", "a.jsonl"), ("s1:fix-0", "a.jsonl")])
+    traj = {"trajectory_id": "s1", "session_id": "s1", "extra": {"subtrajectories": [
+        {"trajectory_id": "s1:fix-0"}, {"trajectory_id": "s1:fix-0"}]}}
     with pytest.raises(ValueError, match="s1:fix-0"):
         segment(traj)
 

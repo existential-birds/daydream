@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, cast
 
-from daydream.dataset import LocalRecordStore
+from daydream.dataset import LocalRecordStore, evidence_document_view
 from daydream.json_utils import atomic_write_bytes, canonical_json
 from daydream.training.admission import REASON_CODE_C5_EXCLUDED_REPO, REASON_CODE_REPO_IDENTITY_MISSING
 from daydream.training.corpus import _is_posterior_leak, _trajectory_set_hash
@@ -236,7 +236,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
             raise ValueError(f"run {run_id}: retained trajectories are required for corpus projection")
         documents = trajectory_section["value"]["documents"]
         root = next(document for document in documents if document["trajectory_id"] == run_id)
-        segments = segment(root)
+        segments = segment(evidence_document_view(root))
         if not segments:
             raise ValueError(f"run {run_id}: no trajectory segments")
         first = segments[0]

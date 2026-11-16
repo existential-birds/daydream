@@ -36,6 +36,7 @@ from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 from tests.harness.otlp import TraceCollector, attributes, kind_of as _kind, otlp_collector
+from tests.harness.trajectory import read_trajectory
 
 _RESULT_FILE = ".daydream/trace-failure-result.json"
 _FLOW_IMPORTS = """
@@ -217,9 +218,9 @@ def _gen_end(
 
 
 def _read_subtrajectory(repo: Path) -> dict[str, Any]:
-    paths = list((repo / ".daydream/runs").glob("*/trajectory.json"))
+    paths = list((repo / ".daydream/runs").glob("*/evidence.otlp.jsonl"))
     assert len(paths) == 1, f"expected exactly one trajectory, found {paths}"
-    trajectory = json.loads(paths[0].read_text())
+    trajectory = read_trajectory(paths[0])
     subs = trajectory["extra"]["subtrajectories"]
     assert len(subs) == 1
     lifecycle = subs[0]["generation_lifecycle"]
@@ -310,8 +311,8 @@ async def test_runner_exact_allocation_bills_children_and_chain_matches_wire(
     billed = attributes(attempt)
     assert billed["daydream.billing.owner"] == "generation_children"
     assert gens["gen-a"]["parentSpanId"] == attempt["spanId"]
-    (path,) = (feature_branch_repo / ".daydream/runs").glob("*/trajectory.json")
-    trajectory = json.loads(path.read_text())
+    (path,) = (feature_branch_repo / ".daydream/runs").glob("*/evidence.otlp.jsonl")
+    trajectory = read_trajectory(path)
     (diagnostic,) = [event for event in attempt["events"] if event["name"] == "daydream.backend_diagnostic"]
     wire = {key.rsplit(".", 1)[-1]: value for key, value in attributes(diagnostic).items()}
     records = [item for step in trajectory["steps"] for item in step.get("extra", {}).get("backend_diagnostics", [])]

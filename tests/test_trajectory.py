@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import signal
 from pathlib import Path
 from typing import Any
@@ -12,8 +13,6 @@ import anyio
 import pytest
 
 import daydream.trajectory as trajectory_module
-from daydream.atif import validate as atif_validate
-from daydream.atif.models import Step
 from daydream.backends import (
     AgentEvent,
     CostEvent,
@@ -30,15 +29,16 @@ from daydream.backends import (
 from daydream.cli import _signal_handler
 from daydream.trajectory import (
     DaydreamPhase,
+    EvidenceRecorder,
     Invocation,
     RunWriteSnapshot,
     TrajectoryDocumentReference,
     TrajectoryDocumentSnapshot,
-    TrajectoryRecorder,
     flush_active_signal_recorders,
     get_current_recorder,
-    partial_document_path,
 )
+from daydream.trajectory.journal import read_journal
+from daydream.trajectory.view import SNAPSHOT_EVENT
 from daydream.ui import get_shutdown_panel, set_shutdown_panel
 from tests.harness.trajectory import (
     make_recorder,
@@ -71,7 +71,7 @@ async def test_diagnostic_is_json_safe_redacted_and_persisted_in_arrival_order(t
     assert lifecycle["drafts"] == [] and lifecycle["billing_owner"] == "unresolved"
     assert "generation_lifecycle" not in read_trajectory(inv.recorder.path)["extra"]["subtrajectories"][0]
     assert len(steps) == 1
-    records = (steps[0].extra or {})["backend_diagnostics"]
+    records = steps[0]["extra"]["backend_diagnostics"]
     assert [record["code"] for record in records] == ["[REDACTED_API_KEY]", "second"]
     encoded = json.dumps(records, allow_nan=False)
     assert secret not in encoded
@@ -93,14 +93,14 @@ async def test_diagnostic_redaction_failure_persists_fixed_safe_record(tmp_path:
         ResultEvent(structured_output=None, continuation=None),
     )
 
-    records = (steps[0].extra or {})["backend_diagnostics"]
+    records = steps[0]["extra"]["backend_diagnostics"]
     assert records == [
         {"code": "diagnostic_redaction_failed", "message": "[DIAGNOSTIC_REDACTION_FAILED]", "metadata": {}}
     ]
     assert secret not in json.dumps(records)
 
 
-async def _record_events(tmp_path: Path, *events: AgentEvent) -> tuple[Invocation, list[Step]]:
+async def _record_events(tmp_path: Path, *events: AgentEvent) -> tuple[Invocation, list[dict[str, Any]]]:
     """Observe *events* in one invocation; return it with its materialized steps."""
     recorder = make_recorder(tmp_path)
     async with recorder:
@@ -114,7 +114,7 @@ INCOMPLETE_CONTENT = "[interrupted: call did not complete before invocation ende
 
 
 async def test_dispatch_failure_is_caught_and_run_continues(
-    recorder: TrajectoryRecorder, monkeypatch: pytest.MonkeyPatch,
+    recorder: EvidenceRecorder, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Behavior 6: Recorder boundary catches dispatch exceptions; run continues."""
     async with recorder:
@@ -138,7 +138,6 @@ async def test_dispatch_failure_is_caught_and_run_continues(
             observe_text_and_result(inv, "after-failure")
 
     traj = read_trajectory(recorder.path)
-    assert atif_validate(traj, validate_images=False) is True
     agent_steps = _agent_steps(traj)
     assert len(agent_steps) == 1
     # "before-failure" + "after-failure" both make it; "will-fail" was dropped.
@@ -186,11 +185,14 @@ async def test_dispatch_body_failure_and_cancellation_own_terminal_status(tmp_pa
             assert (status['dispatch_status'], status['reason_code']) == ('cancelled', 'cancelled')
 
 
-async def test_filesystem_writer_failure_is_optional(
-    recorder: TrajectoryRecorder, monkeypatch: pytest.MonkeyPatch,
+async def test_seal_failure_is_optional_and_reads_back_as_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A failed seal warns once, keeps the run going and publishes the accepted prefix as partial."""
     warnings: list[str] = []
+    snapshots: list[RunWriteSnapshot] = []
     monkeypatch.setattr('daydream.ui.print_warning', lambda _console, message: warnings.append(message))
+    recorder = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
 
     def fail(*args: Any, **kwargs: Any) -> Any:
         raise PermissionError('denied')
@@ -198,9 +200,13 @@ async def test_filesystem_writer_failure_is_optional(
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
             observe_text_and_result(invocation, 'retained response')
-        monkeypatch.setattr('os.replace', fail)
-    expected = 'Trajectory write failed'
-    assert len(warnings) == 1 and expected in warnings[0]
+        monkeypatch.setattr('os.fsync', fail)
+    assert len(warnings) == 1 and 'Evidence write failed (PermissionError)' in warnings[0]
+    snapshot, = snapshots
+    assert snapshot.status == 'partial'
+    view = snapshot.documents[0].validated_payload(recorder.session_id)
+    assert view['extra']['partial'] is True and 'run_ended_at' not in view['extra']
+    assert [step['message'] for step in _agent_steps(view)] == ['retained response']
 
 
 UNICODE_TEXT = 'caf\u00e9 \U0001f600 \u2028\x00'
@@ -232,11 +238,11 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
                     frozen = tuple(document.read_bytes() for document in first.documents)
                     assert len(first.documents) == 2
                     for document in first.documents:
-                        payload = json.loads(document.read_bytes())
-                        assert payload['steps'][0]['extra']['host_event'] == 'partial_snapshot'
+                        payload = document.validated_payload(root.session_id)
+                        assert payload['steps'] == []  # Evidence never invents a step for an empty snapshot.
                         assert payload['extra']['snapshot_at'] == first.cutoff_at
                         assert 'total_prompt_tokens' not in payload['final_metrics']
-                    active = json.loads(first.documents[1].read_bytes())['extra']['subtrajectories'][0]
+                    active = read_trajectory(first.documents[1])['extra']['subtrajectories'][0]
                     assert active['ended_at'] is None and active['step_ids'] == []
                     secret = '{"type":"oauth","access":"opaque-event-canary"}'
                     split = secret.index('opaque-event-canary') + len('opaque-event-canary')
@@ -283,21 +289,20 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
                                 assert second.trajectory_id == root.session_id + ':' + second_label
                             for document in snapshot.documents:
                                 raw = document.read_bytes()
-                                payload = json.loads(raw)
-                                assert atif_validate(payload, validate_images=False)
+                                payload = document.validated_payload(root.session_id)
                                 assert raw.isascii() and '-canary' not in raw.decode()
                                 if document.trajectory_id != leaf.trajectory_id:
                                     assert (payload['extra']['snapshot_at'], payload['extra']['partial']) == (
                                         snapshot.cutoff_at, True)
-                                    assert document.path.read_bytes() == raw  # The standalone .partial write.
+                                    assert document.path.read_bytes() == raw  # Nothing follows the snapshot yet.
                                 for entry in payload.get('extra', {}).get('subtrajectories', []):
                                     if reference := entry.get('sibling_trajectory_ref'):
                                         target = documents[entry['trajectory_id']]
                                         logical = target.path.relative_to(tmp_path / '.daydream').as_posix()
-                                        assert logical.removesuffix('.partial') == reference
+                                        assert logical == reference
                             assert documents[leaf.trajectory_id] == leaf_reference
                             assert leaf_reference.read_bytes() == completed_bytes  # Standalone writes exact bytes.
-                            partial = json.loads(documents[parent.trajectory_id].read_bytes())
+                            partial = read_trajectory(documents[parent.trajectory_id])
                             assert partial['final_metrics']['total_prompt_tokens'] == 0
                             assert 'total_completion_tokens' not in partial['final_metrics']
                             assert partial['final_metrics']['total_cost_usd'] == 1.5e-05
@@ -307,7 +312,7 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
                             with pytest.raises(AttributeError):
                                 setattr(snapshot, 'cutoff_at', 'changed')
                             if dispatch is not None:
-                                extra = json.loads(documents[root.trajectory_id].read_bytes())['extra']
+                                extra = read_trajectory(documents[root.trajectory_id])['extra']
                                 assert extra['profile_name'] == HOST_NAME
                                 plan, = extra['active_dispatches']
                                 assert plan['dispatch_id'] == dispatch.dispatch_id
@@ -316,11 +321,11 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
                                 assert len(plan['queued_descriptors']) == 1 and '-canary' not in json.dumps(plan)
                                 assert plan['attempted_count'] == 2 and plan['completed_count'] == 0
     assert tuple(document.read_bytes() for document in interrupted.documents) == interrupted_bytes
-    final_parent = json.loads(parent.path.read_bytes())
+    final_parent = read_trajectory(parent.path)
     message = next(step['message'] for step in final_parent['steps'] if step['source'] == 'agent')
     assert json.loads(message)['type'] == 'oauth'  # Snapshot redaction must not mutate the live text buffer.
-    usage = root.review_usage()
-    requests = [request for invocation in json.loads(parent.path.read_bytes())['extra']['subtrajectories']
+    usage = root.usage.usage()
+    requests = [request for invocation in read_trajectory(parent.path)['extra']['subtrajectories']
                 for request in invocation.get('requests', [])]
     assert usage['prompt_tokens'] == usage['cached_tokens'] == 0 and 'completion_tokens' not in usage
     assert len(requests) == 1 and requests[0]['backend'] == 'pi' and requests[0]['controls']['read_only']
@@ -341,74 +346,78 @@ async def test_fork_paths_confine_public_descriptors(tmp_path: Path) -> None:
                 pass
 
 
-async def test_fork_write_failure_degrades(tmp_path: Path) -> None:
-    """If child _write() raises, parent ContextVar is restored, no crash."""
-    recorder = make_recorder(tmp_path)
+async def test_fork_write_failure_degrades_to_truthful_incomplete_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child that cannot seal keeps no reference, restores its parent, and marks the run partial."""
+    snapshots: list[RunWriteSnapshot] = []
+    recorder = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
     warnings_emitted: list[str] = []
-
-    def fake_print_warning(_console: Any, message: str) -> None:
-        warnings_emitted.append(message)
 
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             observe_text_and_result(inv)
-        with patch("daydream.ui.print_warning", fake_print_warning):
+        with patch("daydream.ui.print_warning", lambda _console, message: warnings_emitted.append(message)):
             async with recorder.fork("fail-child") as child:
                 async with child.invocation(phase=DaydreamPhase.FIX) as inv:
                     observe_text_and_result(inv)
-                original_path = child.path
-                # A file in the parent path forces mkdir failure even with a writable root.
-                blocker = tmp_path / "not-a-dir"
-                blocker.write_text("x")
-                child.path = blocker / "child.json"
+                journal, fsync = child._journal, os.fsync
+
+                def denied(fd: int) -> None:
+                    if fd == journal._fd:
+                        raise OSError("disk full")
+                    fsync(fd)
+
+                monkeypatch.setattr(os, "fsync", denied)
 
         assert get_current_recorder() is recorder
-        assert recorder.completed_child_documents() == ()  # A failed child write keeps no reference.
-        child.path = original_path
-
+        assert recorder.completed_child_documents() == ()  # A failed child keeps no reference.
         flush_active_signal_recorders()
-        assert recorder.path.with_suffix(".json.partial").exists()
-        assert not child.path.with_suffix(".json.partial").exists()
+        assert [document.trajectory_id for document in snapshots[-1].documents] == [recorder.trajectory_id]
 
-    assert any("Sibling trajectory write failed" in m for m in warnings_emitted)
-    assert recorder.path.exists()
+    assert any("Sibling evidence write failed" in m for m in warnings_emitted)
+    final = snapshots[-1]
+    assert final.status == "partial"
+    root = final.documents[0].validated_payload(recorder.session_id)
+    assert root["extra"]["partial"] is True and root["extra"]["snapshot_at"] == root["extra"]["run_ended_at"]
+    seal = read_journal(recorder.path.read_bytes()).seal
+    assert seal is not None and seal.body["failed_documents"] == [child.trajectory_id]
+    assert journal.failure == "OSError" and not read_journal(child.path.read_bytes()).complete
 
 
 # write_partial tests (CLI-03, D-07 SIGINT partial flush)
 
 
 async def test_partial_writes_preserve_live_state_and_joined_steps(tmp_path: Path) -> None:
-    root = make_recorder(tmp_path)
+    snapshots: list[RunWriteSnapshot] = []
+    root = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
     async with root:
-        async with trajectory_module.maybe_fork(None, 'child') as child:
-            recorder = child if child is not None else root
-            async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
-                invocation.observe_user_step(prompt='retained prompt')
-                invocation.observe(ToolStartEvent(id='pending', name='Read', input={'file_path': 'a.py'}))
-                recorder.write_partial()
-                first = partial_document_path(recorder.path).read_bytes()
-            recorder.write_partial()
-            joined_bytes = partial_document_path(recorder.path).read_bytes()
-            recorder.write_partial()
-            assert partial_document_path(recorder.path).read_bytes() == joined_bytes
-            joined = json.loads(joined_bytes)
-        final_path = recorder.path
-    final = read_trajectory(final_path)
+        async with root.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+            invocation.observe_user_step(prompt='retained prompt')
+            invocation.observe(ToolStartEvent(id='pending', name='Read', input={'file_path': 'a.py'}))
+            root.write_partial()
+            first = snapshots[-1].documents[0].validated_payload(root.session_id)
+        root.write_partial()
+        joined_snapshot = snapshots[-1]
+        root.write_partial()
+        assert snapshots[-1] == joined_snapshot  # No new evidence republishes the same snapshot.
+        joined = joined_snapshot.documents[0].validated_payload(root.session_id)
+    final = read_trajectory(root.path)
     assert len(joined['steps']) == len(final['steps'])
-    for document in (json.loads(first), joined, final):
-        assert atif_validate(document, validate_images=False)
+    for document in (first, joined, final):
         observation, = _agent_steps(document)[0]['observation']['results']
         assert observation == {'content': INCOMPLETE_CONTENT,
                                'extra': {'is_error': True, 'status': 'interrupted'}}
 
 
-def _partial_path(recorder: TrajectoryRecorder) -> Path:
-    return recorder.path.with_suffix(recorder.path.suffix + ".partial")
+def _snapshot_count(recorder: EvidenceRecorder) -> int:
+    """Signal snapshots appended to one document."""
+    return sum(record.event_name == SNAPSHOT_EVENT for record in read_journal(recorder.path.read_bytes()).records)
 
 
 async def _hold_fork(
-    parent: TrajectoryRecorder, descriptor: str, marker: str, entered: anyio.Event, release: anyio.Event,
-    children: dict[str, TrajectoryRecorder],
+    parent: EvidenceRecorder, descriptor: str, marker: str, entered: anyio.Event, release: anyio.Event,
+    children: dict[str, EvidenceRecorder],
 ) -> None:
     """Hold one public fork invocation open across a signal-flush barrier."""
     async with parent.fork(descriptor) as child:
@@ -433,62 +442,33 @@ async def test_signal_flush_prepare_failure_never_publishes_disconnected_snapsho
                 invocation.observe(TextEvent('valid previous evidence'))
                 flush_active_signal_recorders()
                 previous = snapshots[-1]
-                saved = {document.path: document.read_bytes() for document in previous.documents}
-                target = root
+                saved = {document.trajectory_id: document.read_bytes() for document in previous.documents}
 
-                def fail(**kwargs: Any) -> Any:
+                def fail() -> Any:
                     raise RuntimeError('document preparation failed')
 
                 invocation.observe(TextEvent(' later evidence'))
                 with monkeypatch.context() as patcher:
-                    patcher.setattr(target, '_prepare_document', fail)
+                    patcher.setattr('daydream.trajectory.recorder.redact_value', lambda value: fail())
                     flush_active_signal_recorders()
                 assert snapshots == [previous] and len(warnings) == 1
-                assert all(path.read_bytes() == body for path, body in saved.items())
                 flush_active_signal_recorders()
                 current = snapshots[-1]
                 assert current.cutoff_at != previous.cutoff_at
                 assert {document.trajectory_id for document in current.documents} == {
                     root.trajectory_id, child.trajectory_id}
                 for document in current.documents:
-                    payload = json.loads(document.read_bytes())
+                    payload = document.validated_payload(root.session_id)
                     assert payload['extra']['snapshot_at'] == current.cutoff_at
-                    assert atif_validate(payload, validate_images=False)
                 assert all(document.path.read_bytes() == document.read_bytes() for document in current.documents)
-                assert {document.path: document.read_bytes() for document in previous.documents} == saved
+                assert {document.trajectory_id: document.read_bytes() for document in previous.documents} == saved
 
 
-async def test_signal_flush_excludes_exited_child(recorder: TrajectoryRecorder) -> None:
-    """Every child exit shape unregisters before a later root-only flush."""
-    exit_kind = "system-exit"
-
-    async def child_body() -> TrajectoryRecorder:
-        async with recorder.fork(f"exited-{exit_kind}") as child:
-            async with child.invocation(phase=DaydreamPhase.REVIEW) as inv:
-                observe_text_and_result(inv, "EXITED_CHILD_ONLY")
-                raise SystemExit(17)
-            return child
-
-    async with recorder:
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            observe_text_and_result(inv, "ROOT_ONLY")
-
-        with pytest.raises(SystemExit) as exc:
-            await child_body()
-        assert exc.value.code == 17
-
-        flush_active_signal_recorders()
-        assert _partial_path(recorder).exists()
-        child_path = recorder._sibling_path_for(f"exited-{exit_kind}")
-        assert not child_path.with_suffix(child_path.suffix + ".partial").exists()
-
-async def test_signal_flush_excludes_child_after_final_write_system_exit(
-    recorder: TrajectoryRecorder, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A BaseException from the child final write cannot leak registry membership."""
-
-    child: TrajectoryRecorder
-    child_path: Path
+@pytest.mark.parametrize("exit_on", ["body", "final-write"])
+async def test_signal_flush_excludes_exited_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                  exit_on: str) -> None:
+    """A child that exits, even through a BaseException from its own seal, takes no later snapshot."""
+    recorder = make_recorder(tmp_path)
 
     def fail_final_write() -> None:
         raise SystemExit(23)
@@ -497,16 +477,17 @@ async def test_signal_flush_excludes_child_after_final_write_system_exit(
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             observe_text_and_result(inv, "ROOT_ONLY")
         with pytest.raises(SystemExit) as exc:
-            async with recorder.fork("final-system-exit") as child:
-                child_path = child.path
+            async with recorder.fork(f"exited-{exit_on}") as child:
                 async with child.invocation(phase=DaydreamPhase.REVIEW) as inv:
-                    observe_text_and_result(inv, "STALE_CHILD_ONLY")
-                monkeypatch.setattr(child, "_write", fail_final_write)
-        assert exc.value.code == 23
-        child.path = child_path
+                    observe_text_and_result(inv, "EXITED_CHILD_ONLY")
+                if exit_on == "body":
+                    raise SystemExit(17)
+                monkeypatch.setattr(child, "_write_final", fail_final_write)
+        assert exc.value.code == (17 if exit_on == "body" else 23)
         flush_active_signal_recorders()
-        assert _partial_path(recorder).exists()
-        assert not _partial_path(child).exists()
+        assert _snapshot_count(recorder) == 1
+        assert _snapshot_count(child) == 0
+
 
 def _finish_shutdown_panel() -> None:
 
@@ -518,15 +499,15 @@ def _finish_shutdown_panel() -> None:
 async def test_signal_handler_flushes_siblings_despite_a_writer_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """One sibling's failed write marks only that document incomplete; the others take the snapshot."""
     signum = signal.SIGTERM
-    denied = True
     snapshots: list[RunWriteSnapshot] = []
     recorder = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
     # The second label keeps a lone surrogate from an undecodable file name; the flush still never raises.
     entered = {name: anyio.Event() for name in ('signal-a', 'signal-b-caf\udce9')}
     release = {name: anyio.Event() for name in entered}
-    children: dict[str, TrajectoryRecorder] = {}
-    writes = Path.write_bytes
+    children: dict[str, EvidenceRecorder] = {}
+    writes = os.write
     warnings: list[str] = []
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
@@ -535,25 +516,25 @@ async def test_signal_handler_flushes_siblings_despite_a_writer_failure(
             for name in entered:
                 group.start_soon(_hold_fork, recorder, name, name, entered[name], release[name], children)
                 await entered[name].wait()
-            failed_path = partial_document_path(children['signal-a'].path)
+            failed = children['signal-a']._journal
 
-            def write(path: Path, *args: Any, **kwargs: Any) -> int:
-                if denied and path == failed_path:
+            def write(fd: int, data: Any) -> int:
+                if fd == failed._fd:
                     raise PermissionError('denied sibling')
-                return writes(path, *args, **kwargs)
+                return writes(fd, data)
 
-            monkeypatch.setattr(Path, 'write_bytes', write)
+            monkeypatch.setattr(os, 'write', write)
             monkeypatch.setattr('daydream.ui.print_warning', lambda _console, message: warnings.append(message))
             try:
                 with pytest.raises(KeyboardInterrupt):
                     _signal_handler(signum, None)
-                assert len(snapshots) == 1 and snapshots[0].status == 'partial'
-                for child in (recorder, *children.values()):
-                    path = partial_document_path(child.path)
-                    assert path.exists() == (not denied or child is not children['signal-a'])
-                    if path.exists():
-                        assert atif_validate(read_trajectory(path), validate_images=False)
-                assert len(warnings) == int(denied)
+                snapshot, = snapshots
+                assert snapshot.status == 'partial' and len(snapshot.documents) == 3
+                for document in snapshot.documents:
+                    view = document.validated_payload(recorder.session_id)
+                    taken = view['extra'].get('snapshot_at') == snapshot.cutoff_at
+                    assert taken == (document.trajectory_id != children['signal-a'].trajectory_id)
+                assert failed.failure == 'PermissionError' and len(warnings) == 1
             finally:
                 _finish_shutdown_panel()
                 for event in release.values():
@@ -576,4 +557,4 @@ async def test_explicit_document_writer_failure_never_replaces_primary(tmp_path:
     except RuntimeError as caught:
         propagated = caught
     assert propagated is primary
-    assert any('trajectory finalization' in note for note in primary.__notes__)
+    assert any('evidence finalization' in note for note in primary.__notes__)

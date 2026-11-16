@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -13,31 +12,22 @@ from daydream.artifact_visibility import (
     ArtifactTreeSnapshot,
 )
 from daydream.artifacts.filesystem import manifest_tree
-from daydream.atif import Step
 from daydream.run_snapshot import (
     ArchiveRunSnapshot,
     ManifestRunIdentity,
     RunPhaseCapabilities,
 )
 from daydream.trajectory import (
+    RUN_DOCUMENT_NAME,
     DaydreamPhase,
     DaydreamRunFlow,
+    EvidenceRecorder,
     RunWriteSnapshot,
-    TrajectoryRecorder,
-    now_iso,
 )
-from tests.harness.trajectory import make_recorder
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 
-def _add_user_step(recorder: TrajectoryRecorder) -> None:
-    """Append a minimal user Step so the recorder has at least one step and won't skip _write."""
-    step = Step(step_id=recorder._next_step_id(), timestamp=now_iso(), source="user", message="test prompt",
-        extra={"daydream_phase": DaydreamPhase.REVIEW.value, "daydream_run_flow": DaydreamRunFlow.NORMAL.value,},
-    )
-    recorder.steps.append(step)
-
-
-def _finalize_strict_archive(recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot, config: Any, target: Path, *,
+def _finalize_strict_archive(recorder: EvidenceRecorder, snapshot: RunWriteSnapshot, config: Any, target: Path, *,
     destinations: tuple[Any, ...] = (), dump_path: Path | None = None,
 ) -> None:
     """Run strict finalization; the re-attested target tree must exclude the archive directory."""
@@ -69,13 +59,14 @@ def _finalize_strict_archive(recorder: TrajectoryRecorder, snapshot: RunWriteSna
 
 
 async def test_on_write_failure_does_not_raise(tmp_path: Path) -> None:
-    def on_write_boom(recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot,) -> None:
+    def on_write_boom(recorder: EvidenceRecorder, snapshot: RunWriteSnapshot,) -> None:
         raise RuntimeError("archive exploded")
     recorder = make_recorder(tmp_path, on_write=on_write_boom)
     async with recorder:
-        _add_user_step(recorder)
-    traj_path = tmp_path / ".daydream" / "trajectory.json"
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+            invocation.observe_user_step("test prompt")
+    traj_path = tmp_path / ".daydream" / RUN_DOCUMENT_NAME
     assert traj_path.exists()
-    data = json.loads(traj_path.read_text(encoding="utf-8"))
+    data = read_trajectory(traj_path)
     assert data["session_id"] == recorder.session_id
     assert len(data["steps"]) == 1

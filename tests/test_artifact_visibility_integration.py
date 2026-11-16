@@ -17,7 +17,7 @@ from daydream import runner
 from daydream.artifact_visibility import ArtifactSession, private_root_locations
 from daydream.dataset import LocalRecordStore
 from daydream.run_config import RunConfig
-from daydream.trajectory import RunWriteSnapshot, TrajectoryDocumentReference
+from daydream.trajectory import RUN_DOCUMENT_NAME, SIBLINGS_DIRNAME, RunWriteSnapshot
 from tests.harness.blocked_mode import wait_for_entered
 from tests.harness.claude_sdk import (
     MockResultMessage,
@@ -26,6 +26,7 @@ from tests.harness.claude_sdk import (
 from tests.harness.dataset import read_records
 from tests.harness.git_helpers import commit, git
 from tests.harness.protocol_cli import ProtocolCli, install_protocol_cli
+from tests.harness.trajectory import read_trajectory
 
 SOURCE_CANARY = "SOURCE_CANARY"
 PRIOR_REASONING_CANARY = "PRIOR_REASONING_CANARY"
@@ -124,7 +125,7 @@ def _seed_visibility_canaries(repo: Path, private_base: Path) -> None:
 
     prior = repo / ".daydream" / "runs" / "prior-public-run"
     prior.mkdir(parents=True)
-    (prior / "trajectory.json").write_text(json.dumps({"reasoning": PRIOR_REASONING_CANARY}), encoding="utf-8")
+    (prior / RUN_DOCUMENT_NAME).write_text(json.dumps({"reasoning": PRIOR_REASONING_CANARY}), encoding="utf-8")
     legacy = repo / ".daydream" / "exploration" / "legacy cache.json"
     legacy.parent.mkdir(parents=True)
     legacy.write_text(RESUME_CACHE_CANARY, encoding="utf-8")
@@ -245,12 +246,12 @@ async def _run_probe(config: RunConfig, private_base: Path) -> int:
 
 def _assert_archived_run(archive_dir: Path, trajectory: Path, *, backend: str, status: str) -> dict[str, Any]:
     """The archived bundle mirrors the explicit trajectory byte-for-byte."""
-    explicit: dict[str, Any] = json.loads(trajectory.read_bytes())
+    explicit: dict[str, Any] = read_trajectory(trajectory)
     session_id = explicit["session_id"]
     assert explicit["trajectory_id"] == session_id
     assert explicit["extra"]["backend"] == backend
     archived_run = archive_dir / "runs" / session_id
-    assert (archived_run / "trajectory.json").read_bytes() == trajectory.read_bytes()
+    assert (archived_run / RUN_DOCUMENT_NAME).read_bytes() == trajectory.read_bytes()
     manifest = json.loads((archived_run / "manifest.json").read_bytes())
     assert manifest["session_id"] == session_id
     assert manifest["archive_status"] == status
@@ -395,7 +396,8 @@ async def test_runner_improve_claude_strict_uses_audit_root_and_inline_sanctione
     freeze, dropped = ArtifactSession.freeze, []
 
     def freeze_without_child(session: ArtifactSession, snapshot: RunWriteSnapshot) -> Any:
-        child = next(document for document in snapshot.documents if isinstance(document, TrajectoryDocumentReference))
+        child = next(document for document in snapshot.documents
+                     if document.trajectory_id != snapshot.root_trajectory_id)
         child.private_path.unlink()
         dropped.append(child.path.name)
         return freeze(session, snapshot)
@@ -466,7 +468,7 @@ async def test_runner_improve_claude_strict_uses_audit_root_and_inline_sanctione
 
     explicit = _assert_archived_run(archive_dir, explicit_trajectory, backend="claude", status="complete")
     assert explicit["extra"].get("partial") is not True
-    archived_children = archive_dir / "runs" / explicit["session_id"] / "trajectories"
+    archived_children = archive_dir / "runs" / explicit["session_id"] / SIBLINGS_DIRNAME
     assert dropped and any(archived_children.iterdir()) and not (archived_children / dropped[0]).exists()
     # Incomplete trajectory evidence is never captured as a record.
     assert "lost a completed child trajectory" in capsys.readouterr().out and not read_records(store).runs
@@ -484,7 +486,7 @@ def _assert_single_partial_snapshot(repo: Path, archive_dir: Path, explicit_traj
 ) -> dict[str, Any]:
     """Exactly one honest partial snapshot is frozen across all destinations."""
     explicit_bytes = explicit_trajectory.read_bytes()
-    explicit: dict[str, Any] = json.loads(explicit_bytes)
+    explicit: dict[str, Any] = read_trajectory(explicit_trajectory)
     session_id = explicit["session_id"]
     assert explicit["trajectory_id"] == session_id
     assert explicit["extra"]["partial"] is True
@@ -496,7 +498,7 @@ def _assert_single_partial_snapshot(repo: Path, archive_dir: Path, explicit_traj
     public_runs = [path for path in (repo / ".daydream" / "runs").iterdir() if path.name != "prior-public-run"]
     assert [path.name for path in public_runs] == [session_id]
     assert [path.name for path in (archive_dir / "runs").iterdir()] == [session_id]
-    assert (public_runs[0] / "trajectory.json").read_bytes() == explicit_bytes
+    assert (public_runs[0] / RUN_DOCUMENT_NAME).read_bytes() == explicit_bytes
     _assert_archived_run(archive_dir, explicit_trajectory, backend=backend, status="partial")
     return explicit
 

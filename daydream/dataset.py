@@ -23,11 +23,11 @@ from pydantic import JsonValue, TypeAdapter
 
 from daydream.artifacts.filesystem import _create_private_directory, _projection_path
 from daydream.artifacts.models import ArtifactVisibilityError
-from daydream.atif import Trajectory
 from daydream.deep.render import without_review_context
 from daydream.json_utils import _publish_staged, atomic_write_bytes, canonical_json
 from daydream.training.adjudication.precedence import effective_adjudication
 from daydream.training.labeler_versions import reply_evidence_digest
+from daydream.trajectory.view import read_document_view
 
 
 class StoreError(ValueError):
@@ -113,7 +113,7 @@ _EVIDENCE = _object(optional=("value", "reason"), status=_AVAILABILITY, value={}
 _EVIDENCE["if"] = {"properties": {"status": {"const": "available"}}}
 _EVIDENCE["then"] = {"required": ["value"], "properties": {"value": {"not": {"type": "null"}}}}
 _EVIDENCE["else"] = {"properties": {"value": {"type": "null"}}}
-_RUN_SCHEMA = _object(schema_version={"const": "daydream.run.v2"}, run_id=_ID, captured_at=_STRING,
+_RUN_SCHEMA = _object(schema_version={"const": "daydream.run.v3"}, run_id=_ID, captured_at=_STRING,
     outcome={"enum": ["success", "failed", "interrupted"]}, provenance=_MAP, completeness=_MAP,
     trace_id=_nullable(_STRING))
 _RUN_SCHEMA["properties"].update({name: {"allOf": [_EVIDENCE, {
@@ -163,7 +163,7 @@ _SNAPSHOT_V2_SCHEMA["properties"].update(
     source=_nullable(_object(repository=_ID, revision={"type": "string", "pattern": "^[a-f0-9]{40}$"},
                             manifest_sha256=_nullable(_SHA))))
 _SNAPSHOT_V2_SCHEMA["required"].append("source")
-_VALIDATORS = {"daydream.run.v2": Draft202012Validator(_RUN_SCHEMA),
+_VALIDATORS = {"daydream.run.v3": Draft202012Validator(_RUN_SCHEMA),
                "daydream.observation.v3": Draft202012Validator(_OBSERVATION_SCHEMA),
                "daydream.snapshot.v1": Draft202012Validator(_SNAPSHOT_SCHEMA),
                "daydream.snapshot.v2": Draft202012Validator(_SNAPSHOT_V2_SCHEMA)}
@@ -187,14 +187,14 @@ def _invalid(name: str) -> Iterator[None]:
 
 def _parse(raw: Mapping[str, Any] | str | bytes, version: str) -> Record:
     name = "ObservationRecord" if version.startswith("daydream.observation.") else (
-        "RunRecord" if version == "daydream.run.v2" else "Snapshot")
+        "RunRecord" if version == "daydream.run.v3" else "Snapshot")
     with _invalid(name):
         value = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
         if not isinstance(value, dict) or value.get("schema_version") != version or version not in _VALIDATORS:
             raise ValueError("schema_version")
         _JSON.validate_python(value)
         evidence_default = {"status": "unproduced", "value": None, "reason": None}
-        if version == "daydream.run.v2":
+        if version == "daydream.run.v3":
             value = {"provenance": {}, "completeness": {}, "trace_id": None, **value}
             for field in _RUN_PAYLOADS:
                 value[field] = {**evidence_default, **value.get(field, {})}
@@ -204,7 +204,7 @@ def _parse(raw: Mapping[str, Any] | str | bytes, version: str) -> Record:
             _timestamp(value["observed_at"])
         if not _VALIDATORS[version].is_valid(value):
             raise ValueError("record")
-        if version == "daydream.run.v2":
+        if version == "daydream.run.v3":
             _validate_run_evidence(value)
         elif version.startswith("daydream.observation."):
             _validate_observation(value)
@@ -242,7 +242,7 @@ def _run_envelope(
                 value["trajectories"] = {**section, "value": {**payload, "documents": [{}]}}
         elif documents is not None:
             raise ValueError("record")
-    envelope = _parse(value, "daydream.run.v2")
+    envelope = _parse(value, "daydream.run.v3")
     if documents is not None:
         envelope["trajectories"]["value"]["documents"] = f"documents-{uuid4().hex}"
     return envelope, documents
@@ -415,6 +415,25 @@ def _validate_run_evidence(run: Record) -> None:
                 raise ValueError("scoring length differs from retained review text without redaction provenance")
 
 
+def portable_evidence_document(raw: bytes, *, trajectory_id: str, session_id: str) -> dict[str, Any]:
+    """Embed one evidence document's exact OTLP/JSON lines with their source digest."""
+    return {"trajectory_id": trajectory_id, "session_id": session_id,
+            "sha256": hashlib.sha256(raw).hexdigest(), "otlp_jsonl": raw.decode("ascii")}
+
+
+def evidence_document_view(document: Mapping[str, Any]) -> dict[str, Any]:
+    """Verify an embedded evidence document against its digest and identity, then reduce it."""
+    if set(document) != {"trajectory_id", "session_id", "sha256", "otlp_jsonl"}:
+        raise ValueError("evidence document fields are malformed")
+    raw = document["otlp_jsonl"].encode("ascii")
+    if hashlib.sha256(raw).hexdigest() != document["sha256"]:
+        raise ValueError("evidence document bytes differ from their digest")
+    view = read_document_view(raw)
+    if view["trajectory_id"] != document["trajectory_id"] or view["session_id"] != document["session_id"]:
+        raise ValueError("evidence document identity differs from its records")
+    return view
+
+
 class _TrajectoryChecks:
     """Per-document trajectory checks that retain only the facts the run-level checks need."""
 
@@ -425,14 +444,14 @@ class _TrajectoryChecks:
 
     def admit(self, document: Any) -> None:
         _JSON.validate_python(document)
-        Trajectory.model_validate(document)
-        identity = document.get("trajectory_id")
+        view = evidence_document_view(document)
+        identity = view.get("trajectory_id")
         if not isinstance(identity, str) or not identity or identity in self.step_ids:
             raise ValueError("trajectory documents need unique identities")
-        if document.get("session_id") != self.run_id:
+        if view.get("session_id") != self.run_id:
             raise ValueError("trajectory session_id differs from run_id")
-        self.step_ids[identity] = {step["step_id"] for step in document["steps"]}
-        self.summaries.append((document.get("extra") or {}).get("subtrajectories", []))
+        self.step_ids[identity] = {step["step_id"] for step in view["steps"]}
+        self.summaries.append((view.get("extra") or {}).get("subtrajectories", []))
 
     def finish(self) -> None:
         if self.root_trajectory_id != self.run_id or self.run_id not in self.step_ids:

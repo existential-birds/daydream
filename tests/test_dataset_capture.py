@@ -11,7 +11,7 @@ import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from daydream import git_ops, runner
-from daydream.dataset import LocalRecordStore, StoreError
+from daydream.dataset import LocalRecordStore, StoreError, evidence_document_view
 from daydream.deep import review_terminal
 from daydream.extensions import Registry, build_registry
 from daydream.observability.config import ObservabilityConfig
@@ -123,14 +123,15 @@ async def test_terminal_failure_retains_owned_trace_and_partial_evidence(
     assert raw["original_task"]["status"] == "available"
     assert raw["provenance"]["collection_diagnostics"]["fix-failures.json"] == {
         "status": "failed", "reason": "malformed_json", "raw_text": "{malformed"}
-    # A version 2 record names no routing or per-stack setting of the replaced reviewer.
-    assert raw["schema_version"] == "daydream.run.v2"
+    # A version 3 record names no routing or per-stack setting of the replaced reviewer.
+    assert raw["schema_version"] == "daydream.run.v3"
     assert not {"latency_profile", "latency_route", "latency_routing"} & raw["provenance"].keys()
     effective = raw["provenance"]["effective_configuration"]
     assert not {"skill", "per_stack_review_backend", "per_stack_review_model"} & effective.keys()
     assert "per_stack_review" not in effective["phases"]
     documents = raw["trajectories"]["value"]["documents"]
-    assert any(tool["tool_call_id"] == "failed-tool" for doc in documents for step in doc["steps"]
+    views = [evidence_document_view(document) for document in documents]
+    assert any(tool["tool_call_id"] == "failed-tool" for view in views for step in view["steps"]
                for tool in step.get("tool_calls", []))
     assert raw["original_task"]["value"]["diff"] == original_diff
     assert raw["original_task"]["value"]["analyzed_revision"]["head_sha"] == original_head

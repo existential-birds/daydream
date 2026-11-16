@@ -1,9 +1,9 @@
-"""Recorder closes one Step per TurnEndEvent — never collapses multi-turn invocations."""
+"""Recorder closes one step per TurnEndEvent — never collapses multi-turn invocations."""
 from pathlib import Path
 
 from daydream.backends import MetricsEvent, TextEvent, ToolResultEvent, ToolStartEvent, TurnEndEvent
 from daydream.trajectory import DaydreamPhase
-from tests.harness.trajectory import make_recorder
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 
 async def test_tool_calls_spanning_turn_boundaries_stay_with_their_turns(tmp_path: Path) -> None:
@@ -23,10 +23,11 @@ async def test_tool_calls_spanning_turn_boundaries_stay_with_their_turns(tmp_pat
                                      cost_usd=None, model_name="native-model", usage_scope="invocation"))
             inv.observe(TextEvent(text="Done."))
             inv.observe(TurnEndEvent())
-    agent = [s for s in recorder.steps if s.source == "agent"]
+    agent = [s for s in read_trajectory(recorder.path)["steps"] if s["source"] == "agent"]
     assert len(agent) == 3
     for step, call_id, output in ((agent[0], "tool_1", "first"), (agent[1], "tool_2", "second")):
-        assert step.tool_calls is not None and [call.tool_call_id for call in step.tool_calls] == [call_id]
-        assert step.observation is not None
-        assert [(result.source_call_id, result.content) for result in step.observation.results] == [(call_id, output)]
-    assert [step.model_name for step in agent] == ["native-model"] * 3
+        assert [call["tool_call_id"] for call in step["tool_calls"]] == [call_id]
+        assert [(result["source_call_id"], result["content"])
+                for result in step["observation"]["results"]] == [(call_id, output)]
+    assert [step["model_name"] for step in agent] == ["native-model"] * 3
+    assert [step["extra"]["turn_boundary"] for step in agent] == ["turn_end", "turn_end", "turn_end"]

@@ -17,7 +17,6 @@ from typing import Any
 import pytest
 
 from daydream import git_ops
-from daydream.atif import validate as atif_validate
 from daydream.backends import (
     AgentEvent,
     ResultEvent,
@@ -27,6 +26,7 @@ from daydream.dataset import LocalRecordStore
 from daydream.run_config import RunConfig, _resolved_model
 from daydream.runner import run
 from daydream.training.labeler_signals import local_commit_applied_signal
+from daydream.trajectory import DOCUMENT_SUFFIX, RUN_DOCUMENT_NAME, siblings_directory
 from tests.deep_orchestrator.support import _only_archived_run
 from tests.harness.dataset import read_records
 from tests.harness.git_helpers import bare_remote, git
@@ -37,7 +37,7 @@ from tests.harness.stub_backend import (
     install_stub_backend,
     silence,
 )
-from tests.harness.trajectory import diff_adding
+from tests.harness.trajectory import diff_adding, read_trajectory
 from tests.test_deep_orchestrator import _noop_commit, _ok
 
 
@@ -140,12 +140,11 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
 
     run_dir = _only_archived_run(archive_dir)
     manifest = json.loads((run_dir / "manifest.json").read_text())
-    trajectory = json.loads((run_dir / "trajectory.json").read_text())
-    siblings = [json.loads(path.read_bytes()) for path in (run_dir / "trajectories").glob("*.json")]
+    trajectory = read_trajectory(run_dir / RUN_DOCUMENT_NAME)
+    siblings = [read_trajectory(path) for path in siblings_directory(run_dir).glob(f"*{DOCUMENT_SUFFIX}")]
     assert len(siblings) >= 1
     for document in (trajectory, *siblings):
         assert document["session_id"] == manifest["session_id"]
-        assert atif_validate(document, validate_images=False)
         assert [step["step_id"] for step in document["steps"]] == list(range(1, len(document["steps"]) + 1))
         assert all(
             step["extra"]["daydream_run_flow"] == "deep" for step in document["steps"] if step["source"] == "agent"
@@ -189,7 +188,7 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert "# daydream recommended change" in recommended_text
     assert "# daydream recommended change" not in diff_text
     # The sealed result lives beside the other deep artifacts, so the archive and the dump retain it.
-    for filename in ("manifest.json", "trajectory.json", "diff.patch", "evaluation.json", "deep/committed-review.json"):
+    for filename in ("manifest.json", RUN_DOCUMENT_NAME, "diff.patch", "evaluation.json", "deep/committed-review.json"):
         assert (dump_dir / filename).is_file()
         assert (dump_dir / filename).read_bytes() == (run_dir / filename).read_bytes()
     assert json.loads((run_dir / "deep/committed-review.json").read_text())["run_id"] == manifest["session_id"]

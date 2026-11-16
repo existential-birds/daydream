@@ -81,7 +81,7 @@ defects. Repair the owner when warranted; never delete a failure to turn green.
 
 For an individual candidate, read the complete test, parametrized rows, fixture
 chain, production owner, callers, overlapping tests, and relevant history. Inspect
-dependency source or types when a claim depends on SDK behavior. `daydream/atif/`
+dependency source or types when a claim depends on SDK behavior. `daydream/benchmarks/atif/`
 is vendored with a mechanical-update-only policy; pruning is not permission to
 hand-edit it.
 

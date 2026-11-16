@@ -16,7 +16,7 @@ def _build_summarize_parser() -> argparse.ArgumentParser:
         prog="daydream summarize",
         description=(
             "Print run-info markdown (rollup + per-phase breakdown table) "
-            "for a trajectory file or run directory."
+            "for an evidence document or run directory."
         ),
     )
     parser.add_argument(
@@ -24,8 +24,8 @@ def _build_summarize_parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="PATH",
         help=(
-            "Either a trajectory JSON file or a run directory containing "
-            "trajectory.json (and optional trajectories/ siblings)."
+            "Either an evidence document (.otlp.jsonl) or a run directory containing "
+            "evidence.otlp.jsonl (and optional forks/ siblings)."
         ),
     )
     return parser
@@ -44,6 +44,26 @@ _EXT_USAGE = (
     "Extension sub-verbs:\n"
     "  validate   load the daydream_ext extension and resolve-check the registry"
 )
+
+
+def _handle_evidence_command(argv: list[str]) -> int:
+    """``daydream evidence verify RUN_DIR``: print a JSON completeness report; 1 when incomplete."""
+    import json
+
+    from daydream.trajectory.verify import verify_run_evidence
+
+    parser = argparse.ArgumentParser(
+        prog="daydream evidence",
+        description="Verify a run directory's local OpenTelemetry evidence: every document's seal, "
+                    "record count and SHA-256.",
+    )
+    sub = parser.add_subparsers(dest="action", required=True)
+    verify = sub.add_parser("verify", help="Verify one run directory (runs/<session_id>/).")
+    verify.add_argument("run_dir", type=Path, metavar="RUN_DIR")
+    args = parser.parse_args(argv)
+    report = verify_run_evidence(args.run_dir)
+    print(json.dumps(report.to_dict(), indent=2))
+    return 0 if report.complete else 1
 
 
 def _ext_resolve_failure(registry: "Registry") -> str | None:

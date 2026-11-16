@@ -4,9 +4,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from daydream.atif.models.agent import Agent
-from daydream.atif.models.final_metrics import FinalMetrics
-from daydream.atif.models.step import Step
+from daydream.benchmarks.atif.models.agent import Agent
+from daydream.benchmarks.atif.models.final_metrics import FinalMetrics
+from daydream.benchmarks.atif.models.step import Step
 
 
 class Trajectory(BaseModel):

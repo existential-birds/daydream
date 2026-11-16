@@ -62,17 +62,18 @@ from daydream.run_snapshot import (
     RunPhaseCapabilities,
 )
 from daydream.trajectory import (
+    DOCUMENT_SUFFIX,
+    RUN_DOCUMENT_NAME,
     DaydreamPhase,
     DaydreamRunFlow,
     PhaseEvent,
     RunWriteSnapshot,
     TrajectoryDocumentReference,
-    TrajectoryDocumentSnapshot,
     sibling_document_path,
     summarize_run,
 )
 from tests.harness.review_result import review_coverage
-from tests.harness.trajectory import make_manifest
+from tests.harness.trajectory import evidence_reference, make_manifest
 
 MakeConfig = Callable[..., RunConfig]
 
@@ -81,24 +82,23 @@ _DEFAULT_FINAL_METRICS: dict[str, Any] = {
 }
 
 
-def _write_snapshot(recorder: Any, *, status: str = "complete", phase_events: list[dict[str, Any]] | None = None,
+def _document(store: Path, payload: Mapping[str, Any], path: Path) -> TrajectoryDocumentReference:
+    """An evidence reference whose logical ``path`` names it; its bytes live in the private *store*."""
+    private = store / f"{len(list(store.iterdir())) if store.is_dir() else 0}{DOCUMENT_SUFFIX}"
+    return evidence_reference(payload, private, logical_path=path)
+
+
+def _write_snapshot(store: Path, recorder: Any, *, status: str = "complete",
+    phase_events: list[dict[str, Any]] | None = None,
     final_metrics: dict[str, Any] | None = None, lifecycle: tuple[str, str] | None = None,
 ) -> RunWriteSnapshot:
     """Freeze the recorder's root with optional metric and lifecycle overrides.
 
     A supplied lifecycle also pins the cutoff to its end, making complete timing valid.
     """
-    path = Path(recorder.path)
-    payload: dict[str, Any] = {}
-    if path.is_file():
-        loaded = json.loads(path.read_text())
-        if isinstance(loaded, dict):
-            payload = loaded
     trajectory_id = str(getattr(recorder, "session_id"))
     # A frozen root document always carries the archived run's own identity.
-    payload["session_id"] = trajectory_id
-    payload["trajectory_id"] = trajectory_id
-    payload.setdefault("steps", [])
+    payload: dict[str, Any] = {"session_id": trajectory_id, "trajectory_id": trajectory_id, "steps": []}
     extra: dict[str, Any] = payload.setdefault("extra", {})
     if phase_events is not None:
         extra["phase_events"] = phase_events
@@ -110,23 +110,16 @@ def _write_snapshot(recorder: Any, *, status: str = "complete", phase_events: li
     if lifecycle is not None:
         extra["run_started_at"], extra["run_ended_at"] = lifecycle
         cutoff_at = lifecycle[1]
-    if final_metrics is not None:
-        payload["final_metrics"] = final_metrics
-    else:
-        payload.setdefault("final_metrics", dict(_DEFAULT_FINAL_METRICS))
-    document = TrajectoryDocumentSnapshot(
-        trajectory_id=trajectory_id, path=path, json_bytes=json.dumps(payload).encode(),
-    )
-    return RunWriteSnapshot(
-        status=cast(Any, status), cutoff_at=cutoff_at, root_trajectory_id=trajectory_id, documents=(document,),
-    )
+    payload["final_metrics"] = dict(_DEFAULT_FINAL_METRICS) if final_metrics is None else final_metrics
+    return RunWriteSnapshot(status=cast(Any, status), cutoff_at=cutoff_at, root_trajectory_id=trajectory_id,
+                            documents=(_document(store, payload, Path(recorder.path)),))
 
 
 @dataclass
 class _MockRecorder:
     """The recorder identity fields a frozen snapshot is stamped from."""
     session_id: str = "abcd1234-0000-0000-0000-000000000000"
-    path: Path = Path("/nonexistent/trajectory.json")
+    path: Path = Path("/nonexistent") / RUN_DOCUMENT_NAME
     run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL
     pr_number: int | None = None
     pr_repo: str | None = None
@@ -181,8 +174,9 @@ def _manifest_identity(**overrides: Any) -> ManifestRunIdentity:
 
 
 def _manifest_write_snapshot(
-    *, session_id: str = "abcd1234-0000-0000-0000-000000000000", final_metrics: Mapping[str, Any] | None = None,
-    extra: Mapping[str, Any] | None = None, path: Path = Path("/frozen/trajectory.json"),
+    store: Path, *, session_id: str = "abcd1234-0000-0000-0000-000000000000",
+    final_metrics: Mapping[str, Any] | None = None, extra: Mapping[str, Any] | None = None,
+    path: Path = Path("/frozen") / RUN_DOCUMENT_NAME,
 ) -> RunWriteSnapshot:
     """Build explicit immutable root bytes for manifest-reducer tests."""
     snapshot_extra = dict(extra or {})
@@ -193,9 +187,7 @@ def _manifest_write_snapshot(
     return RunWriteSnapshot(
         status="complete", cutoff_at=str(snapshot_extra.get("run_ended_at", "2026-01-01T00:00:01Z")),
         root_trajectory_id=session_id,
-        documents=(
-            TrajectoryDocumentSnapshot(trajectory_id=session_id, path=path, json_bytes=json.dumps(payload).encode(),),
-        ),
+        documents=(_document(store, payload, path),),
     )
 
 
@@ -213,7 +205,7 @@ def _build(tmp_path: Path, *, git_ctx: GitContext | None = None, write_snapshot:
     run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL, identity: ManifestRunIdentity | None = None, **kw: Any,
 ) -> Manifest:
     """Build a manifest from immutable public archive inputs."""
-    snapshot = write_snapshot or _manifest_write_snapshot()
+    snapshot = write_snapshot or _manifest_write_snapshot(tmp_path / "evidence")
     return build_manifest_from_snapshot(run=_archive_snapshot(snapshot, run_flow=run_flow, identity=identity,),
         summary=summarize_run(snapshot), git_ctx=git_ctx if git_ctx is not None else GitContext(), status="complete",
         archive_path=tmp_path, **kw,
@@ -285,8 +277,8 @@ def _setup_bundle(tmp_path: Path, session_id: str = "abcd1234-0000-0000-0000-000
     frozen_run_dir = daydream / "runs" / session_id
     frozen_run_dir.mkdir(parents=True)
 
-    traj = frozen_run_dir / "trajectory.json"
-    traj.write_text(json.dumps({"session_id": session_id, "trajectory_id": session_id}))
+    traj = frozen_run_dir / RUN_DOCUMENT_NAME
+    evidence_reference({"session_id": session_id, "trajectory_id": session_id}, traj)
 
     deep = daydream / "deep"
     deep.mkdir()
@@ -308,7 +300,8 @@ def _assemble_bundle(
     destinations: tuple[RoutedDestination, ...] = (),
 ) -> None:
     """Run the production bundle assembler over one frozen tree + snapshot."""
-    snapshot = write_snapshot if write_snapshot is not None else _write_snapshot(recorder)
+    snapshot = write_snapshot if write_snapshot is not None else _write_snapshot(target.parent / "evidence",
+                                                                                     recorder)
     _copy_snapshot_bundle(run=_archive_snapshot(snapshot, run_flow=recorder.run_flow),
         artifacts=ArtifactTreeSnapshot(
             session_id=recorder.session_id, workspace_key="workspace", root=target, manifest=manifest_tree(target),
@@ -547,7 +540,7 @@ def test_archive_rejects_repository_identity_the_producer_cannot_create(
 
     _strict_archive(target=target, session_id=recorder.session_id,
         config=make_config(target, archive=True, pr_repo=oversized, pr_number=42,),
-        write_snapshot=_write_snapshot(recorder,
+        write_snapshot=_write_snapshot(target.parent / "evidence", recorder,
             phase_events=[*_merge_events(recorder.session_id, "succeeded"),
                 _phase_start_event("fix", recorder.session_id, timestamp="2026-09-06T12:00:00Z"),
                 *[_phase_start_event(phase.value, recorder.session_id, timestamp="2026-09-06T12:00:00Z")
@@ -619,7 +612,7 @@ def test_archive_required_success_with_pending_advisory_is_succeeded(
     )
 
     _strict_archive(target=target, session_id=recorder.session_id, config=config,
-        write_snapshot=_write_snapshot(recorder,
+        write_snapshot=_write_snapshot(target.parent / "evidence", recorder,
             phase_events=[*_merge_events(recorder.session_id, "succeeded"),
                 _phase_start_event("fix", recorder.session_id, timestamp="2026-09-06T12:00:00Z"),
             ],
@@ -679,7 +672,7 @@ def test_current_merge_event_controls_pipeline_status(tmp_path: Path) -> None:
     # but only on this session's own coverage.
     no_diff = review_coverage(run_id="current", scope_ids=(), phases=("no_diff",))
     no_diff.record_phase("no_diff", "complete", noop=True)
-    run = _archive_snapshot(_manifest_write_snapshot(session_id="current"))
+    run = _archive_snapshot(_manifest_write_snapshot(tmp_path / "evidence", session_id="current"))
     for run_id, expected in (("current", "succeeded"), ("prior", "partial")):
         _write_deep(tmp_path, "review-coverage.json", {**no_diff.to_dict(), "run_id": run_id})
         assert pipeline._manifest_state(target_dir=tmp_path, run=run, frozen_extra={})["pipeline_status"] == expected
@@ -703,7 +696,7 @@ def test_archive_retains_malformed_frozen_merge_evidence_as_unknown(
     events = _merge_events(session_id, "not-a-status")
 
     _strict_archive(target=target, session_id=session_id, config=make_config(target, archive=True),
-        write_snapshot=_write_snapshot(recorder, phase_events=events),
+        write_snapshot=_write_snapshot(target.parent / "evidence", recorder, phase_events=events),
     )
 
     manifest = json.loads((archive_dir / "runs" / session_id / "manifest.json").read_text())
@@ -719,10 +712,7 @@ def test_archive_rejects_frozen_root_from_another_session(target: Path, archive_
     }
     snapshot = RunWriteSnapshot(
         status="complete", cutoff_at="2026-01-01T00:00:01Z", root_trajectory_id=recorder.session_id,
-        documents=(TrajectoryDocumentSnapshot(
-                trajectory_id=recorder.session_id, path=recorder.path, json_bytes=json.dumps(payload).encode(),
-            ),
-        ),
+        documents=(_document(target.parent / "evidence", payload, recorder.path),),
     )
 
     with pytest.raises(ValueError, match="frozen root trajectory identity"):
@@ -737,11 +727,12 @@ def test_archive_rejects_a_sibling_document_from_another_session(
 ) -> None:
     """The root is valid: bundle projection must reject the foreign fork without publishing a partial archive."""
     recorder = _MockRecorder(session_id="current-session")
-    root = _write_snapshot(recorder).documents[0]
-    foreign = json.dumps({"session_id": "other-session", "trajectory_id": "fork-1"}).encode()
+    root = _write_snapshot(target.parent / "evidence", recorder).documents[0]
+    foreign = _document(target.parent / "evidence", {"session_id": "other-session", "trajectory_id": "fork-1"},
+                        target / f"fork{DOCUMENT_SUFFIX}")
     snapshot = RunWriteSnapshot(
         status="complete", cutoff_at="2026-01-01T00:00:01Z", root_trajectory_id=recorder.session_id,
-        documents=(root, TrajectoryDocumentSnapshot("fork-1", target / "fork.json", foreign)),
+        documents=(root, foreign),
     )
 
     with pytest.raises(ArchiveFinalizationError, match="frozen trajectory projection failed"):
@@ -768,7 +759,8 @@ def test_test_failed_from_verdict(tmp_path: Path) -> None:
     fixed = tmp_path / "fix-failures"
     _write_deep(fixed, "fix-failures.json", {"api.py": "verification failed"})
     state = pipeline._manifest_state(
-        target_dir=fixed, run=_archive_snapshot(_manifest_write_snapshot(session_id="current")), frozen_extra={},
+        target_dir=fixed, frozen_extra={},
+        run=_archive_snapshot(_manifest_write_snapshot(tmp_path / "evidence", session_id="current")),
     )
     assert state["status"] == "partial" and state["fix_failures"] == {"api.py": "verification failed"}
     assert state["phase_states"]["fix"] == {"ran": True, "status": "partial"}
@@ -789,8 +781,8 @@ def test_snapshot_manifest_provenance_rejects_malformed_identity(tmp_path: Path)
         ("session", {"pr_number": True}, "pr_number"), ("session", {"pr_number": 7, "pr_repo": None}, "pr_repo"),
         ("..", None, "session_id"),
     ):
-        snapshot = _manifest_write_snapshot(
-            session_id=session_id, extra=extra, final_metrics={}, path=tmp_path / "trajectory.json",
+        snapshot = _manifest_write_snapshot(tmp_path / "evidence",
+            session_id=session_id, extra=extra, final_metrics={}, path=tmp_path / RUN_DOCUMENT_NAME,
         )
         with pytest.raises(ValueError, match=message):
             archive_recorder_provenance_from_snapshot(write_snapshot=snapshot, run_flow=DaydreamRunFlow.NORMAL)
@@ -806,19 +798,17 @@ def _finalizer_arguments(tmp_path: Path, session_id: str, *, config: RunConfig, 
 ) -> dict[str, Any]:
     """Freeze a prepared root and a completed-child file reference, binding the finalizer's roots."""
     frozen = tmp_path / "frozen"
-    path = frozen / ".daydream" / "runs" / session_id / "trajectory.json"
+    path = frozen / ".daydream" / "runs" / session_id / RUN_DOCUMENT_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
-    snapshot = _manifest_write_snapshot(session_id=session_id, final_metrics={}, path=path)
-    path.write_bytes(snapshot.documents[0].read_bytes())
+    root = evidence_reference({"session_id": session_id, "trajectory_id": session_id, "final_metrics": {}}, path)
+    snapshot = RunWriteSnapshot(status="complete", cutoff_at="2026-01-01T00:00:01Z", root_trajectory_id=session_id,
+                                documents=(root,))
     # Completed children reach consumers as references into the frozen copy, named by their logical path.
-    child = json.dumps({"session_id": session_id, "trajectory_id": "fork-1", "steps": list(child_steps)}).encode()
-    private_child = sibling_document_path(path.parent, "frozen-child.json")
-    private_child.parent.mkdir()
-    private_child.write_bytes(child)
-    logical_child = sibling_document_path(tmp_path / "live" / "runs" / session_id, "review.json")
-    snapshot = replace(snapshot, documents=(
-        *snapshot.documents, TrajectoryDocumentReference.written("fork-1", logical_child, private_child, child),
-    ))
+    private_child = sibling_document_path(path.parent, f"frozen-child{DOCUMENT_SUFFIX}")
+    child = evidence_reference({"session_id": session_id, "trajectory_id": "fork-1", "steps": list(child_steps)},
+                      private_child)
+    logical_child = sibling_document_path(tmp_path / "live" / "runs" / session_id, f"review{DOCUMENT_SUFFIX}")
+    snapshot = replace(snapshot, documents=(*snapshot.documents, replace(child, path=logical_child)))
     return dict(run=_archive_snapshot(snapshot),
         artifacts=ArtifactTreeSnapshot(session_id, "workspace", frozen, manifest_tree(frozen), ()),
         artifact_provenance=ArtifactEvidenceProvenance("workspace", session_id, tmp_path / "source", tmp_path / "live",
@@ -961,13 +951,14 @@ def test_strict_archive_rejects_frozen_receipt_changed_by_evaluator(
     assert not (archive_dir / "index.db").exists()
 
 
-@pytest.mark.parametrize(("mutated", "message"), [
-    (0, "frozen artifact tree changed"),
+@pytest.mark.parametrize(("mutated", "rewrite", "message"), [
+    # Bytes appended after a referenced prefix leave the evidence intact; the tree attestation refuses them.
+    (0, False, "frozen artifact tree changed"),
     # A completed child changed after its checked bundle copy fails the summary pass as integrity, not optional.
-    (1, "frozen trajectory document changed"),
+    (1, True, "frozen trajectory document changed"),
 ])
 def test_strict_archive_refuses_frozen_tree_mutated_before_publication(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutated: int, message: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutated: int, rewrite: bool, message: str,
 ) -> None:
     session_id = "strict-mutated-publication"
     arguments = _finalizer_arguments(
@@ -978,7 +969,8 @@ def test_strict_archive_refuses_frozen_tree_mutated_before_publication(
     from daydream.archive.git_context import capture_git_context
 
     def mutate_then_capture(*args: Any) -> Any:
-        private_path.write_bytes(document.read_bytes() + b"\n")
+        raw = document.read_bytes()
+        private_path.write_bytes(raw.replace(b'"test"', b'"TEST"', 1) if rewrite else raw + b"\n")
         return capture_git_context(*args)
 
     monkeypatch.setattr("daydream.archive.finalize.capture_git_context", mutate_then_capture)

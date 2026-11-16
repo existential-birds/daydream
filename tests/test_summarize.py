@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from daydream.summarize import summarize
+from daydream.trajectory import DOCUMENT_SUFFIX, RUN_DOCUMENT_NAME
+from tests.harness.trajectory import evidence_document
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "trajectories"
 _DEEP_PARENT = _FIXTURE_DIR / "deep_mode_parent.json"
@@ -23,17 +25,17 @@ def test_missing_empty_unparseable_or_non_json_input_returns_nonzero(
     empty = tmp_path / "empty-run"
     empty.mkdir()
     assert summarize(empty) != 0
-    assert "no trajectory" in capsys.readouterr().err.lower()
+    assert f"no {RUN_DOCUMENT_NAME}" in capsys.readouterr().err
     run_dir = tmp_path / "broken-run"
     run_dir.mkdir()
-    (run_dir / "trajectory.json").write_text("{not json", encoding="utf-8")
+    (run_dir / RUN_DOCUMENT_NAME).write_text("{not json", encoding="utf-8")
     # The renderer fallback signals "no real summary produced" via non-zero.
     assert summarize(run_dir) != 0
     assert "*run details unavailable*" in capsys.readouterr().out
-    bad = tmp_path / "trajectory.txt"
+    bad = tmp_path / "trajectory.json"
     bad.write_text(json.dumps({"schema_version": "ATIF-v1.6"}), encoding="utf-8")
     assert summarize(bad) != 0
-    assert ".json" in capsys.readouterr().err
+    assert DOCUMENT_SUFFIX in capsys.readouterr().err
 
 
 # --- User-overridable pricing through the summarize entrypoint ----------------
@@ -54,9 +56,7 @@ _EXPECTED_COST_CELL = "$2.00"
 def _write_custom_model_trajectory(tmp_path: Path) -> Path:
     """Write an unknown model's tokens without cost. A dollar cell can appear
     only if the user price override is loaded."""
-    traj = {"schema_version": "ATIF-v1.6", "session_id": "fixture-custom-model-summarize",
-        "agent": {"name": "daydream", "version": "0.14.0", "model_name": _CUSTOM_MODEL},
-        "steps": [{"step_id": 1, "timestamp": "2026-05-02T00:00:00.000000Z", "source": "user", "message": "review",
+    steps = ({"step_id": 1, "timestamp": "2026-05-02T00:00:00.000000Z", "source": "user", "message": "review",
                 "extra": {"daydream_phase": "review", "daydream_run_flow": "normal"},
             }, {"step_id": 2, "timestamp": "2026-05-02T00:00:01.000000Z", "source": "agent",
                 "model_name": _CUSTOM_MODEL, "message": "Reviewed.",
@@ -65,13 +65,10 @@ def _write_custom_model_trajectory(tmp_path: Path) -> Path:
                 "metrics": {"prompt_tokens": _PROMPT_TOKENS, "completion_tokens": _COMPLETION_TOKENS,
                     "cached_tokens": _CACHED_TOKENS, "cost_usd": None,
                 }, "extra": {"daydream_phase": "review", "daydream_run_flow": "normal"},
-            },
-        ], "final_metrics": {"total_prompt_tokens": _PROMPT_TOKENS, "total_completion_tokens": _COMPLETION_TOKENS,
-            "total_cached_tokens": _CACHED_TOKENS, "total_steps": 2,
-        },
-    }
-    traj_path = tmp_path / "trajectory.json"
-    traj_path.write_text(json.dumps(traj), encoding="utf-8")
+            })
+    traj_path = tmp_path / RUN_DOCUMENT_NAME
+    traj_path.write_bytes(evidence_document("fixture-custom-model-summarize",
+                                            session_id="fixture-custom-model-summarize", steps=steps))
     return traj_path
 
 

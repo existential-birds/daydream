@@ -16,15 +16,16 @@ below. This selects the exact frozen record even when the source repeats an ID.
 
    ```bash
    python3 "$SKILL/scripts/trace.py" window "$RUN" \
-     --pointer '/trajectories/value/documents/1/steps/3/tool_calls/0' \
+     --pointer '/trajectories/value/documents/1/view/steps/3/tool_calls/0' \
      --before 2 --after 3 --chars 350
    python3 "$SKILL/scripts/trace.py" search "$RUN" \
      --query 'arguments are required: roots' --limit 5
    python3 "$SKILL/scripts/trace.py" show "$RUN" \
-     --pointer '/trajectories/value/documents/1/steps/3' --chars 3000
+     --pointer '/trajectories/value/documents/1/view/steps/3' --chars 3000
    ```
 
-   Use pointers actually returned for this run. `window` shows recorded neighbors
+   Use pointers actually returned for this run; embedded evidence is addressed
+   through each document's reduced `view` ([format.md](format.md#evidence-documents-and-pointers)). `window` shows recorded neighbors
    in the same document, including explicit invocation/phase boundaries. Within
    each displayed step, it prioritizes the anchored call or result within the
    evidence limit, keeps retained rows in recorded order, and counts omitted

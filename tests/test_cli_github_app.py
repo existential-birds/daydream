@@ -24,11 +24,13 @@ from daydream.dataset import LocalRecordStore
 from daydream.review_profile import build_default_profile
 from daydream.reviews.identity import finding_marker
 from daydream.run_config import RunConfig
+from daydream.trajectory import RUN_DOCUMENT_NAME
 from tests.harness.dataset import read_records
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote, git
 from tests.harness.rsa import generate_rsa_pem
 from tests.harness.stub_backend import StubBackend
+from tests.harness.trajectory import read_trajectory
 
 _TOKEN = "ghs_scoped_installation_test_token"
 _AMBIENT = "ghp_unusable_ambient_test_token"
@@ -111,7 +113,7 @@ def test_cli_app_failure_is_redacted_without_ambient_fallback(
     secret = "ghs_sensitive_installation_response_token"
     transport.gh.set_response("POST", "app/installations/71/access_tokens", {"__error__": secret})
 
-    assert _run(feature_branch_repo, tmp_path / "trajectory.json", "--comment", "--verbose") == 1
+    assert _run(feature_branch_repo, tmp_path / RUN_DOCUMENT_NAME, "--comment", "--verbose") == 1
 
     captured = capsys.readouterr()
     assert "App token resolution failed" in captured.out + captured.err
@@ -128,7 +130,7 @@ def test_cli_invalid_app_key_aborts_without_exposing_secret(
     secret = "malformed-private-key-secret"
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", secret)
 
-    assert _run(feature_branch_repo, tmp_path / "trajectory.json", "--comment", "--verbose") == 1
+    assert _run(feature_branch_repo, tmp_path / RUN_DOCUMENT_NAME, "--comment", "--verbose") == 1
 
     captured = capsys.readouterr()
     assert "App token resolution failed" in captured.out + captured.err
@@ -148,11 +150,11 @@ def test_cli_no_app_uses_gh_selected_repository(
     monkeypatch.delenv("DAYDREAM_APP_ID")
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY")
     git(feature_branch_repo, "remote", "add", "origin", "https://github.com/contributor/widgets.git")
-    output = tmp_path / "trajectory.json"
+    output = tmp_path / RUN_DOCUMENT_NAME
 
     assert _run(feature_branch_repo, output, "--review", "--base", "main") == 0
 
-    assert json.loads(output.read_text())["extra"]["pr_repo"] == "acme/widgets"
+    assert read_trajectory(output)["extra"]["pr_repo"] == "acme/widgets"
     assert (feature_branch_repo / ".review-output.md").is_file()
     assert not transport.gh.calls("POST", "app/installations/71/access_tokens")
     assert all(env["GH_TOKEN"] == _AMBIENT for _cwd, _argv, env in transport.requests)
@@ -210,12 +212,12 @@ def test_cli_requested_branch_ignores_current_checkout_pr(
     stub.review_claims = [{"title": "Sample issue", "file": "main.py", "line": 1, "severity": "high"},
                           {"title": "Removed return", "file": "main.py", "line": 2, "side": "old", "severity": "low"}]
     monkeypatch.setattr("daydream.runner.create_backend", lambda *a, **kw: stub)
-    output = tmp_path / "trajectory.json"
+    output = tmp_path / RUN_DOCUMENT_NAME
     store = LocalRecordStore(tmp_path / "records")
     assert _run(repo, output, "--comment", "--branch", "requested", "--base", "main", "--approve-on-clean",
                 "--capture-data", "--dataset-store", str(store.root)) == 0
 
-    assert json.loads(output.read_text())["extra"]["pr_number"] == 73
+    assert read_trajectory(output)["extra"]["pr_number"] == 73
     # The sealed review, not the fake, attests which commit discovery and its fresh challenge analyzed.
     sealed = json.loads((repo / ".daydream/deep/committed-review.json").read_text())
     assert sealed["analyzed_revision"]["head_sha"] == requested_head

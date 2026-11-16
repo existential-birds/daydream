@@ -4,7 +4,7 @@ import json
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -12,6 +12,7 @@ from daydream.backends.codex import CodexBackend
 from daydream.remote_ci import RemoteCITarget, pending_remote_ci_verdict, write_remote_ci_handoff
 from daydream.run_config import RunConfig
 from daydream.runner import run
+from daydream.trajectory import RUN_DOCUMENT_NAME
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote, commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.processes import wait_for_process_group_exit
@@ -21,13 +22,13 @@ from tests.harness.remote_ci import (
     start_remote_ci_fake,
 )
 from tests.harness.stub_backend import StubBackend
+from tests.harness.trajectory import read_trajectory
 from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
 
 def _load_trajectory(project: Path, session_id: str) -> dict[str, Any]:
-    """Load the recorded trajectory for ``session_id`` from ``project``'s run dir."""
-    path = project / ".daydream" / "runs" / session_id / "trajectory.json"
-    return cast(dict[str, Any], json.loads(path.read_text()))
+    """Reduce the root evidence document for ``session_id`` from ``project``'s run dir."""
+    return read_trajectory(project / ".daydream" / "runs" / session_id / RUN_DOCUMENT_NAME)
 
 def _remote_ci_phase_end(trajectory: dict[str, Any]) -> dict[str, Any]:
     """Return the single ``remote-ci`` ``phase_end`` event, asserting uniqueness."""

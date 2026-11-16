@@ -2,7 +2,6 @@
 import fcntl
 import hashlib
 import json
-import math
 import os
 import stat
 from collections.abc import Iterator
@@ -20,6 +19,7 @@ from daydream.deep.render import insert_review_context
 from daydream.run_config import RunConfig
 from daydream.training.reward import ScoringInputs
 from tests.harness.dataset import observation, read_records, run_record
+from tests.harness.trajectory import portable_document
 
 LEGACY_REVIEW = '# Review\n\n## Issues\n1. [a.py:1] Existing finding.\n'
 CONTEXT_REVIEW = insert_review_context(LEGACY_REVIEW, {
@@ -220,9 +220,7 @@ def test_failed_commit_is_not_visible_and_abandoned_staging_recovers_privately(
             shared.setattr(fcntl, "flock", lambda descriptor, operation: None)
             assert store.commit_run(run_record("concurrent")).diagnostics == () and live.exists()
         assert {run["run_id"] for run in read_records(store).runs} == {"run-1", "retry", "concurrent"}
-        yield {"schema_version": "ATIF-v1.7", "session_id": "streamed", "trajectory_id": "streamed",
-               "agent": {"name": "daydream", "version": "test"},
-               "steps": [{"step_id": 1, "source": "user", "message": "review"}]}
+        yield _document("streamed", "streamed")
     streamed = run_record("streamed", trajectories={"status": "available", "value": {
         "root_trajectory_id": "streamed", "status": "complete", "cutoff_at": "2026-10-04T12:01:00Z"}})
     assert store.commit_run(streamed, documents()).committed
@@ -255,6 +253,12 @@ def test_snapshot_reads_validate_only_pinned_shards(tmp_path: Path) -> None:
             store.read_snapshot(identity)
 
 
+def _document(session_id: str, trajectory_id: str, *, steps: tuple[dict[str, Any], ...] = (
+        {"step_id": 1, "source": "user", "message": "review"},), **fields: Any) -> dict[str, Any]:
+    """One captured evidence document, with one step unless the caller supplies its own."""
+    return portable_document(trajectory_id, session_id=session_id, steps=steps, **fields)
+
+
 def test_run_sections_require_complete_semantic_payload_and_bound_membership(tmp_path: Path) -> None:
     field = "trajectories"
     raw = parse_run(run_record())
@@ -265,13 +269,9 @@ def test_run_sections_require_complete_semantic_payload_and_bound_membership(tmp
     parse_run(raw)
     summary: dict[str, Any] = {"trajectory_id": "run-1", "invocation_id": "attempt-1", "step_ids": [1],
                                "phase": "review"}
-    agent = {"name": "daydream", "version": "test"}
-    documents = [{"schema_version": "ATIF-v1.7", "session_id": "run-1", "trajectory_id": "run-1", "agent": agent,
-                  "steps": [{"step_id": 1, "source": "user", "message": "review"}],
-                  "extra": {"subtrajectories": [summary]}},
-                 {"schema_version": "ATIF-v1.7", "session_id": "run-1", "trajectory_id": "run-1:child", "agent": agent,
-                  "steps": [{"step_id": 1, "source": "agent", "message": "caf\u00e9 \U0001f600",
-                             "metrics": {"cost_usd": 1.5e-05}}], "extra": {"absent": None}}]
+    child_step = {"step_id": 1, "source": "agent", "message": "caf\u00e9 \U0001f600", "metrics": {"cost_usd": 1.5e-05}}
+    child = _document("run-1", "run-1:child", steps=(child_step,), extra={"absent": None})
+    documents = [_document("run-1", "run-1", subtrajectories=(summary,)), child]
     value = {"root_trajectory_id": "run-1", "status": "partial", "cutoff_at": "2026-10-04T12:01:00Z"}
     envelope = run_record(outcome="interrupted", trajectories={"status": "available", "value": value})
     raw = run_record(outcome="interrupted", trajectories={"status": "available", "value": {
@@ -296,20 +296,23 @@ def test_run_sections_require_complete_semantic_payload_and_bound_membership(tmp
     with pytest.raises(StoreError, match="record_too_large"):
         short.commit_run(envelope, iter(documents))
     assert list((short.root / "runs").iterdir()) == []
-    root, child = documents
+    root = documents[0]
     faulted = LocalRecordStore(tmp_path / "faulted")
     for record, streamed_documents in (
-        (envelope, [root, child | {"session_id": "other"}]), (envelope, [root, child | {"trajectory_id": "run-1"}]),
-        (envelope, [root, child | {"steps": []}]), (envelope, [root, child | {"extra": {"x": math.nan}}]),
+        # A child recorded under another run, a second root identity, and bytes that differ from their digest.
+        (envelope, [root, _document("other", "run-1:child")]), (envelope, [root, _document("run-1", "run-1")]),
+        (envelope, [root, child | {"sha256": "0" * 64}]),
         (envelope, [child]), (raw, documents), (run_record(), documents),
     ):
         with pytest.raises(StoreError, match="invalid_or_unknown_record_schema"):
             faulted.commit_run(record, iter(streamed_documents))
-    summary["step_ids"] = [9]
+    # An invocation summary naming a step its document never recorded is refused.
+    absent = [_document("run-1", "run-1", subtrajectories=({**summary, "step_ids": [9]},)), child]
     with pytest.raises(ValueError, match="invalid RunRecord"):
-        parse_run(raw)
+        parse_run(run_record(outcome="interrupted", trajectories={"status": "available", "value": {
+            **value, "documents": absent}}))
     with pytest.raises(StoreError, match="invalid_or_unknown_record_schema"):
-        faulted.commit_run(envelope, iter(documents))
+        faulted.commit_run(envelope, iter(absent))
     assert list((faulted.root / "runs").iterdir()) == []
 
 

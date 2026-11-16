@@ -10,6 +10,7 @@ from daydream.dataset_capture import capture_scoring
 from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig
 from daydream.training.reward import ScoringInputs
 from tests.harness.dataset import observation, run_record
+from tests.harness.trajectory import portable_document
 
 CAPTURED_AT = "2026-10-04T10:00:00Z"
 VALID_AT = "2026-10-04T11:00:00Z"
@@ -25,15 +26,13 @@ def projection_run(
               "fingerprint": hashlib.sha256(f"{run_id}:{index}".encode()).hexdigest(),
               "body": f"{disposition} finding body"} for index, disposition in enumerate(dispositions)]
     diff = f"diff --git a/{run_id}.py b/{run_id}.py\n-pass\n+fixed\n"
-    root = {"schema_version": "ATIF-v1.7", "session_id": run_id, "trajectory_id": run_id,
-            "agent": {"name": "daydream", "version": "1"},
-            "steps": [{"step_id": 1, "source": "agent", "message": "review"}]}
-    documents = [root]
-    if siblings:
-        children = [{**root, "trajectory_id": f"{run_id}:fix-{index}"} for index in range(siblings)]
-        # Actual capture holds standalone documents plus ordered root invocation summaries.
-        root["extra"] = {"subtrajectories": [{"trajectory_id": child["trajectory_id"]} for child in children]}
-        documents += children
+    steps = ({"step_id": 1, "source": "agent", "message": "review"},)
+    children = [f"{run_id}:fix-{index}" for index in range(siblings)]
+    # Actual capture holds standalone documents plus ordered root fork summaries.
+    documents = [portable_document(
+        trajectory_id, session_id=run_id, steps=steps, parent=None if trajectory_id == run_id else run_id,
+        subtrajectories=tuple({"trajectory_id": child} for child in children) if trajectory_id == run_id else (),
+    ) for trajectory_id in (run_id, *children)]
     provenance = {"profile": {"profile_schema_version": 2, "profile_name": profile,
                               "profile_source_kind": "builtin", "profile_digest": "d" * 64}, "stack": stack}
     scoring = capture_scoring(ScoringInputs(verifier_verdicts=None, format_valid=True, length=6), "review")

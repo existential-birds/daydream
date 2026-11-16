@@ -32,7 +32,7 @@ from tests.harness.fake_cli_process import FakeCliProcess, FakeCliSpawner, insta
 from tests.harness.osprey_jsonl import osprey_session
 from tests.harness.protocol_cli import install_protocol_cli
 from tests.harness.protocol_cli_assertions import assert_protocol_cli_invariants
-from tests.harness.trajectory import make_recorder
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 
 @pytest.mark.parametrize("sandbox", [False, True])
@@ -167,7 +167,7 @@ async def test_osprey_turns_retain_thinking_boundaries_and_native_identity(tmp_p
     assert spawn.call_args.kwargs["stderr"] is asyncio.subprocess.PIPE
     assert process.returncode == 0 and process.stdin.closed and process._transport.closed
     assert backend._transports == []
-    trajectory = json.loads(recorder.path.read_text())
+    trajectory = read_trajectory(recorder.path)
     steps = [step for step in trajectory["steps"] if step["source"] == "agent"]
     assert [step["message"] for step in steps] == ["Done.", "from message_end"]
     assert steps[0]["reasoning_content"] == "Let me think.\nsecond attempt"

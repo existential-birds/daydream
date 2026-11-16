@@ -17,7 +17,6 @@ import pytest
 
 from daydream.agent import run_agent
 from daydream.agent_retry import _resolve_retry_settings
-from daydream.atif import validate
 from daydream.backends import (
     Backend,
     BackendExecutionInput,
@@ -54,7 +53,7 @@ from tests.harness.fake_clock import FakeClock
 from tests.harness.pi_replay import FIXTURES_DIR, make_mock_process, make_mock_process_from_fixture
 from tests.harness.process_replay import replay_process
 from tests.harness.protocol_cli_assertions import make_cancel_probe
-from tests.harness.trajectory import make_recorder
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 
 def _case_dir(tmp_path: Path, index: int) -> Path:
@@ -126,7 +125,7 @@ async def _interrupted_pi_updates_retain_only_admitted_progress_case(
                 output, _, reason = await turn
     assert reason == "wall_budget_exceeded"
     assert output == ""
-    trajectory = json.loads(recorder.path.read_text())
+    trajectory = read_trajectory(recorder.path)
     evidence = trajectory["extra"]["subtrajectories"][0]["backend_lifecycle"]
     assert evidence["state"] == ("native_event" if kind == "tool" else "generating")
     assert evidence["generation_count"] == 1 and evidence["generation_open"] is (kind != "tool")
@@ -537,7 +536,7 @@ async def _pi_terminal_diagnostic_is_bounded_and_redacted_before_persistence_cas
                 )
     assert failure.value.category == "UNKNOWN" and failure.value.retryable is False
     assert spawn.call_count == 1
-    document = json.loads(recorder.path.read_text())
+    document = read_trajectory(recorder.path)
     diagnostics = [
         diagnostic
         for step in document["steps"]
@@ -617,7 +616,7 @@ async def _pi_diagnostic_redaction_fault_preserves_native_failure_and_terminal_u
                 )
     assert failure.value.category == "UNKNOWN" and failure.value.retryable is False
     assert spawn.call_count == 1
-    document = json.loads(recorder.path.read_text())
+    document = read_trajectory(recorder.path)
     diagnostics = [
         diagnostic
         for step in document["steps"]
@@ -1139,7 +1138,7 @@ async def test_native_pi_tool_batch_and_resumed_turn_record_literal_observations
     }
     assert {event.id: event.output for event in results} == expected
     assert [event.id for event in results if event.is_error] == ["failed"]
-    document = json.loads(recorder.path.read_text())
+    document = read_trajectory(recorder.path)
     agent_steps = [step for step in document["steps"] if step["source"] == "agent"]
     recorded = next(step for step in agent_steps if step["message"] == "Inspecting")
     assert recorded["reasoning_content"] == "Inspect these results"
@@ -1161,7 +1160,6 @@ async def test_native_pi_tool_batch_and_resumed_turn_record_literal_observations
         process.wait.assert_awaited()
         process._transport.close.assert_called_once()
     assert backend._transports == []
-    assert validate(recorder.path, validate_images=False)
 
 
 @pytest.mark.parametrize(("active_tool", "deadline_s", "expected_window"),

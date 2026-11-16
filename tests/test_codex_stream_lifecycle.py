@@ -35,7 +35,7 @@ from daydream.trajectory import DaydreamPhase
 from tests.harness.codex_lifecycle_cli import CodexLifecycleCli, LifecycleMode, install_codex_lifecycle_cli
 from tests.harness.codex_replay import make_mock_process
 from tests.harness.processes import wait_for_process_group_gone
-from tests.harness.trajectory import make_recorder
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 
 def _bounded_codex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: LifecycleMode,
@@ -301,7 +301,7 @@ async def test_codex_cleanup_expiry_preserves_primary_drain_error_and_recorded_e
             async with recorder:
                 await run_agent(backend, tmp_path, "synthetic lifecycle request", phase=DaydreamPhase.FIX)
     assert failure.value.retryable is False
-    trajectory = json.loads(recorder.path.read_text())
+    trajectory = read_trajectory(recorder.path)
     assert trajectory["extra"]["partial"] is True
     attempts = trajectory["extra"]["subtrajectories"]
     assert len(attempts) == 1

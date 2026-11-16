@@ -16,7 +16,6 @@ from claude_agent_sdk import ClaudeAgentOptions, CLINotFoundError, HookMatcher
 from mcp import types as mcp_types
 
 from daydream import agent, clock
-from daydream.atif import validate
 from daydream.backends import (
     READ_ONLY_BASH_ALLOWLIST,
     AuditIsolationError,
@@ -59,7 +58,7 @@ from tests.harness.claude_sdk import (
     scripted_client,
 )
 from tests.harness.git_helpers import commit, init_repo, write_and_stage
-from tests.harness.trajectory import make_recorder
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 
 @pytest.fixture
@@ -643,7 +642,7 @@ async def test_sdk_conversation_records_native_tools_usage_and_resumed_request(
     assert (terminal.session_id, terminal.finish_reason, terminal.duration_ms, terminal.duration_api_ms) == (
         "native-session", "end_turn", 120, 100,
     )
-    document = json.loads(recorder.path.read_text())
+    document = read_trajectory(recorder.path)
     steps = [step for step in document["steps"] if step["source"] == "agent"]
     assert steps[0]["message"] == "Checking" and steps[0]["reasoning_content"] == "Inspect the file"
 
@@ -675,7 +674,6 @@ async def test_sdk_conversation_records_native_tools_usage_and_resumed_request(
     assert document["final_metrics"]["total_prompt_tokens"] == 160
     assert document["final_metrics"]["total_completion_tokens"] == 55
     assert not any(isinstance(event, (GenerationStartEvent, GenerationEndEvent)) for event in first + second)
-    assert validate(recorder.path, validate_images=False)
 
 
 # --- Host tools through the real bundled CLI and an offline loopback provider ---
@@ -893,7 +891,7 @@ async def test_host_tools_complete_through_both_sdk_startup_routes(
         decision = await _decide(guards, {"tool_name": name, "tool_input": tool_input})
         assert _is_denied(decision) is (not allowed), (name, tool_input)
     # Terminal usage and the host lifecycle survive a native failure after acceptance.
-    document = json.loads(recorder.path.read_text())
+    document = read_trajectory(recorder.path)
     assert document["final_metrics"]["total_prompt_tokens"] > 0
     (invocation,) = document["extra"]["subtrajectories"]
     assert invocation["host_dispatch"]["system_disposition"] == "supplied"

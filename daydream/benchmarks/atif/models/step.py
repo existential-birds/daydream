@@ -5,10 +5,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from daydream.atif.models.content import ContentPart
-from daydream.atif.models.metrics import Metrics
-from daydream.atif.models.observation import Observation
-from daydream.atif.models.tool_call import ToolCall
+from daydream.benchmarks.atif.models.content import ContentPart
+from daydream.benchmarks.atif.models.metrics import Metrics
+from daydream.benchmarks.atif.models.observation import Observation
+from daydream.benchmarks.atif.models.tool_call import ToolCall
 
 
 class Step(BaseModel):

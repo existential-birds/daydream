@@ -10,7 +10,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from daydream.atif.models import Trajectory
+from daydream.benchmarks.atif.models import Trajectory
 
 
 class TrajectoryValidator:

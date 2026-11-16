@@ -48,7 +48,7 @@ def test_offline_queue_retry_download_and_immutable_history(
     tree = hub.trees[result.revision]
     manifest = json.loads(tree[api.MANIFEST_PATH])
     assert manifest["schema_version"] == "daydream.hub.v3"
-    assert manifest["record_schemas"] == {"runs": ["daydream.run.v2"],
+    assert manifest["record_schemas"] == {"runs": ["daydream.run.v3"],
         "observations": ["daydream.observation.v3"]}
     for kind, shards in manifest["shards"].items():
         assert len(shards) == 1
@@ -201,7 +201,7 @@ def test_corrupt_pinned_snapshots_never_expose_records(tmp_path: Path, api: Any)
         elif fault in {"partial", "record", "version"}:
             data = tree.pop(shard["path"])
             data = (data[:-1] if fault == "partial" else data.replace(b'"success"', b'"failed"') if fault == "record"
-                    else data.replace(b"daydream.run.v2", b"daydream.run.v9"))
+                    else data.replace(b"daydream.run.v3", b"daydream.run.v9"))
             shard["sha256"] = hashlib.sha256(data).hexdigest()
             shard["bytes"] = len(data)
             shard["path"] = "runs/" + shard["sha256"] + ".jsonl"
@@ -235,7 +235,7 @@ def test_interruption_after_remote_commit_recovers_from_content_identity(tmp_pat
     assert restarted.status().queued == 1 and restarted.status().published == 0
     assert restarted.upload().published == 1 and len(hub.commits) == 1
     published = store.root / "runs" / record_name("run-1")
-    published.write_bytes(published.read_bytes().replace(b"daydream.run.v2", b"daydream.run.v9"))
+    published.write_bytes(published.read_bytes().replace(b"daydream.run.v3", b"daydream.run.v9"))
     store.commit_run(run_record("after"))
     after = restarted.upload()
     assert (after.published, after.error, after.skipped, len(hub.commits)) == (2, None, (), 2)

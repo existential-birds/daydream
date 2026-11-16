@@ -29,7 +29,7 @@ from daydream.hub import DatasetHub, HfDatasetHub, HubConflict, HubError, _revis
 from daydream.json_utils import atomic_write_bytes, canonical_json
 
 MANIFEST_PATH = "manifest.json"
-_SCHEMAS = {"runs": ["daydream.run.v2"], "observations": ["daydream.observation.v3"]}
+_SCHEMAS = {"runs": ["daydream.run.v3"], "observations": ["daydream.observation.v3"]}
 _IDENTITY_FIELDS = {"runs": "run_id", "observations": "observation_id"}
 _PARSERS = {"runs": parse_run, "observations": parse_observation}
 _VERSION = "daydream.hub.v3"

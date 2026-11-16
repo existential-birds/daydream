@@ -27,41 +27,41 @@ from daydream.eval.analyzer import (
 )
 from daydream.git_ops import search_files
 from daydream.trajectory import (
+    DOCUMENT_SUFFIX,
+    RUN_DOCUMENT_NAME,
     DaydreamPhase,
     RunWriteSnapshot,
-    TrajectoryDocumentSnapshot,
     summarize_run,
 )
 from tests.harness.git_helpers import git
-from tests.harness.trajectory import make_recorder
+from tests.harness.trajectory import evidence_reference, make_recorder
 
 
-def _snapshot(root: dict[str, Any], *forks: dict[str, Any], cutoff_at: str = "2026-01-01T00:00:10Z",
+def _snapshot(store: Path, root: dict[str, Any], *forks: dict[str, Any], cutoff_at: str = "2026-01-01T00:00:10Z",
     status: Literal["complete", "partial"] = "complete",
 ) -> RunWriteSnapshot:
-    """Prepare explicitly identified fixture documents without reading trajectory files."""
+    """Freeze explicitly identified fixture documents in *store*, each named by its ``_source_file``."""
+    documents = [evidence_reference(payload, store / f"{index}{DOCUMENT_SUFFIX}",
+                                    logical_path=Path(payload["_source_file"]))
+                 for index, payload in enumerate((root, *forks))]
     return RunWriteSnapshot(status=status, cutoff_at=cutoff_at, root_trajectory_id=root["trajectory_id"],
-        documents=tuple(TrajectoryDocumentSnapshot(payload["trajectory_id"], Path(payload["_source_file"]),
-                json.dumps({key: value for key, value in payload.items() if key != "_source_file"}).encode(),
-            ) for payload in (root, *forks)),
-    )
+                            documents=tuple(documents))
 
 
 def test_evaluation_uses_frozen_bytes_status_and_cutoff(tmp_path: Path) -> None:
-    root: dict[str, Any] = {"session_id": "frozen", "trajectory_id": "frozen", "_source_file": "trajectory.json",
+    root: dict[str, Any] = {"session_id": "frozen", "trajectory_id": "frozen", "_source_file": RUN_DOCUMENT_NAME,
         "steps": [{"timestamp": "2026-01-01T00:00:02Z"}, {"timestamp": "2026-01-01T00:00:03Z"}],
         "final_metrics": {"total_cost_usd": 0.5},
         "extra": {"partial": False, "run_started_at": "2026-01-01T00:00:00Z",
             "run_ended_at": "2026-01-01T00:00:10Z", "snapshot_at": "2026-01-01T00:00:04Z"},
     }
-    snapshot = _snapshot(root, status="partial", cutoff_at="2026-01-01T00:00:10Z")
+    snapshot = _snapshot(tmp_path / "evidence", root, status="partial", cutoff_at="2026-01-01T00:00:10Z")
     snapshot.validate("frozen")
-    live_path = tmp_path / ".daydream" / "runs" / "frozen" / "trajectory.json"
-    live_path.parent.mkdir(parents=True)
-    live_path.write_bytes(snapshot.documents[0].read_bytes())
+    live_path = tmp_path / ".daydream" / "runs" / "frozen" / RUN_DOCUMENT_NAME
     root["final_metrics"]["total_cost_usd"] = 99.0
     root["extra"]["run_ended_at"] = "2026-01-01T00:01:00Z"
-    live_path.write_text(json.dumps(root))
+    del root["extra"]["snapshot_at"]
+    evidence_reference(root, live_path)
 
     result = analyze_session(tmp_path / ".daydream", summary=summarize_run(snapshot))
 
@@ -100,8 +100,8 @@ def test_training_signals_preserve_independent_fork_outcomes_in_archive(tmp_path
     target.mkdir()
     recorder = make_recorder(target, session_id="training-outcomes")
     root = _root_trajectory(recorder.session_id)
-    snapshot = _snapshot(root, *(
-        root | {"_source_file": f"{name}.json", "trajectory_id": name, "steps": steps}
+    snapshot = _snapshot(tmp_path / "evidence", root, *(
+        root | {"_source_file": f"{name}{DOCUMENT_SUFFIX}", "trajectory_id": name, "steps": steps}
         for name, steps in population.items()
     ))
     _finalize_strict_archive(recorder, snapshot, RunConfig(run_eval=True, archive=True), target)
@@ -124,17 +124,18 @@ def test_training_signals_preserve_independent_fork_outcomes_in_archive(tmp_path
     assert (result["total_trajectories"], result["clean_for_training"], result["needs_review"]) == (12, 5, 7)
 
 
-def test_analyze_costs_aggregates_legacy_fork_metrics() -> None:
+def test_analyze_costs_aggregates_legacy_fork_metrics(tmp_path: Path) -> None:
     """A root without the whole-run metric scope bills its rows by summing every document's own totals."""
     root = _root_trajectory("legacy") | {"final_metrics": {"total_cost_usd": 1.0}}
-    fork = root | {"_source_file": "fork.json", "trajectory_id": "fork", "final_metrics": {"total_cost_usd": 0.5}}
+    fork = root | {"_source_file": f"fork{DOCUMENT_SUFFIX}", "trajectory_id": "fork",
+                   "final_metrics": {"total_cost_usd": 0.5}}
 
-    result = analyze_costs(summarize_run(_snapshot(root, fork)))
+    result = analyze_costs(summarize_run(_snapshot(tmp_path / "evidence", root, fork)))
 
     assert result["total_cost_usd"] == 1.5
     assert [(row["agent"], row["cost_usd"]) for row in result["by_agent"]] == [("main", 1.0), ("fork", 0.5)]
-    # The legacy filename shapes are retained deliberately.
-    assert _agent_label("deadbeef.deep-python.json") == "deep-python"
+    # A fork document is labeled by its descriptor without the fork identity digest.
+    assert _agent_label(f"deep-python--{'a' * 64}{DOCUMENT_SUFFIX}") == "deep-python"
 
 
 async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Path, archive_dir: Path) -> None:
@@ -154,7 +155,7 @@ async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Pa
     recorder = make_recorder(
         workspace,
         on_write=lambda _rec, snapshot: snapshots.append(snapshot),
-        path=daydream_dir / "runs" / "nested-forks" / "trajectory.json",
+        path=daydream_dir / "runs" / "nested-forks" / RUN_DOCUMENT_NAME,
         agent_model_name="opus",
         session_id="nested-forks",
     )
@@ -191,7 +192,7 @@ async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Pa
     snapshot = snapshots[-1]
     snapshot.validate(recorder.session_id)
     assert not empty.path.exists()
-    root = json.loads(snapshot.documents[0].read_bytes())
+    root = snapshot.documents[0].validated_payload(recorder.session_id)
     assert root["final_metrics"]["total_prompt_tokens"] == 190
     assert root["final_metrics"]["total_cost_usd"] == pytest.approx(0.50006)
     assert not any(item.get("descriptor") == "empty-child" for item in root["extra"]["subtrajectories"])
@@ -254,8 +255,8 @@ def _deep_dirs(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _root_trajectory(session_id: str) -> dict[str, Any]:
-    """A minimal ATIF root trajectory ``analyze_session`` accepts as frozen input."""
-    return {"_source_file": "trajectory.json", "session_id": session_id, "trajectory_id": session_id,
+    """A minimal root document view ``analyze_session`` accepts as frozen input."""
+    return {"_source_file": RUN_DOCUMENT_NAME, "session_id": session_id, "trajectory_id": session_id,
         "agent": {"name": "daydream", "model_name": "test"}, "steps": [], "final_metrics": {},
     }
 
@@ -564,7 +565,7 @@ def test_analyze_session_reads_quality_from_explicit_code_workspace(tmp_path: Pa
     workspace = _quality_workspace(tmp_path, files, name="operational")
     public_source = tmp_path / "public-source"
     frozen = tmp_path / "frozen" / ".daydream"
-    snapshot = _snapshot(_root_trajectory("quality-split") | {"schema_version": "ATIF-v1.6"})
+    snapshot = _snapshot(tmp_path / "evidence", _root_trajectory("quality-split"))
     provenance = _artifact_provenance(
         public_source=public_source, private_base=tmp_path / "private", workspace_key="workspace",
         session_id="quality-split",
@@ -692,7 +693,7 @@ def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
     Files that only earlier builds wrote (stack records, alternatives, routing) count for nothing."""
     sid = "a80b9373-56d6-4062-9ab5-4c75e475ab67"
     dd, deep = _deep_dirs(tmp_path)
-    snapshot = _snapshot(_root_trajectory(sid) | {"final_metrics": {"total_cost_usd": 18.2056}})
+    snapshot = _snapshot(tmp_path / "evidence", _root_trajectory(sid) | {"final_metrics": {"total_cost_usd": 18.2056}})
     shipped = [_item(i, file="a.py", line=i + 1, description=f"high-{i}", confidence="HIGH", severity="high")
         for i in range(4)
     ]
@@ -747,7 +748,7 @@ def _assert_frozen_analysis_survives(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         root["final_metrics"] = {"total_cost_usd": 0.5}
         root["steps"] = [{"timestamp": "2026-01-01T00:00:02Z"}, {"timestamp": "2026-01-01T00:00:03Z"}]
         child = _root_trajectory("quality-unavailable") | {"trajectory_id": "child", "_source_file": "child.json"}
-        snapshot = _snapshot(root, child)
+        snapshot = _snapshot(tmp_path / "evidence", root, child)
         code_workspace: Path | CodeWorkspace = ws
         if unavailable in {"source-during-checkout-open", "denied-checkout-open"}:
             original_open = os.open
@@ -927,7 +928,7 @@ def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path
     assert all(RECORD_SOURCE_UIDS_KEY not in item for item in (items[0], items[3], items[4]))
     seed_merged_items(deep, items)
     result = analyze_session(
-        dd, summary=summarize_run(_snapshot(_root_trajectory("loc-session") | {"schema_version": "ATIF-v1.7"}))
+        dd, summary=summarize_run(_snapshot(tmp_path / "evidence", _root_trajectory("loc-session")))
     )
     location = result["location"]
     assert location["hunk_source"] == "hunk-index.json"

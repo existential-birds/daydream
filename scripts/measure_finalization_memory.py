@@ -1,6 +1,6 @@
-"""Offline memory characterization of trajectory serialization and finalization consumers (#1714).
+"""Offline memory characterization of evidence recording and finalization consumers (#1714, #1719).
 
-A standalone ``TrajectoryRecorder`` receives synthetic backend events, with no models:
+A standalone ``EvidenceRecorder`` receives synthetic backend events, with no models:
 ``--forks`` completed children of ``--turns`` turns whose tool result is ``--body-kb`` KB,
 plus ``--root-invocations`` root invocations. Each scenario runs in a fresh subprocess.
 Per stage it reports the tracemalloc peak above the stage's starting allocation (Python
@@ -8,7 +8,8 @@ heap), the kernel RSS high-water delta (``/proc/self/clear_refs``; includes nati
 pydantic-core buffers), bytes read (``/proc/self/io`` rchar; the table prints the archive
 stage's) and seconds:
 
-- ``write``: the root's final write on recorder exit (serialization and snapshot callback);
+- ``record``: recording every event, appending evidence as each invocation finishes;
+- ``write``: the root's seal on recorder exit (and the snapshot callback);
 - ``runinfo``: ``render_live_run_info`` while the recorder is live;
 - ``summarize``: ``render_run_info_block`` over the written run directory (``daydream summarize``);
 - ``archive``: ``finalize_archive_run`` with archive and evaluation enabled;
@@ -38,7 +39,7 @@ from typing import Any
 
 MIB = 1024 * 1024
 SESSION = "0d1714aa-0000-4000-8000-000000000000"
-STAGES = ("write", "runinfo", "summarize", "archive", "capture")
+STAGES = ("record", "write", "runinfo", "summarize", "archive", "capture")
 
 
 PROC = Path("/proc/self")
@@ -107,7 +108,13 @@ def _scenario(forks: int, body_kb: int, turns: int, root_invocations: int) -> di
     from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
     from daydream.run_config import RunConfig
     from daydream.run_snapshot import ArchiveRunSnapshot, ManifestRunIdentity, RunPhaseCapabilities
-    from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder, default_trajectory_path
+    from daydream.trajectory import (
+        DOCUMENT_SUFFIX,
+        DaydreamPhase,
+        DaydreamRunFlow,
+        EvidenceRecorder,
+        default_trajectory_path,
+    )
     from daydream.trajectory.scopes import fork_scope, invocation_scope
 
     body = "x" * (body_kb * 1024)
@@ -115,20 +122,23 @@ def _scenario(forks: int, body_kb: int, turns: int, root_invocations: int) -> di
     snapshots: list[Any] = []
 
     async def record(frozen: Path) -> None:
-        recorder = TrajectoryRecorder(
+        recorder = EvidenceRecorder(
             path=default_trajectory_path(frozen, SESSION), run_flow=DaydreamRunFlow.DEEP, target_dir=frozen,
             agent_model_name="synthetic", session_id=SESSION,
             on_write=lambda _recorder, snapshot: snapshots.append(snapshot),
         )
         write = Stage(result, "write")
         async with recorder:
-            for index in range(forks):
-                async with fork_scope(recorder, f"reviewer-{index}") as child:
-                    async with invocation_scope(child, DaydreamPhase.REVIEW) as inv:
+            cpu = time.process_time()
+            with Stage(result, "record"):
+                for index in range(forks):
+                    async with fork_scope(recorder, f"reviewer-{index}") as child:
+                        async with invocation_scope(child, DaydreamPhase.REVIEW) as inv:
+                            _drive(inv, turns, body)
+                for _ in range(root_invocations):
+                    async with invocation_scope(recorder, DaydreamPhase.REVIEW) as inv:
                         _drive(inv, turns, body)
-            for _ in range(root_invocations):
-                async with invocation_scope(recorder, DaydreamPhase.REVIEW) as inv:
-                    _drive(inv, turns, body)
+            result["record_cpu_s"] = time.process_time() - cpu
             with Stage(result, "runinfo"):
                 info = render_live_run_info(LiveRunInfoSource(recorder, object()))  # type: ignore[arg-type]
             assert info.diagnostic is None, info.diagnostic
@@ -141,7 +151,7 @@ def _scenario(forks: int, body_kb: int, turns: int, root_invocations: int) -> di
         tracemalloc.start()
         anyio.run(record, frozen)
         final = snapshots[-1]
-        written = sorted(frozen.glob(".daydream/runs/*/**/*.json"))
+        written = sorted(frozen.glob(f".daydream/runs/*/**/*{DOCUMENT_SUFFIX}"))
         result["docs"] = len(final.documents)
         result["run_mib"] = sum(path.stat().st_size for path in written) / MIB
         result["largest_mib"] = max(path.stat().st_size for path in written) / MIB
@@ -199,7 +209,7 @@ def main() -> None:
         return
     header = ["forks", "body KB", "docs", "run MiB", "largest MiB"]
     header += [f"{stage} {kind}" for stage in STAGES for kind in ("peak MiB", "RSS MiB", "s")]
-    header += ["archive read MiB", "maxrss MiB"]
+    header += ["record CPU s", "archive read MiB", "maxrss MiB"]
     print("| " + " | ".join(header) + " |")
     print("|" + "---|" * len(header))
     for body_kb in args.body_kb:
@@ -214,7 +224,7 @@ def main() -> None:
                      f"{row['largest_mib']:.2f}"]
             for stage in STAGES:
                 cells += [f"{row[stage + '_peak']:.2f}", f"{row[stage + '_rss']:.1f}", f"{row[stage + '_s']:.3f}"]
-            cells += [f"{row['archive_read']:.2f}", f"{row['maxrss']:.1f}"]
+            cells += [f"{row['record_cpu_s']:.3f}", f"{row['archive_read']:.2f}", f"{row['maxrss']:.1f}"]
             print("| " + " | ".join(cells) + " |")
 
 

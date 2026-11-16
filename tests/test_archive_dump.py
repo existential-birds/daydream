@@ -27,7 +27,7 @@ def test_destination_publication_error_stays_fatal(tmp_path: Path, archive_dir: 
         _strict_archive(
             target=source, session_id=recorder.session_id,
             config=RunConfig(target=str(source), dump_artifacts=str(stage)),
-            write_snapshot=_write_snapshot(recorder), dump_path=stage,
+            write_snapshot=_write_snapshot(tmp_path / "evidence", recorder), dump_path=stage,
         )
     assert isinstance(raised.value.__cause__, shutil.Error)
     assert _contents(stage) == {}

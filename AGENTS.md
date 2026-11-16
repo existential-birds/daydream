@@ -81,8 +81,8 @@ or older testing requirements.
 ## Architecture
 
 Daydream reviews diffs, applies authorized fixes, validates them, and records agent
-interactions as ATIF v1.7 trajectories. Captured records feed the bitemporal corpus
-pipeline. One reviewer, the committed-review program, reviews the whole change; a review
+interactions as local OpenTelemetry evidence. Captured records feed the bitemporal corpus
+pipeline; benchmarks export Harbor-compatible ATIF from that evidence. One reviewer, the committed-review program, reviews the whole change; a review
 that ends with findings is the default, fixing is
 [selected explicitly](docs/runtime.md#validation-and-repair), and review/comment modes stop
 before fixes. Improve currently requires Claude for
@@ -105,7 +105,8 @@ These boundaries matter across subsystems; module docstrings carry finer detail:
 | `agent.py`, `agent_output.py`, `agent_retry.py` | Backend lifecycle/budgets, host result selection/validation, retry policy |
 | `committed_review*` | Explicit committed-review request/result, semantic claim revisions, mandatory fresh challenge and sealed output |
 | `backends/` | Native transport and the common `Backend` / `AgentEvent` contract |
-| `trajectory/`, `observability/` | Recorded evidence, generation billing ownership, and per-run tracing |
+| `trajectory/`, `observability/` | Local OpenTelemetry evidence, usage billing ownership, and per-run tracing |
+| `benchmarks/` | Optional Harbor/ATIF export of finished evidence; never imported by ordinary runs |
 | `artifact_visibility.py`, `artifacts/`, `workspace.py` | Private artifact ownership, finalization/recovery, and operational worktrees |
 | `git_ops/` | Single Git/GitHub subprocess boundary |
 | `reviews/`, `pr_review.py`, `pr_comment_renderer.py` | Finding placement/publication and pure comment rendering |
@@ -133,7 +134,7 @@ These boundaries matter across subsystems; module docstrings carry finer detail:
 - Call agents through `agent.run_agent()`, never directly through a backend/SDK
   from phases. Fan-out uses parallel calls under
   `anyio.CapacityLimiter(effective_fanout_concurrency(ceiling, backend))` and
-  `TrajectoryRecorder.fork()` for sibling trajectories, not SDK `agents=`.
+  `EvidenceRecorder.fork()` for sibling evidence documents, not SDK `agents=`.
 - Before changing `committed_review*`, read [its runtime contract](docs/runtime.md#committed-review-requestresult)
   for claim revisions, mandatory fresh challenge, native configuration ownership and sealed output.
 - Keep changing budgets, pacing, and progress state authoritative on the host.
@@ -142,9 +143,10 @@ These boundaries matter across subsystems; module docstrings carry finer detail:
   when a model decision needs current state, provide an existing bounded read-only
   lookup and explain when to use it. Host enforcement must not depend on polling.
   Preserve genuine user turns and the native assistant/tool conversation history.
-- Keep ATIF construction in `trajectory/`. Use the vendored models without adding
-  Harbor as a dependency. Follow
-  [the vendoring policy](daydream/atif/NOTICE): re-vendor wholesale, no local patches.
+- Record evidence only through `trajectory/` ([local evidence](docs/observability.md#local-evidence)).
+  Keep ATIF export in `benchmarks/`, using the vendored models without adding Harbor as a
+  dependency; core modules never import it. Follow
+  [the vendoring policy](daydream/benchmarks/atif/NOTICE): re-vendor wholesale, no local patches.
 - Resolve the private artifact owner once and pass the same owner/session through
   workspace, recorder, and flows. Route generated files through that session;
   join writers before freezing evidence, then archive/evaluate/publish. Preserve

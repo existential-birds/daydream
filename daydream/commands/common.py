@@ -44,9 +44,9 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         type=Path,
         dest="trajectory_path",
         help=(
-            "Write ATIF v1.7 trajectory JSON to PATH (default: publish to "
-            f"<target>/.daydream/{RUNS_DIRNAME}/<session_id>/{RUN_DOCUMENT_NAME} after finalization; "
-            "explicit external paths receive live updates)"
+            "Copy the run's root OpenTelemetry evidence document (OTLP/JSON log lines) to PATH "
+            f"(default: publish <target>/.daydream/{RUNS_DIRNAME}/<session_id>/{RUN_DOCUMENT_NAME} "
+            "with its sibling documents after finalization; explicit external paths receive live updates)"
         ) if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -80,7 +80,7 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
     parser.add_argument(
         "--dump-artifacts",
         metavar="DIR",
-        help="Merge the finalized run bundle (ATIF trajectory, review output, deep artifacts, diffs, "
+        help="Merge the finalized run bundle (evidence documents, review output, deep artifacts, diffs, "
              "findings, manifest, evaluation) into DIR for CI upload. Preserves unrelated destination "
              "files. Always copies exact assembled bytes, including credentials and binary files, "
              "without scanning or sanitizing. "

@@ -97,8 +97,8 @@ def capture_run_record(
 ) -> None:
     """Commit one raw run, without archive reconstruction or trace readback.
 
-    Trajectory documents stream into the store one checked read at a time."""
-    from daydream.dataset import LocalRecordStore
+    Evidence documents stream into the store one checked read at a time, as their exact OTLP/JSON lines."""
+    from daydream.dataset import LocalRecordStore, portable_evidence_document
     from daydream.dataset_scoring import assemble_scoring_inputs
 
     store_path = config.dataset_store_path or Path.home() / ".daydream" / "dataset"
@@ -188,9 +188,11 @@ def capture_run_record(
                 "value": value}
 
     documents = None if selected is None else (
-        document.validated_payload(artifacts.session_id) for document in selected.documents
+        portable_evidence_document(document.validated(artifacts.session_id)[0],
+                                   trajectory_id=document.trajectory_id, session_id=artifacts.session_id)
+        for document in selected.documents
     )
-    LocalRecordStore(store_path).commit_run({"schema_version": "daydream.run.v2",
+    LocalRecordStore(store_path).commit_run({"schema_version": "daydream.run.v3",
         "run_id": artifacts.session_id, "captured_at": selected.cutoff_at if selected else now_iso_utc(),
         "trace_id": current_run_trace_id(),
         "outcome": outcome, "original_task": evidence(original_task, absent="unavailable"),

@@ -2,15 +2,15 @@
 
 Re-exports the vendored Harbor surface so callers import a single namespace::
 
-    from daydream.atif import Trajectory, Step, validate
+    from daydream.benchmarks.atif import Trajectory, Step, validate
 
-See daydream/atif/NOTICE for provenance and Apache-2.0 attribution.
+See daydream/benchmarks/atif/NOTICE for provenance and Apache-2.0 attribution.
 """
 
 from pathlib import Path
 from typing import Any
 
-from daydream.atif.models import (
+from daydream.benchmarks.atif.models import (
     Agent,
     ContentPart,
     FinalMetrics,
@@ -23,7 +23,7 @@ from daydream.atif.models import (
     ToolCall,
     Trajectory,
 )
-from daydream.atif.validator import TrajectoryValidator
+from daydream.benchmarks.atif.validator import TrajectoryValidator
 
 
 def validate(trajectory: dict[str, Any] | str | Path, *, validate_images: bool = True) -> bool:

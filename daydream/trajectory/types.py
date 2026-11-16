@@ -1,15 +1,14 @@
-"""Trajectory identity, lifecycle vocabulary, immutable write snapshots, and checked document reads."""
+"""Document identity, lifecycle vocabulary, immutable write snapshots, and checked evidence reads."""
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
 import stat
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 
 class DaydreamPhase(str, Enum):
@@ -84,7 +83,7 @@ class LifecycleReasonCode(str, Enum):
 
 
 class TrajectoryDocumentIntegrityError(ValueError):
-    """A referenced trajectory file is missing or no longer holds its written bytes."""
+    """A referenced evidence file is missing or no longer starts with its written bytes."""
 
 
 class _TrajectoryDocument:
@@ -97,14 +96,17 @@ class _TrajectoryDocument:
         raise NotImplementedError
 
     def validated(self, session_id: str) -> tuple[bytes, dict[str, Any]]:
-        """Return the exact document bytes and their decoded, identity-checked payload."""
+        """Return the exact evidence bytes and their reduced, identity-checked document view."""
+        from daydream.trajectory.view import read_document_view
+
         raw = self.read_bytes()
-        payload = json.loads(raw)
-        if not isinstance(payload, dict):
-            raise ValueError("JSON is malformed")
+        try:
+            payload = read_document_view(raw)
+        except (KeyError, TypeError) as exc:
+            raise ValueError("evidence is malformed") from exc
         if payload.get("trajectory_id") != self.trajectory_id or payload.get("session_id") != session_id:
             raise ValueError("identity is malformed")
-        return raw, cast(dict[str, Any], payload)
+        return raw, payload
 
     def validated_payload(self, session_id: str) -> dict[str, Any]:
         """Decode the exact document bytes and verify their document/run identity."""
@@ -113,7 +115,7 @@ class _TrajectoryDocument:
 
 @dataclass(frozen=True)
 class TrajectoryDocumentSnapshot(_TrajectoryDocument):
-    """One canonical prepared trajectory payload for a single write cutoff."""
+    """Prepared evidence bytes for one write cutoff (an explicit output copy)."""
 
     trajectory_id: str
     path: Path
@@ -131,11 +133,13 @@ class TrajectoryDocumentSnapshot(_TrajectoryDocument):
 
 @dataclass(frozen=True)
 class TrajectoryDocumentReference(_TrajectoryDocument):
-    """A written trajectory document kept on disk: identity, logical and private paths, size, digest.
+    """A prefix of an append-only evidence file: identity, logical and private paths, size, digest.
 
     ``path`` is the recorder's logical document path (its file name names archive
     and analyzer entries); ``private_path`` is the private file actually written
-    or its frozen copy."""
+    or its frozen copy. The reference covers the file's first ``size`` bytes, so a
+    snapshot taken while a document is still being written stays valid as the
+    file grows; a changed prefix is an integrity error."""
 
     trajectory_id: str
     path: Path
@@ -148,10 +152,14 @@ class TrajectoryDocumentReference(_TrajectoryDocument):
         """Describe the exact *content* just written at *private_path*."""
         return cls(trajectory_id, path, private_path, len(content), hashlib.sha256(content).hexdigest())
 
+    def frozen_at(self, private_path: Path) -> TrajectoryDocumentReference:
+        """The same prefix in a frozen copy."""
+        return TrajectoryDocumentReference(self.trajectory_id, self.path, private_path, self.size, self.sha256)
+
     def validate(self, session_id: str) -> None:
         """Check reference metadata without filesystem I/O."""
         if (
-            type(self.trajectory_id) is not str or not self.trajectory_id or self.trajectory_id == session_id
+            type(self.trajectory_id) is not str or not self.trajectory_id
             or not isinstance(self.path, Path) or not isinstance(self.private_path, Path)
             or type(self.size) is not int or self.size < 0
             or type(self.sha256) is not str or not re.fullmatch(r"[0-9a-f]{64}", self.sha256)
@@ -159,14 +167,14 @@ class TrajectoryDocumentReference(_TrajectoryDocument):
             raise ValueError("document reference is malformed")
 
     def read_bytes(self) -> bytes:
-        """Re-read the referenced regular file and verify its size and SHA-256."""
+        """Re-read the referenced prefix of the regular file and verify its SHA-256."""
         try:
             fd = os.open(self.private_path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
             with os.fdopen(fd, "rb") as stream:
                 metadata = os.fstat(stream.fileno())
-                if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != self.size:
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_size < self.size:
                     raise TrajectoryDocumentIntegrityError("referenced document changed")
-                raw = stream.read(self.size + 1)
+                raw = stream.read(self.size)
         except OSError as exc:
             raise TrajectoryDocumentIntegrityError("referenced document is unavailable") from exc
         if len(raw) != self.size or hashlib.sha256(raw).hexdigest() != self.sha256:
@@ -174,7 +182,7 @@ class TrajectoryDocumentReference(_TrajectoryDocument):
         return raw
 
 
-TrajectoryDocument = TrajectoryDocumentSnapshot | TrajectoryDocumentReference
+TrajectoryDocument = TrajectoryDocumentReference
 
 
 @dataclass(frozen=True)

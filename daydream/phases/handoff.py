@@ -1,5 +1,6 @@
 """Handoff for review and fix phases."""
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -19,6 +20,7 @@ from daydream.backends import (
     Backend,
 )
 from daydream.clipboard import clipboard_available, copy_to_clipboard
+from daydream.json_utils import atomic_write_bytes
 from daydream.output_schema import strict_object
 from daydream.phases.inputs import _prepare_existing_phase_inputs, _render_bash_allowlist, _tail_test_output
 from daydream.phases.test_evidence import RepairAttemptEvidence
@@ -26,10 +28,9 @@ from daydream.run_context import RunContext, bind_resolved_run_context, resolve_
 from daydream.test_execution import redact_test_output
 from daydream.trajectory import (
     DaydreamPhase,
-    TrajectoryRecorder,
+    EvidenceRecorder,
     get_current_recorder,
     maybe_fork,
-    partial_document_path,
     run_directory,
     run_document_path,
     siblings_directory,
@@ -58,13 +59,27 @@ class HandoffArtifacts:
     def inputs(self) -> dict[str, Path]:
         """Name only concrete evidence files; directory links never grant read authority."""
         paths = {
-            "trajectory-partial": None if self.trajectory is None else partial_document_path(self.trajectory),
+            "evidence-view": None if self.trajectory is None else _evidence_view_path(self.trajectory),
             "diff": self.diff,
             "manifest": self.manifest,
             **{label: None if self.deep is None else self.deep / f"{label}.json"
                for label in ("merged-items", "test-verdict", "fix-failures")},
         }
         return {label: path for label, path in paths.items() if path is not None}
+
+
+def _evidence_view_path(document: Path) -> Path:
+    """The readable root evidence view handed to the failure summarizer."""
+    return document.with_name("handoff-evidence.json")
+
+
+def _write_evidence_view(recorder: EvidenceRecorder) -> None:
+    """Render the live root document's accepted prefix as indented JSON; never raise."""
+    try:
+        view = recorder.current_document().validated_payload(recorder.session_id)
+        atomic_write_bytes(_evidence_view_path(recorder.path), json.dumps(view, indent=2).encode())
+    except Exception as exc:  # noqa: BLE001 - the summarizer runs without this optional input
+        _logger.warning("handoff evidence view unavailable (%s)", type(exc).__name__)
 
 
 def _build_failure_summarizer_prompt(
@@ -209,13 +224,16 @@ FAILURE_SUMMARIZER_SCHEMA: dict[str, Any] = strict_object({
 def _changed_files(repo: Path) -> list[Path]:
     """Join validated Git-relative changed names to repo without resolving leaves.
 
-    Unavailable Git or a repository without commits returns no paths.
+    Daydream's own ``.daydream/`` evidence is not a change under review. Unavailable
+    Git or a repository without commits returns no paths.
     """
     paths: list[Path] = []
     for name in git_ops.changed_files(repo):
         parts = name.split("/")
         if "\0" in name or Path(name).is_absolute() or any(p in ("", ".", "..") for p in parts):
             _logger.warning("skipping unsafe changed-file name: %r", name)
+            continue
+        if parts[0] == ".daydream":
             continue
         paths.append(repo.joinpath(*parts))
     return paths
@@ -240,7 +258,7 @@ def _require_handoff_session(
 
 
 def _resolve_handoff_paths(
-    recorder: TrajectoryRecorder | None,
+    recorder: EvidenceRecorder | None,
     work: WorkContext,
     *,
     artifact_session: ArtifactSession | None = None,
@@ -471,10 +489,11 @@ async def _run_failure_summarizer(
         allow_standalone=allow_standalone,
     )
 
-    # The recorder has not exited yet. Persist a best-effort partial trajectory
-    # for the summarizer before the main trajectory is written.
+    # The recorder has not exited yet. Snapshot the live evidence and render a
+    # best-effort readable view of it for the summarizer.
     if recorder is not None:
         recorder.write_partial()
+        _write_evidence_view(recorder)
 
     has_trajectory = artifacts.trajectory is not None
     active_session = artifact_session is not None
@@ -494,7 +513,7 @@ async def _run_failure_summarizer(
             label: artifact_session.live_path_for(path, repo=work.repo) for label, path in possible_inputs.items()
         }
         if recorder is not None:
-            possible_inputs["trajectory-partial"] = partial_document_path(recorder.path)
+            possible_inputs["evidence-view"] = _evidence_view_path(recorder.path)
     else:
         changed_for_model = durable_changed = changed_live
     readable_inputs = {label: path for label, path in possible_inputs.items() if path.is_file()}

@@ -32,6 +32,46 @@ verify native trees using [readback tooling](../scripts/verify_observability_rea
 The [replay manifest](../tests/fixtures/observability_contract/replay-manifest.json)
 pins sanitized replay inputs; replay is distinct from real-provider acceptance.
 
+## Local evidence
+
+Every recorded run keeps complete local OpenTelemetry evidence, with no tracing
+destination, network access or credentials, independently of `--trace-to`. Each
+document (the run's root and one per fork) is an append-only file of OTLP/JSON log
+lines: `runs/<session_id>/evidence.otlp.jsonl` and
+`runs/<session_id>/forks/<descriptor>.otlp.jsonl`. Each line is a complete
+`ExportLogsServiceRequest` holding one `LogRecord` of the `daydream.evidence` scope
+with a `daydream.evidence.seq` attribute and, while tracing is active, the current span's
+trace and span ids. [The journal](../daydream/trajectory/journal.py) owns encoding;
+[the document view](../daydream/trajectory/view.py) owns record names and reduction.
+
+- **Records.** `daydream.evidence.open` (run, document and backend identity),
+  `daydream.transcript.step` (one finished, redacted transcript step: messages,
+  reasoning, tool calls with their results, usage, diagnostics, `extra.turn_boundary`),
+  `daydream.agent.model`, `daydream.phase_event`, `daydream.subtrajectory`
+  (invocation and fork summaries, including generation billing and backend lifecycle),
+  `daydream.profile`, `daydream.evidence.snapshot` (a signal flush's in-flight work) and
+  `daydream.evidence.seal`. GenAI attributes (`gen_ai.response.model`,
+  `gen_ai.usage.*`) name usage where a convention covers it; the record body keeps
+  everything else.
+- **Acceptance and completeness.** A record is accepted once its whole line is written
+  with no in-memory queue; the seal fsyncs. Only a seal whose record count and SHA-256
+  match the bytes before it makes a document complete. A write, encoding or fsync
+  failure warns once, stops that document and leaves it unsealed; a failed fork also
+  marks the root seal `capture_complete: false`, and the run snapshot is `partial`.
+  Readers report a truncated line, a broken sequence or a mismatched seal as
+  incomplete evidence, never as complete.
+- **Bounded memory.** Steps are appended as each invocation finishes; no whole-run
+  transcript stays in memory. References name a document's accepted prefix (size and
+  SHA-256), so a signal snapshot stays valid while the document grows.
+- **Privacy.** Local evidence uses the same redaction as before (credentials, keys and
+  user paths), not the remote export scrubbing, which stays for remote destinations and
+  the opt-in `local` trace file below.
+- **Consumers.** Archive, evaluation, `daydream summarize`, PR run info and dataset
+  capture read documents through one checked read that reduces them to a view.
+  Dataset run records (`daydream.run.v3`) embed each document's exact lines with their
+  source SHA-256. [`daydream.benchmarks.harbor`](../daydream/benchmarks/harbor.py)
+  exports Harbor-compatible ATIF for benchmarks; ordinary runs never import it.
+
 `local` writes `otel-trace.jsonl` (mode 0600) in the run's private directory,
 `~/.daydream/runtime/<workspace>/runs/<session_id>/`, once the artifact session opens.
 Each line is one OTLP/JSON `ExportTraceServiceRequest` written as its span ends; the run
@@ -44,7 +84,7 @@ Only the resolved billing owner emits usage/cost; parent aggregation must not
 charge it again. Cache tokens are within input; reasoning tokens within output.
 Missing values stay absent; observed zero stays zero. Usage repeated under one message
 id counts once, and an invocation total can raise but never lower summed turn usage, so
-trajectories and attempt spans report the same totals (except two Codex turns in one
+evidence steps and attempt spans report the same totals (except two Codex turns in one
 invocation, [#1796](https://github.com/existential-birds/daydream/issues/1796)). Pi
 generation intervals need native boundaries; unfinished generations create no invented
 completion or billing.
@@ -54,17 +94,17 @@ span records them as attributes before backend startup, so a startup failure kee
 and records each backend diagnostic as an event in observed order: the code always, the
 message and metadata only with full content. The run span carries the run's GitHub
 repository and, when known, its pull request number as `daydream.pr_repo` and
-`daydream.pr_number`, and spans inside a forked recorder carry that fork's ATIF trajectory
+`daydream.pr_number`, and spans inside a forked recorder carry that fork's evidence document
 id as `daydream.trajectory.id`. Each phase scope adds `daydream.phase.start` and
-`daydream.phase.end` events to the active span with `daydream.phase` and the ATIF
+`daydream.phase.end` events to the active span with `daydream.phase` and the evidence
 `scope_id` as `daydream.phase_scope.id`; the end event adds `daydream.phase_scope.status`
 and, when set, `daydream.phase_scope.reason_code`. Each fan-out adds
-`daydream.dispatch.start` and `daydream.dispatch.end` events with the ATIF `dispatch_id` as
-`daydream.dispatch.id`. The trajectory recorder assigns both ids, so a run without one
+`daydream.dispatch.start` and `daydream.dispatch.end` events with the evidence `dispatch_id` as
+`daydream.dispatch.id`. The evidence recorder assigns both ids, so a run without one
 records neither event.
 
 [Span construction](../daydream/observability/spans.py),
-[trajectory metrics](../daydream/trajectory/), and
+[evidence and billing](../daydream/trajectory/), and
 [wire contract tests](../tests/test_observability_otlp_wire.py) own exact fields.
 [Semantic convention fixtures](../tests/fixtures/observability_contract/) pin
 external compatibility. Vendor attributes are added to copies of shared spans.
@@ -159,7 +199,7 @@ hint longer than the remaining deadline). Every other stop is a `daydream.budget
 event with the same attributes on the active span: a review-finalization turn's stop on
 its agent span, and a dispatch the host refuses before any agent runs on the enclosing
 step or run span. Values are counts or durations in seconds, never monotonic timestamps.
-A retry-ladder stop is a `daydream.retry.stop` event on its agent span carrying the ATIF
+A retry-ladder stop is a `daydream.retry.stop` event on its agent span carrying the evidence
 `agent_budget_stop` fields as `daydream.retry.*`, with or without a recorder.
 
 ## Codex lifecycle evidence

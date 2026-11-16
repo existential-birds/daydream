@@ -95,7 +95,7 @@ from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
 from daydream.run_config import FrozenAuthorDescription, RunConfig, _resolved_backend_name
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 from daydream.runner import _resolve_backend
-from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, phase_scope
+from daydream.trajectory import RUN_DOCUMENT_NAME, DaydreamPhase, DaydreamRunFlow, phase_scope
 from daydream.trajectory.lifecycle import maybe_fork
 from daydream.workspace import WorkContext, open_workspace
 
@@ -1290,7 +1290,7 @@ async def _run_committed_review(
                 assert findings_route.write_path is not None
                 findings_path = findings_route.write_path
         trajectory = session.register_trajectory_output(
-            None if hosted is None else hosted.output_dir / "trajectory.json",
+            None if hosted is None else hosted.output_dir / RUN_DOCUMENT_NAME,
         )
         capture = _RunWriteCapture(session_id=run_id)
         artifacts = _RunArtifacts(session, owner, trajectory, capture, None,

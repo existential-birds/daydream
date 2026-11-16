@@ -51,6 +51,7 @@ from daydream.phases.testing import (
 )
 from daydream.test_execution import TestExecutionIdentity, TestExecutionResult, resolve_test_recipe, run_test_command
 from daydream.trajectory import (
+    DOCUMENT_SUFFIX,
     DaydreamRunFlow,
     run_directory,
     siblings_directory,
@@ -60,7 +61,7 @@ from tests.harness.backend import ScriptedBackend
 from tests.harness.execution import host_test_command
 from tests.harness.git_helpers import commit as git_commit, configure_identity, git, init_repo
 from tests.harness.review_result import merge_result
-from tests.harness.trajectory import make_recorder
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
 _FIX_TURN: tuple[AgentEvent, ...] = (TextEvent(text="Applied fix attempt"), _RESULT)
@@ -656,10 +657,8 @@ async def test_grouped_fix_delivers_scopes_verdicts_evidence_and_test_map_then_r
     assert (repo / "src/handler.py").read_text() == (repo / "tests/test_app.py").read_text() == "VALUE = 1\n"
     assert (repo / "src/util.py").read_text() == before["src/util.py"]
     assert (repo / "daydream/app.py").read_text() == before["daydream/app.py"]
-    traces = [
-        json.loads(path.read_text())
-        for path in siblings_directory(run_directory(repo / ".daydream", recorder.session_id)).glob("*.json")
-    ]
+    siblings = siblings_directory(run_directory(repo / ".daydream", recorder.session_id))
+    traces = [read_trajectory(path) for path in siblings.glob(f"*{DOCUMENT_SUFFIX}")]
     assert len(traces) == 3
     messages = [step.get("message", "") for trace in traces for step in trace["steps"]]
     assert any("Off-by-one in loop bound" in str(message) for message in messages)

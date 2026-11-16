@@ -1,20 +1,24 @@
-"""Canonical paths shared by live, archived, and hydrated trajectories."""
+"""Canonical paths shared by live, archived, and hydrated evidence documents."""
 from pathlib import Path
 
 # Run-document layout: this module is the sole declaration of
-# <root>/runs/<session_id>/trajectory.json and the sibling <root>/runs/<session_id>/
-# trajectories/<descriptor>.json set. The same shape is carried by the live
-# <target>/.daydream root, the public live root, the archive root and the hydrated
-# index root; every reader composes it through the helpers below rather than
-# retyping the names. The archive *bundle* layout (manifest, diff, deep/, handoff)
-# is deliberately not unified with this shape beyond the shared names.
+# <root>/runs/<session_id>/evidence.otlp.jsonl and the sibling
+# <root>/runs/<session_id>/forks/<descriptor>.otlp.jsonl set. The same shape is
+# carried by the live <target>/.daydream root, the public live root, the archive
+# root and the hydrated index root; every reader composes it through the helpers
+# below rather than retyping the names. The archive *bundle* layout (manifest,
+# diff, deep/, handoff) is deliberately not unified with this shape beyond the
+# shared names.
 RUNS_DIRNAME = "runs"
 
 
-RUN_DOCUMENT_NAME = "trajectory.json"
+DOCUMENT_SUFFIX = ".otlp.jsonl"
 
 
-SIBLINGS_DIRNAME = "trajectories"
+RUN_DOCUMENT_NAME = "evidence" + DOCUMENT_SUFFIX
+
+
+SIBLINGS_DIRNAME = "forks"
 
 
 PARTIAL_SUFFIX = ".partial"
@@ -34,7 +38,7 @@ def run_directory(root: Path, session_id: str) -> Path:
 
 
 def run_document_path(run_dir: Path) -> Path:
-    """Return the run's root trajectory document within *run_dir*.
+    """Return the run's root evidence document within *run_dir*.
 
     Takes the run directory, not ``(root, session_id)``: three callers hold one
     and no root. It performs no existence or identity validation.
@@ -43,14 +47,14 @@ def run_document_path(run_dir: Path) -> Path:
 
 
 def siblings_directory(run_dir: Path) -> Path:
-    """Return the directory holding a run's sibling trajectory documents."""
+    """Return the directory holding a run's sibling evidence documents."""
     return run_dir / SIBLINGS_DIRNAME
 
 
 def sibling_document_path(run_dir: Path, name: str) -> Path:
     """Return a named sibling document path within *run_dir*.
 
-    *name* is the full file name (e.g. ``"deep-python.json"``); the helper adds
+    *name* is the full file name (e.g. ``"deep-python.otlp.jsonl"``); the helper adds
     the siblings directory and nothing else. It validates no duplicate or
     descriptor identity.
     """
@@ -58,7 +62,7 @@ def sibling_document_path(run_dir: Path, name: str) -> Path:
 
 
 def partial_document_path(document: Path) -> Path:
-    """Return the partial-write variant of *document*.
+    """Return the partial-write variant of an explicit output *document*.
 
     The ``.partial`` suffix is appended after the existing suffix, so dotted names
     are preserved (``a.b.json`` -> ``a.b.json.partial``). The helper only composes
@@ -68,7 +72,7 @@ def partial_document_path(document: Path) -> Path:
 
 
 def default_trajectory_path(target_dir: Path, session_id: str) -> Path:
-    """Return the default trajectory path under ``<target>/.daydream/runs/<session_id>/``.
+    """Return the default root evidence path under ``<target>/.daydream/runs/<session_id>/``.
 
     The session_id segment guarantees uniqueness per run; the recorder
     creates the directory before its first write.

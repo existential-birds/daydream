@@ -30,10 +30,14 @@ def _artifact_provenance(*, phase: DaydreamPhase) -> dict[str, str]:
     recorder = get_current_recorder()
     if recorder is None:
         return {"session_id": "unrecorded", "phase": phase.value}
-    try:
-        trajectory_path = recorder.path.relative_to(recorder.target_dir).as_posix()
-    except ValueError:
-        trajectory_path = str(recorder.path)
+    if recorder.artifact_run_dir is not None:
+        # The private evidence path never reaches model inputs; name its published location.
+        trajectory_path = f".daydream/runs/{recorder.session_id}/{recorder.path.name}"
+    else:
+        try:
+            trajectory_path = recorder.path.relative_to(recorder.target_dir).as_posix()
+        except ValueError:
+            trajectory_path = str(recorder.path)
     return {
         "session_id": recorder.session_id,
         "phase": phase.value,

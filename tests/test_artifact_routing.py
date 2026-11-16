@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from pathlib import Path
 
@@ -23,6 +22,7 @@ from daydream.trajectory import DaydreamPhase, DaydreamRunFlow
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import git
+from tests.harness.trajectory import read_trajectory
 
 
 async def test_recorder_public_output_requires_standalone_opt_in(tmp_path: Path, make_config: Callable[..., RunConfig],
@@ -41,7 +41,7 @@ async def test_recorder_public_output_requires_standalone_opt_in(tmp_path: Path,
             ), tmp_path, "Record one standalone turn.", phase=DaydreamPhase.REVIEW,
         )
     assert recorder.path.is_file()
-    assert json.loads(recorder.path.read_text())["session_id"] == recorder.session_id
+    assert read_trajectory(recorder.path)["session_id"] == recorder.session_id
 
 async def test_standalone_entry_rejects_borrowing_a_bound_artifact_session(
     tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig],
