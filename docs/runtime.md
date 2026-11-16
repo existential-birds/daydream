@@ -136,7 +136,7 @@ fresh challenge, navigates it under the
   unfinished work. Every kind can request the historical context again; the strategy stays
   in the instructions.
 - `review_source` is a charged, read-only host lookup over frozen canonical inputs:
-  with `target_id`/`path` null it pages the whole catalog; `path` lists one changed
+  with `target_id`, `path` and `historical_context` all null it pages the whole catalog; `path` lists one changed
   path's targets; `target_id` returns the target's `source_options`, ranges (for a
   continuation fragment, its `source_summary` claim-line span and split-line
   `fragment_line_offset`) and its exact captured change bytes in 32 KiB pages, each also
@@ -695,8 +695,8 @@ findings export cannot hold its coverage and envelope beside one maximal (128 Ki
 submission. With every
 author field at its bound in control characters, which JSON escapes to six bytes each,
 the envelope takes about 770 KiB of the 1 MiB export, and a one-file review still retains
-a dozen claims at the largest text size. Readers older than this bound refuse envelopes
-and results that use it.
+a dozen claims at the largest text size. Readers older than this bound refuse envelopes,
+results and findings that use it.
 The [inert Git owner](../daydream/git_ops/immutable.py) owns source limits:
 100,000 files and objects, 8 MiB per source blob and 256 MiB of source bytes per
 tree. Bundles and physical object stores, including metadata, are bounded at

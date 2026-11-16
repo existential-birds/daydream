@@ -34,6 +34,7 @@ from daydream.backends.pi import PiBackend, PiError
 from daydream.committed_review import CommittedReviewRequest, Review, run_committed_review
 from daydream.committed_review_model import (
     COMMITTED_SUBMISSION_MAX_BYTES,
+    LOOKUP_PAGE_MAX_BYTES,
     RESULT_VERSIONS,
     planned_work_id,
     validate_committed_result,
@@ -1806,7 +1807,8 @@ async def test_lookup_is_read_only_and_cursor_bound(tmp_path: Path) -> None:
                                  "helper.py": "H = 1\n"})
     # The first page ends inside an "é"; later pages of control characters, which a result's JSON escapes to six
     # bytes each, still fit the host's result bound. An empty field is not offered.
-    description = ("#1761 " + "\u00e9" * 20_000 + "\x01" * 40_000).encode()
+    description = ("PR #1761 " + "\u00e9" * 20_000 + "\x01" * 40_000).encode()
+    assert description[LOOKUP_PAGE_MAX_BYTES] & 0xC0 == 0x80  # The page bound falls inside a character.
     review = Review(_inputs(repo, tmp_path / "inputs", ["api.py", "uni.py"]), "domain",
                     historical_context={"title": "", "body": description.decode()})
     digest = hashlib.sha256(description).hexdigest()
