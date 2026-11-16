@@ -116,11 +116,7 @@ class SourceSelectorRejected(HostToolRejected):
 
 
 class _SubmissionSources:
-    """Callback-local host facts, revoked before the factory validates and installs.
-
-    ``worktree_snapshot`` is the frozen tracked-worktree commit that backs the new
-    side of a ``tracked_worktree_edits`` revision.
-    """
+    """Callback-local host facts, revoked before the factory validates and installs."""
 
     def __init__(self, revision: dict[str, Any], root: Path, aliases: Mapping[str, str],
                  captured: CapturedSource | None, *, worktree_snapshot: str | None = None) -> None:
