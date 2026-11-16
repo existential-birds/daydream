@@ -27,7 +27,7 @@ def serialized(value):
 
 
 def records(path, selected_line=None):
-    """Support pretty JSON documents and streaming JSONL; retain physical lines."""
+    """Stream one JSON value per physical line (capture JSONL or an evidence document); retain line numbers."""
     with path.open(encoding="utf-8") as stream:
         first = next(((n, s) for n, s in enumerate(stream, 1)
                       if n == selected_line or selected_line is None and s.strip()), None)

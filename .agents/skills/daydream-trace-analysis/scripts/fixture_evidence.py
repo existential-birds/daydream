@@ -7,6 +7,7 @@ actual captures.
 
 import hashlib
 import json
+import math
 
 _REDUCED = ("phase_events", "subtrajectories", "run_ended_at", "snapshot_at", "partial", "active_dispatches")
 
@@ -19,7 +20,10 @@ def any_value(value):
     if isinstance(value, int):
         return {"intValue": str(value)}
     if isinstance(value, float):
-        return {"doubleValue": value}
+        # Non-finite doubles are strings, as the journal writes them under allow_nan=False.
+        if math.isfinite(value):
+            return {"doubleValue": value}
+        return {"doubleValue": "NaN" if math.isnan(value) else "Infinity" if value > 0 else "-Infinity"}
     if isinstance(value, str):
         return {"stringValue": value}
     if isinstance(value, (list, tuple)):
@@ -33,7 +37,7 @@ def _line(seq, event, body):
               "attributes": [{"key": "daydream.evidence.seq", "value": {"intValue": str(seq)}}]}
     request = {"resourceLogs": [{"resource": {"attributes": []}, "scopeLogs": [
         {"scope": {"name": "daydream.evidence", "version": "test"}, "logRecords": [record]}]}]}
-    return (json.dumps(request, ensure_ascii=True, separators=(",", ":")) + "\n").encode()
+    return (json.dumps(request, ensure_ascii=True, separators=(",", ":"), allow_nan=False) + "\n").encode()
 
 
 def evidence_bytes(view, session_id, *, sealed=True):
