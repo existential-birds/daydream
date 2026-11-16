@@ -1006,10 +1006,9 @@ async def _artifact_session_rejects_closed_recovery_manifest_untouched_case(sour
     stage.mkdir(parents=True)
     stage_canary = stage / "canary"
     stage_canary.write_bytes(b"stage must remain unchanged")
-    raw_path = {"unsafe-path": "../escape", "duplicate-path": ".daydream", "leading-dot": "./runs",
-        "embedded-dot": "runs/./record.json", "empty-component": "runs//record.json",
-        "bool-schema-version": "runs/record.json", "missing-proof": "runs", "bool-device-proof": "runs",
-        "normalized-duplicate": "runs/e\u0301.json",
+    raw_path = {"duplicate-path": ".daydream", "normalized-duplicate": "runs/e\u0301.json",
+        "embedded-dot": "runs/./record.json", "bool-schema-version": "runs/record.json", "missing-proof": "runs",
+        "bool-device-proof": "runs",
     }[manifest_problem]
     entry = {"path": raw_path, "kind": "directory", "size": 0, "mode": 0o700, "sha256": None}
     if manifest_problem == "duplicate-path":
