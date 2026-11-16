@@ -67,8 +67,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disk, so `make check` (and the pre-push hook) no longer fails there.
 - The review-completion tests no longer run the `gh` found on `PATH`. Their runs called
   `gh api /user` and `gh pr view`, and the loop-mode finalization row sent a review POST to
-  `o/r` with whatever credentials that `gh` held. Every such call now goes to the FakeGh
-  harness ([#1801](https://github.com/existential-birds/daydream/issues/1801)).
+  `o/r`, so the outcome depended on the host's `gh` and any credential it could still find.
+  Every such call now goes to the FakeGh harness
+  ([#1801](https://github.com/existential-birds/daydream/issues/1801)).
 - `ImmutableReviewInput` accepts every pull request title and description GitHub accepts,
   so hosted reviews of PRs with descriptions over 8 KiB no longer fail before analysis
   ([#1761](https://github.com/existential-birds/daydream/issues/1761)). `title` and `body`
