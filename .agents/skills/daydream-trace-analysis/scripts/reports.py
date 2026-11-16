@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 from cohort import canonical, digest, iter_runs, load_manifest, parse_json
+from evidence import with_views
 
 CATEGORIES = {"environment_scope", "investigation_loop", "handoff_loss", "verification_gap",
               "budget_allocation", "finding_quality", "backend_lifecycle", "capture_failure"}
@@ -229,6 +230,8 @@ def synthesize(manifest, plan, runs, batches, paths):
                 categories[pattern] = category
     # Validate every frozen source once; retain only analyst and manifest metadata.
     for frozen, record in iter_runs(runs.values()):
+        # Evidence pointers address the record with each embedded document reduced to its view.
+        record = with_views(record)
         for item in rows.get(frozen["run_id"], {}).get("assessments", []):
             evidence(item["evidence"], record, plan["evidence_chars"])
             evidence(item["counterevidence"], record, plan["evidence_chars"])

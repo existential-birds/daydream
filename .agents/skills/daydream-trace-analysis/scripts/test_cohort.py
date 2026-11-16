@@ -14,11 +14,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from fixture_evidence import v3_record
+
 SCRIPT = Path(__file__).with_name("cohort.py")
 
 
 def capture(run_id, captured_at, outcome="success", padding=0):
-    return {"schema_version": "daydream.run.v2", "run_id": run_id, "captured_at": captured_at,
+    return v3_record({"schema_version": "daydream.run.v3", "run_id": run_id, "captured_at": captured_at,
             "outcome": outcome, "completeness": {"trajectory": "complete"},
             "provenance": {"producer": {"version": "1", "commit": "producer-sha"},
                            "resolved_phases": {"fix": {"backend": "codex", "model": "model"}},
@@ -29,8 +31,8 @@ def capture(run_id, captured_at, outcome="success", padding=0):
                 "analyzed_revision": {"head_sha": "reviewed-sha", "diff_key": "patch-key"},
                 "diff_sha256": "d" * 64, "diff": "private diff", "changed_files": ["a.py"]}},
             "trajectories": {"status": "available", "value": {"root_trajectory_id": "root",
-                "documents": [{"trajectory_id": "root", "steps": [{"message": "x" * padding}]},
-                              {"trajectory_id": "sibling", "steps": []}]}}}
+                "documents": [{"trajectory_id": "root", "steps": [{"step_id": 1, "message": "x" * padding}]},
+                              {"trajectory_id": "sibling", "steps": []}]}}})
 
 
 class CohortCliTests(unittest.TestCase):
@@ -140,7 +142,7 @@ class CohortCliTests(unittest.TestCase):
             self.assertEqual(batch["bytes"], sum(by_id[r]["bytes"] for r in batch["run_ids"]))
         self.assertEqual(plan, self.cli("batches", manifest, "--count", 2, "--question", "Where was scope lost?",
                                         "--chars", 120, "--max-observations", 3))
-        records[0]["trajectories"]["value"]["documents"][1]["steps"].append({"message": "changed"})
+        records[0]["trajectories"]["value"]["documents"][1]["otlp_jsonl"] += "changed\n"
         self.write(*records)
         self.assertIn("changed", self.cli("batches", manifest, "--count", 2, "--question", "why", code=2))
         report["runs"][0]["bytes"] += 1
@@ -178,7 +180,7 @@ class CohortCliTests(unittest.TestCase):
         self.assertEqual(loaded["first"][0]["line"], 2)
         self.assertEqual(loaded["last"][0]["line"], 4)
         self.assertEqual(loaded["other"][0]["source"], str(other_path.resolve()))
-        last["trajectories"]["value"]["documents"][1]["steps"].append({"message": "changed sibling"})
+        last["trajectories"]["value"]["documents"][1]["otlp_jsonl"] += "changed sibling\n"
         self.path.write_text("\n" + json.dumps(first) + "\n\n" + json.dumps(last) + "\n")
         with self.assertRaisesRegex(ValueError, "changed"):
             list(helper.iter_runs(manifest["runs"]))

@@ -13,6 +13,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from fixture_evidence import v3_record
+
 
 class ReportCliTests(unittest.TestCase):
     def setUp(self):
@@ -22,7 +24,7 @@ class ReportCliTests(unittest.TestCase):
         self.script = self.root / "scripts" / "reports.py"
         shutil.copytree(Path(__file__).parent, self.script.parent, ignore=shutil.ignore_patterns("__pycache__"))
         self.source = self.root / "capture.jsonl"
-        self.records = [{"schema_version": "daydream.run.v2", "run_id": f"run-{i}",
+        self.records = [{"schema_version": "daydream.run.v3", "run_id": f"run-{i}",
                          "outcome": "success", "completeness": {},
                          "provenance": {"effective_configuration": {"model": "other" if i == 4 else "same"}},
                          "original_task": {"status": "available", "value": "repeated search; later recovered"}}
@@ -217,9 +219,10 @@ class ReportCliTests(unittest.TestCase):
             for number in range(24):
                 record = dict(self.records[0], run_id=f"bulk-{number:02d}", trajectories={
                     "status": "available", "value": {"documents": [
-                        {"trajectory_id": "root", "steps": [{"message": "x" * padding}]},
-                        {"trajectory_id": "sibling", "steps": [{"message": "retained sibling evidence"}]}]}})
-                stream.write(json.dumps(record) + "\n")
+                        {"trajectory_id": "root", "steps": [{"step_id": 1, "message": "x" * padding}]},
+                        {"trajectory_id": "sibling", "steps": [{"step_id": 1,
+                                                                "message": "retained sibling evidence"}]}]}})
+                stream.write(json.dumps(v3_record(record)) + "\n")
         selected = subprocess.run([sys.executable, str(self.script.with_name("cohort.py")), "select", str(self.source)],
                                   capture_output=True, text=True)
         self.assertEqual(selected.returncode, 0, selected.stderr)
@@ -251,7 +254,7 @@ finally:
         report.pop("template")
         for row in report["runs"]:
             assessment = self.assessment("present", 1)
-            assessment["evidence"] = [{"pointer": "/trajectories/value/documents/1/steps/0/message",
+            assessment["evidence"] = [{"pointer": "/trajectories/value/documents/1/view/steps/0/message",
                                        "excerpt": "retained sibling evidence"}]
             row.update(status="analyzed", reason="", assessments=[assessment])
         report_path = self.write("bulk-report.json", report)

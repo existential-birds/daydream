@@ -1,7 +1,8 @@
 """CLI contracts for the standalone parser; no runtime code or private captures required.
 
 Existing recorder tests do not exercise this offline consumer. These cases protect
-evidence identity, accounting, and bounded retrieval against realistic ATIF traps.
+evidence identity, accounting, and bounded retrieval against realistic transcript traps,
+written as real v3 records whose documents are encoded evidence lines.
 """
 
 import json
@@ -10,6 +11,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+from fixture_evidence import evidence_bytes, v3_record
 
 SCRIPT = Path(__file__).with_name("trace.py")
 
@@ -33,18 +36,21 @@ class TraceCliTests(unittest.TestCase):
              "observation": {"results": [
                  {"source_call_id": "item_1", "content": "/other", "extra": {"exit_code": 0}}]}},
         ]
-        root = {"schema_version": "ATIF-v1.7", "trajectory_id": "root", "session_id": "run",
+        root = {"trajectory_id": "root", "session_id": "run",
                 "steps": steps, "extra": {"subtrajectories": [
                     {"invocation_id": "one", "step_ids": [1]},
                     {"invocation_id": "two", "step_ids": [2]}]},
                 "final_metrics": {"total_cost_usd": 5, "extra": {
                     "daydream_metric_scope": "whole_run_including_forks"}}}
         child = {"trajectory_id": "child", "steps": [steps[0]], "final_metrics": {"total_cost_usd": 3}}
-        self.record = {"schema_version": "daydream.run.v2", "run_id": "run", "outcome": "success",
+        self.record = {"schema_version": "daydream.run.v3", "run_id": "run", "outcome": "success",
                        "trajectories": {"status": "available", "value": {
                            "root_trajectory_id": "root", "documents": [child, root]}},
                        "completeness": {"trajectory": "complete"}}
-        self.path.write_text("\n" + json.dumps(self.record) + "\n")
+        self.path.write_text("\n" + json.dumps(v3_record(self.record)) + "\n")
+
+    def save(self, *records, suffix=""):
+        self.path.write_text("\n".join(json.dumps(v3_record(record)) for record in records) + suffix)
 
     def cli(self, command, *args, ok=True):
         result = subprocess.run([sys.executable, str(SCRIPT), command, str(self.path), *args],
@@ -64,10 +70,10 @@ class TraceCliTests(unittest.TestCase):
         self.assertTrue(rows[1]["failed"])
         self.assertEqual([r["result_count"] for r in rows], [1, 1, 1])
         self.assertEqual(rows[0]["results"][0]["pointer"],
-                         "/trajectories/value/documents/1/steps/0/observation/results/1")
+                         "/trajectories/value/documents/1/view/steps/0/observation/results/1")
         self.assertEqual(rows[2]["results"][0]["content"], "/other")
         self.assertEqual(rows[2]["results"][0]["pointer"],
-                         "/trajectories/value/documents/1/steps/1/observation/results/0")
+                         "/trajectories/value/documents/1/view/steps/1/observation/results/0")
         self.assertEqual(report["line"], 2)
 
     def test_summary_uses_declared_root_without_adding_fork_billing(self):
@@ -99,8 +105,8 @@ class TraceCliTests(unittest.TestCase):
             "observation": {"results": [{"source_call_id": "excluded", "content": "outside-window " * 10000}]}}
         doc["steps"].append(excluded)
         self.record["trajectories"]["value"]["documents"][0]["steps"] = [excluded]
-        self.path.write_text(json.dumps(self.record))
-        anchor = "/trajectories/value/documents/1/steps/0/tool_calls/1"
+        self.save(self.record)
+        anchor = "/trajectories/value/documents/1/view/steps/0/tool_calls/1"
         report = self.cli("window", "--pointer", anchor, "--before", "2", "--after", "1",
                           "--chars", "50", "--evidence-limit", "1")
         self.assertEqual(report["anchor_pointer"], anchor)
@@ -131,8 +137,8 @@ class TraceCliTests(unittest.TestCase):
             {"source_call_id": "item_2", "content": "late diagnostic", "extra": {"native": "x" * 10000}},
             {"source_call_id": "missing_1", "content": "earlier orphan"},
             {"source_call_id": "missing_2", "content": "anchored orphan", "extra": {"native": "y" * 10000}}])
-        self.path.write_text(json.dumps(self.record))
-        prefix = "/trajectories/value/documents/1/steps/0"
+        self.save(self.record)
+        prefix = "/trajectories/value/documents/1/view/steps/0"
         anchor = prefix + "/observation/results/2/extra/native"
         report = self.cli("window", "--pointer", anchor, "--before", "0", "--after", "0",
                           "--chars", "40", "--evidence-limit", "1")
@@ -155,19 +161,19 @@ class TraceCliTests(unittest.TestCase):
 
     def test_window_rejects_nonexistent_nonstep_and_invalid_pointers_and_negative_bounds(self):
         # A plausible-looking unresolved suffix must not masquerade as evidence.
-        for pointer in ("/trajectories/value/documents/1/steps/0/missing", "/run_id"):
+        for pointer in ("/trajectories/value/documents/1/view/steps/0/missing", "/run_id"):
             with self.subTest(pointer=pointer):
                 self.cli("window", "--pointer", pointer, ok=False)
-        self.cli("window", "--pointer", "/trajectories/value/documents/1/steps/0", "--before", "-1", ok=False)
+        self.cli("window", "--pointer", "/trajectories/value/documents/1/view/steps/0", "--before", "-1", ok=False)
         for suffix in ("-1", "00", "+1"):
-            pointer = f"/trajectories/value/documents/1/steps/0/observation/results/{suffix}/content"
+            pointer = f"/trajectories/value/documents/1/view/steps/0/observation/results/{suffix}/content"
             for command in ("window", "show"):
                 with self.subTest(command=command, pointer=pointer):
                     self.cli(command, "--pointer", pointer, ok=False)
 
     def test_search_and_show_bound_large_strings_and_support_slices(self):
         self.record["original_task"] = {"status": "available", "value": "a" * 10000 + "needle"}
-        self.path.write_text(json.dumps(self.record) + "\n")
+        self.save(self.record, suffix="\n")
         report = self.cli("search", "--query", "needle", "--chars", "40", "--limit", "1")
         self.assertEqual(report["total"], 1)
         self.assertIn("needle", report["items"][0]["excerpt"])
@@ -180,7 +186,7 @@ class TraceCliTests(unittest.TestCase):
             with self.subTest(prefix=prefix[0]):
                 value = prefix + "needle"
                 self.record["original_task"]["value"] = value
-                self.path.write_text(json.dumps(self.record) + "\n")
+                self.save(self.record, suffix="\n")
                 report = self.cli("search", "--query", "NEEDLE", "--chars", "40")
                 row = report["items"][0]
                 self.assertEqual(row["match_offset"], len(prefix))
@@ -190,15 +196,15 @@ class TraceCliTests(unittest.TestCase):
 
     def test_multiple_records_require_selection_and_bad_json_is_not_silently_skipped(self):
         second = dict(self.record, run_id="other")
-        self.path.write_text(json.dumps(self.record) + "\n" + json.dumps(second) + "\n")
+        self.save(self.record, second, suffix="\n")
         self.assertIn("select", self.cli("summary", ok=False).lower())
         self.assertEqual(self.cli("summary", "--run-id", "other")["run_id"], "other")
-        self.path.write_text(json.dumps(self.record) + "\n{" )
+        self.save(self.record, suffix="\n{")
         self.assertIn(":2", self.cli("summary", ok=False))
 
     def test_physical_line_selects_duplicate_ids_without_accepting_wrong_or_invalid_records(self):
         # Cohorts deduplicate identical IDs; run-id selection alone remains ambiguous.
-        encoded = json.dumps(self.record)
+        encoded = json.dumps(v3_record(self.record))
         self.path.write_text("\n" + encoded + "\n" + encoded + "\n")
         self.assertIn("select", self.cli("summary", "--run-id", "run", ok=False).lower())
         selected = self.cli("summary", "--run-id", "run", "--line", "3")
@@ -213,11 +219,17 @@ class TraceCliTests(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertIn("line", self.cli("summary", "--line", line, ok=False))
 
-    def test_raw_atif_and_unavailable_trajectories_are_distinguished(self):
+    def test_standalone_evidence_and_unavailable_trajectories_are_distinguished(self):
+        # Embedded evidence is read only when its lines still match their recorded digest.
+        tampered = v3_record(self.record)
+        document = tampered["trajectories"]["value"]["documents"][1]
+        document["otlp_jsonl"] = document["otlp_jsonl"].replace("/repo", "/forged")
+        self.path.write_text(json.dumps(tampered))
+        self.assertIn("sha256", self.cli("summary", ok=False))
         root = self.record["trajectories"]["value"]["documents"][1]
-        self.path.write_text(json.dumps(root))
+        self.path.write_bytes(evidence_bytes(root, "run"))
         self.assertEqual(self.cli("summary")["document_count"], 1)
-        # Valid ATIF producers may serialize optional containers as null instead of omitting them.
+        # Recorded steps may carry optional containers as null instead of omitting them.
         for nullable_path in (("extra",), ("steps", 0, "extra"), ("steps", 0, "tool_calls"),
                               ("steps", 0, "observation"),
                               ("steps", 0, "observation", "results", 0, "extra")):
@@ -226,12 +238,12 @@ class TraceCliTests(unittest.TestCase):
             for key in nullable_path[:-1]:
                 parent = parent[key]
             parent[nullable_path[-1]] = None
-            self.path.write_text(json.dumps(raw))
+            self.path.write_bytes(evidence_bytes(raw, "run"))
             for command in ("summary", "tools", "mine", "timeline"):
                 with self.subTest(nullable_path=nullable_path, command=command):
                     self.assertEqual(self.cli(command)["run_id"], "run")
         self.record["trajectories"] = {"status": "unavailable", "reason": "capture failed", "value": None}
-        self.path.write_text(json.dumps(self.record))
+        self.save(self.record)
         report = self.cli("summary")
         self.assertEqual(report["document_count"], 0)
         self.assertEqual(report["availability"]["trajectories"]["reason"], "capture failed")
@@ -241,7 +253,7 @@ class TraceCliTests(unittest.TestCase):
         doc["extra"]["phase_events"] = [
             {"event": "phase_start", "scope_id": "scope", "session_id": "run", "phase": "deep",
              "timestamp": "2026-10-17T00:00:00Z", "metadata": {"reason": "x" * 1000}}]
-        self.path.write_text(json.dumps(self.record))
+        self.save(self.record)
         row = next(r for r in self.cli("timeline")["items"] if r["kind"] == "open_phase")
         self.assertEqual(row["trajectory_id"], "root")
         self.assertIsNone(row["duration_s"])
@@ -254,7 +266,7 @@ class TraceCliTests(unittest.TestCase):
         doc["extra"]["subtrajectories"][0]["generation_lifecycle"] = {
             "drafts": [{"generation_id": "generation-1", "choice_parts": [
                 {"type": "text", "text": "x" * 100000}]}]}
-        self.path.write_text(json.dumps(self.record))
+        self.save(self.record)
         report = self.cli("timeline", "--doc", "1", "--chars", "40")
         row = next(r for r in report["items"] if r["invocation_id"] == "one")
         self.assertLess(len(json.dumps(report)), 3000)
@@ -275,13 +287,13 @@ class TraceCliTests(unittest.TestCase):
         for references in ({}, {"subagent_trajectory_ref": None}, {"subagent_trajectory_ref": []}):
             with self.subTest(references=references):
                 result.update(references)
-                self.path.write_text(json.dumps(self.record))
+                self.save(self.record)
                 report = self.cli("tools", "--doc", "1")
                 self.assertEqual(report["unmatched_results"]["total"], 1)
                 row = report["unmatched_results"]["items"][0]
                 self.assertTrue(row["failed"])
                 self.assertEqual(row["pointer"],
-                                 "/trajectories/value/documents/1/steps/2/observation/results/0")
+                                 "/trajectories/value/documents/1/view/steps/2/observation/results/0")
                 report = self.cli("mine", "--doc", "1")
                 self.assertTrue(any(r["kind"] == "unmatched_result_failure" for r in report["items"]))
 

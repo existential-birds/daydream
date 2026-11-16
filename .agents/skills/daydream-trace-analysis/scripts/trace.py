@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""Read-only, standard-library inspection of Daydream JSONL and ATIF JSON.
+"""Read-only, standard-library inspection of Daydream captures and local evidence documents.
 
-All pointers are RFC 6901 paths within the selected physical JSONL record.
+Inputs are capture JSONL (``daydream.run.v3`` records) or one standalone evidence
+document (``evidence.otlp.jsonl`` or ``forks/*.otlp.jsonl``). Each embedded document is
+verified against its sha256 and reduced to its view (see evidence.py). All pointers are
+RFC 6901 paths within the selected record with documents replaced by their views:
+``/trajectories/value/documents/<i>/view/steps/<n>``; for a standalone document they
+address its view directly (``/steps/<n>``).
 No imports from Daydream, command execution, network access, or artifact writes.
 """
 
@@ -13,6 +18,8 @@ import json
 import re
 import sys
 from pathlib import Path
+
+from evidence import is_evidence_line, reduce, with_views
 
 
 def serialized(value):
@@ -31,13 +38,6 @@ def records(path, selected_line=None):
         n, line = first
         if not line.strip():
             raise ValueError(f"{path}:{n}: selected physical line is blank")
-        if line.strip() == "{":
-            # Standalone ATIF is commonly pretty-printed; JSONL remains streamed.
-            try:
-                yield n, json.loads(line + stream.read())
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"{path}:{n + exc.lineno - 1}: {exc.msg}") from exc
-            return
         for number, text in [(n, line)]:
             try:
                 yield number, json.loads(text)
@@ -57,9 +57,28 @@ def unwrap(value):
     return value.get("value") if isinstance(value, dict) and value.get("status") == "available" else None
 
 
+def standalone(path):
+    """Reduce a standalone evidence document, or return None for capture JSONL."""
+    with path.open("rb") as stream:
+        first = next((text for text in stream if text.strip()), b"")
+    try:
+        if not is_evidence_line(json.loads(first)):
+            return None
+    except ValueError:
+        return None
+    view, problem = reduce(path.read_bytes())
+    return {**view, "evidence_problem": problem}
+
+
 def load(path, run_id=None, line=None):
     if line is not None and (type(line) is not int or line < 1):
         raise ValueError("--line must be a positive physical line number")
+    view = standalone(path)
+    if view is not None:
+        if line not in (None, 1) or run_id not in (None, view["session_id"]):
+            raise ValueError(f"{path}: an evidence document holds one run; --run-id/--line do not match")
+        return {"source": str(path.resolve()), "line": 1, "run_id": view["session_id"], "record": view,
+                "docs": [view], "prefix": None, "root_id": view["trajectory_id"]}
     selected = []
     for number, record in records(path, line):
         if not isinstance(record, dict):
@@ -72,15 +91,13 @@ def load(path, run_id=None, line=None):
     if len(selected) != 1:
         raise ValueError(f"{path}: found {len(selected)} matching records; select one with --run-id or --line")
     line, record = selected[0]
-    if record.get("schema_version") == "daydream.run.v2":
-        bundle = unwrap(record.get("trajectories")) or {}
-        docs = bundle.get("documents", [])
-        prefix = "/trajectories/value/documents"
-        root_id = bundle.get("root_trajectory_id")
-    elif isinstance(record.get("steps"), list):
-        docs, prefix, root_id = [record], None, record.get("trajectory_id")
-    else:
+    if record.get("schema_version") != "daydream.run.v3":
         raise ValueError(f"{path}:{line}: unsupported schema {record.get('schema_version')!r}")
+    record = with_views(record)
+    bundle = unwrap(record.get("trajectories")) or {}
+    docs = [document["view"] for document in bundle.get("documents", [])]
+    prefix = "/trajectories/value/documents"
+    root_id = bundle.get("root_trajectory_id")
     return {"source": str(path.resolve()), "line": line, "run_id": record.get("run_id", record.get("session_id")),
             "record": record, "docs": docs, "prefix": prefix, "root_id": root_id}
 
@@ -90,7 +107,7 @@ def base(trace):
 
 
 def doc_pointer(trace, index):
-    return f"{trace['prefix']}/{index}" if trace["prefix"] is not None else ""
+    return f"{trace['prefix']}/{index}/view" if trace["prefix"] is not None else ""
 
 
 def page(items, args):
@@ -220,7 +237,7 @@ def summary(trace, args):
                      "failed_calls": sum(r["failed"] for r in own_calls),
                      "result_chars": sum(len(preview(r["content"], sys.maxsize))
                                          for c in own_calls for r in c["results"]),
-                     "metrics": doc.get("final_metrics")})
+                     "metrics": doc.get("final_metrics"), "partial": (doc.get("extra") or {}).get("partial", False)})
     diagnostics = [{**ref, "pointer": ref["pointer"] + "/extra/" + key,
                     "excerpt": preview(value, args.chars)}
                    for doc, step, ref in steps(trace, args)
@@ -422,7 +439,7 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     for command in ("list", "summary", "timeline", "tools", "mine", "search", "show", "window"):
         sub = commands.add_parser(command)
-        sub.add_argument("input", help="Capture JSONL or standalone ATIF JSON; directory for list")
+        sub.add_argument("input", help="Capture JSONL or one evidence.otlp.jsonl document; directory for list")
         sub.add_argument("--limit", type=int, default=12, help="Maximum rows per table")
         sub.add_argument("--evidence-limit", type=int, default=3, help="Maximum examples per group/results per call")
         sub.add_argument("--offset", type=int, default=0, help="Row offset; character offset for show")

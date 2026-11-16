@@ -3,9 +3,10 @@
 ## Containers and identity
 
 The local store usually has `~/.daydream/dataset/runs/<digest>.jsonl`. Each
-nonblank line is a `daydream.run.v2` record, frequently hundreds of KB or more.
+nonblank line is a `daydream.run.v3` record, frequently hundreds of KB or more.
 Use the record's `run_id`, not the basename. Physical line numbers locate the
-record; JSON pointers locate evidence inside it. For a cohort row, pass both its
+record; JSON pointers locate evidence inside it. Earlier record versions are not
+read; inspect them with an earlier revision of this skill. For a cohort row, pass both its
 `--run-id` and physical `--line` to the trace helper so repeated IDs select the
 frozen record unambiguously. Indexes in pointers are zero-based; `step_id` is
 the recorded ID, not its array position.
@@ -17,7 +18,7 @@ the recorded ID, not its array position.
 | `completeness` | Separate acquisition, trajectory and terminal review availability |
 | `provenance` | Producer identity, repository/revision, configuration/profile, resolved phases, collection diagnostics |
 | `trajectories.value.root_trajectory_id` | Root document identity; do not assume documents are root-first |
-| `trajectories.value.documents[]` | Embedded ATIF documents, normally `ATIF-v1.7` |
+| `trajectories.value.documents[]` | Embedded evidence documents: `trajectory_id`, `session_id`, `sha256`, `otlp_jsonl` (the exact OTLP/JSON lines) |
 | `findings.value.claims`, `.derivation`, `.terminal_coverage` | Stack claims, adjudication/dedup artifacts, scope and phase outcomes |
 
 Wrapper states include `available`, `unavailable`, `unproduced`, `withheld`,
@@ -27,10 +28,31 @@ value may still be null. Success means the run completed, not that every tool
 succeeded or every finding is correct. Missing correctness scoring leaves
 finding correctness unestablished.
 
-Documents have `trajectory_id`, shared `session_id`, `agent`, `steps`, `extra`,
-`final_metrics`. Steps have `step_id`, `timestamp`, `source`, `message`, optional
+## Evidence documents and pointers
+
+Each document is Daydream's local OpenTelemetry evidence: one OTLP/JSON logs
+request per line, each holding one `daydream.evidence` record with a
+`daydream.evidence.seq` attribute (`daydream.evidence.open`,
+`daydream.transcript.step`, `daydream.agent.model`, `daydream.phase_event`,
+`daydream.subtrajectory`, `daydream.profile`, `daydream.evidence.snapshot`,
+`daydream.evidence.seal`). The helpers verify each embedded document against its
+`sha256` (a mismatch is an error, never silently read), check the sequence and
+seal, and reduce the records to the same document view Daydream's own reducer
+builds (`scripts/evidence.py`). An unsealed, truncated or seal-mismatched document
+reads as `extra.partial` with its accepted records; `evidence_problem` names why.
+
+Pointers address the record with each document's raw `otlp_jsonl` replaced by its
+`view`: `/trajectories/value/documents/<i>/view/steps/<n>/...`. The working copy keeps
+`trajectory_id`, `session_id`, `sha256` and `evidence_problem` beside `view`, so
+`search` reports each value once. Report pointers in this form; `reports.py`
+resolves evidence the same way. For a standalone document the pointer addresses
+the view directly (`/steps/<n>/...`).
+
+Views have `trajectory_id`, shared `session_id`, `parent_trajectory_id`, `run_flow`,
+`agent`, `steps`, `extra`, `final_metrics`. Steps have `step_id`, `timestamp`, `source`, `message`, optional
 `reasoning_content`, `model_name`, `llm_call_count`, `metrics`, `tool_calls`,
-`observation`, and `extra.daydream_phase` / `daydream_run_flow`.
+`observation`, `extra.daydream_phase` / `daydream_run_flow`, and `extra.turn_boundary`
+(`turn_end`, `result` or `invocation_end`: the event that closed the step).
 
 ## Calls, results and missing actions
 
@@ -90,10 +112,11 @@ too; absence from the tool list is not proof that an action did not happen.
 
 ## Beyond the embedded capture
 
-The canonical trajectory layout is `<artifact-root>/runs/<session_id>/trajectory.json`
-and `trajectories/*.json` siblings; interrupted documents can end `.json.partial`.
-An intact partial-suffix JSON is readable; truncated JSON is an explicit parser
-error, not permission to silently discard its tail. Locate the artifact root
+The canonical evidence layout is `<artifact-root>/runs/<session_id>/evidence.otlp.jsonl`
+with `forks/*.otlp.jsonl` siblings; `trace.py` reads one such document directly.
+Interrupted documents stay unsealed and read as partial; a truncated last line is
+reported (`evidence_problem`), never silently dropped. `daydream evidence verify RUN_DIR`
+checks every document's seal, count and digest. Locate the artifact root
 from the actual run configuration or archive, not redacted captured paths.
 
 Failure archives can contain richer `deep/` evidence: `review-coverage.json`,
@@ -117,6 +140,7 @@ the helper is a navigation tool, not a replacement for runtime contracts.
 | --- | --- |
 | `daydream/dataset.py`, `dataset_capture.py` | Envelope schema, status and captured artifacts |
 | `daydream/trajectory/layout.py`, `types.py` | Physical layout, identity, event vocabularies |
+| `daydream/trajectory/journal.py`, `view.py` | Evidence encoding, seal verification, document view |
 | `daydream/trajectory/invocation.py`, `scopes.py`, `recorder.py` | Tool correlation, interrupted outcomes, forks, metric ownership |
 | `daydream/trajectory/timing.py` | Authoritative phase interval/latency reduction |
 | `daydream/eval/analyzer.py` | Existing cost/tool/timing signals |
