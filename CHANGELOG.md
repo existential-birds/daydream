@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The test suite passes on macOS again: the committed-review test for a changed path whose
+  diff header overflows an assignment staged a 4,000-byte path through the working tree, which
+  macOS's 1,024-byte path limit refuses. It now records the path in Git without writing it to
+  disk, so `make check` (and the pre-push hook) no longer fails there.
+
 ## [0.36.0] - 2026-11-15
 
 ### Changed

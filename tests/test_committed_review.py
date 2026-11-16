@@ -994,8 +994,11 @@ async def test_committed_diff_uses_raw_commit_endpoints_despite_local_diff_drive
     assert only["terminal_result"]["analysis_state"] == "complete"
     assert only["settings"]["assignment_policy"]["planned_assignments"] == 0
     # A path within the schemas' 4096 characters whose header alone overflows an assignment is refused by name.
+    # Staged without a working-tree file: the path exceeds macOS's 1024-byte PATH_MAX.
     deep = "/".join(["d" * 99] * 40) + "/deep.py"
-    write_and_stage(repo, deep, "VALUE = 1\n")
+    (tmp_path / "deep-blob").write_text("VALUE = 1\n")
+    blob = git(repo, "hash-object", "-w", str(tmp_path / "deep-blob"))
+    git(repo, "update-index", "--add", "--cacheinfo", f"100644,{blob},{deep}")
     deeper = commit(repo, "deep path")
     with pytest.raises(SanctionedInputUnavailable, match=f"required change header of '{deep[:160]}' exceeds"):
         _inputs(repo, tmp_path / "deep", [deep], immutable_review_diff(repo, head, deeper))
