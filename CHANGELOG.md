@@ -72,15 +72,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - When Codex exits with an error, such as a required MCP server it cannot initialize,
   the raised error now shows Codex's own cause line
   (`required MCP servers failed to initialize: <name>`). Before, the bounded excerpt kept
-  only the last output lines, which were backtrace frames. Blank lines and everything
-  from Codex's `Stack backtrace:` header on are still counted but no longer shown;
+  only the last output lines, which were backtrace frames. Blank lines and backtraces
+  (the `Stack backtrace:` header and its frames) are still counted but no longer shown;
   redaction and the excerpt's size bounds are unchanged
   ([#1818](https://github.com/existential-birds/daydream/issues/1818)).
 - A Codex MCP tool result is now recorded as its text blocks joined with newlines, or as
-  JSON for any other content. Before, it was recorded as the Python repr of the content
-  list, such as `[{'type': 'text', 'text': 'refused'}]`. An empty result is now recorded
-  as empty instead of `[]`, so evaluation flags it as `empty_tool_result`. This changes
-  the recorded tool-result evidence for every Codex invocation, including
+  JSON for any other content, including a result that carries only structured content.
+  Before, it was recorded as the Python repr of the content list, such as
+  `[{'type': 'text', 'text': 'refused'}]`. An empty result with no structured content is
+  now recorded as empty instead of `[]`, so evaluation flags it as `empty_tool_result`.
+  This changes the recorded tool-result evidence for every Codex invocation, including
   `daydream --backend codex` and committed review's host-tool results
   ([#1818](https://github.com/existential-birds/daydream/issues/1818)).
 - An archived fixing run whose review completed with no findings is now recorded with
