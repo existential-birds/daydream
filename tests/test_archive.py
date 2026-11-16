@@ -72,7 +72,7 @@ from daydream.trajectory import (
     sibling_document_path,
     summarize_run,
 )
-from tests.harness.review_result import review_coverage
+from tests.harness.review_result import review_coverage, terminal_result
 from tests.harness.trajectory import evidence_reference, make_manifest
 
 MakeConfig = Callable[..., RunConfig]
@@ -668,14 +668,30 @@ def test_current_merge_event_controls_pipeline_status(tmp_path: Path) -> None:
         states = merge_states(events)
         assert states["merge"] == {"ran": True, "status": "unknown"}
         assert derive_pipeline_status("complete", None, states, runs_merge=True) == "unknown"
-    # An empty-diff run seals a no-diff review and returns before any merge, fix or test: it succeeded,
-    # but only on this session's own coverage.
+    # An empty-diff run seals a no-diff review and returns before merge, fix or test. A fixing run whose review
+    # finds nothing merges, then stops at the fix gate: only this session's sealed, complete, zero-finding
+    # review waives fix and test, and merge stays required.
     no_diff = review_coverage(run_id="current", scope_ids=(), phases=("no_diff",))
     no_diff.record_phase("no_diff", "complete", noop=True)
+    sealed_no_diff = no_diff.finalize("completed")
     run = _archive_snapshot(_manifest_write_snapshot(tmp_path / "evidence", session_id="current"))
-    for run_id, expected in (("current", "succeeded"), ("prior", "partial")):
-        _write_deep(tmp_path, "review-coverage.json", {**no_diff.to_dict(), "run_id": run_id})
-        assert pipeline._manifest_state(target_dir=tmp_path, run=run, frozen_extra={})["pipeline_status"] == expected
+    merged = {"phase_events": _merge_events("current", "succeeded")}
+    for run_id, findings, terminal, extra, expected in (
+        ("current", [], sealed_no_diff, {}, "succeeded"),
+        ("prior", [], sealed_no_diff, {}, "partial"),
+        ("current", [], terminal_result(), merged, "succeeded"),
+        ("current", [], terminal_result(), {}, "partial"),
+        (None, [], terminal_result(), merged, "partial"),  # no committed-review.json
+        ("current", [{"id": 1}], terminal_result(), merged, "partial"),
+        ("current", [], terminal_result("incomplete"), merged, "partial"),
+        ("current", [], "complete", merged, "partial"),
+    ):
+        if run_id is None:
+            (tmp_path / ".daydream" / "deep" / "committed-review.json").unlink(missing_ok=True)
+        else:
+            _write_deep(tmp_path, "committed-review.json",
+                        {"run_id": run_id, "findings": findings, "terminal_result": terminal})
+        assert pipeline._manifest_state(target_dir=tmp_path, run=run, frozen_extra=extra)["pipeline_status"] == expected
 
 
 def test_merge_artifacts_cannot_supply_missing_run_identity(tmp_path: Path) -> None:

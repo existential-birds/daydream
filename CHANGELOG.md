@@ -61,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An archived fixing run whose review completed with no findings is now recorded with
+  `pipeline_status: succeeded` instead of `partial`. Fix and test are no longer required
+  when this session's sealed review is complete with zero findings; already archived rows
+  are unchanged ([#1889](https://github.com/existential-birds/daydream/issues/1889)).
 - Finalized artifact trees that hold a directory beside a sibling whose name extends it with
   a byte that sorts before `/`, such as `evidence/` beside `evidence.otlp.jsonl`, publish and
   reopen again. Manifest validation now checks the depth-first order the tree walk writes

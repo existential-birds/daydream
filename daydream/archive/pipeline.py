@@ -104,14 +104,20 @@ def _read_session_bound_json_artifact(
     return data
 
 
-def _sealed_no_diff(target_dir: Path, session_id: str | None) -> bool:
-    """Whether this session sealed a complete no-diff review, so it had nothing to merge, fix or test."""
-    from daydream.deep.artifacts import DeepArtifact
+def _sealed_zero_finding_result(target_dir: Path, session_id: str | None) -> dict[str, Any] | None:
+    """Return this session's sealed committed review result when complete with zero confirmed findings.
 
-    coverage = _read_json_artifact(DeepArtifact.REVIEW_COVERAGE.at(target_dir / ".daydream" / "deep"), dict)
-    return session_id is not None and coverage is not None and coverage.get("run_id") == session_id and (
-        coverage.get("required_phases"), coverage.get("phase_outcomes")) == (["no_diff"], [
-            {"phase": "no_diff", "status": "complete", "reason_codes": [], "noop": True, "usable_evidence": False}])
+    Absent, malformed, stale, incomplete, failed, or cancelled results, and any
+    finding, return ``None``. A no-diff seal is the case where
+    ``required_phases == ["no_diff"]``.
+    """
+    payload = _read_json_artifact(_deep_dir(target_dir) / "committed-review.json", dict)
+    if session_id is None or payload is None or payload.get("run_id") != session_id or payload.get("findings") != []:
+        return None
+    result = payload.get("terminal_result")
+    if not isinstance(result, dict) or result.get("analysis_state") != "complete":
+        return None
+    return result
 
 
 def _manifest_state(
@@ -124,8 +130,9 @@ def _manifest_state(
 
     Derivation is gated to the phases this registered flow can execute, and
     every sidecar read is session-bound, so a non-deep or interrupted run never
-    adopts prior state. The ``derive_*`` helpers never raise on absent or
-    malformed artifacts, so this can never abort an archive.
+    adopts prior state. Requirement waivers follow `derive_pipeline_status`'s
+    rule 4 and leave ``phase_states`` unchanged. The ``derive_*`` helpers never
+    raise on absent or malformed artifacts, so this can never abort an archive.
     """
     from daydream.deep.artifacts import DeepArtifact
     from daydream.retry_policy import derive_retry_summary
@@ -151,6 +158,7 @@ def _manifest_state(
     )
     if fix_failures or frozen_extra.get("partial") is True:
         status = "partial"
+    sealed = _sealed_zero_finding_result(target_dir, session_id)
     phase_states = derive_phase_states(
         target_dir,
         phase_events=frozen_extra.get("phase_events"),
@@ -182,9 +190,9 @@ def _manifest_state(
             fix_failures,
             phase_states,
             runs_merge=runs_merge,
-            runs_fix=runs_fix,
-            runs_test=runs_test,
-            no_diff=_sealed_no_diff(target_dir, session_id),
+            runs_fix=runs_fix and sealed is None,
+            runs_test=runs_test and sealed is None,
+            no_diff=sealed is not None and sealed.get("required_phases") == ["no_diff"],
         ),
     }
 
@@ -814,7 +822,10 @@ def derive_pipeline_status(
     2. ``failed`` when any local, push, or remote phase reports failed.
     3. ``partial`` when ``fix_failures`` are present.
     4. ``partial`` when a required local phase never ran or an attempted push/
-       remote phase is incomplete.
+       remote phase is incomplete. Fix and test are not required when this
+       session's sealed review is complete with zero findings: the caller drops
+       those requirements, merge stays required, and its success is the
+       positive evidence.
     5. ``succeeded`` when every phase is succeeded or absent AND at least one
        phase actually ran (a flow that runs none of these phases surfaces no
        derivable phase signal, so an early-aborted/failed run must not be
