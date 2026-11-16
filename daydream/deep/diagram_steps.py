@@ -70,7 +70,7 @@ from daydream.ui import print_error, print_info, print_warning
 
 if TYPE_CHECKING:
     from daydream.run_config import RunConfig
-    from daydream.trajectory import DispatchHandle, PhaseScopeHandle, TrajectoryRecorder
+    from daydream.trajectory import DispatchHandle, EvidenceRecorder, PhaseScopeHandle
 
 
 @dataclass(frozen=True)
@@ -313,7 +313,7 @@ async def _diagram_turn(
     descriptor: str,
     prompt: str,
     schema: dict[str, Any],
-    recorder: "TrajectoryRecorder | None",
+    recorder: "EvidenceRecorder | None",
     backend: Any,
     dispatch: "DispatchHandle | None",
     continuation: Any = None,
@@ -354,7 +354,7 @@ async def _run_diagram_kind(
     eligibility: Eligibility,
     hunk_ranges: dict[str, list[tuple[int, int]]],
     symbols: RepoSymbols,
-    recorder: "TrajectoryRecorder | None",
+    recorder: "EvidenceRecorder | None",
     backend: Any,
     dispatch: "DispatchHandle | None" = None,
     deadline: float | None = None,

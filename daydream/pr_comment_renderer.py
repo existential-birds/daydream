@@ -1,4 +1,4 @@
-"""Render validated trajectories as PR run summaries; a separate filesystem adapter
+"""Render evidence document views as PR run summaries; a separate filesystem adapter
 tolerates missing/corrupt files. Group by daydream_phase, prefer recorded costs, and
 synthesize missing costs from model prices. Unpriced models show a dash plus a footnote.
 Pure rendering errors propagate; standalone filesystem rendering falls back.
@@ -6,16 +6,16 @@ Pure rendering errors propagate; standalone filesystem rendering falls back.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import daydream
-from daydream.atif import Step, Trajectory
 from daydream.pricing import ModelPrice, compute_cost_from_totals, load_user_prices, resolve_prices
 from daydream.timeutil import parse_iso_timestamp
-from daydream.trajectory.invocation import _GENERIC_MODEL_LABELS
+from daydream.trajectory import read_document_view
+from daydream.trajectory.billing import GENERIC_MODEL_LABELS
 
 # Display labels use serialized DaydreamPhase values.
 _PHASE_LABELS: dict[str, str] = {
@@ -112,7 +112,7 @@ class _RunAgg:
 
 
 def render_run_info(
-    trajectories: Iterable[Trajectory],
+    trajectories: Iterable[dict[str, Any]],
     *,
     prices: dict[str, ModelPrice] | None = None,
 ) -> str:
@@ -138,21 +138,21 @@ def render_run_info_block(trajectory_paths: Sequence[Path]) -> str:
         return _render_fallback()
 
 
-def _load_trajectories(paths: Sequence[Path]) -> Iterator[Trajectory]:
-    """Parse each trajectory independently, skipping failed files so surviving forks still
-    contribute.
+def _load_trajectories(paths: Sequence[Path]) -> Iterator[dict[str, Any]]:
+    """Reduce each evidence document independently, skipping failed files so surviving
+    forks still contribute.
     """
     for p in paths:
         try:
-            trajectory = Trajectory.model_validate(json.loads(Path(p).read_text(encoding="utf-8")))
+            trajectory = read_document_view(Path(p).read_bytes())
         except Exception:  # noqa: BLE001 - per-file resilience
             continue
         yield trajectory
-        del trajectory  # release this file's model before the next one is read
+        del trajectory  # release this file's view before the next one is read
 
 
-def _aggregate(trajectories: Iterable[Trajectory], prices: dict[str, ModelPrice]) -> _RunAgg:
-    """Aggregate phase-tagged steps, honoring ATIF root-model fallback. Generic backend
+def _aggregate(trajectories: Iterable[dict[str, Any]], prices: dict[str, ModelPrice]) -> _RunAgg:
+    """Aggregate phase-tagged steps, honoring the document's root-model fallback. Generic backend
     labels do not enter displayed model sets, but still reach pricing to mark unknown
     costs.
     """
@@ -163,35 +163,36 @@ def _aggregate(trajectories: Iterable[Trajectory], prices: dict[str, ModelPrice]
     return agg
 
 
-def _fold(agg: _RunAgg, traj: Trajectory, prices: dict[str, ModelPrice]) -> None:
-    agent_default_model = traj.agent.model_name
-    for step in traj.steps:
+def _fold(agg: _RunAgg, traj: dict[str, Any], prices: dict[str, ModelPrice]) -> None:
+    agent_default_model = traj["agent"].get("model_name")
+    for step in traj["steps"]:
         phase_key = _phase_key_of(step)
         if phase_key is None:
             continue
         phase = agg.phases.setdefault(phase_key, _PhaseAgg(phase_key))
         # Track timestamps from ALL sources (user + agent) for latency.
-        if step.timestamp:
+        timestamp = step.get("timestamp")
+        if timestamp:
             if phase.first_timestamp is None or parse_iso_timestamp(
-                step.timestamp
+                timestamp
             ) < parse_iso_timestamp(phase.first_timestamp):
-                phase.first_timestamp = step.timestamp
+                phase.first_timestamp = timestamp
             if phase.last_timestamp is None or parse_iso_timestamp(
-                step.timestamp
+                timestamp
             ) > parse_iso_timestamp(phase.last_timestamp):
-                phase.last_timestamp = step.timestamp
-        if step.source != "agent":
+                phase.last_timestamp = timestamp
+        if step.get("source") != "agent":
             continue
         phase.steps += 1
-        phase.tool_calls += len(step.tool_calls or [])
-        effective_model = step.model_name or agent_default_model
-        if effective_model and effective_model not in _GENERIC_MODEL_LABELS:
+        phase.tool_calls += len(step.get("tool_calls") or [])
+        effective_model = step.get("model_name") or agent_default_model
+        if effective_model and effective_model not in GENERIC_MODEL_LABELS:
             phase.models.add(effective_model)
         _accumulate_metrics(agg, phase, step, fallback_model=agent_default_model, prices=prices)
 
 
-def _phase_key_of(step: Step) -> str | None:
-    extra = step.extra or {}
+def _phase_key_of(step: dict[str, Any]) -> str | None:
+    extra = step.get("extra") or {}
     val = extra.get("daydream_phase")
     return val if isinstance(val, str) else None
 
@@ -199,7 +200,7 @@ def _phase_key_of(step: Step) -> str | None:
 def _accumulate_metrics(
     agg: _RunAgg,
     phase: _PhaseAgg,
-    step: Step,
+    step: dict[str, Any],
     *,
     fallback_model: str | None = None,
     prices: dict[str, ModelPrice],
@@ -208,12 +209,12 @@ def _accumulate_metrics(
     price the explicit/root model at the step date; missing/unpriced models mark the
     phase cost unknown.
     """
-    metrics = step.metrics
+    metrics = step.get("metrics")
     if metrics is None:
         return
-    prompt = max(metrics.prompt_tokens or 0, 0)
-    completion = max(metrics.completion_tokens or 0, 0)
-    cached_raw = max(metrics.cached_tokens or 0, 0)
+    prompt = max(metrics.get("prompt_tokens") or 0, 0)
+    completion = max(metrics.get("completion_tokens") or 0, 0)
+    cached_raw = max(metrics.get("cached_tokens") or 0, 0)
     # defensive guard: backends emit cached ≤ prompt (cache reads folded into the
     # total); clamp protects against malformed/legacy metrics
     cached = min(cached_raw, prompt)
@@ -221,11 +222,11 @@ def _accumulate_metrics(
     phase.cached_tokens += cached
     phase.output_tokens += completion
 
-    if metrics.cost_usd is not None:
-        phase.cost_usd += metrics.cost_usd
+    if metrics.get("cost_usd") is not None:
+        phase.cost_usd += metrics["cost_usd"]
         return
 
-    model = step.model_name if step.model_name is not None else fallback_model
+    model = step.get("model_name") if step.get("model_name") is not None else fallback_model
     if model is None:
         # Step has no model attribution and no SDK-provided cost: cannot
         # price. Mark unknown so the phase row degrades to '—'.
@@ -237,7 +238,7 @@ def _accumulate_metrics(
         cached_input_tokens=cached,
         output_tokens=completion,
         prices=prices,
-        effective_date=parse_iso_timestamp(step.timestamp).date() if step.timestamp else None,
+        effective_date=parse_iso_timestamp(step["timestamp"]).date() if step.get("timestamp") else None,
     )
     if synth is None:
         phase.cost_unknown = True

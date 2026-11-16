@@ -22,6 +22,6 @@ Read current `AGENTS.md` architecture details before changing these areas:
 - `git_ops/` is the single Git/GitHub subprocess boundary. Preserve process/auth policy and keep credentials out of command lines, remote URLs, and published artifacts.
 - Resolve private artifact ownership once and carry that owner/session throughout the run. Join writers before freezing immutable evidence; archive/evaluate/publish after freezing. Preserve snapshot binding and do not broaden backend read roots.
 - Host-owned identity differs from provenance. Preserve `uid`, `item_uid`, and `source_uids` semantics; display numbering is not durable identity.
-- Vendored `daydream/atif/` is updated wholesale, not patched locally. ATIF construction belongs in trajectory code, not phases or UI.
+- Vendored `daydream/benchmarks/atif/` is updated wholesale, not patched locally. Evidence recording belongs in trajectory code and ATIF export in `daydream/benchmarks/`, not phases or UI.
 
 If reviewer advice conflicts with a documented invariant, verify the underlying problem and choose a solution preserving that invariant. Cite both evidence and constraint; disagreement about a suggested implementation does not automatically invalidate a defect. If resolution requires a product decision or changes beyond authorized scope, identify the dependency and continue independent work.

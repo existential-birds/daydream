@@ -11,53 +11,50 @@ import daydream.pr_run_info as provider
 from daydream.artifact_visibility import (
     ArtifactSession,
 )
-from daydream.atif import Trajectory
 from daydream.pr_comment_renderer import FALLBACK_NOTE
 from daydream.pr_run_info import (
     LiveRunInfoSource,
     render_live_run_info,
 )
 from daydream.trajectory import (
+    RUN_DOCUMENT_NAME,
+    EvidenceRecorder,
     TrajectoryDocumentReference,
-    TrajectoryRecorder,
 )
 from daydream.trajectory.recorder import _SignalFlushRegistry
-from tests.harness.trajectory import make_recorder
+from tests.harness.trajectory import evidence_document, make_recorder
 
 
-def _trajectory(
-    session_id: str, trajectory_id: str, *, phase: str = "review", model: str = "gpt-5.5", prompt_tokens: int = 100,
-    cost_usd: float | None = 0.01,
-) -> Trajectory:
-    return Trajectory.model_validate({
-            "schema_version": "ATIF-v1.7", "session_id": session_id, "trajectory_id": trajectory_id,
-            "agent": {"name": "daydream", "version": "test", "model_name": model},
-            "steps": [{"step_id": 1, "timestamp": "2026-09-11T00:00:00Z", "source": "user", "message": "review",
-                    "extra": {"daydream_phase": phase},
-                }, {"step_id": 2, "timestamp": "2026-09-11T00:00:01Z", "source": "agent", "message": "done",
-                    "model_name": model,
-                    "metrics": {"prompt_tokens": prompt_tokens, "completion_tokens": 10, "cached_tokens": 20,
-                        "cost_usd": cost_usd,
-                    }, "extra": {"daydream_phase": phase},
-                },
-            ],
-        }
-    )
+def _steps(
+    *, phase: str = "review", model: str = "gpt-5.5", prompt_tokens: int = 100, cost_usd: float | None = 0.01,
+) -> tuple[dict[str, Any], ...]:
+    metrics: dict[str, Any] = {"prompt_tokens": prompt_tokens, "completion_tokens": 10, "cached_tokens": 20}
+    if cost_usd is not None:
+        metrics["cost_usd"] = cost_usd
+    return ({"step_id": 1, "timestamp": "2026-09-11T00:00:00Z", "source": "user", "message": "review",
+             "extra": {"daydream_phase": phase}},
+            {"step_id": 2, "timestamp": "2026-09-11T00:00:01Z", "source": "agent", "message": "done",
+             "model_name": model, "metrics": metrics, "extra": {"daydream_phase": phase}})
+
+
+def _document(session_id: str, trajectory_id: str, *, phase: str = "review") -> bytes:
+    return evidence_document(trajectory_id, session_id=session_id, steps=_steps(phase=phase))
 
 
 def _recorder(tmp_path: Path, session_id: str = "run-info", *, model: str = "gpt-5.5", prompt_tokens: int = 100,
     cost_usd: float | None = 0.01,
-) -> TrajectoryRecorder:
-    recorder = make_recorder(tmp_path, path=tmp_path / "trajectory.json", agent_model_name=model, session_id=session_id,
+) -> EvidenceRecorder:
+    """A live root recorder whose evidence document already holds one review turn."""
+    recorder = make_recorder(tmp_path, path=tmp_path / RUN_DOCUMENT_NAME, agent_model_name=model, session_id=session_id,
     )
-    recorder.steps.extend(
-        _trajectory(session_id, session_id, model=model, prompt_tokens=prompt_tokens, cost_usd=cost_usd,).steps
-    )
+    recorder._open_document()
+    recorder._extend_steps(list(_steps(model=model, prompt_tokens=prompt_tokens, cost_usd=cost_usd)))
     return recorder
 
 @pytest.mark.parametrize(("source", "diagnostic"),
     [
-        (LiveRunInfoSource(recorder=_recorder(Path(".")), artifacts=None), "run info: artifact session unavailable",),
+        (LiveRunInfoSource(recorder=make_recorder(Path(".")), artifacts=None),
+         "run info: artifact session unavailable"),
     ],
 )
 def test_missing_live_source_returns_bounded_unavailable_result(source: LiveRunInfoSource, diagnostic: str,) -> None:
@@ -67,7 +64,7 @@ def test_missing_live_source_returns_bounded_unavailable_result(source: LiveRunI
     assert result.diagnostic == diagnostic
 
 def _source(
-    tmp_path: Path, children: tuple[tuple[str, bytes], ...] = (), *, recorder: TrajectoryRecorder | None = None,
+    tmp_path: Path, children: tuple[tuple[str, bytes], ...] = (), *, recorder: EvidenceRecorder | None = None,
 ) -> LiveRunInfoSource:
     """Retain real written child files as the active recorder registry's references."""
     recorder = recorder or _recorder(tmp_path)
@@ -109,8 +106,8 @@ def test_non_root_recorder_is_rejected_before_acquisition(tmp_path: Path) -> Non
 def test_invalid_sibling_identity_returns_unavailable(
     tmp_path: Path, snapshot_id: str, document_session: str, document_id: str,
 ) -> None:
-    document = _trajectory(document_session, document_id)
-    result = render_live_run_info(_source(tmp_path, ((snapshot_id, document.model_dump_json().encode()),)))
+    document = _document(document_session, document_id)
+    result = render_live_run_info(_source(tmp_path, ((snapshot_id, document),)))
 
     assert result.diagnostic == "run info: trajectory identity invalid"
     assert FALLBACK_NOTE in result.markdown
@@ -118,7 +115,7 @@ def test_invalid_sibling_identity_returns_unavailable(
 def test_malformed_sibling_and_duplicate_ids_return_unavailable(tmp_path: Path) -> None:
     malformed_result = render_live_run_info(_source(tmp_path, (("child", b"{bad json"),)))
     # A retained child claiming the root's identity duplicates the parent.
-    root_copy = _trajectory("run-info", "run-info").model_dump_json().encode()
+    root_copy = _document("run-info", "run-info")
     duplicate_result = render_live_run_info(_source(tmp_path, (("run-info", root_copy),)))
 
     assert malformed_result.diagnostic == "run info: trajectory document invalid"
@@ -153,8 +150,8 @@ def test_live_provider_renders_parent_and_completed_sibling_with_user_prices(
     prices_file.write_text(f'[prices."{custom_model}"]\ninput = 2.0\ncached_input = 0.5\noutput = 8.0\n',
                            encoding="utf-8")
     monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(prices_file))
-    child = _trajectory("run-info", "child", phase="fix").model_dump_json().encode()
-    changed = _trajectory("run-info", "changed", phase="fix").model_dump_json().encode()
+    child = _document("run-info", "child", phase="fix")
+    changed = _document("run-info", "changed", phase="fix")
     recorder = _recorder(tmp_path, model=custom_model, prompt_tokens=1_000_000, cost_usd=None)
     source = _source(tmp_path, (("child", child), ("changed", changed)), recorder=recorder)
     (tmp_path / "child-1.json").write_bytes(changed.replace(b'"fix"', b'"FIX"'))

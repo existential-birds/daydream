@@ -60,13 +60,15 @@ from daydream.artifacts.filesystem import _atomic_json
 from daydream.json_utils import _fsync_directory, _fsync_file
 from daydream.run_artifacts import _RunWriteCapture
 from daydream.trajectory import (
+    RUN_DOCUMENT_NAME,
+    SIBLINGS_DIRNAME,
     RunWriteSnapshot,
     TrajectoryDocumentReference,
     TrajectoryDocumentSnapshot,
 )
 from daydream.workspace import WorkContext
 from tests.harness.git_helpers import git as _git
-from tests.harness.trajectory import make_recorder
+from tests.harness.trajectory import evidence_document, make_recorder
 
 _CUTOFF = "2026-09-06T12:00:00Z"
 _COMPLETE = artifact_visibility.ArtifactDisposition.COMPLETE
@@ -222,7 +224,7 @@ def _production_external_child(source: Path, repo: Path, runtime: Path, checkpoi
     artifact_external._external_entry_observer = stop_at_external
 
     async def run() -> None:
-        requested = source.parent / "external-crash-output" / "trajectory.json"
+        requested = source.parent / "external-crash-output" / RUN_DOCUMENT_NAME
         _external_target(requested.parent, prior=False)
         async with open_artifact_session(_work(source, repo=repo), session_id="external-crash", owner=owner) as session:
             session.register_trajectory_output(requested)
@@ -286,7 +288,7 @@ def _worktrees(source: Path, *names: str) -> tuple[Path, ...]:
 def _external_target(parent: Path, *, prior: bool = True) -> tuple[Path, Path]:
     """A fresh external ``trajectory.json``/``.partial`` pair under ``parent``."""
     parent.mkdir(parents=True)
-    requested = parent / "trajectory.json"
+    requested = parent / RUN_DOCUMENT_NAME
     partial = requested.with_suffix(requested.suffix + ".partial")
     if prior:
         requested.write_bytes(b"prior full")
@@ -295,13 +297,18 @@ def _external_target(parent: Path, *, prior: bool = True) -> tuple[Path, Path]:
 
 
 def _payload(session_id: str, trajectory_id: str | None = None, **extra: Any) -> bytes:
-    return json.dumps(
-        {"session_id": session_id, "trajectory_id": session_id if trajectory_id is None else trajectory_id, **extra},
-        sort_keys=True,
-    ).encode()
+    return evidence_document(session_id if trajectory_id is None else trajectory_id, session_id=session_id,
+                             extra=extra or None)
 
 
-def _snapshot(session_id: str, documents: tuple[TrajectoryDocumentSnapshot, ...], *, status: str = "complete",
+def _reference(path: Path, trajectory_id: str, payload: bytes) -> TrajectoryDocumentReference:
+    """Write one evidence document where the recorder would and reference its bytes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    return TrajectoryDocumentReference.written(trajectory_id, path, path, payload)
+
+
+def _snapshot(session_id: str, documents: tuple[TrajectoryDocumentReference, ...], *, status: str = "complete",
     root_trajectory_id: str | None = None,
 ) -> RunWriteSnapshot:
     return RunWriteSnapshot(status=cast(Any, status), cutoff_at=_CUTOFF,
@@ -310,10 +317,9 @@ def _snapshot(session_id: str, documents: tuple[TrajectoryDocumentSnapshot, ...]
 
 
 def _freeze_run(session: Any, session_id: str, *, payload: bytes | None = None) -> Any:
-    """Freeze one root trajectory document written into the session's own run dir."""
-    document = TrajectoryDocumentSnapshot(session_id, session.daydream_dir / "runs" / session_id / "trajectory.json",
-        _payload(session_id) if payload is None else payload,
-    )
+    """Freeze one root evidence document written into the session's own run dir."""
+    document = _reference(session.daydream_dir / "runs" / session_id / RUN_DOCUMENT_NAME, session_id,
+                          _payload(session_id) if payload is None else payload)
     return session.freeze(_snapshot(session_id, (document,)))
 
 
@@ -332,10 +338,11 @@ async def _publish_custom_public_trajectory(source: Path, *, session_id: str, st
         route = session.register_trajectory_output(requested)
         selected_route = route.full if status == "complete" else route.partial
         assert selected_route.write_path is not None
-        document = TrajectoryDocumentSnapshot(session_id, selected_route.write_path, payload)
-        session.write_trajectory_document(route, document, cast(Any, status))
+        root = _reference(route.run_dir / RUN_DOCUMENT_NAME, session_id, payload)
+        session.write_trajectory_document(route, TrajectoryDocumentSnapshot(session_id, root.path, payload),
+                                          cast(Any, status))
         assert not (source / ".daydream").exists()
-        frozen = session.freeze(_snapshot(session_id, (document,), status=status))
+        frozen = session.freeze(_snapshot(session_id, (root,), status=status))
         state_root = session.layout.state_root
         _publish(session, frozen)
     return state_root, selected, payload
@@ -624,13 +631,9 @@ async def test_artifact_session_preserves_resume_mtimes_across_publication_and_r
         session.register_destination(unused_dump, label=OutputLabel.DUMP_DIRECTORY)
         dump_route = session.register_destination(dump, label=OutputLabel.DUMP_DIRECTORY)
         assert dump_route.write_path is None and not any(path.is_file() for path in dump.rglob("*"))
-        document = TrajectoryDocumentSnapshot(
-            session_id, session.daydream_dir / "runs" / session_id / "trajectory.json", payload,
-        )
-        document.path.parent.mkdir(parents=True)
-        document.path.write_bytes(b"wrong bytes")
+        document = _reference(session.daydream_dir / "runs" / session_id / RUN_DOCUMENT_NAME, session_id, payload)
         frozen = session.freeze(_snapshot(session_id, (document,)))
-        assert (frozen.root / ".daydream/runs" / session_id / "trajectory.json").read_bytes() == payload
+        assert (frozen.root / ".daydream/runs" / session_id / RUN_DOCUMENT_NAME).read_bytes() == payload
         with pytest.raises(ArtifactVisibilityError, match="frozen"):
             artifact_dir_for(first, session=session)
         late = session.finalization_merge_path(dump_route, snapshot=frozen)
@@ -644,7 +647,7 @@ async def test_artifact_session_preserves_resume_mtimes_across_publication_and_r
     assert (source / ".daydream/deep/prior.md").read_bytes() == b"prior reasoning\n"
     assert not (source / ".daydream/review-cache").exists()
     assert not any((owner.artifact_state_root / "transactions").iterdir())
-    assert (source / ".daydream/runs" / session_id / "trajectory.json").read_bytes() == payload
+    assert (source / ".daydream/runs" / session_id / RUN_DOCUMENT_NAME).read_bytes() == payload
     canonical = owner.artifact_state_root / "canonical"
     for copied_deep in (source / ".daydream/deep", canonical / ".daydream/deep"):
         assert (copied_deep / "diff-key").stat().st_mtime_ns == key_mtime_ns
@@ -877,16 +880,16 @@ async def test_artifact_session_freeze_rejects_invalid_run_snapshot(source: Path
     work = _work(source)
     session_id = "snapshot-session"
     async with open_artifact_session(work, session_id=session_id) as session:
-        path = session.daydream_dir / "runs" / session_id / "trajectory.json"
-        document = TrajectoryDocumentSnapshot(session_id, path, _payload(session_id))
+        path = session.daydream_dir / "runs" / session_id / RUN_DOCUMENT_NAME
+        document = TrajectoryDocumentReference.written(session_id, path, path, _payload(session_id))
         valid = _snapshot(session_id, (document,), root_trajectory_id=session_id)
-        child_path = path.parent / "trajectories" / "child.json"
+        child_path = path.parent / SIBLINGS_DIRNAME / "child.otlp.jsonl"
         child = TrajectoryDocumentReference.written("child", child_path, child_path, _payload(session_id, "child"))
         for snapshot in (
             _snapshot(session_id, (document, document), root_trajectory_id=session_id),
             replace(valid, documents=()),
-            # Reference metadata is rejected without reading: a root reference and a malformed digest.
-            replace(valid, documents=(replace(child, trajectory_id=session_id),)),
+            # Reference metadata is rejected without reading: a missing root and a malformed digest.
+            replace(valid, documents=(child,)),
             replace(valid, documents=(document, replace(child, sha256="0" * 63))),
             replace(valid, status=cast(Any, "unfinished")),
         ):
@@ -1585,7 +1588,7 @@ async def _recoverable_publication_failure_reconciles_before_unlock_case(
         assert (source / "source.txt").read_bytes() == b"source canary\n"
         assert _git(source, "status", "--porcelain=v1", "--untracked-files=all") == ""
         assert _manifest(owner.artifact_state_root / "canonical") == expected
-        assert (frozen.root / ".daydream" / "runs" / session_id / "trajectory.json").read_bytes() == payload
+        assert (frozen.root / ".daydream" / "runs" / session_id / RUN_DOCUMENT_NAME).read_bytes() == payload
         journals = tuple((owner.artifact_state_root / "transactions").glob("*/journal.json"))
         assert len(journals) == 2
         assert any("artifact recovery retained" in note for note in primary.__notes__)
@@ -1599,7 +1602,7 @@ async def _recoverable_publication_failure_reconciles_before_unlock_case(
         return
     if transition in {"PUBLISH_INSTALLED", "PUBLISH_VERIFIED"}:
         # Recovery rolls an installed publication forward, explicit destinations included.
-        assert (source / ".daydream" / "runs" / session_id / "trajectory.json").read_bytes() == payload
+        assert (source / ".daydream" / "runs" / session_id / RUN_DOCUMENT_NAME).read_bytes() == payload
         assert (source / "explicit" / "findings.md").read_bytes() == b"explicit findings"
     else:
         assert _manifest(source) == expected
@@ -1710,15 +1713,17 @@ async def test_public_subtree_trajectory_uses_whole_daydream_transaction(
         assert (session.daydream_dir / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
 
         selected = route.full
-        root_document = TrajectoryDocumentSnapshot(session_id, cast(Path, selected.write_path), root_bytes)
-        session.write_trajectory_document(route, root_document, cast(Any, status))
+        assert route.explicit
+        root_document = _reference(route.run_dir / RUN_DOCUMENT_NAME, session_id, root_bytes)
+        session.write_trajectory_document(
+            route, TrajectoryDocumentSnapshot(session_id, root_document.path, root_bytes), cast(Any, status))
         assert cast(Path, selected.write_path).read_bytes() == root_bytes
-        assert not (route.run_dir / "trajectory.json").exists()
-        assert not (route.run_dir / "trajectory.json.partial").exists()
-        child_path = route.run_dir / "trajectories" / "child.json"
-        child_document = TrajectoryDocumentSnapshot(child_id, child_path, child_bytes)
-        session.write_trajectory_document(route, child_document, cast(Any, status))
-        assert child_path.read_bytes() == child_bytes
+        child_path = route.run_dir / SIBLINGS_DIRNAME / "child.otlp.jsonl"
+        child_document = _reference(child_path, child_id, child_bytes)
+        # Only the root document has an explicit output; children stay in the run's private directory.
+        with pytest.raises(ArtifactVisibilityError, match="only the root"):
+            session.write_trajectory_document(
+                route, TrajectoryDocumentSnapshot(child_id, child_path, child_bytes), cast(Any, status))
         assert not (source / ".daydream").exists()
 
         frozen = session.freeze(_snapshot(session_id, (root_document, child_document), status=status))
@@ -1734,7 +1739,7 @@ async def test_public_subtree_trajectory_uses_whole_daydream_transaction(
         assert _manifest(source) == baseline
         assert (published_full, published_partial) == (b"prior full", b"prior partial")
     assert unrelated.read_bytes() == b"unrelated"
-    published_child = source / ".daydream" / "runs" / session_id / "trajectories" / "child.json"
+    published_child = source / ".daydream" / "runs" / session_id / SIBLINGS_DIRNAME / "child.otlp.jsonl"
     assert published_child.exists() is (disposition is not artifact_visibility.ArtifactDisposition.ROLLBACK)
 
     async with open_artifact_session(_work(source), session_id=f"reopen-{disposition.value}") as reopened:
@@ -1886,7 +1891,7 @@ async def _public_subtree_trajectory_requires_exact_public_owner_case(source: Pa
         with pytest.raises(ArtifactVisibilityError, match="overlaps a public compatibility root"):
             session.register_trajectory_output(requested)
         # An explicit in-source path outside the public roots is deferred to publication, never written live.
-        explicit = source / "explicit" / "trajectory.json"
+        explicit = source / "explicit" / RUN_DOCUMENT_NAME
         route = session.register_trajectory_output(explicit)
         assert route.full.write_path.is_relative_to(session.layout.live_root) and not explicit.parent.exists()
 
@@ -2007,7 +2012,7 @@ async def test_live_external_destinations_are_probed_and_isolated_before_produce
 async def _independent_model_cwd_rejects_live_external_destination_overlap_case(tmp_path: Path, source: Path) -> None:
     external = tmp_path / "external"
     external.mkdir()
-    requested = external / "nested" / "trajectory.json"
+    requested = external / "nested" / RUN_DOCUMENT_NAME
     nested = requested.parent
     nested.mkdir()
     disjoint = tmp_path / "independent-audit"
@@ -2024,7 +2029,7 @@ async def _independent_model_cwd_rejects_live_external_destination_overlap_case(
 
 async def _live_external_capability_probe_covers_exchange_link_and_missing_parent_case(tmp_path: Path, source: Path,
 ) -> None:
-    requested = tmp_path / "missing" / "nested" / "trajectory.json"
+    requested = tmp_path / "missing" / "nested" / RUN_DOCUMENT_NAME
     canary = tmp_path / "probe-canary"
     canary.write_bytes(b"unrelated")
 
@@ -2299,7 +2304,7 @@ async def test_external_entry_interruption_reconciles_before_unlock(tmp_path: Pa
     )):
         source = tmp_path / f"case-{index}" / "source"
         _init_repo(source)
-        requested = source.parent / "external" / "trajectory.json"
+        requested = source.parent / "external" / RUN_DOCUMENT_NAME
         if purpose != "missing_parent":
             _external_target(requested.parent, prior=purpose == "publication_stage")
         primary = KeyboardInterrupt(f"{checkpoint}:{purpose}")
@@ -2350,7 +2355,7 @@ async def test_external_trajectory_write_freeze_and_dispositions_use_immutable_b
             assert (route.full.requested, route.full.write_path) == (requested, requested)
             assert (route.partial.requested, route.partial.write_path) == (partial_path, partial_path)
             assert (route.full.frozen_path, route.partial.frozen_path) == (
-                route.run_dir / "trajectory.json", route.run_dir / "trajectory.json.partial")
+                route.run_dir / RUN_DOCUMENT_NAME, route.run_dir / f"{RUN_DOCUMENT_NAME}.partial")
             assert route.full.delivery is artifact_visibility.DestinationDelivery.LIVE_EXTERNAL
             assert route.partial.delivery is route.full.delivery
             registry = _load_json(session._detach_transaction / "destinations.json")
@@ -2364,11 +2369,12 @@ async def test_external_trajectory_write_freeze_and_dispositions_use_immutable_b
             assert partial_path.read_bytes() == partial_bytes
             assert route.partial.frozen_path is not None
             assert route.partial.frozen_path.read_bytes() == partial_bytes
-            full_document = TrajectoryDocumentSnapshot(session_id, requested, full_bytes)
-            session.write_trajectory_document(route, full_document, "complete")
+            # The complete output's private copy is the root evidence document itself.
+            full_document = _reference(route.run_dir / RUN_DOCUMENT_NAME, session_id, full_bytes)
+            session.write_trajectory_document(
+                route, TrajectoryDocumentSnapshot(session_id, full_document.path, full_bytes), "complete")
             assert requested.read_bytes() == full_bytes
-            assert route.full.frozen_path is not None
-            assert route.full.frozen_path.read_bytes() == full_bytes
+            assert route.full.frozen_path == full_document.path
             # A concurrent reader only ever sees one complete document, never a missing or torn target.
             payloads = tuple(_payload(session_id, session_id, turn=turn) for turn in range(5)) + (full_bytes,)
             observed: list[bytes] = []
@@ -2394,27 +2400,31 @@ async def test_external_trajectory_write_freeze_and_dispositions_use_immutable_b
             assert not reader.is_alive() and not missing and observed
             assert set(observed) <= set(payloads)
 
-            # Completed children stay on disk as references; freeze checks them in place.
-            children = route.run_dir / "trajectories"
+            # Completed children stay on disk as prefix references; freeze checks them in place.
+            children = route.run_dir / SIBLINGS_DIRNAME
             references = {
-                name: session.write_trajectory_document(route, TrajectoryDocumentSnapshot(
-                    name, children / f"{name}.json",
-                    _payload("other-session" if name == "identity" else session_id, name)), "complete")
-                for name in ("deleted", "digest", "identity", "kept", "late", "size")
+                name: _reference(children / f"{name}.otlp.jsonl", name,
+                                 _payload("other-session" if name == "identity" else session_id, name))
+                for name in ("deleted", "digest", "identity", "kept", "late", "truncated", "grown")
             }
-            (children / "deleted.json").unlink()
-            (children / "digest.json").write_bytes(_payload(session_id, "digest").upper())
-            (children / "size.json").write_bytes(_payload(session_id, "size") + b" ")
+            (children / "deleted.otlp.jsonl").unlink()
+            (children / "digest.otlp.jsonl").write_bytes((children / "digest.otlp.jsonl").read_bytes().upper())
+            (children / "truncated.otlp.jsonl").write_bytes((children / "truncated.otlp.jsonl").read_bytes()[:-1])
+            # A document that kept growing after its snapshot still holds the referenced prefix.
+            with (children / "grown.otlp.jsonl").open("ab") as grown:
+                grown.write(b"later record\n")
             # A child whose bytes are intact but whose identity is wrong is a writer fault, not a drop.
-            with pytest.raises(ArtifactVisibilityError, match="snapshot child identity"):
+            with pytest.raises(ArtifactVisibilityError, match="snapshot document identity"):
                 session.freeze(_snapshot(session_id, (full_document, references.pop("identity"))))
             capsys.readouterr()
             before = {path.name: path.read_bytes() for path in children.iterdir()}
             manifest_tree = artifact_filesystem.manifest_tree
 
+            late_bytes = (children / "late.otlp.jsonl").read_bytes().upper()
+
             def edit_late_child(root: Path, *args: Any) -> Any:
                 if root == session.layout.live_root:  # An edit after the in-place check, before the copy.
-                    (children / "late.json").write_bytes(_payload(session_id, "late").upper())
+                    (children / "late.otlp.jsonl").write_bytes(late_bytes)
                 return manifest_tree(root, *args)
 
             monkeypatch.setattr(artifact_filesystem, "manifest_tree", edit_late_child)
@@ -2424,14 +2434,18 @@ async def test_external_trajectory_write_freeze_and_dispositions_use_immutable_b
             frozen = session.freeze(snapshot)
             monkeypatch.undo()
             frozen_run = frozen.root / ".daydream" / "runs" / session_id
-            assert (frozen_run / "trajectory.json").read_bytes() == full_bytes
+            assert (frozen_run / RUN_DOCUMENT_NAME).read_bytes() == full_bytes
             # Mismatched children are dropped with a warning, left untouched, and the kept one is rebased.
             assert capsys.readouterr().out.count("TrajectoryDocumentIntegrityError") == 4
             after = {path.name: path.read_bytes() for path in children.iterdir()}
-            assert after == {**before, "late.json": _payload(session_id, "late").upper()}
-            kept = replace(references["kept"], private_path=frozen_run / "trajectories" / "kept.json")
-            assert frozen.trajectories == replace(snapshot, documents=(full_document, kept))
-            assert kept.read_bytes() == _payload(session_id, "kept")
+            assert after == {**before, "late.otlp.jsonl": late_bytes}
+            frozen_children = frozen_run / SIBLINGS_DIRNAME
+            kept = references["kept"].frozen_at(frozen_children / "kept.otlp.jsonl")
+            grown_kept = references["grown"].frozen_at(frozen_children / "grown.otlp.jsonl")
+            assert frozen.trajectories == replace(snapshot, documents=(
+                full_document.frozen_at(frozen_run / RUN_DOCUMENT_NAME), kept, grown_kept))
+            assert kept.read_bytes() == (children / "kept.otlp.jsonl").read_bytes()
+            assert grown_kept.read_bytes() + b"later record\n" == (children / "grown.otlp.jsonl").read_bytes()
             _publish(session, frozen)
 
     assert partial_path.read_bytes() == b"mutable path is not evidence"

@@ -19,6 +19,7 @@ from daydream.config import DIAGRAM_MAX_NODES
 from daydream.findings import FINDINGS_SCHEMA_VERSION, write_findings_artifact
 from daydream.pr_review import diagram_marker, parse_diagram_markers, validate_diagram_payload
 from daydream.runner import run
+from daydream.trajectory import RUN_DOCUMENT_NAME
 from tests.harness import diagram_repos as dr
 from tests.harness.console import collapse_panel_text
 from tests.harness.diagram_repos import load_diagram_artifact as _artifact
@@ -26,6 +27,7 @@ from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git
 from tests.harness.scripts import cli_main as _cli_main
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
+from tests.harness.trajectory import read_trajectory
 
 SEQUENCE_HEADING = "<details><summary><h3>Sequence Diagram</h3></summary>"
 FLOWCHART_HEADING = "<details><summary><h3>Flowchart</h3></summary>"
@@ -87,9 +89,9 @@ def target(tmp_path: Path, fake_gh: FakeGh) -> Path:
 
 
 def _diagram_phase_end(target: Path) -> dict[str, Any]:
-    paths = list((target / ".daydream" / "runs").glob("*/trajectory.json"))
+    paths = list((target / ".daydream" / "runs").glob(f"*/{RUN_DOCUMENT_NAME}"))
     assert len(paths) == 1
-    trajectory = json.loads(paths[0].read_text(encoding="utf-8"))
+    trajectory = read_trajectory(paths[0])
     ends = [event
         for event in trajectory["extra"]["phase_events"]
         if event["event"] == "phase_end" and event["phase"] == "diagram"

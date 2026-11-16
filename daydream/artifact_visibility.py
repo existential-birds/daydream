@@ -581,7 +581,7 @@ class ArtifactSession:
                         if destination is not full and destination is not partial
                     ]
                     raise
-        route = TrajectoryOutputRoute(run_dir, full, partial)
+        route = TrajectoryOutputRoute(run_dir, full, partial, explicit=canonical_requested != canonical_default)
         self._trajectory_route = route
         return route
 
@@ -624,35 +624,27 @@ class ArtifactSession:
         document: TrajectoryDocumentSnapshot,
         status: Literal["complete", "partial"],
     ) -> TrajectoryDocumentReference:
-        """Write exact P07 bytes to private evidence and the authorized live root.
+        """Copy the root evidence document's accepted prefix to an explicit output.
 
         Return the reference (private path, size, SHA-256) of the bytes written."""
-        from daydream.trajectory import TrajectoryDocumentReference
+        from daydream.trajectory import TrajectoryDocumentReference, run_document_path
 
         self._require_active()
         if route is not self._trajectory_route or status not in ("complete", "partial"):
             raise ArtifactVisibilityError("trajectory output route identity mismatch")
+        if document.trajectory_id != self.layout.session_id:
+            raise ArtifactVisibilityError("only the root evidence document has an explicit output")
         selected = route.full if status == "complete" else route.partial
-        if document.trajectory_id == self.layout.session_id:
-            allowed = (selected.requested, selected.frozen_path)
-            if document.path not in allowed:
-                raise ArtifactVisibilityError("trajectory document path does not match its paired route")
-            private_path = selected.frozen_path
-        else:
-            try:
-                relative = document.path.relative_to(route.run_dir)
-            except ValueError as exc:
-                raise ArtifactVisibilityError("child trajectory path is outside the private run") from exc
-            filesystem._validate_relative_name(relative.as_posix())
-            private_path = document.path
+        private_path = selected.frozen_path
         if private_path is None or type(document.json_bytes) is not bytes:
             raise ArtifactVisibilityError("trajectory document bytes are malformed")
-        filesystem._atomic_bytes(private_path, document.json_bytes)
+        if private_path != run_document_path(route.run_dir):
+            # A deferred output outside the source publishes the root document itself.
+            filesystem._atomic_bytes(private_path, document.json_bytes)
         reference = TrajectoryDocumentReference.written(
             document.trajectory_id, document.path, private_path, document.json_bytes
         )
-        live_external = selected.delivery is DestinationDelivery.LIVE_EXTERNAL
-        if document.trajectory_id != self.layout.session_id or not live_external:
+        if selected.delivery is not DestinationDelivery.LIVE_EXTERNAL:
             return reference
         item = self._routed_for(selected)
         item.record = replace(item.record, prepared_sha256=reference.sha256)
@@ -673,8 +665,8 @@ class ArtifactSession:
         return reference
 
     def freeze(self, run_snapshot: RunWriteSnapshot) -> ArtifactTreeSnapshot:
-        """Rewrite prepared documents, check references in place, and freeze the live tree."""
-        from daydream.trajectory import TrajectoryDocumentIntegrityError, TrajectoryDocumentSnapshot
+        """Check each evidence prefix in place and freeze the live tree."""
+        from daydream.trajectory import TrajectoryDocumentIntegrityError
 
         self._require_active()
         try:
@@ -683,21 +675,15 @@ class ArtifactSession:
             raise ArtifactVisibilityError(f"run snapshot {exc}") from exc
         seen_paths: set[Path] = set()
         retained: list[TrajectoryDocument] = []
+        frozen_root = self.layout.live_root.parent / "frozen"
         for document in run_snapshot.documents:
-            path = document.path if isinstance(document, TrajectoryDocumentSnapshot) else document.private_path
+            path = document.private_path
             route = self._trajectory_route
-            if route is not None and document.trajectory_id == self.layout.session_id:
-                selected = route.full if run_snapshot.status == "complete" else route.partial
-                if path not in (selected.requested, selected.frozen_path):
-                    raise ArtifactVisibilityError("run snapshot root path does not match its paired route")
-                if selected.frozen_path is None:
-                    raise ArtifactVisibilityError("run snapshot root has no frozen destination")
-                path = selected.frozen_path
-            elif route is not None:
+            if route is not None:
                 try:
                     path.relative_to(route.run_dir)
                 except ValueError as exc:
-                    raise ArtifactVisibilityError("run snapshot child path is outside its private run") from exc
+                    raise ArtifactVisibilityError("run snapshot document path is outside its private run") from exc
             if path in seen_paths:
                 raise ArtifactVisibilityError("run snapshot contains duplicate document identity")
             seen_paths.add(path)
@@ -713,18 +699,16 @@ class ArtifactSession:
                     metadata = cursor.lstat()
                     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
                         raise ArtifactVisibilityError("run snapshot path has unsafe ancestry")
-            if isinstance(document, TrajectoryDocumentSnapshot):
-                filesystem._atomic_bytes(self.layout.live_root / relative, document.json_bytes)
-            else:
-                try:
-                    document.validated(self.layout.session_id)
-                except TrajectoryDocumentIntegrityError as exc:
-                    _print_dropped_child_warning(exc)
-                    continue
-                except ValueError as exc:
-                    raise ArtifactVisibilityError(f"run snapshot child {exc}") from exc
-                document = replace(document, private_path=self.layout.live_root.parent / "frozen" / relative)
-            retained.append(document)
+            try:
+                document.validated(self.layout.session_id)
+            except TrajectoryDocumentIntegrityError as exc:
+                if document.trajectory_id == self.layout.session_id:
+                    raise ArtifactVisibilityError(f"run snapshot root {exc}") from exc
+                _print_dropped_child_warning(exc)
+                continue
+            except ValueError as exc:
+                raise ArtifactVisibilityError(f"run snapshot document {exc}") from exc
+            retained.append(document.frozen_at(frozen_root / relative))
         return self._freeze_tree(replace(run_snapshot, documents=tuple(retained)))
 
     def freeze_unproduced(self) -> ArtifactTreeSnapshot:
@@ -735,7 +719,7 @@ class ArtifactSession:
         return self._freeze_tree()
 
     def _freeze_tree(self, trajectories: RunWriteSnapshot | None = None) -> ArtifactTreeSnapshot:
-        from daydream.trajectory import TrajectoryDocumentIntegrityError, TrajectoryDocumentReference
+        from daydream.trajectory import TrajectoryDocumentIntegrityError
 
         entries = filesystem.manifest_tree(self.layout.live_root)
         frozen_root = self.layout.live_root.parent / "frozen"
@@ -744,15 +728,21 @@ class ArtifactSession:
         filesystem._copy_tree(self.layout.live_root, frozen_root, entries)
         filesystem._atomic_json(frozen_root.parent / "frozen-manifest.json", filesystem._manifest_payload(entries))
         if trajectories is not None:
-            # The verified copy matches its manifest, so a reference whose file
-            # changed after its in-place check is dropped without another read.
+            # The verified copy matches its manifest. A reference covering a whole
+            # file is checked against it without another read; a shorter prefix (a
+            # partial snapshot of a document that kept growing) re-reads that prefix.
             files = {entry.path: (entry.size, entry.sha256) for entry in entries if entry.kind == "file"}
             documents = []
             for document in trajectories.documents:
-                if isinstance(document, TrajectoryDocumentReference) and files.get(
-                    document.private_path.relative_to(frozen_root).as_posix()
-                ) != (document.size, document.sha256):
-                    _print_dropped_child_warning(TrajectoryDocumentIntegrityError("referenced document changed"))
+                entry = files.get(document.private_path.relative_to(frozen_root).as_posix())
+                intact = entry is not None and (
+                    entry == (document.size, document.sha256) if entry[0] == document.size
+                    else entry[0] > document.size and _prefix_intact(document))
+                if not intact:
+                    error = TrajectoryDocumentIntegrityError("referenced document changed")
+                    if document.trajectory_id == self.layout.session_id:
+                        raise ArtifactVisibilityError(f"run snapshot root {error}")
+                    _print_dropped_child_warning(error)
                     continue
                 documents.append(document)
             trajectories = replace(trajectories, documents=tuple(documents))
@@ -1130,6 +1120,16 @@ def _rebaseline_canonical_from_public(
     with suppress(OSError):
         shutil.rmtree(backup, ignore_errors=True)
     _print_rebaseline_warning(source, canonical)
+
+
+def _prefix_intact(document: TrajectoryDocumentReference) -> bool:
+    from daydream.trajectory import TrajectoryDocumentIntegrityError
+
+    try:
+        document.read_bytes()
+    except TrajectoryDocumentIntegrityError:
+        return False
+    return True
 
 
 def _print_dropped_child_warning(exc: ValueError) -> None:

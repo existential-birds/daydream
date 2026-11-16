@@ -113,7 +113,7 @@ async def _run_audit_assignments(
     assignments: list[_AuditAssignment],
     branch_focus: bool,
     backend: Any,
-    recorder: trajectory.TrajectoryRecorder | None,
+    recorder: trajectory.EvidenceRecorder | None,
     limiter: anyio.CapacityLimiter,
     dispatch: trajectory.DispatchHandle | None,
 ) -> tuple[

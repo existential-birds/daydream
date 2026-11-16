@@ -1,4 +1,4 @@
-daydream/atif/
+daydream/benchmarks/atif/
 ==============
 
 This directory contains source code vendored from the Harbor framework
@@ -13,15 +13,15 @@ from being decoupled from Harbor's runtime install graph.
 Re-vendor wholesale on Harbor updates; do not carry local patches.
 The only allowed transformation is import-path renames:
 
-    harbor.models.trajectories  -> daydream.atif.models
-    harbor.utils.trajectory_validator -> daydream.atif.validator
+    harbor.models.trajectories  -> daydream.benchmarks.atif.models
+    harbor.utils.trajectory_validator -> daydream.benchmarks.atif.validator
 
 Plus removal of the validator's `python -m harbor.utils.trajectory_validator`
 CLI entry point (programmatic use only).
 
 ----
 
-Original Harbor LICENSE (Apache-2.0) is preserved at daydream/atif/LICENSE.
+Original Harbor LICENSE (Apache-2.0) is preserved at daydream/benchmarks/atif/LICENSE.
 
 Harbor copyright (Apache-2.0):
     Copyright (c) 2026 Harbor Framework Team and contributors
@@ -36,5 +36,5 @@ Harbor copyright (Apache-2.0):
 
 Daydream attribution:
     Daydream incorporates this vendored code under the terms of the
-    Apache License, Version 2.0. See daydream/atif/LICENSE for the
+    Apache License, Version 2.0. See daydream/benchmarks/atif/LICENSE for the
     full license text.

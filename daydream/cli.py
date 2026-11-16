@@ -23,6 +23,7 @@ def _command_handlers() -> dict[str, Callable[[list[str]], int]]:
     return {
         "search": search.handle_search_command,
         "summarize": admin._handle_summarize_command,
+        "evidence": admin._handle_evidence_command,
         "corpus": corpus._handle_corpus_command,
         "train": train._handle_train_command,
         "post-findings": admin._handle_post_findings_command,

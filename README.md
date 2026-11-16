@@ -7,12 +7,13 @@ Set up https://github.com/existential-birds/daydream for this repository.
 Read its README and CLI help, install Daydream with uv and Python 3.14+,
 and help me authenticate a supported backend (Claude by default, or Codex
 or Pi). Run a report-only review with --review against the intended
-base branch. Show me the findings and where the trajectory was saved.
+base branch. Show me the findings and where the run evidence was saved.
 ```
 
-Daydream reviews code changes, can fix findings and run tests, and records
-[ATIF](https://www.harborframework.com/docs/agents/trajectory-format) trajectories
-for research toward an open-weight code-review model.
+Daydream reviews code changes, can fix findings and run tests, and records local
+[OpenTelemetry](https://opentelemetry.io/) evidence of every agent interaction for
+research toward an open-weight code-review model; benchmarks export it as
+[ATIF](https://www.harborframework.com/docs/agents/trajectory-format) trajectories.
 Its review quality is measured in public on AACR-Bench and ReviewBench in
 [code-review-benchmarks](https://github.com/existential-birds/code-review-benchmarks).
 
@@ -44,7 +45,7 @@ and `--yes` answers its gates. One reviewer covers the whole change and challeng
 every finding in a fresh context before reporting it; it needs a backend with native
 host tools (Pi, Claude or Codex). Use `--help` for common options and `--help-all` for
 configuration and advanced flags.
-Reports land in `.review-output.md`; trajectories in `.daydream/runs/<id>/`.
+Reports land in `.review-output.md`; evidence in `.daydream/runs/<id>/` (`daydream evidence verify` checks it).
 Report-only local review uses the captured net base-to-final-working change,
 including nonignored untracked files. PR comments exclude local edits and use a
 [pinned committed subject](docs/runtime.md#captured-local-source).

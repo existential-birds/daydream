@@ -146,7 +146,7 @@ class Manifest:
     pr_number: int | None = None
     pr_repo: str | None = None
 
-    # Metrics (from trajectory _final_totals)
+    # Metrics (the root document's final usage totals)
     total_cost_usd: float | None = None
     total_prompt_tokens: int | None = None
     total_completion_tokens: int | None = None

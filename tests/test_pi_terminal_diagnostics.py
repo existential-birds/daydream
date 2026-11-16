@@ -11,7 +11,7 @@ import pytest
 from daydream.agent import run_agent
 from daydream.backends.pi import PiBackend, PiError
 from daydream.trajectory import DaydreamPhase
-from tests.harness.trajectory import make_recorder
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 
 @pytest.mark.parametrize("failure_kind", ["native-error", "process-exit"])
@@ -30,6 +30,7 @@ async def test_pi_failure_records_redacted_process_tail_after_cleanup(
     child = binary / "pi"
     child.write_text(f"#!{sys.executable}\n" + '''
 import json, signal, sys, time
+from tests.harness.trajectory import read_trajectory
 def stop(*_):
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     print('late cleanup diagnostic', file=sys.stderr, flush=True)
@@ -60,7 +61,7 @@ time.sleep(300)
     if failure_kind == "process-exit":
         # An ordinary nonzero exit is a permanent process failure that names its return code.
         assert failure.value.retryable is False and "return code 7" in str(failure.value)
-    document = json.loads(recorder.path.read_text())
+    document = read_trajectory(recorder.path)
     diagnostic = next(item for step in document["steps"]
                       for item in step.get("extra", {}).get("backend_diagnostics", [])
                       if item["code"] == "pi_process_failure")

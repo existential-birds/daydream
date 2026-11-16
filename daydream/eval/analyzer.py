@@ -18,6 +18,7 @@ from daydream.hunk_index import load_hunk_index, parse_hunks, range_distance
 from daydream.observability.runtime import current_session
 from daydream.observability.spans import SpanScope
 from daydream.trajectory import (
+    DOCUMENT_SUFFIX,
     RUN_DOCUMENT_NAME,
     RUNS_DIRNAME,
     DocumentSummary,
@@ -30,7 +31,7 @@ from daydream.trajectory import (
 # Trajectory loading
 
 def _latest_main_trajectory(daydream_dir: Path) -> Path | None:
-    """Find the newest runs/<session>/trajectory.json by mtime."""
+    """Find the newest runs/<session>/ root evidence document by mtime."""
     candidates = list(daydream_dir.glob(f"{RUNS_DIRNAME}/*/{RUN_DOCUMENT_NAME}"))
     if not candidates:
         return None
@@ -38,21 +39,21 @@ def _latest_main_trajectory(daydream_dir: Path) -> Path | None:
 
 
 def _run_dir_trajectory_paths(run_dir: Path) -> list[Path]:
-    """``trajectory.json`` plus sorted ``trajectories/*.json`` directly under *run_dir*."""
+    """The root evidence document plus its sorted sibling documents directly under *run_dir*."""
     paths: list[Path] = []
     main_path = run_document_path(run_dir)
     if main_path.is_file():
         paths.append(main_path)
     siblings_dir = siblings_directory(run_dir)
     if siblings_dir.is_dir():
-        paths.extend(f for f in sorted(siblings_dir.glob("*.json")) if f.is_file())
+        paths.extend(f for f in sorted(siblings_dir.glob(f"*{DOCUMENT_SUFFIX}")) if f.is_file())
     return paths
 
 
 def collect_trajectory_paths(run_dir: Path) -> list[Path]:
-    """Collect trajectory files for *run_dir*, main trajectory first.
+    """Collect evidence documents for *run_dir*, the root document first.
 
-    Looks for ``trajectory.json`` plus ``trajectories/*.json`` directly under
+    Looks for the root document plus its sibling documents directly under
     *run_dir*; when neither exists, falls back to the most recently modified
     ``runs/<session_id>/`` run beneath it.
     """
@@ -65,15 +66,10 @@ def collect_trajectory_paths(run_dir: Path) -> list[Path]:
 
 
 def _agent_label(filename: str) -> str:
-    """Label current and legacy trajectory filenames, removing host collision suffixes."""
-    if filename.startswith("trajectory"):
+    """Label an evidence document by its descriptor, removing the fork identity digest."""
+    if filename == RUN_DOCUMENT_NAME:
         return "main"
-    # Legacy ``trajectory-<timestamp>.json`` / ``<hash>.deep-python.json`` shapes.
-    parts = filename.rsplit(".", 2)
-    if len(parts) >= 3:
-        return parts[1]
-    label = filename.replace(".json", "")
-    return re.sub(r"--[0-9a-f]{64}$", "", label)
+    return re.sub(r"--[0-9a-f]{64}$", "", filename.removesuffix(DOCUMENT_SUFFIX))
 
 
 _WRITE_TOOL_ALIASES = frozenset(
@@ -572,7 +568,7 @@ def analyze_session(
     session_id = main.get("session_id", "unknown")
     agent_info = main.get("agent", {})
 
-    # Extract PR metadata from trajectory extra (set by TrajectoryRecorder)
+    # Extract PR metadata from the root document's run identity
     traj_extra = main.get("extra") or {}
     pr_number = traj_extra.get("pr_number")
     pr_repo = traj_extra.get("pr_repo")

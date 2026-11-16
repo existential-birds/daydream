@@ -619,8 +619,9 @@ Every investigation work, fresh challenge/rechallenge and retry keeps the same p
 and [budget ledger](#budget-ledger). Tool admission intersects grants before effects, and domain
 submission may change only the assigned in-memory Review state.
 
-Trusted host writers publish `review-output.md`, `committed-review.json` and
-`trajectory.json` (or its partial counterpart) under `output_dir` using the same
+Trusted host writers publish `review-output.md`, `committed-review.json` and a copy of
+the root [evidence document](observability.md#local-evidence) `evidence.otlp.jsonl` (or
+its partial counterpart) under `output_dir` using the same
 private session and conflict-safe installation. Existing source public artifacts
 are restored unchanged. Diagnostics stay under `private_base`; output destinations
 do not become model write grants. Recorded policy/configuration identities omit
@@ -712,7 +713,7 @@ Immutable analysis and export use only captured/local evidence. They perform no
 GitHub discovery or credential resolution, including identity preflight, and never
 refresh a head, base, PR body or remote. PR advancement/closure cannot relabel or
 invalidate captured analysis. Trusted repository/PR/provenance stays on result and
-ATIF control surfaces; only the approved bounded historical context enters model
+evidence control surfaces; only the approved bounded historical context enters model
 assignments. Model-facing profile serialization never carries trusted provenance.
 
 Strict immutable findings schema 5 binds the outer original repository/PR/head to
@@ -1133,26 +1134,26 @@ through subprocess dispatch; inherited Git routing cannot select replacement
 metadata. Unsafe cleanup retains the operational worktree and warns without
 replacing a primary failure.
 
-Completed fork trajectories stay on disk, not in RAM. The run's recorder registry
-keeps one reference per completed child: its trajectory id, logical path, the
-private file actually written, and that file's size and SHA-256. Run snapshots keep
-the root and still-running forks as prepared bytes, because every flush rewrites
-their `.partial` paths. Every consumer reads documents through one checked read:
-prepared bytes come from memory, and a reference is re-read without following links
-and must match its size and digest; identity-checked reads also verify
-trajectory/session identity. Retaining a snapshot, which also happens from the
-signal handler, checks only reference metadata and performs no I/O. Freeze checks
-each reference in place and against the frozen copy's manifest. A missing or changed
-child is dropped from that snapshot with a warning, and its file is left in place;
-live run info drops it from its view the same way. Realistic causes are an older
-retained partial snapshot whose child file a later fork with the same legacy
-descriptor overwrote, or an edit in private state. Intact bytes with the wrong
-identity remain a fatal freeze error. A run that lost a child still installs its
+Evidence documents are written to disk as the run proceeds, never held whole in RAM.
+Every run snapshot names each document by reference: its document id, logical path,
+the private file and the size and SHA-256 of its accepted prefix. A signal snapshot
+stays valid while documents keep growing. The run's recorder registry keeps one sealed
+reference per completed child. Every consumer reads documents through one checked
+read: the referenced prefix is re-read without following links, must match its digest
+and is reduced to the document view, and identity-checked reads also verify
+document/session identity. Retaining a snapshot, which also happens from the signal
+handler, checks only reference metadata and performs no I/O. Freeze checks each
+reference in place and against the frozen copy's manifest. A missing or changed child
+is dropped from that snapshot with a warning, and its file is left in place; live run
+info drops it from its view the same way. Realistic causes are an older retained
+partial snapshot whose child file a later fork with the same legacy descriptor
+replaced, or an edit in private state. A changed root, or intact bytes with the wrong
+identity, remain fatal freeze errors. A run that lost a child still installs its
 outputs and archive, but optional dataset capture skips it rather than record
-incomplete trajectory evidence. Consumers after freeze read references from the
-frozen copy, where a mismatch is an integrity failure.
+incomplete evidence. Consumers after freeze read references from the frozen copy,
+where a mismatch is an integrity failure.
 
-Finalization holds one trajectory document at a time. After freeze, one summary
+Finalization holds one evidence document at a time. After freeze, one summary
 pass (`summarize_run`) reads each selected document once through its
 identity-checked read and keeps only its metadata without `steps` plus compact
 step facts; timing is reduced once from that summary, and evaluation and the
@@ -1165,11 +1166,8 @@ recovery, the comparison with an existing shard and publication, and recovery an
 readers leave a live writer's stage alone.
 The record bytes equal the in-memory canonical record. Live run info and
 `daydream summarize` fold documents into the run-info table one at a time. The
-recorder serializes each document once, straight from the ATIF model to bytes,
-with ASCII escapes and absent fields omitted. Float spelling may differ from
-older documents (`0.000015` rather than `1.5e-05`); decoded values are
-identical. Serialization is not streamed, because every prepared document is
-retained or written whole. [The finalization measurement](../scripts/measure_finalization_memory.py)
+recorder encodes each record once, straight to an ASCII-escaped OTLP/JSON line, and
+appends it; no document is rewritten. [The finalization measurement](../scripts/measure_finalization_memory.py)
 reports each stage's peak memory and runtime and the archive's bytes read.
 
 Finalization reports local JSONL capture, configured upload, archive/evaluation,
@@ -1185,8 +1183,8 @@ and cancellation remain primary when finalization also fails.
 
 Pass generated model inputs through exact sanctioned paths or bounded inline
 contents; private storage is discovery isolation, not an OS sandbox. Never broaden
-read roots or reconstruct public paths. Explicit external `--trajectory` supports
-live atomic updates; other explicit exports wait for finalization. Diagnostic dumps
+read roots or reconstruct public paths. Explicit `--trajectory` receives a copy of the
+root evidence document; an external path supports live atomic updates; other explicit exports wait for finalization. Diagnostic dumps
 preserve assembled bytes, including sensitive/binary content; publication scanning
 is independent. Archive indexes require the current complete schema or an empty
 index; preserve unsupported indexes and use a fresh directory.

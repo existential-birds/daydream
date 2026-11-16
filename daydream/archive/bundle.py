@@ -10,7 +10,7 @@ from daydream.archive.errors import ArchiveIntegrityError
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.run_snapshot import ArchiveRunSnapshot
 from daydream.trajectory import (
-    PARTIAL_SUFFIX,
+    DOCUMENT_SUFFIX,
     DaydreamRunFlow,
     run_document_path,
     sibling_document_path,
@@ -82,7 +82,7 @@ def _project_documents(
     *,
     session_id: str,
 ) -> None:
-    """Copy each frozen trajectory document's checked bytes into one archive bundle.
+    """Copy each frozen evidence document's checked bytes into one archive bundle.
 
     Each document is read once; ``session_id`` additionally binds it to the
     archived run, and a changed referenced file fails the projection.
@@ -96,8 +96,8 @@ def _project_documents(
         if document.trajectory_id == write_snapshot.root_trajectory_id:
             destination = root_path
         else:
-            name = document.path.name.removesuffix(PARTIAL_SUFFIX)
-            if not name.endswith(".json") or name in {".", ".."}:
+            name = document.path.name
+            if not name.endswith(DOCUMENT_SUFFIX) or name in {".", ".."}:
                 raise ValueError("invalid frozen trajectory document path")
             destination = sibling_document_path(run_dir, name)
         if destination in seen:

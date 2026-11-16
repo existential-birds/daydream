@@ -40,11 +40,11 @@ from daydream.run_artifacts import (
 from daydream.run_config import RunConfig
 from daydream.run_context import RunContext, current_run_context
 from daydream.trajectory import (
+    RUN_DOCUMENT_NAME,
     DaydreamRunFlow,
+    EvidenceRecorder,
     RunWriteSnapshot,
     TrajectoryDocumentReference,
-    TrajectoryDocumentSnapshot,
-    TrajectoryRecorder,
 )
 from daydream.workspace import AuditWorkspace, WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
@@ -52,7 +52,7 @@ from tests.harness.dataset import read_records
 from tests.harness.git_helpers import bare_remote, commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.otlp import attributes, kind_of
 from tests.harness.stub_backend import StubBackend
-from tests.harness.trajectory import make_recorder
+from tests.harness.trajectory import make_recorder, read_trajectory
 from tests.test_deep_orchestrator import _pin_findings_pr
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
@@ -83,35 +83,27 @@ def _handoff_turn(body: str) -> Turn:
     """The read-only failure-summarizer's structured handoff response."""
     return (ResultEvent(structured_output={"handoff_prompt": body}, continuation=None),)
 
-_VALID_DOCUMENT_BYTES = json.dumps(
-    {"session_id": "session", "trajectory_id": "session", "steps": [], "final_metrics": {}, "extra": {}}
-).encode()
-
 @pytest.fixture
-def capture_recorder(tmp_path: Path) -> TrajectoryRecorder:
+def capture_recorder(tmp_path: Path) -> EvidenceRecorder:
     """A bare recorder identifying the ``session`` run for capture tests."""
-    return make_recorder(tmp_path, path=tmp_path / "trajectory.json", agent_model_name="test", session_id="session")
+    return make_recorder(tmp_path, path=tmp_path / RUN_DOCUMENT_NAME, agent_model_name="test", session_id="session")
 
 def _capture_snapshot(
-    tmp_path: Path, status: Literal["complete", "partial"], *, json_bytes: bytes = _VALID_DOCUMENT_BYTES,
-    root: str = "session", cutoff_at: str = "2026-09-06T00:00:00Z",
+    tmp_path: Path, status: Literal["complete", "partial"], *, root: str = "session",
+    cutoff_at: str = "2026-09-06T00:00:00Z",
 ) -> RunWriteSnapshot:
-    """One single-document run-write snapshot whose path is never written."""
+    """One single-document run-write snapshot whose referenced file is never written."""
+    path = tmp_path / RUN_DOCUMENT_NAME
     return RunWriteSnapshot(
         status=status, cutoff_at=cutoff_at, root_trajectory_id=root,
-        documents=(
-            TrajectoryDocumentSnapshot(
-                trajectory_id="session", path=tmp_path / f"missing.{'json' if status == 'complete' else 'partial'}",
-                json_bytes=json_bytes,
-            ),
-        ),
+        documents=(TrajectoryDocumentReference("session", path, path, 2, "1" * 64),),
     )
 
 def test_run_write_capture_retains_valid_final_without_io_and_records_invalid(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capture_recorder: TrajectoryRecorder
+    tmp_path: Path, capture_recorder: EvidenceRecorder
 ) -> None:
     """The recorder callback is a non-raising immutable handoff, not finalization."""
-    # Completed children are references: retention checks their metadata, never their files.
+    # Documents are references: retention checks their metadata, never their files.
     child = TrajectoryDocumentReference("session:child", tmp_path / "child.json", tmp_path / "child.json", 2, "0" * 64)
     prepared = _capture_snapshot(tmp_path, "complete")
     final = replace(prepared, documents=(*prepared.documents, child))
@@ -126,16 +118,6 @@ def test_run_write_capture_retains_valid_final_without_io_and_records_invalid(
         capture.retain(capture_recorder, invalid)
         assert capture.final is final
         assert isinstance(capture.validation_error, _RunSnapshotCaptureError)
-    # A BaseException during validation propagates instead of being recorded.
-    capture = _RunWriteCapture(session_id="session")
-    def interrupt(_payload: bytes) -> Any:
-        raise KeyboardInterrupt
-    monkeypatch.setattr("daydream.trajectory.types.json.loads", interrupt)
-    with pytest.raises(KeyboardInterrupt):
-        capture.retain(capture_recorder, _capture_snapshot(tmp_path, "partial", json_bytes=b"{}"))
-    assert capture.partial is None
-    assert capture.final is None
-    assert capture.validation_error is None
 
 def test_diagram_artifact_uses_the_captured_pr_and_the_run_auth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
@@ -398,7 +380,7 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
                     assert not (repo / ".daydream").exists()
                     assert not list((archive_dir / "runs").glob("[!.]*"))
                     live_trajectories = list(
-                        (tmp_path / "private" / "runtime").glob("*/runs/*/live/.daydream/runs/*/trajectory.json")
+                        (tmp_path / "private" / "runtime").glob("*/runs/*/live/.daydream/runs/*/evidence.otlp.jsonl")
                     )
                     assert len(live_trajectories) == 1
                     frozen_trajectory = live_trajectories[0].read_bytes()
@@ -465,7 +447,7 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
         assert "Local JSONL capture: retained" in progress
         assert "Public publication: failed" in progress or "Public publication: not attempted" in progress
         assert "Run evidence could not be persisted" not in captured.out
-        assert json.loads(external_trajectory.read_text()) == documents[0]
+        assert external_trajectory.read_bytes().decode() == documents[0]["otlp_jsonl"]
         assert (dump / "prior.txt").read_text() == "prior dump"
         assert list((tmp_path / "private" / "runtime").glob("*/transactions/*/journal.json"))
         return
@@ -483,16 +465,16 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     (agent,), (attempt,) = kind_of(spans, "agent"), kind_of(spans, "attempt")
     assert "PROBE" in attributes(agent)["traceloop.entity.input"]
     assert json.loads(attributes(attempt)["traceloop.entity.output"]) == "controlled output"
-    archived_bytes = (archived_run / "trajectory.json").read_bytes()
+    archived_bytes = (archived_run / RUN_DOCUMENT_NAME).read_bytes()
     assert archived_bytes == frozen_trajectory
     evaluation = json.loads((archived_run / "evaluation.json").read_text())
     assert evaluation["quality"]["scoped_files"] == 1
     assert list(evaluation["quality"]["per_file"]) == ["app.py"]
     assert "Finalization: Publishing run archive." in progress
     assert "Finalization: Publishing run outputs." in progress
-    assert (public_run / "trajectory.json").read_bytes() == archived_bytes
+    assert (public_run / RUN_DOCUMENT_NAME).read_bytes() == archived_bytes
     assert external_trajectory.read_bytes() == archived_bytes
-    assert (dump / "trajectory.json").read_bytes() == archived_bytes
+    assert (dump / RUN_DOCUMENT_NAME).read_bytes() == archived_bytes
     manifest = json.loads((archived_run / "manifest.json").read_text())
     assert manifest["session_id"] == public_run.name
     assert manifest["archive_status"] == "complete"
@@ -551,7 +533,7 @@ async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
     assert backend.cancelled is True
     public_runs = list((repo / ".daydream" / "runs").iterdir())
     assert len(public_runs) == 1
-    assert json.loads((public_runs[0] / "trajectory.json").read_text())["extra"]["partial"] is True
+    assert read_trajectory((public_runs[0] / RUN_DOCUMENT_NAME))["extra"]["partial"] is True
     _, archived_run = _assert_one_published_run(repo, archive_dir)
     assert json.loads((archived_run / "manifest.json").read_text())["archive_status"] == "partial"
 

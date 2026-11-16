@@ -207,9 +207,15 @@ class RoutedDestination:
 
 @dataclass(frozen=True)
 class TrajectoryOutputRoute:
+    """The run's private evidence directory and the paired root output destinations.
+
+    The default pair names the root evidence document itself; an explicit pair
+    receives a copy of its accepted prefix."""
+
     run_dir: Path
     full: RoutedDestination
     partial: RoutedDestination
+    explicit: bool = False
 
 
 @dataclass(frozen=True)

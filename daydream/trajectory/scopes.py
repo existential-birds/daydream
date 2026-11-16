@@ -15,14 +15,14 @@ from daydream.trajectory.lifecycle import DispatchHandle, ForkIdentity, _Complet
 from daydream.trajectory.types import DaydreamPhase
 
 if TYPE_CHECKING:
-    from daydream.trajectory.recorder import TrajectoryRecorder
+    from daydream.trajectory.recorder import EvidenceRecorder
 
 _console = ui.create_console()
 
 
 @asynccontextmanager
-async def invocation_scope(recorder: TrajectoryRecorder, phase: DaydreamPhase) -> AsyncIterator[Invocation]:
-    """Register an active invocation, then persist its terminal evidence and steps."""
+async def invocation_scope(recorder: EvidenceRecorder, phase: DaydreamPhase) -> AsyncIterator[Invocation]:
+    """Register an active invocation, then append its terminal evidence and steps."""
     invocation = Invocation(recorder=recorder, phase=phase, invocation_id=recorder._next_invocation_id())
     invocation.started_at = timeutil.now_iso()
     recorder._active_invocations.append(invocation)
@@ -54,10 +54,10 @@ async def invocation_scope(recorder: TrajectoryRecorder, phase: DaydreamPhase) -
 
 @asynccontextmanager
 async def fork_scope(
-    parent: TrajectoryRecorder, descriptor: str, dispatch: DispatchHandle | None = None,
-) -> AsyncIterator[TrajectoryRecorder]:
-    """Bind a child recorder and fold only successfully written child evidence."""
-    from daydream.trajectory.recorder import TrajectoryRecorder, _admitted_descriptor
+    parent: EvidenceRecorder, descriptor: str, dispatch: DispatchHandle | None = None,
+) -> AsyncIterator[EvidenceRecorder]:
+    """Bind a child recorder and fold only sealed, nonempty child evidence."""
+    from daydream.trajectory.recorder import EvidenceRecorder, _admitted_descriptor
 
     descriptor = _admitted_descriptor(descriptor)
     identity: ForkIdentity | None = None
@@ -65,12 +65,14 @@ async def fork_scope(
         if dispatch._recorder is not parent:
             raise RuntimeError("dispatch belongs to a different recorder")
         identity = dispatch.register_fork(descriptor)
-    child = TrajectoryRecorder(
+    registry = parent._signal_registry
+    if registry is None:
+        raise RuntimeError("cannot enter a fork without an active parent recorder")
+    child = EvidenceRecorder(
         path=parent._sibling_path_for(descriptor, identity),
         run_flow=parent.run_flow,
         target_dir=parent.target_dir,
         agent_model_name=parent.agent_model_name,
-        redactor=parent.redactor,
         session_id=parent.session_id,
         pr_number=parent.pr_number,
         pr_repo=parent.pr_repo,
@@ -80,83 +82,61 @@ async def fork_scope(
         fix_backend_name=parent.fix_backend_name,
         test_backend_name=parent.test_backend_name,
         artifact_run_dir=parent.artifact_run_dir,
-        document_writer=parent.document_writer,
     )
     child.parent = parent
     child.descriptor = descriptor
     if identity is not None:
         child._trajectory_id = identity.fork_id
-    registry = parent._signal_registry
-    if registry is None:
-        raise RuntimeError("cannot enter a fork without an active parent recorder")
     child._signal_registry = registry
-    registry.register(child)
-    child._previous_token = _RECORDER_VAR.set(child)
     entered_at = timeutil.now_iso()
     child._run_started_at = entered_at
+    child._open_document()
+    registry.register(child)
+    child._previous_token = _RECORDER_VAR.set(child)
     try:
         yield child
     except BaseException:
         child._aborted = True
         raise
     finally:
-        write_ok = False
         try:
             exited_at = timeutil.now_iso()
             child._run_ended_at = exited_at
+            sealed = False
             try:
-                child._write()
-                write_ok = bool(child.steps)
+                child._write_final()
+                sealed = True
             except Exception as exc:  # noqa: BLE001 - recording must never crash a run
-                ui.print_warning(
-                    _console,
-                    f"Sibling trajectory write failed: {type(exc).__name__}: {exc}",
-                )
-            if write_ok and child.parent is not None:
-                # The root trajectory's final_metrics is whole-run truth: fold the
-                # fork's totals in so manifest/eval consumers read one number
-                # instead of re-summing sibling files. The fork file keeps its own
-                # share. A failed child write folds nothing (the error already
-                # degrades the record, D-11).
-                child.parent._accumulate_metrics(
-                    prompt_tokens=child._final_totals["prompt"],
-                    completion_tokens=child._final_totals["completion"],
-                    cached_tokens=child._final_totals["cached"],
-                    cost_usd=child._final_totals["cost"],
-                )
-                child.parent._folded_fork_totals = True
-                sibling_ref = child.parent._logical_child_trajectory_ref(child.path)
-                phase = DaydreamPhase.FIX.value
-                for step in child.steps:
-                    if step.extra is None:
-                        continue
-                    candidate = step.extra.get("daydream_phase")
-                    if isinstance(candidate, str):
-                        phase = candidate
-                        break
-                child.parent._register_fork_subtrajectory(
+                registry.failed_documents.append(child.trajectory_id)
+                ui.print_warning(_console, f"Sibling evidence write failed: {type(exc).__name__}: {exc}")
+            if sealed and child._step_count:
+                # The root ledger is whole-run truth: fold the fork's total once so
+                # manifest/eval consumers read one number. The fork keeps its own share.
+                parent.usage.fold(child.usage)
+                registry.retain(child._reference())
+                phase = DaydreamPhase.FIX.value if child._first_phase is None else child._first_phase[1]
+                parent._register_fork_subtrajectory(
                     child=child,
                     phase=phase,
                     identity=identity,
-                    started_at=entered_at or timeutil.now_iso(),
-                    ended_at=exited_at or timeutil.now_iso(),
-                    sibling_trajectory_ref=sibling_ref,
+                    started_at=entered_at,
+                    ended_at=exited_at,
+                    sibling_trajectory_ref=parent._logical_child_trajectory_ref(child.path),
                 )
                 if dispatch is not None and identity is not None:
                     dispatch._record_completed(
-                        _CompletedFork(
-                            identity=identity,
-                            path=child.path,
-                            trajectory_id=child.trajectory_id,
-                        )
+                        _CompletedFork(identity=identity, path=child.path, trajectory_id=child.trajectory_id)
                     )
-            elif dispatch is not None:
-                dispatch._record_write_failure()
+            else:
+                if sealed:
+                    # A child that produced no steps keeps no document, as before.
+                    with suppress(OSError):
+                        child.path.unlink()
+                if dispatch is not None:
+                    dispatch._record_write_failure()
         finally:
-            registry = child._signal_registry
-            if registry is not None:
-                registry.unregister(child)
-                child._signal_registry = None
+            registry.unregister(child)
+            child._signal_registry = None
             if child._previous_token is not None:
                 _RECORDER_VAR.reset(child._previous_token)
                 child._previous_token = None

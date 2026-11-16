@@ -1,52 +1,42 @@
-"""ATIF v1.7 run recorder: model construction, scope ownership, and durable writes.
+"""Run evidence recorder: scope ownership and durable local OpenTelemetry evidence.
 
 runner binds one recorder through a ContextVar; agent opens an Invocation per
-call. Invocations buffer backend events into steps and flush on scope exit.
-Child recorders support parallel tasks; persistence redacts sensitive values.
-Snapshots, timing, and generation billing live in their own modules."""
+call. Each recorder owns one evidence document: an append-only OTLP/JSON log
+journal (:mod:`daydream.trajectory.journal`) in the run's private directory.
+Finished invocation steps, phase and dispatch lifecycle, invocation and fork
+summaries, and profile identity are appended as they happen, so no whole-run
+transcript stays in memory. Forks own child documents. Closing a document seals
+it; a signal flush appends a snapshot and publishes a partial run snapshot of
+prefix references. Usage totals live in each document's host-owned
+:class:`~daydream.trajectory.billing.UsageLedger`.
+"""
 
 from __future__ import annotations
 
-# external contract: "ATIF v1.7" names the Harbor trajectory-format version, not a project-owned name
 import hashlib
 import json
 import re
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
-from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-from pydantic_core import PydanticSerializationError, to_json, to_jsonable_python
-
 import daydream
 from daydream import timeutil, ui
-from daydream.atif import (
-    Agent,
-    FinalMetrics,
-    Observation,
-    ObservationResult,
-    Step,
-    SubagentTrajectoryRef,
-    Trajectory,
-)
-from daydream.json_utils import atomic_write_bytes
-from daydream.redaction import (
-    _redact_unstructured_text,
-    redact_value,
-)
+from daydream.redaction import _redact_unstructured_text, redact_value
+from daydream.trajectory.billing import GENERIC_MODEL_LABELS, UsageLedger
 from daydream.trajectory.context import _RECORDER_VAR
-from daydream.trajectory.invocation import _GENERIC_MODEL_LABELS, Invocation
+from daydream.trajectory.invocation import Invocation
+from daydream.trajectory.journal import JournalWriter
 from daydream.trajectory.layout import (
     _DAYDREAM_DIRNAME,
+    DOCUMENT_SUFFIX,
     RUNS_DIRNAME,
-    partial_document_path,
     run_directory,
     sibling_document_path,
 )
 from daydream.trajectory.lifecycle import DispatchHandle, ForkIdentity, PhaseEvent
-from daydream.trajectory.redactor import Redactor
 from daydream.trajectory.scopes import fork_scope, invocation_scope
 from daydream.trajectory.types import (
     DaydreamPhase,
@@ -54,29 +44,21 @@ from daydream.trajectory.types import (
     LifecycleReasonCode,
     LifecycleStatus,
     RunWriteSnapshot,
-    TrajectoryDocument,
     TrajectoryDocumentReference,
     TrajectoryDocumentSnapshot,
+)
+from daydream.trajectory.view import (
+    MODEL_EVENT,
+    OPEN_EVENT,
+    PHASE_EVENT,
+    PROFILE_EVENT,
+    SNAPSHOT_EVENT,
+    STEP_EVENT,
+    SUBTRAJECTORY_EVENT,
 )
 from daydream.ui import create_console, print_error
 
 _console = create_console()
-
-
-def _json_bytes(value: Any, *, indent: int | None = None) -> bytes:
-    """Encode straight to JSON bytes with ASCII escapes, omitting absent model fields.
-
-    pydantic-core refuses lone surrogates, which host values such as undecodable
-    paths can carry; those values take the standard library's escaping encoder."""
-    try:
-        return to_json(value, indent=indent, exclude_none=True, ensure_ascii=True)
-    except PydanticSerializationError:
-        return json.dumps(to_jsonable_python(value, exclude_none=True), indent=indent).encode()
-
-
-def _warn_partial_write(exc: Exception) -> None:
-    """Warn that a partial trajectory snapshot write failed."""
-    ui.print_warning(_console, f"Partial trajectory write failed: {type(exc).__name__}: {exc}")
 
 
 def _admitted_descriptor(raw: str) -> str:
@@ -96,7 +78,11 @@ def _safe_descriptor(raw: str) -> str:
     return slug
 
 
-TrajectoryWriteCallback = Callable[["TrajectoryRecorder", RunWriteSnapshot], None]
+class _EvidenceIncomplete(OSError):
+    """A document could not be sealed; its accepted prefix remains truthful partial evidence."""
+
+
+TrajectoryWriteCallback = Callable[["EvidenceRecorder", RunWriteSnapshot], None]
 TrajectoryDocumentWriter = Callable[
     [TrajectoryDocumentSnapshot, Literal["complete", "partial"]], TrajectoryDocumentReference
 ]
@@ -106,77 +92,46 @@ class _SignalFlushRegistry:
     """Identity membership for every active recorder owned by one run."""
 
     def __init__(self) -> None:
-        self._active: dict[int, TrajectoryRecorder] = {}
+        self._active: dict[int, EvidenceRecorder] = {}
         self._completed: dict[str, TrajectoryDocumentReference] = {}
-        self._partial_state_digest = ""
-        self._partial_cutoff_at = ""
+        self.failed_documents: list[str] = []
+        # The last partial snapshot and the document state it covered; a repeated
+        # flush with no new evidence republishes it with the same cutoff.
+        self._last_partial: tuple[str, RunWriteSnapshot] | None = None
 
-    def register(self, recorder: TrajectoryRecorder) -> None:
+    def register(self, recorder: EvidenceRecorder) -> None:
         """Register *recorder* once by object identity."""
         self._active[id(recorder)] = recorder
 
-    def unregister(self, recorder: TrajectoryRecorder) -> None:
+    def unregister(self, recorder: EvidenceRecorder) -> None:
         """Remove *recorder* when the same identity is still registered."""
         if self._active.get(id(recorder)) is recorder:
             self._active.pop(id(recorder), None)
 
     def retain(self, reference: TrajectoryDocumentReference) -> None:
-        """Retain a completed child's written-file reference until root archival."""
+        """Retain a completed child's sealed reference until root archival."""
         self._completed[reference.trajectory_id] = reference
 
-    def _partial_cutoff(
-        self, recorders: Sequence[TrajectoryRecorder], summaries: dict[int, list[dict[str, Any]]],
-    ) -> str:
-        state = [(recorder.trajectory_id, recorder._partial_state_key(summaries[id(recorder)]))
-                 for recorder in recorders]
-        state.extend(
-            (trajectory_id, reference.sha256)
-            for trajectory_id, reference in sorted(self._completed.items())
-        )
-        digest = hashlib.sha256(json.dumps(state, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        if digest != self._partial_state_digest:
-            self._partial_state_digest = digest
-            self._partial_cutoff_at = timeutil.now_iso()
-        return self._partial_cutoff_at
+    def _root(self) -> EvidenceRecorder | None:
+        return next((recorder for recorder in self._active.values() if recorder.parent is None), None)
 
-    def _root(self) -> TrajectoryRecorder | None:
-        return next(
-            (recorder for recorder in self._active.values() if recorder.parent is None),
-            None,
-        )
-
-    def _write_snapshot(
-        self,
-        *,
-        status: Literal["complete", "partial"],
-        root: TrajectoryRecorder,
-        prepared: Sequence[TrajectoryDocumentSnapshot],
-        cutoff_at: str,
-    ) -> RunWriteSnapshot:
-        documents: dict[str, TrajectoryDocument] = dict(self._completed)
-        documents.update((document.trajectory_id, document) for document in prepared)
-        ordered = tuple(
-            sorted(
-                documents.values(),
-                key=lambda document: (
-                    document.trajectory_id != root.trajectory_id,
-                    document.trajectory_id,
-                ),
-            )
-        )
-        snapshot = RunWriteSnapshot(
-            status=status,
-            cutoff_at=cutoff_at,
-            root_trajectory_id=root.trajectory_id,
-            documents=ordered,
-        )
-        for document in prepared:
+    def _publish(self, root: EvidenceRecorder, status: Literal["complete", "partial"], cutoff_at: str,
+                 live: Sequence[TrajectoryDocumentReference]) -> RunWriteSnapshot:
+        documents: dict[str, TrajectoryDocumentReference] = dict(self._completed)
+        documents.update((document.trajectory_id, document) for document in live)
+        ordered = tuple(sorted(documents.values(), key=lambda document: (
+            document.trajectory_id != root.trajectory_id, document.trajectory_id)))
+        snapshot = RunWriteSnapshot(status=status, cutoff_at=cutoff_at,
+                                    root_trajectory_id=root.trajectory_id, documents=ordered)
+        if root.document_writer is not None:
             try:
-                root._write_document(document, status)
-            except Exception as exc:  # noqa: BLE001 - isolate every recorder write
+                reference = next(document for document in ordered if document.trajectory_id == root.trajectory_id)
+                root.document_writer(TrajectoryDocumentSnapshot(
+                    root.trajectory_id, root.path, reference.read_bytes()), status)
+            except Exception as exc:  # noqa: BLE001 - a partial explicit copy never interrupts recording
                 if status == "complete":
                     raise
-                _warn_partial_write(exc)
+                ui.print_warning(_console, f"Partial evidence output failed: {type(exc).__name__}")
         if root.on_write is not None:
             try:
                 root.on_write(root, snapshot)
@@ -185,60 +140,39 @@ class _SignalFlushRegistry:
         return snapshot
 
     def flush_active(self) -> None:
-        """Prepare the entire live graph before publishing one common-cutoff snapshot."""
-        recorders = tuple(self._active.values())
+        """Append one common-cutoff snapshot to every live document, then publish their prefixes.
+
+        A root that cannot take its snapshot publishes nothing, so no snapshot is ever
+        disconnected from its root. A child that cannot take one keeps its last accepted
+        prefix in the published snapshot. Repeating a flush with no new evidence or
+        in-flight state republishes the previous snapshot with its cutoff."""
         root = self._root()
         if root is None:
             return
-        summaries = {id(recorder): [inv.summary(partial=True) for inv in recorder._active_invocations]
-                     for recorder in recorders}
-        for child in recorders:
-            if child.parent is None:
-                continue
-            # The child document owns its live invocations and phase events.
-            # Ancestors retain only graph identity; completed summaries keep
-            # their ordinary folded shape when the fork joins.
-            fork: dict[str, Any] = {
-                "trajectory_id": child.trajectory_id, "descriptor": child.descriptor,
-                "started_at": child._run_started_at, "ended_at": None,
-                "sibling_trajectory_ref": child.parent._logical_child_trajectory_ref(child.path),
-                "invocations": [],
-            }
-            if ":fork:" in child.trajectory_id:
-                fork.update(fork_id=child.trajectory_id, dispatch_id=child.trajectory_id.rsplit(":fork:", 1)[0])
-            summaries[id(child.parent)].append(fork)
-        cutoff = self._partial_cutoff(recorders, summaries)
-        prepared: list[TrajectoryDocumentSnapshot] = []
-        try:
-            for recorder in recorders:
-                document = recorder._prepare_document(status="partial", cutoff_at=cutoff,
-                    active_summaries=summaries[id(recorder)],
-                    allow_empty_root=bool(recorder.parent or recorder._active_dispatches or
-                        recorder._subtrajectories or summaries[id(recorder)] or self._completed))
-                if document is not None:
-                    prepared.append(document)
-        except Exception as exc:  # noqa: BLE001 - preserve the previous coherent graph on any prepare failure
-            _warn_partial_write(exc)
+        bodies: list[tuple[EvidenceRecorder, dict[str, Any] | None]] = []
+        for recorder in tuple(self._active.values()):
+            body = recorder._snapshot_body()
+            if body is None and recorder is root:
+                return
+            bodies.append((recorder, body))
+        state = hashlib.sha256(json.dumps([
+            *((recorder.trajectory_id, recorder._recorded, body) for recorder, body in bodies),
+            *sorted((reference.trajectory_id, reference.size) for reference in self._completed.values()),
+        ], sort_keys=True, default=str).encode()).hexdigest()
+        if self._last_partial is not None and self._last_partial[0] == state:
+            self._publish(root, "partial", self._last_partial[1].cutoff_at, self._last_partial[1].documents)
             return
-        if prepared:
-            self._write_snapshot(status="partial", root=root, prepared=prepared, cutoff_at=cutoff)
-
-    def write_final(self, root: TrajectoryRecorder) -> None:
-        """Write the final root document and publish one retained run snapshot."""
-        cutoff_at = root._run_ended_at or timeutil.now_iso()
-        document = root._prepare_document(
-            status="complete",
-            cutoff_at=cutoff_at,
-            allow_empty_root=root.document_writer is not None,
-        )
-        if document is None:
-            return
-        self._write_snapshot(
-            status="complete",
-            root=root,
-            prepared=(document,),
-            cutoff_at=cutoff_at,
-        )
+        cutoff = timeutil.now_iso()
+        live: list[TrajectoryDocumentReference] = []
+        for recorder, body in bodies:
+            appended = body is not None and recorder._journal.append(
+                SNAPSHOT_EVENT, {"snapshot_at": cutoff, **body}, blocking=False)
+            if not appended and recorder is root:
+                return
+            if appended:
+                recorder._journal.sync()
+            live.append(recorder._reference())
+        self._last_partial = (state, self._publish(root, "partial", cutoff, live))
 
 
 # Independently nested roots temporarily select their own run registry. The
@@ -254,17 +188,17 @@ def flush_active_signal_recorders() -> None:
 
 
 @dataclass
-class TrajectoryRecorder:
-    """Own one run's ATIF trajectory, child recorders, and durable snapshots.
+class EvidenceRecorder:
+    """Own one evidence document, its child recorders and its run's snapshots.
 
-    An async context binds the recorder, writes on exit, and restores the parent
-    context. Steps receive monotonic IDs and are serialized in ID order. Model
-    names begin as backend labels and upgrade when native metadata arrives.
+    An async context binds the recorder, seals its document on exit and restores
+    the parent context. Steps receive monotonic IDs. Model names begin as backend
+    labels and upgrade when native metadata arrives.
 
-    The caller supplies the session identity, output path, and resolved backend
-    labels. Non-empty review/fix/test labels are persisted in trajectory extra;
+    The caller supplies the session identity, root document path and resolved
+    backend labels. Non-empty review/fix/test labels are recorded as run identity;
     flows that omit those stages leave the corresponding labels empty. Sensitive
-    values are redacted before persistence, with explicit failure markers."""
+    values are redacted before they are written, with explicit failure markers."""
 
     path: Path
     run_flow: DaydreamRunFlow
@@ -273,9 +207,7 @@ class TrajectoryRecorder:
     session_id: str
     artifact_run_dir: Path | None = None
     document_writer: TrajectoryDocumentWriter | None = None
-    redactor: Redactor = field(default_factory=Redactor)
-    steps: list[Step] = field(default_factory=list)
-    parent: TrajectoryRecorder | None = None
+    parent: EvidenceRecorder | None = None
     descriptor: str = ""
     explicit_path: bool = False
     pr_number: int | None = None
@@ -285,40 +217,35 @@ class TrajectoryRecorder:
     review_backend_name: str = ""
     fix_backend_name: str = ""
     test_backend_name: str = ""
+    usage: UsageLedger = field(default_factory=UsageLedger)
     _step_id_counter: int = 0
     _phase_scope_counter: int = 0
     _dispatch_counter: int = 0
     _invocation_counter: int = 0
-    _final_totals: dict[str, Any] = field(
-        default_factory=lambda: dict.fromkeys(("prompt", "completion", "cached", "cost"))
-    )
-    _folded_fork_totals: bool = False
+    _step_count: int = 0
+    # Evidence records accepted for this document, excluding signal snapshots.
+    _recorded: int = 0
+    # The phase of the lowest-numbered step, which labels this document's fork summary.
+    _first_phase: tuple[int, str] | None = None
     _previous_token: Any = None
-    # Active invocations whose in-flight steps haven't been flushed yet.
-    # write_partial reads this so SIGINT mid-run_agent() captures partial
-    # work rather than dropping it.
+    # Active invocations whose in-flight steps have not been appended yet; a
+    # signal snapshot materializes them so SIGINT mid-run_agent() keeps partial work.
     _active_invocations: list[Invocation] = field(default_factory=list)
     _active_dispatches: list[DispatchHandle] = field(default_factory=list, repr=False)
-    # Explicit phase-boundary events (phase_start/phase_end) emitted by
-    # phase_scope/host_phase_scope. Serialized into
-    # Trajectory.extra["phase_events"] when non-empty (issue #203).
+    # Compact identified phase events and invocation/fork summaries. They are also
+    # appended as records; a fork's summary on its parent flattens them.
     _phase_events: list[PhaseEvent] = field(default_factory=list)
-    # Completed invocation timing summaries registered at scope exit.
-    # Serialized into Trajectory.extra["subtrajectories"] when non-empty.
     _subtrajectories: list[dict[str, Any]] = field(default_factory=list)
-    # Resolved review-profile provenance (issue #885, R12): schema version,
-    # name, source kind, and canonical digest of the profile this run executed
-    # under, recorded via ``record_profile`` by the runner composition root.
-    # Serialized into Trajectory.extra["profile_*"] when set (new runs).
-    _profile: dict[str, Any] | None = None
     _aborted: bool = False
     on_write: TrajectoryWriteCallback | None = None
     _trajectory_id: str = ""
     _run_started_at: str = ""
     _run_ended_at: str = ""
+    _writer: JournalWriter | None = field(default=None, init=False, repr=False, compare=False)
+    _pending: list[tuple[str, Any, dict[str, Any] | None]] = field(default_factory=list, init=False, repr=False)
     _signal_registry: _SignalFlushRegistry | None = field(default=None, init=False, repr=False, compare=False)
 
-    async def __aenter__(self) -> "TrajectoryRecorder":
+    async def __aenter__(self) -> "EvidenceRecorder":
         self._run_started_at = timeutil.now_iso()
         self._run_ended_at = ""
         registry = _SignalFlushRegistry()
@@ -326,6 +253,7 @@ class TrajectoryRecorder:
         registry.register(self)
         _ACTIVE_SIGNAL_RUNS.append(registry)
         self._previous_token = _RECORDER_VAR.set(self)
+        self._open_document()
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, _exc_tb: Any) -> None:
@@ -333,25 +261,20 @@ class TrajectoryRecorder:
             if exc_type is not None:
                 self._aborted = True
             self._run_ended_at = timeutil.now_iso()
-            self._write()
+            self._write_final()
         except Exception as exc:  # noqa: BLE001 - branch on explicit_path per D-06
+            if isinstance(exc, _EvidenceIncomplete) and not self.explicit_path:
+                return  # The journal already warned once; the run snapshot reports partial evidence.
             if self.explicit_path:
                 # D-06: user asked for it, deliver or fail loud
-                print_error(
-                    _console,
-                    "Trajectory write failed",
-                    f"{type(exc).__name__}: {exc}",
-                )
+                print_error(_console, "Evidence write failed", f"{type(exc).__name__}: {exc}")
                 if exc_val is not None:
                     # An in-flight failure owns the exit; do not mask it with SystemExit.
-                    exc_val.add_note(f"trajectory finalization also failed ({type(exc).__name__})")
+                    exc_val.add_note(f"evidence finalization also failed ({type(exc).__name__})")
                     return
                 raise SystemExit(2) from exc
             # Implicit/default path — degrade with warning per CORE-09 / D-11
-            ui.print_warning(
-                _console,
-                f"Trajectory write failed: {type(exc).__name__}: {exc}",
-            )
+            ui.print_warning(_console, f"Evidence write failed: {type(exc).__name__}: {exc}")
         finally:
             registry = self._signal_registry
             if registry is not None:
@@ -366,7 +289,7 @@ class TrajectoryRecorder:
                 self._previous_token = None
 
     def invocation(self, *, phase: DaydreamPhase) -> AbstractAsyncContextManager[Invocation]:
-        """Open an invocation scope that flushes its steps on exit."""
+        """Open an invocation scope whose steps are appended on exit."""
         return invocation_scope(self, phase)
 
     @property
@@ -377,6 +300,56 @@ class TrajectoryRecorder:
         if self.descriptor:
             return f"{self.session_id}:{self.descriptor}"
         return self.session_id
+
+    # -- evidence records -------------------------------------------------
+
+    def _open_document(self) -> None:
+        """Create this document's journal and append its identity record."""
+        writer = self._writer = JournalWriter(self.path, version=daydream.__version__, resource={
+            "service.name": "daydream", "service.version": daydream.__version__,
+            "daydream.session.id": self.session_id, "daydream.trajectory.id": self.trajectory_id,
+        })
+        extra: dict[str, Any] = {"target_dir": str(self.target_dir), "run_started_at": self._run_started_at}
+        if self.backend_name:
+            # A representative backend plus per-phase keys, each only when the flow runs it.
+            extra["backend"] = self.backend_name
+            for key, value in (("review_backend", self.review_backend_name),
+                               ("fix_backend", self.fix_backend_name), ("test_backend", self.test_backend_name)):
+                if value:
+                    extra[key] = value
+        if self.pr_number is not None:
+            extra["pr_number"] = self.pr_number
+        if self.pr_repo is not None:
+            extra["pr_repo"] = self.pr_repo
+        if self.immutable_input is not None:
+            extra["immutable_input"] = self.immutable_input
+        writer.append(OPEN_EVENT, {
+            "session_id": self.session_id, "trajectory_id": self.trajectory_id, "descriptor": self.descriptor,
+            "parent_trajectory_id": None if self.parent is None else self.parent.trajectory_id,
+            "run_flow": self.run_flow.value, "agent_version": daydream.__version__,
+            "agent_model_name": self.agent_model_name, "extra": extra,
+        }, {"daydream.flow": self.run_flow.value})
+        pending, self._pending = self._pending, []
+        for event_name, body, attributes in pending:
+            writer.append(event_name, body, attributes)
+
+    def _record(self, event_name: str, body: Any, attributes: dict[str, Any] | None = None) -> None:
+        self._recorded += 1
+        if self._writer is None:
+            # Identity recorded before the run enters (its profile) follows the open record.
+            self._pending.append((event_name, body, attributes))
+            return
+        self._writer.append(event_name, body, attributes)
+
+    @property
+    def _journal(self) -> JournalWriter:
+        if self._writer is None:
+            raise RuntimeError("evidence document is not open")
+        return self._writer
+
+    def _reference(self) -> TrajectoryDocumentReference:
+        size, sha256 = self._journal.reference()
+        return TrajectoryDocumentReference(self.trajectory_id, self.path, self.path, size, sha256)
 
     def _emit_phase_event(
         self,
@@ -389,28 +362,19 @@ class TrajectoryRecorder:
         reason_code: LifecycleReasonCode | None = None,
         **metadata: Any,
     ) -> None:
-        """Append a :class:`PhaseEvent` stamped with ``timeutil.now_iso()``."""
-        self._phase_events.append(
-            PhaseEvent(
-                phase=phase,
-                event=event,
-                timestamp=timeutil.now_iso(),
-                session_id=session_id,
-                scope_id=scope_id,
-                status=status,
-                reason_code=reason_code,
-                metadata=metadata,
-            )
-        )
+        """Append one :class:`PhaseEvent` stamped with ``timeutil.now_iso()``."""
+        phase_event = PhaseEvent(phase=phase, event=event, timestamp=timeutil.now_iso(), session_id=session_id,
+                                 scope_id=scope_id, status=status, reason_code=reason_code, metadata=metadata)
+        if scope_id is not None:
+            self._phase_events.append(phase_event)
+        self._record(PHASE_EVENT, phase_event.to_dict(), {"daydream.phase": phase.value, "daydream.event": event})
 
     def record_profile(self, *, schema_version: int, name: str, source_kind: str, digest: str) -> None:
-        """Persist the resolved policy name, source, and canonical digest for attribution."""
-        self._profile = {
-            "profile_schema_version": schema_version,
-            "profile_name": name,
-            "profile_source_kind": source_kind,
-            "profile_digest": digest,
-        }
+        """Record the resolved policy name, source, and canonical digest for attribution."""
+        self._record(PROFILE_EVENT, {
+            "profile_schema_version": schema_version, "profile_name": name,
+            "profile_source_kind": source_kind, "profile_digest": digest,
+        })
 
     def emit_repair_outcome(
         self,
@@ -428,13 +392,8 @@ class TrajectoryRecorder:
         reason travels as metadata, never as the lifecycle ``reason_code``.
         """
         self._emit_phase_event(
-            DaydreamPhase.TEST,
-            "repair_outcome",
-            execution_id=execution_id,
-            outcome=outcome,
-            abort_reason=abort_reason,
-            repair_reason_code=repair_reason_code,
-            changed_paths=list(changed_paths),
+            DaydreamPhase.TEST, "repair_outcome", execution_id=execution_id, outcome=outcome,
+            abort_reason=abort_reason, repair_reason_code=repair_reason_code, changed_paths=list(changed_paths),
         )
 
     def emit_file_group_budget_exceeded(
@@ -448,16 +407,11 @@ class TrajectoryRecorder:
     ) -> None:
         """Record FIX budget counts; omit elapsed_s when absent to retain the wire shape."""
         metadata: dict[str, Any] = {
-            "file": file,
-            "reason": reason,
-            "items_processed": items_processed,
-            "items_skipped": items_skipped,
+            "file": file, "reason": reason, "items_processed": items_processed, "items_skipped": items_skipped,
         }
         if elapsed_s is not None:
             metadata["elapsed_s"] = elapsed_s
-        self._emit_phase_event(
-            DaydreamPhase.FIX, "file_group_budget_exceeded", **metadata
-        )
+        self._emit_phase_event(DaydreamPhase.FIX, "file_group_budget_exceeded", **metadata)
 
     def emit_agent_budget_stop(
         self,
@@ -479,16 +433,9 @@ class TrajectoryRecorder:
         state. Initial useful work is excluded. Partial edits are
         kept for an interrupted attempt and discarded when stopping before dispatch."""
         self._emit_phase_event(
-            phase,
-            "agent_budget_stop",
-            limit_expired=limit_expired,
-            elapsed_s=elapsed_s,
-            backend_s=backend_s,
-            backoff_s=backoff_s,
-            attempts=attempts,
-            cleanup_elapsed_s=cleanup_elapsed_s,
-            retry_stop_reason=retry_stop_reason,
-            circuit_state=circuit_state,
+            phase, "agent_budget_stop", limit_expired=limit_expired, elapsed_s=elapsed_s, backend_s=backend_s,
+            backoff_s=backoff_s, attempts=attempts, cleanup_elapsed_s=cleanup_elapsed_s,
+            retry_stop_reason=retry_stop_reason, circuit_state=circuit_state,
             partial_edit_handling=partial_edit_handling,
         )
 
@@ -505,23 +452,20 @@ class TrajectoryRecorder:
         reasons: dict[str, int],
     ) -> None:
         """Record a redacted repository-command validation summary."""
-        metadata: dict[str, Any] = {
-            "counts": {
-                "total_candidates": total_candidates,
-                "accepted": accepted,
-                "rejected": rejected,
-            },
-            "reasons": dict(sorted(reasons.items())),
-        }
-        self._emit_phase_event(
-            DaydreamPhase.RECON,
-            "command_validation",
-            **metadata,
-        )
+        self._emit_phase_event(DaydreamPhase.RECON, "command_validation", counts={
+            "total_candidates": total_candidates, "accepted": accepted, "rejected": rejected,
+        }, reasons=dict(sorted(reasons.items())))
 
     def _register_subtrajectory(self, inv: Invocation) -> None:
-        """Register finalized invocation timing in trajectory.extra.subtrajectories."""
-        self._subtrajectories.append(inv.summary())
+        """Append one finished invocation's identity, timing and generation billing summary."""
+        self._append_summary(inv.summary())
+
+    def _append_summary(self, summary: dict[str, Any]) -> None:
+        safe = redact_value(summary)
+        if not isinstance(safe, dict):
+            raise ValueError("summary redaction returned a non-object")
+        self._subtrajectories.append(safe)
+        self._record(SUBTRAJECTORY_EVENT, safe, {"daydream.invocation.id": safe.get("invocation_id")})
 
     def _recursive_invocation_summaries(self) -> list[dict[str, Any]]:
         """Flatten document-qualified invocation evidence through nested forks."""
@@ -536,11 +480,7 @@ class TrajectoryRecorder:
 
     def _recursive_phase_event_summaries(self) -> list[dict[str, Any]]:
         """Flatten identified phase evidence while retaining document identity."""
-        summaries = [
-            {**event.to_dict(), "trajectory_id": self.trajectory_id}
-            for event in self._phase_events
-            if event.scope_id is not None
-        ]
+        summaries = [{**event.to_dict(), "trajectory_id": self.trajectory_id} for event in self._phase_events]
         for summary in self._subtrajectories:
             nested = summary.get("phase_events")
             if isinstance(nested, list):
@@ -550,14 +490,14 @@ class TrajectoryRecorder:
     def _register_fork_subtrajectory(
         self,
         *,
-        child: "TrajectoryRecorder",
+        child: "EvidenceRecorder",
         phase: str,
         identity: ForkIdentity | None,
         started_at: str,
         ended_at: str,
         sibling_trajectory_ref: str,
     ) -> None:
-        """Register a per-fork timing summary on the parent trajectory."""
+        """Append a per-fork timing summary to this (parent) document."""
         summary: dict[str, Any] = {
             "trajectory_id": child.trajectory_id,
             "phase": phase,
@@ -571,7 +511,7 @@ class TrajectoryRecorder:
         if identity is not None:
             summary["fork_id"] = identity.fork_id
             summary["dispatch_id"] = identity.fork_id.rsplit(":fork:", 1)[0]
-        self._subtrajectories.append(summary)
+        self._append_summary(summary)
 
     def _next_step_id(self) -> int:
         self._step_id_counter += 1
@@ -589,45 +529,37 @@ class TrajectoryRecorder:
         self._invocation_counter += 1
         return f"{self.trajectory_id}:invocation:{self._invocation_counter}"
 
-    def _extend_steps(self, steps: list[Step]) -> None:
-        """Merge completed invocation steps in ID order.
-
-        Concurrent invocations may close out of order; ATIF requires sequential IDs."""
-        self.steps.extend(steps)
-        self.steps.sort(key=lambda s: s.step_id)
+    def _extend_steps(self, steps: list[dict[str, Any]]) -> None:
+        """Append finished steps in ID order; readers order concurrent invocations by ID."""
+        for step in sorted(steps, key=lambda item: item["step_id"]):
+            attributes: dict[str, Any] = {"daydream.step.id": step["step_id"], "daydream.step.source": step["source"]}
+            if step["source"] == "agent":
+                attributes.update({"gen_ai.operation.name": "chat", "gen_ai.response.model": step.get("model_name")})
+                metrics = step.get("metrics") or {}
+                for key, name in (("prompt_tokens", "gen_ai.usage.input_tokens"),
+                                  ("completion_tokens", "gen_ai.usage.output_tokens"),
+                                  ("cached_tokens", "gen_ai.usage.cache_read.input_tokens"),
+                                  ("cost_usd", "gen_ai.usage.cost")):
+                    attributes[name] = metrics.get(key)
+            self._record(STEP_EVENT, step, attributes)
+            self._step_count += 1
+            phase = (step.get("extra") or {}).get("daydream_phase")
+            if isinstance(phase, str) and (self._first_phase is None or step["step_id"] < self._first_phase[0]):
+                self._first_phase = (step["step_id"], phase)
 
     def _upgrade_model_name(self, candidate: str) -> None:
         """Replace provisional backend labels with the first native model name.
 
-        Upgrade closed agent steps too: a backend may report its model after TurnEnd."""
-        if candidate and (self.agent_model_name or "") in _GENERIC_MODEL_LABELS:
+        Already appended agent steps upgrade too: a backend may report its model after TurnEnd."""
+        if candidate and (self.agent_model_name or "") in GENERIC_MODEL_LABELS:
             self.agent_model_name = candidate
-            for index, step in enumerate(self.steps):
-                if step.source == "agent" and (step.model_name or "") in _GENERIC_MODEL_LABELS:
-                    self.steps[index] = self.redactor.redact_step(step.model_copy(update={"model_name": candidate}))
+            self._record(MODEL_EVENT, {"model_name": candidate}, {"gen_ai.response.model": candidate})
 
-    def _accumulate_metrics(
-        self,
-        *,
-        prompt_tokens: int | None,
-        completion_tokens: int | None,
-        cached_tokens: int | None,
-        cost_usd: float | None,
-    ) -> None:
-        for key, value in (("prompt", prompt_tokens), ("completion", completion_tokens),
-                           ("cached", cached_tokens), ("cost", cost_usd)):
-            if value is not None:
-                self._final_totals[key] = (self._final_totals[key] or 0) + value
+    def _sibling_path_for(self, descriptor: str, identity: ForkIdentity | None = None) -> Path:
+        """Keep sibling documents in the parent run directory.
 
-    def _sibling_path_for(
-        self,
-        descriptor: str,
-        identity: ForkIdentity | None = None,
-    ) -> Path:
-        """Keep sibling files in the parent run directory.
-
-        Legacy forks use <slug>.json; identified forks append a unique identity digest
-        to prevent repeated semantic descriptors overwriting each other."""
+        Legacy forks use <slug>; identified forks append a unique identity digest so
+        repeated semantic descriptors never replace each other's documents."""
         slug = _safe_descriptor(descriptor)
         if identity is not None:
             identity_digest = hashlib.sha256(identity.fork_id.encode("utf-8")).hexdigest()
@@ -635,7 +567,7 @@ class TrajectoryRecorder:
         run_dir = self.artifact_run_dir
         if run_dir is None:
             run_dir = run_directory(self.target_dir / _DAYDREAM_DIRNAME, self.session_id)
-        return sibling_document_path(run_dir, f"{slug}.json")
+        return sibling_document_path(run_dir, f"{slug}{DOCUMENT_SUFFIX}")
 
     def _logical_child_trajectory_ref(self, child_path: Path) -> str:
         """Return a child path relative to the stable public ``.daydream`` root."""
@@ -649,26 +581,20 @@ class TrajectoryRecorder:
         descriptor: str,
         *,
         dispatch: DispatchHandle | None = None,
-    ) -> AbstractAsyncContextManager[TrajectoryRecorder]:
+    ) -> AbstractAsyncContextManager[EvidenceRecorder]:
         """Create a parallel child recorder with a semantic descriptor such as fix-0."""
         return fork_scope(self, descriptor, dispatch)
 
     def _create_dispatch_step(self, dispatch: DispatchHandle) -> None:
-        """Materialize one identified, start-stamped deterministic dispatch."""
-        results: list[ObservationResult] = []
-        for completed in dispatch._ordered_completed():
-            results.append(
-                ObservationResult(
-                    content=f"Dispatched to {completed.identity.descriptor}",
-                    subagent_trajectory_ref=[
-                        SubagentTrajectoryRef(
-                            trajectory_id=completed.trajectory_id,
-                            session_id=self.session_id,
-                            trajectory_path=self._logical_child_trajectory_ref(completed.path),
-                        )
-                    ],
-                )
-            )
+        """Append one identified, start-stamped deterministic dispatch step."""
+        results = [{
+            "content": f"Dispatched to {completed.identity.descriptor}",
+            "subagent_trajectory_ref": [{
+                "trajectory_id": completed.trajectory_id,
+                "session_id": self.session_id,
+                "trajectory_path": self._logical_child_trajectory_ref(completed.path),
+            }],
+        } for completed in dispatch._ordered_completed()]
         extra: dict[str, Any] = {
             "daydream_phase": dispatch.phase.value,
             "daydream_run_flow": self.run_flow.value,
@@ -685,145 +611,19 @@ class TrajectoryRecorder:
         redacted_extra = redact_value(extra)
         if not isinstance(redacted_extra, dict):
             raise TypeError("dispatch redaction returned a non-object")
-        json.dumps(redacted_extra, allow_nan=False)
-        step = Step(
-            step_id=self._next_step_id(),
-            timestamp=dispatch.started_at,
-            source="agent",
-            model_name=self.agent_model_name,
-            message=f"Dispatching {dispatch.attempted_count} parallel {dispatch.phase.value} tasks",
-            observation=Observation(results=results),
-            llm_call_count=0,
-            extra=redacted_extra,
-        )
-        self._extend_steps([self.redactor.redact_step(step)])
+        step: dict[str, Any] = {
+            "step_id": self._next_step_id(),
+            "timestamp": dispatch.started_at,
+            "source": "agent",
+            "model_name": self.agent_model_name,
+            "message": f"Dispatching {dispatch.attempted_count} parallel {dispatch.phase.value} tasks",
+            "observation": {"results": results},
+            "llm_call_count": 0,
+            "extra": redacted_extra,
+        }
+        self._extend_steps([step])
 
-    def review_usage(self) -> dict[str, Any]:
-        """Project root usage after each fork folds its metrics once; exclude elapsed review and cleanup time."""
-        metrics = self._build_final_metrics(len(self.steps))
-        usage = {key: value for key, value in (
-            ("prompt_tokens", metrics.total_prompt_tokens), ("completion_tokens", metrics.total_completion_tokens),
-            ("cached_tokens", metrics.total_cached_tokens), ("cost_usd", metrics.total_cost_usd)) if value is not None}
-        if "prompt_tokens" in usage and "completion_tokens" in usage:
-            usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
-        return usage
-
-    def _build_final_metrics(self, total_steps: int) -> FinalMetrics:
-        """Keep ATIF and embedded result usage on the same billing projection."""
-        final_metrics_extra: dict[str, Any] | None = None
-        if self._folded_fork_totals:
-            # Token and cost totals include successful fork trajectories, but
-            # total_steps remains scoped to this document's own step list.
-            # Cached tokens remain a subset of prompt tokens, not an addition.
-            final_metrics_extra = {
-                "daydream_metric_scope": "whole_run_including_forks",
-                "total_steps_scope": "local_trajectory",
-            }
-
-        return FinalMetrics(
-            total_prompt_tokens=self._final_totals["prompt"],
-            total_completion_tokens=self._final_totals["completion"],
-            total_cached_tokens=self._final_totals["cached"],
-            total_cost_usd=self._final_totals["cost"],
-            total_steps=total_steps,
-            extra=final_metrics_extra,
-        )
-
-    def build_trajectory(
-        self,
-        steps: list[Step] | None = None,
-        *,
-        snapshot_at: str | None = None,
-    ) -> Trajectory:
-        if steps is None:
-            steps = self.steps
-        version = daydream.__version__
-        final_metrics = self._build_final_metrics(len(steps))
-        extra: dict[str, Any] = {"target_dir": str(self.target_dir)}
-        if self._run_started_at:
-            extra["run_started_at"] = self._run_started_at
-        if snapshot_at is not None:
-            extra["snapshot_at"] = snapshot_at
-        elif self._run_ended_at:
-            extra["run_ended_at"] = self._run_ended_at
-        if self.backend_name:
-            # Backend identity mirrors archive/manifest.py's record: a
-            # representative ``backend`` (resolved via the phase that governs the
-            # deep flow's review fan-out) plus per-phase keys, each serialized
-            # only when set — a flow that never runs a phase (improve never runs
-            # fix/test) omits that phase's key entirely. Empty ``backend_name``
-            # (direct construction outside the factory) serializes no backend keys.
-            extra["backend"] = self.backend_name
-            if self.review_backend_name:
-                extra["review_backend"] = self.review_backend_name
-            if self.fix_backend_name:
-                extra["fix_backend"] = self.fix_backend_name
-            if self.test_backend_name:
-                extra["test_backend"] = self.test_backend_name
-        if self.pr_number is not None:
-            extra["pr_number"] = self.pr_number
-        if self.pr_repo is not None:
-            extra["pr_repo"] = self.pr_repo
-        if self.immutable_input is not None:
-            extra["immutable_input"] = deepcopy(self.immutable_input)
-        if self._profile is not None:
-            extra.update(self._profile)
-        if self._phase_events:
-            extra["phase_events"] = [e.to_dict() for e in self._phase_events]
-        if self._subtrajectories:
-            summaries = redact_value([dict(s) for s in self._subtrajectories])
-            if isinstance(summaries, list):
-                extra["subtrajectories"] = summaries
-        # trajectory_id is the per-document identifier (distinct from the
-        # run-scoped session_id): the root uses session_id directly; a fork
-        # qualifies it with its descriptor so sibling documents stay unique
-        # within the run (ATIF v1.7).
-        return Trajectory(
-            schema_version="ATIF-v1.7",
-            session_id=self.session_id,
-            trajectory_id=self.trajectory_id,
-            agent=Agent(name="daydream", version=version, model_name=self.agent_model_name),
-            steps=list(steps),
-            final_metrics=final_metrics,
-            extra=extra,
-        )
-
-    def _write(self) -> None:
-        registry = self._signal_registry
-        if self.parent is None and registry is not None:
-            registry.write_final(self)
-            return
-        document = self._prepare_document(
-            status="complete",
-            cutoff_at=self._run_ended_at or timeutil.now_iso(),
-        )
-        if document is None:
-            return
-        reference = self._write_document(document, "complete")
-        if registry is not None:
-            registry.retain(reference)
-
-    def _write_document(
-        self, document: TrajectoryDocumentSnapshot, status: Literal["complete", "partial"]
-    ) -> TrajectoryDocumentReference:
-        """Write one frozen document's exact bytes through the host sink, or straight to disk."""
-        if self.document_writer is not None:
-            return self.document_writer(document, status)
-        if status == "complete":
-            atomic_write_bytes(document.path, document.json_bytes)
-        else:
-            document.path.parent.mkdir(parents=True, exist_ok=True)
-            document.path.write_bytes(document.json_bytes)
-        return TrajectoryDocumentReference.written(
-            document.trajectory_id, document.path, document.path, document.json_bytes
-        )
-
-    def completed_child_documents(self) -> tuple[TrajectoryDocumentReference, ...]:
-        """Return the run's completed child references in trajectory-id order."""
-        registry = self._signal_registry
-        if registry is None:
-            raise RuntimeError("recorder is not active")
-        return tuple(reference for _, reference in sorted(registry._completed.items()))
+    # -- snapshots and sealing ------------------------------------------------
 
     def _partial_dispatch_summaries(self) -> list[dict[str, Any]]:
         """Retain planned and queued host work without a terminal dispatch decision."""
@@ -847,92 +647,68 @@ class TrajectoryRecorder:
             raise ValueError("dispatch summary redaction returned a non-array")
         return safe
 
-    def _partial_state_key(self, active_summaries: list[dict[str, Any]]) -> str:
-        """Return a stable digest of this recorder's current partial state."""
-        state = {
-            "steps": self._snapshot_in_flight_steps(),
-            "phase_events": [event.to_dict() for event in self._phase_events],
-            "subtrajectories": self._subtrajectories,
-            "active_subtrajectories": active_summaries,
-            "active_dispatches": self._partial_dispatch_summaries(),
+    def _snapshot_body(self) -> dict[str, Any] | None:
+        """In-flight invocations, dispatches and child forks; ``None`` when they cannot be captured."""
+        try:
+            next_id = self._step_id_counter + 1
+            active: list[dict[str, Any]] = []
+            for invocation in self._active_invocations:
+                active.append({"summary": invocation.summary(partial=True),
+                               "steps": invocation.snapshot_steps(snapshot_step_id=next_id)})
+                if invocation._open_step_dict is not None:
+                    next_id += 1
+            registry = self._signal_registry
+            forks: list[dict[str, Any]] = [] if registry is None else [{
+                "trajectory_id": child.trajectory_id, "descriptor": child.descriptor,
+                "started_at": child._run_started_at, "ended_at": None,
+                "sibling_trajectory_ref": self._logical_child_trajectory_ref(child.path), "invocations": [],
+                **({"fork_id": child.trajectory_id, "dispatch_id": child.trajectory_id.rsplit(":fork:", 1)[0]}
+                   if ":fork:" in child.trajectory_id else {}),
+            } for child in registry._active.values() if child.parent is self]
+            body = redact_value({
+                "active_invocations": active, "active_dispatches": self._partial_dispatch_summaries(),
+                "active_forks": forks, "final_metrics": self.usage.final_metrics(self._step_count),
+            })
+            if not isinstance(body, dict):
+                raise TypeError("snapshot redaction returned a non-object")
+            return body
+        except Exception as exc:  # noqa: BLE001 - a signal snapshot is best effort, never a crash
+            ui.print_warning(_console, f"Partial evidence snapshot failed: {type(exc).__name__}")
+            return None
+
+    def _seal(self, *, failed_documents: Sequence[str] = ()) -> bool:
+        """Seal this document with its end time, totals and capture completeness."""
+        return self._journal.seal({
+            "run_ended_at": self._run_ended_at or timeutil.now_iso(),
             "aborted": self._aborted,
-        }
-        return hashlib.sha256(_json_bytes(state)).hexdigest()
+            "capture_complete": not failed_documents,
+            "failed_documents": list(failed_documents),
+            "final_metrics": self.usage.final_metrics(self._step_count),
+        })
 
-    def _prepare_document(
-        self,
-        *,
-        status: Literal["complete", "partial"],
-        cutoff_at: str,
-        allow_empty_root: bool = False,
-        active_summaries: list[dict[str, Any]] | None = None,
-    ) -> TrajectoryDocumentSnapshot | None:
-        """Freeze one canonical document without performing any filesystem write."""
-        steps = self.steps if status == "complete" else self._snapshot_in_flight_steps()
-        if not steps:
-            allow_host_snapshot = allow_empty_root or (status == "partial" and bool(self._active_invocations))
-            if not allow_host_snapshot or (self.parent is not None and status != "partial"):
-                return None
-            # ATIF requires at least one Step. An early signal can arrive while
-            # child agents are already running -- or a whole run can end host-only --
-            # before the root emitted a dispatch or agent Step. Represent the real
-            # host event as a system Step in the immutable document only; do not
-            # mutate the live recorder or fabricate an agent invocation.
-            partial = status == "partial"
-            steps = [
-                Step(
-                    step_id=1,
-                    timestamp=cutoff_at,
-                    source="system",
-                    message="Daydream run snapshot" if partial else "Daydream host-only run snapshot",
-                    extra={
-                        "daydream_run_flow": self.run_flow.value,
-                        "host_event": "partial_snapshot" if partial else "host_only_final_snapshot",
-                    },
-                )
-            ]
-        trajectory = self.build_trajectory(
-            steps=list(steps),
-            snapshot_at=cutoff_at if status == "partial" else None,
-        )
-        extra = trajectory.extra = trajectory.extra or {}
-        if status == "partial":
-            dispatches = self._partial_dispatch_summaries()
-            if dispatches:
-                extra["active_dispatches"] = dispatches
-            active = (active_summaries if active_summaries is not None
-                      else [invocation.summary(partial=True) for invocation in self._active_invocations])
-            if active:
-                safe_active = redact_value(active)
-                if not isinstance(safe_active, list):
-                    raise ValueError("active summary redaction returned a non-array")
-                extra["subtrajectories"] = [*extra.get("subtrajectories", []), *safe_active]
-        if self._aborted or status == "partial":
-            extra["partial"] = True
-        path = self.path
-        if status == "partial":
-            path = partial_document_path(path)
-        return TrajectoryDocumentSnapshot(
-            trajectory_id=self.trajectory_id,
-            path=path,
-            json_bytes=_json_bytes(trajectory, indent=2),
-        )
+    def _write_final(self) -> None:
+        registry = self._signal_registry
+        if self.parent is not None or registry is None:
+            if not self._seal():
+                raise _EvidenceIncomplete(f"evidence document is incomplete ({self._journal.failure or 'not sealed'})")
+            return
+        failed = list(registry.failed_documents)
+        if not self._seal(failed_documents=failed):
+            # The root is unsealed: publish its accepted prefix as truthful partial evidence.
+            registry._publish(self, "partial", self._run_ended_at, [self._reference()])
+            raise _EvidenceIncomplete(f"evidence document is incomplete ({self._journal.failure or 'not sealed'})")
+        registry._publish(self, "partial" if failed else "complete", self._run_ended_at, [self._reference()])
 
-    def _snapshot_in_flight_steps(self) -> list[Step]:
-        """Merge flushed and active-invocation steps by step_id without mutation.
+    def completed_child_documents(self) -> tuple[TrajectoryDocumentReference, ...]:
+        """Return the run's completed child references in trajectory-id order."""
+        registry = self._signal_registry
+        if registry is None:
+            raise RuntimeError("recorder is not active")
+        return tuple(reference for _, reference in sorted(registry._completed.items()))
 
-        An active invocation may predate a completed one; partial snapshots must retain
-        ATIF’s sequential-id invariant just as final writes do."""
-        if not self._active_invocations:
-            return list(self.steps)
-        snapshot = list(self.steps)
-        next_id = self._step_id_counter + 1
-        for inv in self._active_invocations:
-            snapshot.extend(inv.snapshot_steps(snapshot_step_id=next_id))
-            if inv._open_step_dict is not None:
-                next_id += 1
-        snapshot.sort(key=lambda s: s.step_id)
-        return snapshot
+    def current_document(self) -> TrajectoryDocumentReference:
+        """Reference this live document's accepted prefix."""
+        return self._reference()
 
     def write_partial(self) -> None:
         """Flush each active recorder owned by the run once; never raise.

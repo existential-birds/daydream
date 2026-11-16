@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 
 from daydream.agent import run_agent
-from daydream.atif import validate as atif_validate
 from daydream.backends import (
     AgentEvent,
     CostEvent,
@@ -24,6 +23,7 @@ from daydream.backends import (
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
 from tests.harness.trajectory import (
+    atif_valid as atif_validate,
     make_recorder,
     read_trajectory,
     step_token_sum,

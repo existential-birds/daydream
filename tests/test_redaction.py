@@ -11,9 +11,34 @@ from typing import Any
 import pytest
 
 from daydream import redaction as redaction_mod
-from daydream.atif import ContentPart, Observation, ObservationResult, Step, ToolCall
-from daydream.atif.models.content import ImageSource
-from daydream.trajectory import Redactor, now_iso, redact_structured_text, redact_value, redactor as redactor_mod
+from daydream.trajectory import now_iso, redact_structured_text, redact_value, redactor as redactor_mod
+from daydream.trajectory.redactor import redact_step
+
+Step = dict[str, Any]
+
+
+def _present(**fields: Any) -> dict[str, Any]:
+    return {key: value for key, value in fields.items() if value is not None}
+
+
+def ToolCall(**fields: Any) -> dict[str, Any]:  # noqa: N802 - transcript-shaped test builders
+    return _present(**fields)
+
+
+def ObservationResult(**fields: Any) -> dict[str, Any]:  # noqa: N802
+    return _present(**fields)
+
+
+def Observation(*, results: list[dict[str, Any]]) -> dict[str, Any]:  # noqa: N802
+    return {"results": results}
+
+
+def ContentPart(**fields: Any) -> dict[str, Any]:  # noqa: N802
+    return _present(**fields)
+
+
+def ImageSource(**fields: Any) -> dict[str, Any]:  # noqa: N802
+    return _present(**fields)
 
 
 def _check_case(check: Callable[..., None], case: tuple[Any, ...]) -> None:
@@ -27,16 +52,15 @@ def _check_case(check: Callable[..., None], case: tuple[Any, ...]) -> None:
 
 def _user_step(message: str) -> Step:
     """Construct a minimal user Step with *message* (test helper)."""
-    return Step(step_id=1, timestamp=now_iso(), source="user", message=message,
-        extra={"daydream_phase": "review", "daydream_run_flow": "normal"},
-    )
+    return {"step_id": 1, "timestamp": now_iso(), "source": "user", "message": message,
+            "extra": {"daydream_phase": "review", "daydream_run_flow": "normal"}}
 
 
-def _agent_step(message: str = "ok", reasoning_content: str | None = None, tool_calls: list[ToolCall] | None = None,
-    observation: Observation | None = None,
+def _agent_step(message: str = "ok", reasoning_content: str | None = None,
+    tool_calls: list[dict[str, Any]] | None = None, observation: dict[str, Any] | None = None,
 ) -> Step:
-    """Construct a minimal agent Step (test helper)."""
-    return Step(step_id=2, timestamp=now_iso(), source="agent", model_name="opus", message=message,
+    """Construct a minimal agent step (test helper)."""
+    return _present(step_id=2, timestamp=now_iso(), source="agent", model_name="opus", message=message,
         reasoning_content=reasoning_content, tool_calls=tool_calls, observation=observation,
         extra={"daydream_phase": "review", "daydream_run_flow": "normal"},
     )
@@ -52,10 +76,10 @@ def test_redactor_fails_closed_per_rule_per_key_and_per_field(monkeypatch: pytes
         patch.setattr(redaction_mod, "_REDACTION_RULES",
                       ((_BoomPattern(), "[REDACTED_API_KEY]"), *redaction_mod._REDACTION_RULES[1:]))
         assert redaction_mod.redact_text("OPENAI_API_KEY=sk-leakthis123") == "[REDACTION_FAILED]"
-        out = Redactor().redact_step(_user_step("OPENAI_API_KEY=sk-leakthis123"))
-        assert isinstance(out.message, str)
-        assert "sk-leakthis123" not in out.message
-        assert "[REDACTION_FAILED]" in out.message
+        out = redact_step(_user_step("OPENAI_API_KEY=sk-leakthis123"))
+        assert isinstance(out["message"], str)
+        assert "sk-leakthis123" not in out["message"]
+        assert "[REDACTION_FAILED]" in out["message"]
 
     # A failing nested argument loses only that key; siblings and the caller's mapping survive.
     arguments = {'edits': [{'path': '/Users/alice/repo/file.py', 'edit_type': 'replace'},
@@ -69,36 +93,36 @@ def test_redactor_fails_closed_per_rule_per_key_and_per_field(monkeypatch: pytes
         return real(value, sensitive=sensitive)
     with monkeypatch.context() as patch:
         patch.setattr(redactor_mod, 'redact_value', redact)
-        step = Redactor().redact_step(_agent_step(tool_calls=[ToolCall(
+        step = redact_step(_agent_step(tool_calls=[ToolCall(
             tool_call_id='edit', function_name='Edit', arguments=arguments,
         )]))
-    assert step.tool_calls is not None
-    result = step.tool_calls[0].arguments
+    assert step.get("tool_calls") is not None
+    result = step["tool_calls"][0]["arguments"]
     assert result['count'] == 42 and result['flags'] == ['a', 'b'] and result['config'] == arguments['config']
     assert result['edits'] == '[REDACTION_FAILED]'
     assert arguments == original
 
     # A failure deep in the step pipeline wipes every text-bearing field.
-    def _boom(self: object, value: object) -> str:
+    def _boom(value: object) -> str:
         raise RuntimeError("simulated regex failure deep in pipeline")
 
-    monkeypatch.setattr(Redactor, "_redact_optional_text", _boom, raising=True)
+    monkeypatch.setattr(redactor_mod, "redact_structured_text", _boom, raising=True)
     step = _agent_step(message="OPENAI_API_KEY=sk-leak1", reasoning_content="thinking about sk-leak2",
         tool_calls=[ToolCall(
                 tool_call_id="tc1", function_name="Edit", arguments={"old_string": "sk-leak3", "new_string": "x"},
             ),
         ], observation=Observation(results=[ObservationResult(content="result with sk-leak4")],),
     )
-    out = Redactor().redact_step(step)
-    serialized = str(out.model_dump())
+    out = redact_step(step)
+    serialized = str(out)
     for leak in ("sk-leak1", "sk-leak2", "sk-leak3", "sk-leak4"):
         assert leak not in serialized, f"{leak} leaked through fallback: {serialized!r}"
-    assert out.message == "[REDACTION_FAILED]"
-    assert out.reasoning_content == "[REDACTION_FAILED]"
-    assert out.tool_calls is not None
-    assert out.tool_calls[0].arguments == {"_redaction": "[REDACTION_FAILED]"}
-    assert out.observation is not None
-    assert out.observation.results[0].content == "[REDACTION_FAILED]"
+    assert out["message"] == "[REDACTION_FAILED]"
+    assert out.get("reasoning_content") == "[REDACTION_FAILED]"
+    assert out.get("tool_calls") is not None
+    assert out["tool_calls"][0]["arguments"] == {"_redaction": "[REDACTION_FAILED]"}
+    assert out.get("observation") is not None
+    assert out["observation"]["results"][0]["content"] == "[REDACTION_FAILED]"
 
 
 def test_redactor_scrubs_text_content_parts() -> None:
@@ -106,23 +130,22 @@ def test_redactor_scrubs_text_content_parts() -> None:
         ContentPart(type="image", source=ImageSource(media_type="image/png", path="screenshot.png"),),
         ContentPart(type="text", text="clean text"),
     ]
-    step = Step(step_id=1, timestamp=now_iso(), source="user", message=parts,
-        extra={"daydream_phase": "review", "daydream_run_flow": "normal"},
-    )
-    out = Redactor().redact_step(step)
-    assert isinstance(out.message, list)
-    assert len(out.message) == 3
-    assert out.message[0].type == "text"
-    first_text = out.message[0].text
+    step = {"step_id": 1, "timestamp": now_iso(), "source": "user", "message": parts,
+            "extra": {"daydream_phase": "review", "daydream_run_flow": "normal"}}
+    out = redact_step(step)
+    assert isinstance(out["message"], list)
+    assert len(out["message"]) == 3
+    assert out["message"][0]["type"] == "text"
+    first_text = out["message"][0]["text"]
     assert first_text is not None  # type='text' guarantees text is populated
     assert "sk-test-secret123abc" not in first_text
     assert "[REDACTED_API_KEY]" in first_text
-    assert out.message[1].type == "image"
-    image_source = out.message[1].source
+    assert out["message"][1]["type"] == "image"
+    image_source = out["message"][1]["source"]
     assert image_source is not None  # type='image' guarantees source is populated
-    assert image_source.path == "screenshot.png"
-    assert out.message[2].type == "text"
-    assert out.message[2].text == "clean text"
+    assert image_source["path"] == "screenshot.png"
+    assert out["message"][2]["type"] == "text"
+    assert out["message"][2]["text"] == "clean text"
 
 
 _PKCS1_PEM = (
@@ -239,19 +262,19 @@ def _assert_native_tagged_credential_redacted(kind: str, order: str, form: str, 
         result = redact_value(payload)
         assert redact_value(result) == result
     elif form == 'arguments':
-        out = Redactor().redact_step(_agent_step(tool_calls=[ToolCall(
+        out = redact_step(_agent_step(tool_calls=[ToolCall(
             tool_call_id='auth', function_name='Inspect', arguments=credential,
         )]))
-        assert out.tool_calls is not None
-        result = {**payload, 'data': out.tool_calls[0].arguments}
+        assert out.get("tool_calls") is not None
+        result = {**payload, 'data': out["tool_calls"][0]["arguments"]}
     elif form == 'text-parts':
-        out = Redactor().redact_step(_agent_step(observation=Observation(results=[ObservationResult(
+        out = redact_step(_agent_step(observation=Observation(results=[ObservationResult(
             content=[ContentPart(type='text', text=json.dumps(payload))],
         )])))
-        assert out.observation is not None
-        parts = out.observation.results[0].content
-        assert isinstance(parts, list) and isinstance(parts[0].text, str)
-        result = json.loads(parts[0].text)
+        assert out.get("observation") is not None
+        parts = out["observation"]["results"][0]["content"]
+        assert isinstance(parts, list) and isinstance(parts[0]["text"], str)
+        result = json.loads(parts[0]["text"])
     else:
         text = json.dumps(payload)
         text = json.dumps(text) if form == 'json-string' else text
@@ -408,9 +431,9 @@ def test_redactor_sanitizes_http_observation_and_preserves_its_layout() -> None:
         'curl -H "Authorization: Bearer opaque-token-xyz" https://api\n'
         "saw Authorization: Bearer opaque-token-xyz in the log\nnext line stays"
     )
-    out = Redactor().redact_step(_agent_step(observation=Observation(results=[ObservationResult(content=content)])))
-    assert out.observation is not None
-    assert out.observation.results[0].content == (
+    out = redact_step(_agent_step(observation=Observation(results=[ObservationResult(content=content)])))
+    assert out.get("observation") is not None
+    assert out["observation"]["results"][0]["content"] == (
         "Authorization: [REDACTED_CREDENTIAL]\nauthorization: Bearer [REDACTED_CREDENTIAL]\n"
         "Proxy-Authorization: [REDACTED_CREDENTIAL]\nX-Api-Key: [REDACTED_CREDENTIAL]\n"
         "X-Auth-Token: [REDACTED_CREDENTIAL]\nCookie: [REDACTED_CREDENTIAL]\nSet-Cookie: [REDACTED_CREDENTIAL]\n"
@@ -423,7 +446,7 @@ def test_redactor_sanitizes_http_observation_and_preserves_its_layout() -> None:
 def test_credential_rotation_diagnostic_redacts_independent_documents_and_preserves_siblings() -> None:
     """One native record retains its certificate, paths and config structure while removing every credential family."""
     certificate = "-----BEGIN CERTIFICATE-----\nMIIDdzCCAl+gAwIBAgIEAgAAuTANBgkq\n-----END CERTIFICATE-----"
-    out = Redactor().redact_step(
+    out = redact_step(
         _agent_step(
             message=(
                 f"RSA: {_PKCS1_PEM}\nPKCS8: {_PKCS8_PEM}\nEncrypted: {_ENCRYPTED_PEM}\n"
@@ -478,14 +501,14 @@ def test_credential_rotation_diagnostic_redacts_independent_documents_and_preser
             ),
         )
     )
-    assert out.message == (
+    assert out["message"] == (
         "RSA: [REDACTED_PEM_KEY]\nPKCS8: [REDACTED_PEM_KEY]\nEncrypted: [REDACTED_PEM_KEY]\n"
         "SSH: [REDACTED_PEM_KEY]\nEC: [REDACTED_PEM_KEY]\nDSA: [REDACTED_PEM_KEY]\n"
         f"Certificate: {certificate}\npath=/Users/[REDACTED_USER]/github/proj/app.py\n"
         "path=/home/[REDACTED_USER]/foo/bar\npath=C:\\Users\\[REDACTED_USER]\\repo\n"
         "Streamed: [REDACTED_PEM_KEY]"
     )
-    assert out.reasoning_content == (
+    assert out.get("reasoning_content") == (
         "thought: [REDACTED_API_KEY]\nRSA_PRIVATE_KEY=[REDACTED_ENV_VAR]\nPKCS8_PRIVATE_KEY=[REDACTED_ENV_VAR]\n"
         "ENCRYPTED_PRIVATE_KEY=[REDACTED_ENV_VAR]\nSSH_PRIVATE_KEY=[REDACTED_ENV_VAR]\n"
         "EC_PRIVATE_KEY=[REDACTED_ENV_VAR]\nDSA_PRIVATE_KEY=[REDACTED_ENV_VAR]\n"
@@ -494,12 +517,12 @@ def test_credential_rotation_diagnostic_redacts_independent_documents_and_preser
         "MONKEY_PATCH=enabled\nKEYBOARD_LAYOUT=qwerty\nAUTHOR=alice\nTOKENIZED=yes\nKEYSTORE=/etc/ks"
     )
     # Sensitive keys redact plain values (and everything beneath them); lookalike keys keep their data.
-    assert out.tool_calls is not None and out.tool_calls[0].arguments == {
+    assert out.get("tool_calls") is not None and out["tool_calls"][0]["arguments"] == {
         "password": "[REDACTED_CREDENTIAL]", "auth": {"metadata": "[REDACTED_CREDENTIAL]"},
         "max_tokens": 5, "tokenizer": "bpe", "passwordless": True, "keyStore": "ks",
     }
-    assert out.observation is not None
-    assert [(result.source_call_id, result.content) for result in out.observation.results] == [
+    assert out.get("observation") is not None
+    assert [(result["source_call_id"], result["content"]) for result in out["observation"]["results"]] == [
         (
             "json-config",
             '{"credentials": "[REDACTED_CREDENTIAL]", "profiles": ['

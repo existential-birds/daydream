@@ -24,7 +24,7 @@ from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
 from daydream.repository_paths import git_observed_path_is_confined
 from daydream.review_budget import render_review_warnings, review_warnings
 from daydream.review_result import ReasonCode, deliver_finalized_review
-from daydream.trajectory import DaydreamPhase, get_current_recorder, phase_scope
+from daydream.trajectory import DaydreamPhase, get_current_recorder, phase_scope, run_usage
 from daydream.ui import print_info, print_warning
 
 
@@ -232,8 +232,7 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
     # A cancelled run hands nothing over, to its embedder or to a poster: the published files hold the sealed result.
     handed_over = pipeline_state != "cancelled"
     if handed_over:
-        recorder = get_current_recorder()
-        deliver_finalized_review(result, items, usage={} if recorder is None else recorder.review_usage())
+        deliver_finalized_review(result, items, usage=run_usage())
     try:
         context = refresh_review_report(ctx, no_diff=no_diff)
     except (OSError, ValueError, TypeError, RecursionError, ArtifactSourceUnavailableError) as exc:

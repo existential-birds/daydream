@@ -25,11 +25,13 @@ from daydream.findings import FindingsValidationError, load_findings_artifact
 from daydream.host_tools import HostToolRejected
 from daydream.pr_review import post_findings_from_artifact
 from daydream.review_result import ReviewCoverage
+from daydream.trajectory import RUN_DOCUMENT_NAME
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.console import collapse_panel_text
 from tests.harness.dataset import read_records
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote, git, init_repo
+from tests.harness.trajectory import read_trajectory
 from tests.test_artifact_visibility import _Entry, _walk_entry
 from tests.test_deep_orchestrator import _pin_findings_pr
 from tests.test_pr_review import _recording_fake_submit
@@ -41,7 +43,7 @@ class ReviewRun:
         self.pr = _pin_findings_pr(patch, repo)
         self.output = tmp / 'findings.json'
         self.backend = EmptyReviewBackend(repo)
-        self.config = empty_review_config(repo, tmp / 'trajectory.json', findings_out=str(self.output), pr_number=7)
+        self.config = empty_review_config(repo, tmp / RUN_DOCUMENT_NAME, findings_out=str(self.output), pr_number=7)
         patch.setattr('daydream.runner.create_backend', lambda *_a, **_k: self.backend)
 
     async def run(self, **overrides: Any) -> int:
@@ -120,7 +122,7 @@ async def test_comment_pins_pr_head_independently_and_excludes_local_edits(
     review.patch.setattr(review_reporting, 'render_github_review_context', unrenderable)
     assert await review.run(output_mode='comment', findings_out=None, approve_on_clean=True,
                             review_backend='codex') == 0
-    assert json.loads((review.tmp / 'trajectory.json').read_text())['extra']['review_backend'] == 'codex'
+    assert read_trajectory((review.tmp / RUN_DOCUMENT_NAME))['extra']['review_backend'] == 'codex'
     plan = plans['plan']
     assert plan.review_summary == summarize(None, review_warnings=plan.review_warnings) and plan.review_warnings
     assert plan.pr.head_sha == review.pr.head_sha != local_head

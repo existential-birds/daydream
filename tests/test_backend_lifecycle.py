@@ -55,6 +55,8 @@ sys.modules["daydream.host_tools_server"] = None
 sys.modules["claude_agent_sdk"] = None
 # Codex serves host tools over MCP only for an invocation that carries them.
 sys.modules["mcp"] = sys.modules["uvicorn"] = None
+# ATIF export is benchmark-only: recording and every evidence consumer must run without it.
+sys.modules["daydream.benchmarks"] = sys.modules["harbor"] = None
 ADAPTERS = {f"daydream.backends.{name}" for name in ("claude", "codex", "pi", "osprey")}
 
 def loaded():
@@ -104,6 +106,21 @@ async def run_pi():
 
 asyncio.run(run_pi())
 assert sys.modules["daydream.host_tools_server"] is None
+
+import daydream.archive.finalize, daydream.committed_review, daydream.dataset_capture  # noqa: E401
+import daydream.eval.analyzer, daydream.pr_run_info, daydream.summarize  # noqa: E401
+from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, EvidenceRecorder, default_trajectory_path
+
+async def record():
+    recorder = EvidenceRecorder(path=default_trajectory_path(target / "evidence", "run"), run_flow=DaydreamRunFlow.DEEP,
+                                target_dir=target / "evidence", agent_model_name="", session_id="run")
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+            invocation.observe(TextEvent("recorded"))
+            invocation.observe(ResultEvent(structured_output=None, continuation=None))
+    return recorder.current_document().validated_payload("run")
+
+assert len(asyncio.run(record())["steps"]) == 1
 
 del sys.modules["claude_agent_sdk"], sys.modules["mcp"], sys.modules["uvicorn"]
 assert type(_resolve_backend(RunConfig(target=str(target)), "review")).__name__ == "ClaudeBackend"

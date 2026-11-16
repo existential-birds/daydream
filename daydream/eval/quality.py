@@ -20,8 +20,8 @@ _QUALITY_EXCLUDED_DIRS = frozenset(
     {
         ".git", ".daydream", "node_modules", ".venv", "venv", "__pycache__", ".worktrees",
         "dist", "build", "vendor", "third_party", "migrations",
-        # ``atif`` is daydream/atif, explicitly vendored from Harbor
-        # (see daydream/atif/NOTICE) — out of metric scope (Finding #5).
+        # ``atif`` is daydream/benchmarks/atif, explicitly vendored from Harbor
+        # (see daydream/benchmarks/atif/NOTICE) — out of metric scope (Finding #5).
         "atif",
     }
 )

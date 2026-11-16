@@ -35,12 +35,13 @@ from daydream.run_config import (
 from daydream.run_snapshot import ArchiveRunSnapshot, ManifestRunIdentity, RunPhaseCapabilities, RunProfileIdentity
 from daydream.trajectory import (
     DaydreamRunFlow,
+    EvidenceRecorder,
     RunWriteSnapshot,
     TrajectoryDocumentReference,
     TrajectoryDocumentSnapshot,
-    TrajectoryRecorder,
     default_trajectory_path,
     get_current_recorder,
+    run_document_path,
 )
 from daydream.ui import print_error
 from daydream.workspace import WorkContext
@@ -62,7 +63,7 @@ class _RunWriteCapture:
     manifest_identity: ManifestRunIdentity | None = None
     original_task: dict[str, object] | None = None
 
-    def retain(self, recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot) -> None:
+    def retain(self, recorder: EvidenceRecorder, snapshot: RunWriteSnapshot) -> None:
         try:
             if recorder.session_id != self.session_id:
                 raise _RunSnapshotCaptureError("recorder session identity mismatch")
@@ -135,7 +136,7 @@ def _open_recorder(
     run_artifacts: _RunArtifacts | None = None,
     allow_standalone: bool = False,
     immutable_input: dict[str, object] | None = None,
-) -> TrajectoryRecorder:
+) -> EvidenceRecorder:
     """Open every flow's recorder with consistent identity, paths, and retention.
 
     Flows must use this factory so dump-artifacts and strict archive finalization
@@ -163,7 +164,8 @@ def _open_recorder(
         target_dir = work.source
         if run_artifacts.trajectory.full.write_path is None:
             raise ArtifactVisibilityError("trajectory route has no writable destination")
-        trajectory_path = run_artifacts.trajectory.full.write_path
+        # The root evidence document stays private; an explicit output receives a copy.
+        trajectory_path = run_document_path(run_artifacts.trajectory.run_dir)
         if run_artifacts.capture.manifest_identity is not None:
             raise ArtifactVisibilityError("manifest run identity was already captured")
         _resolve_review_profile(config)
@@ -174,12 +176,13 @@ def _open_recorder(
     # Trajectory labels retain their representative per-flow phase mapping;
     # manifest identity separately records the general default and capabilities.
     names = _recorder_backend_names(config, flow_kind)
-    recorder = TrajectoryRecorder(
+    recorder = EvidenceRecorder(
         path=trajectory_path,
         run_flow=flow_kind,
         target_dir=target_dir,
         artifact_run_dir=None if run_artifacts is None else run_artifacts.trajectory.run_dir,
-        document_writer=None if run_artifacts is None else run_artifacts.write_trajectory_document,
+        document_writer=(run_artifacts.write_trajectory_document
+                         if run_artifacts is not None and run_artifacts.trajectory.explicit else None),
         agent_model_name="",
         session_id=session_id,
         explicit_path=config.trajectory_path is not None,

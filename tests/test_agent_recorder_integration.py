@@ -1,4 +1,4 @@
-"""Agent/recorder integration: validate persisted trajectories and observable behavior.
+"""Agent/recorder integration: validate persisted evidence and observable behavior.
 
 The public agent boundary requires an explicit keyword-only phase.
 """
@@ -13,7 +13,6 @@ from typing import Any
 import pytest
 
 from daydream.agent import run_agent
-from daydream.atif import validate as atif_validate
 from daydream.backends import (
     AgentEvent,
     Backend,
@@ -28,20 +27,20 @@ from daydream.trajectory import (
     DaydreamRunFlow,
 )
 from tests.harness.backend import ScriptedBackend
-from tests.harness.trajectory import make_recorder
+from tests.harness.trajectory import atif_valid as atif_validate, make_recorder, read_trajectory
 
 
 async def _run_with_recorder(
     backend: Backend, tmp_path: Path, *, phase: DaydreamPhase = DaydreamPhase.REVIEW,
     run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL, prompt: str = "hello",
 ) -> tuple[dict[str, Any] | None, tuple[Any, Any, Any]]:
-    """Drive run_agent inside a TrajectoryRecorder. Return (trajectory_dict, return_value)."""
+    """Drive run_agent inside an EvidenceRecorder. Return (document view, return_value)."""
     recorder = make_recorder(tmp_path, run_flow=run_flow)
     target_path = recorder.path
     async with recorder:
         result = await run_agent(backend, tmp_path, prompt, phase=phase)
     if target_path.exists():
-        return json.loads(target_path.read_text()), result
+        return read_trajectory(target_path), result
     return None, result
 
 
@@ -106,7 +105,7 @@ async def test_mid_turn_backend_error_is_recorded_in_trajectory(tmp_path: Path) 
             await run_agent(backend, tmp_path, "fix this", phase=DaydreamPhase.FIX)
     # (b) the emitted trajectory carries the error marker + subtype.
     assert target_path.exists()
-    traj = json.loads(target_path.read_text())
+    traj = read_trajectory(target_path)
     assert atif_validate(traj) is True
     errored = [s for s in traj["steps"] if s.get("extra", {}).get("error_subtype")]
     assert len(errored) == 1

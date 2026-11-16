@@ -52,7 +52,7 @@ from daydream.review_result import validate_terminal_result
 from daydream.review_source_refs import source_options
 from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
 from daydream.run_config import FrozenAuthorDescription, RunConfig
-from daydream.trajectory import get_current_recorder
+from daydream.trajectory import RUN_DOCUMENT_NAME, get_current_recorder
 from tests.harness.claude_provider import LoopbackProvider, Turn, claude_cli_env, tool
 from tests.harness.codex_lifecycle_cli import install_codex_lifecycle_cli
 from tests.harness.fake_gh import FakeGh
@@ -65,7 +65,7 @@ from tests.harness.git_helpers import (
     work_context,
     write_and_stage,
 )
-from tests.harness.trajectory import root_trajectory
+from tests.harness.trajectory import read_trajectory, root_trajectory
 from tests.test_deep_orchestrator import _profile_with_pipeline
 
 
@@ -1314,7 +1314,7 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     assert exported_value["schema_version"] == 5 and exported_value["findings"] == []
     assert exported_value["head_sha"] == envelope["provenance"]["head_sha"]
     assert exported_value["terminal_result"] == value["terminal_result"]
-    trajectory = json.loads((operator_policy.output_dir / "trajectory.json").read_text())
+    trajectory = read_trajectory((operator_policy.output_dir / RUN_DOCUMENT_NAME))
     assert trajectory["extra"]["pr_repo"] == "captured/repository"
     assert trajectory["extra"]["pr_number"] == 1421
     assert trajectory["extra"]["immutable_input"] == envelope
@@ -2863,7 +2863,7 @@ async def test_committed_review_completes_through_native_host_tools(
         fresh = [all(message["role"] != "assistant" for message in body["messages"]) for body in quiet.requests]
         assert fresh == [True, True] and [(entry["assignment"], entry["accepted"], entry["reason"]) for entry in
                                           incomplete["execution"]] == [("discovery", False, "missing_output")]
-        events = json.loads((repo / ".daydream/runs" / incomplete["run_id"] / "trajectory.json").read_text())
+        events = read_trajectory((repo / ".daydream/runs" / incomplete["run_id"] / RUN_DOCUMENT_NAME))
         assert [(event["metadata"]["retry_stop_reason"], event["metadata"]["attempts"],
                  event["metadata"]["circuit_state"]) for event in events["extra"]["phase_events"]
                 if event["event"] == "agent_budget_stop"] == [("retry_attempts_exhausted", 1, "closed")]

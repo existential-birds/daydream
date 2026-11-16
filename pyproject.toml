@@ -77,8 +77,8 @@ include = [
     "daydream/backends/pi_host_tools.ts",
     "daydream/backends/pi_diagnostics.ts",
     "daydream/training/schema/**",
-    "daydream/atif/LICENSE",
-    "daydream/atif/NOTICE",
+    "daydream/benchmarks/atif/LICENSE",
+    "daydream/benchmarks/atif/NOTICE",
 ]
 
 [tool.mypy]
@@ -89,9 +89,9 @@ explicit_package_bases = true
 
 
 [[tool.mypy.overrides]]
-# Vendored from harbor-framework/harbor@v0.17.1-9 (see daydream/atif/NOTICE);
+# Vendored from harbor-framework/harbor@v0.17.1-9 (see daydream/benchmarks/atif/NOTICE);
 # mechanical-edit-only policy forbids hand-fixes. Mirrors ruff exemption above.
-module = ["daydream.atif.*"]
+module = ["daydream.benchmarks.atif.*"]
 ignore_errors = true
 
 [[tool.mypy.overrides]]
@@ -124,9 +124,9 @@ select = ["E", "F", "I", "W"]
 combine-as-imports = true
 
 [tool.ruff.lint.per-file-ignores]
-# Vendored from Harbor v0.17.1-9; see daydream/atif/NOTICE.
+# Vendored from Harbor v0.17.1-9; see daydream/benchmarks/atif/NOTICE.
 # Mechanical-only edit policy (D-03): no reformatting allowed.
-"daydream/atif/**" = ["E", "F", "I", "W"]
+"daydream/benchmarks/atif/**" = ["E", "F", "I", "W"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -158,11 +158,11 @@ branch = true
 relative_files = true
 source = ["daydream"]
 omit = [
-    # Vendored from harbor-framework/harbor@v0.17.1-9 (see daydream/atif/NOTICE);
+    # Vendored from harbor-framework/harbor@v0.17.1-9 (see daydream/benchmarks/atif/NOTICE);
     # mechanical-edit-only policy (D-03) forbids touching it to add tests, so
     # including it would set the floor from code no one may edit.
     # Mirrors the mypy and ruff exemptions above.
-    "daydream/atif/*",
+    "daydream/benchmarks/atif/*",
 ]
 
 [tool.coverage.report]

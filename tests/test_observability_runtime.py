@@ -143,7 +143,7 @@ async def test_shutdown_deadline_is_total_and_shutdown_once( caplog: pytest.LogC
                 await returned.wait()
                 assert not release.is_set()
                 assert all(not exporter.shutdown_complete.is_set() for exporter in exporters)
-                assert "Trace cleanup exceeded its deadline" in caplog.text
+                assert "Remote trace delivery is unknown: cleanup exceeded its deadline" in caplog.text
             finally:
                 release.set()
             for exporter in exporters:
@@ -338,6 +338,10 @@ async def test_run_trace_identity_and_delivery_failures_never_block_the_run(
             run.finish(0)
     assert current_run_trace_id() is None
     assert "Trace export failed; review execution continues" in caplog.text
+    # Exhausted delivery is reported with counts, never mistaken for delivered evidence.
+    assert ("Remote trace delivery to rejecting is incomplete: 0 of 2 spans dropped before export, 2 failed"
+            in caplog.text)
+    assert session.delivery == [{"destination": "rejecting", "ended": 2, "dropped": 0, "failed": 2}]
     assert "Trace processor flush failed" in caplog.text
     assert caplog.text.count("Local trace evidence write failed (NotADirectoryError); the review continues") == 1
     assert str(tmp_path) not in caplog.text and not blocked.exists()

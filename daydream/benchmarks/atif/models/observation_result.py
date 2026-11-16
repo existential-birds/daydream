@@ -4,8 +4,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from daydream.atif.models.content import ContentPart
-from daydream.atif.models.subagent_trajectory_ref import SubagentTrajectoryRef
+from daydream.benchmarks.atif.models.content import ContentPart
+from daydream.benchmarks.atif.models.subagent_trajectory_ref import SubagentTrajectoryRef
 
 
 class ObservationResult(BaseModel):

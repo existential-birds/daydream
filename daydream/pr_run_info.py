@@ -1,26 +1,25 @@
-"""Live, session-owned trajectory acquisition for PR run-info markdown."""
+"""Live, session-owned evidence acquisition for PR run-info markdown."""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from daydream.atif import Trajectory
 from daydream.pr_comment_renderer import render_run_info
 from daydream.pricing import load_user_prices, resolve_prices
 from daydream.trajectory import TrajectoryDocumentIntegrityError
 
 if TYPE_CHECKING:
     from daydream.artifact_visibility import ArtifactSession
-    from daydream.trajectory import TrajectoryRecorder
+    from daydream.trajectory import EvidenceRecorder
 
 
 @dataclass(frozen=True)
 class LiveRunInfoSource:
     """Explicit live owners needed to acquire the parent and sibling values."""
 
-    recorder: TrajectoryRecorder | None
+    recorder: EvidenceRecorder | None
     artifacts: ArtifactSession | None
 
 
@@ -60,7 +59,7 @@ def _print_omitted_child_warning(exc: TrajectoryDocumentIntegrityError) -> None:
 def render_live_run_info(source: LiveRunInfoSource) -> RunInfoResult:
     """Acquire validated live trajectories and render them while the recorder is active.
 
-    The parent comes from recorder memory; completed children are checked reads
+    The parent is a checked read of the live root document's accepted prefix; completed children are checked reads
     of the recorder registry's file references, decoded and folded one at a time,
     and a missing or changed child is omitted with a warning rather than blocking the post.
     Prices resolve before the fold, so a pricing failure reports rendering unavailable
@@ -86,30 +85,27 @@ def render_live_run_info(source: LiveRunInfoSource) -> RunInfoResult:
         return _unavailable("run info: trajectory snapshot unavailable")
 
     try:
-        parent = recorder.build_trajectory()
+        parent = recorder.current_document().validated_payload(session_id)
     except Exception:  # noqa: BLE001 - live review must still post
         return _unavailable("run info: parent trajectory unavailable")
-    if parent.session_id != session_id or parent.trajectory_id != root_id:
-        return _unavailable("run info: trajectory identity invalid")
 
-    def trajectories() -> Iterator[Trajectory]:
+    def trajectories() -> Iterator[dict[str, Any]]:
         yield parent
         seen_ids = {root_id}
         for reference in references:
             try:
-                sibling = Trajectory.model_validate_json(reference.read_bytes())
+                sibling = reference.validated_payload(session_id)
             except TrajectoryDocumentIntegrityError as exc:
                 _print_omitted_child_warning(exc)
                 continue
+            except ValueError as exc:
+                if "identity" in str(exc):
+                    raise _Unavailable("run info: trajectory identity invalid") from None
+                raise _Unavailable("run info: trajectory document invalid") from None
             except Exception:  # noqa: BLE001 - one corrupt retained value invalidates the view
                 raise _Unavailable("run info: trajectory document invalid") from None
-            sibling_id = sibling.trajectory_id
-            if (
-                not sibling_id
-                or sibling.session_id != session_id
-                or sibling_id != reference.trajectory_id
-                or sibling_id in seen_ids
-            ):
+            sibling_id = sibling["trajectory_id"]
+            if sibling_id in seen_ids:
                 raise _Unavailable("run info: trajectory identity invalid")
             seen_ids.add(sibling_id)
             yield sibling

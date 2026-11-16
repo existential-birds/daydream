@@ -16,6 +16,7 @@ from daydream.backends import BackendExecutionInput
 from daydream.config_file import DaydreamFileConfig
 from daydream.github_app import GitHubExecutionInput
 from daydream.run_config import RunConfig
+from daydream.trajectory import RUN_DOCUMENT_NAME
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 
@@ -86,7 +87,7 @@ async def test_runner_injected_execution_reaches_a_real_custom_flow_with_one_bac
     config = RunConfig(
         target=str(repo), flow_name="factory-probe", base="main", backend=backend_name, model="factory-model",
         archive=False, run_eval=False, non_interactive=True, output_mode="loop", file_config=DaydreamFileConfig(),
-        trajectory_path=tmp_path / "trajectory.json",
+        trajectory_path=tmp_path / RUN_DOCUMENT_NAME,
     )
     result = await runner.run(
         config, execution=execution, private_roots=private_root_locations(base=tmp_path / "private"),
@@ -98,6 +99,6 @@ async def test_runner_injected_execution_reaches_a_real_custom_flow_with_one_bac
     assert [(backend.reasoning_effort, backend.prompts) for backend in created] == [
         (None, ['FACTORY_TURN_first', 'FACTORY_TURN_again'])]
     assert all(call['cwd'] == repo for backend in created for call in backend.calls)
-    trajectory = (tmp_path / "trajectory.json").read_text()
+    trajectory = (tmp_path / RUN_DOCUMENT_NAME).read_text()
     assert "factory-owned-private-key" not in trajectory
     assert "parent-private-key" not in trajectory

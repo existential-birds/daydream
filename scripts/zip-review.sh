@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Zips the most recent daydream review run (trajectory + review-output.md) for sharing on Slack.
+# Zips the most recent daydream review run (evidence + review-output.md) for sharing on Slack.
 #
 # Usage:
 #   zip-review.sh <daydream-dir> [branch-name]
@@ -18,14 +18,14 @@ DAYDREAM_DIR="$(cd "$DAYDREAM_DIR" && pwd)"
 # Find the runs directory
 RUNS_DIR=""
 for candidate in "$DAYDREAM_DIR/runs" "$DAYDREAM_DIR"; do
-  if [ -d "$candidate" ] && ls "$candidate"/*/trajectory.json &>/dev/null; then
+  if [ -d "$candidate" ] && ls "$candidate"/*/evidence.otlp.jsonl &>/dev/null; then
     RUNS_DIR="$candidate"
     break
   fi
 done
 
 if [ -z "$RUNS_DIR" ]; then
-  echo "Error: no runs with trajectory.json found under $DAYDREAM_DIR" >&2
+  echo "Error: no runs with evidence.otlp.jsonl found under $DAYDREAM_DIR" >&2
   exit 1
 fi
 
@@ -52,13 +52,14 @@ if [ -z "$BRANCH_NAME" ]; then
   if [ -z "$BRANCH_NAME" ]; then
     TARGET_DIR="$(python3 -c '
 import json, sys
-for f in sys.argv[1:]:
-    try:
-        d = json.load(open(f))
-        td = d.get("extra", {}).get("target_dir") or d.get("git", {}).get("branch")
-        if td: print(td); sys.exit()
-    except: pass
-' "$LATEST_RUN/trajectory.json" "$LATEST_RUN/manifest.json" 2>/dev/null || true)"
+try:
+    # The root evidence opens with an OTLP/JSON record whose body names the run target_dir.
+    record = json.loads(open(sys.argv[1]).readline())["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]
+    body = {item["key"]: item["value"] for item in record["body"]["kvlistValue"]["values"]}
+    extra = {item["key"]: item["value"] for item in body["extra"]["kvlistValue"]["values"]}
+    print(extra["target_dir"]["stringValue"])
+except Exception: pass
+' "$LATEST_RUN/evidence.otlp.jsonl" 2>/dev/null || true)"
     if [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ]; then
       BRANCH_NAME="$(git -C "$TARGET_DIR" branch --show-current 2>/dev/null || true)"
     fi
@@ -78,7 +79,7 @@ echo "Output: $ZIP_FILE"
 # Collect files to zip
 FILES_TO_ZIP=()
 
-# Always include the run directory (trajectory + sub-trajectories)
+# Always include the run directory (root and sibling evidence documents)
 FILES_TO_ZIP+=("$LATEST_RUN")
 
 # Find review-output.md — check run dir first, then deep/ at daydream level

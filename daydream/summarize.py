@@ -1,6 +1,6 @@
-"""Render a trajectory file or run directory as the PR-comment run-info block.
+"""Render an evidence document or run directory as the PR-comment run-info block.
 
-Directory input includes parent and sibling trajectories. Print the rollup,
+Directory input includes the root and sibling evidence documents. Print the rollup,
 phase table and version footer without GitHub writes or diff filtering."""
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from rich.console import Console
 
 from daydream.eval.analyzer import collect_trajectory_paths
 from daydream.pr_comment_renderer import FALLBACK_NOTE, render_run_info_block
+from daydream.trajectory import DOCUMENT_SUFFIX, RUN_DOCUMENT_NAME, SIBLINGS_DIRNAME
 from daydream.ui import NEON_THEME, print_error
 
 
@@ -24,11 +25,11 @@ def summarize(path: Path) -> int:
         return 1
 
     if path.is_file():
-        if path.suffix != ".json":
+        if not path.name.endswith(DOCUMENT_SUFFIX):
             print_error(
                 err_console,
                 "Invalid Path",
-                f"file must be a .json trajectory: {path}",
+                f"file must be a {DOCUMENT_SUFFIX} evidence document: {path}",
             )
             return 1
         paths = [path]
@@ -38,7 +39,7 @@ def summarize(path: Path) -> int:
             print_error(
                 err_console,
                 "Invalid Path",
-                f"no trajectory.json or trajectories/ found under {path}",
+                f"no {RUN_DOCUMENT_NAME} or {SIBLINGS_DIRNAME}/ found under {path}",
             )
             return 1
     else:

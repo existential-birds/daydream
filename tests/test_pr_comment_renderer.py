@@ -11,12 +11,14 @@ from typing import Any
 import pytest
 
 import daydream.pr_comment_renderer as renderer
-from daydream.atif import Trajectory
 from daydream.pr_comment_renderer import (
     render_run_info,
     render_run_info_block,
 )
 from daydream.pricing import ModelPrice, resolve_prices
+from daydream.trajectory import DOCUMENT_SUFFIX, read_document_view
+from daydream.trajectory.journal import JournalWriter
+from daydream.trajectory.view import OPEN_EVENT, STEP_EVENT
 
 # Committed fixtures cover Claude (cost_usd present) and Codex (cost_usd null,
 # synthesized via pricing). Tests needing a specific shape build inline via _write_trajectory.
@@ -51,20 +53,37 @@ def _user_step(phase: str = "review") -> dict[str, Any]:
     }
 
 
-def _write_trajectory(tmp_path: Path, *, name: str = "t.json", session_id: str = "fixture", model: str = "gpt-5.5",
+def _write_evidence(path: Path, payload: dict[str, Any]) -> Path:
+    """Write one document view's identity, root model and steps as an evidence document."""
+    session_id = payload.get("session_id") or "fixture"
+    writer = JournalWriter(path, resource={}, version="test")
+    writer.append(OPEN_EVENT, {
+        "session_id": session_id, "trajectory_id": payload.get("trajectory_id") or session_id,
+        "agent_version": "test", "agent_model_name": payload["agent"].get("model_name"), "extra": {},
+    })
+    for step in payload["steps"]:
+        writer.append(STEP_EVENT, step)
+    writer.seal({"run_ended_at": "2026-05-02T00:01:00Z", "final_metrics": {}})
+    return path
+
+
+def _fixture(path: Path, tmp_path: Path) -> Path:
+    """A committed fixture view written as an evidence document."""
+    return _write_evidence(tmp_path / f"{path.stem}{DOCUMENT_SUFFIX}", json.loads(path.read_text()))
+
+
+def _write_trajectory(tmp_path: Path, *, name: str = "t", session_id: str = "fixture", model: str = "gpt-5.5",
     steps: list[dict[str, Any]],
 ) -> Path:
-    """Write validator-compatible Agent and sequential user/agent steps."""
-    full = {"schema_version": "ATIF-v1.6", "session_id": session_id,
-        "agent": {"name": "daydream", "version": "0.14.0", "model_name": model}, "steps": steps,
-    }
-    p = tmp_path / name
-    p.write_text(json.dumps(full), encoding="utf-8")
-    return p
+    """Write an evidence document whose root model is the steps' fallback model."""
+    return _write_evidence(tmp_path / f"{name}{DOCUMENT_SUFFIX}", {
+        "session_id": session_id, "agent": {"name": "daydream", "version": "0.14.0", "model_name": model},
+        "steps": steps,
+    })
 
 
 def _single_phase_trajectory(
-    tmp_path: Path, *, name: str = "t.json", model: str | None = "gpt-5.5", phase: str = "review", prompt: int = 1000,
+    tmp_path: Path, *, name: str = "t", model: str | None = "gpt-5.5", phase: str = "review", prompt: int = 1000,
     completion: int = 100, cached: int = 500, cost_usd: float | None = None,
 ) -> Path:
     """Write one user and one agent step; model=None uses the gpt-5.5 root fallback."""
@@ -110,13 +129,13 @@ def test_value_renderer_does_not_read_ambient_user_prices(monkeypatch: pytest.Mo
         raise AssertionError("value renderer read ambient pricing")
 
     monkeypatch.setattr(renderer, "load_user_prices", fail)
-    trajectory = Trajectory.model_validate_json(_MULTI_PHASE_CODEX.read_bytes())
+    trajectory = json.loads(_MULTI_PHASE_CODEX.read_text())
 
     assert "- **Cost:**" in render_run_info([trajectory])
 
 
 def test_value_renderer_respects_an_explicit_empty_price_table() -> None:
-    trajectory = Trajectory.model_validate_json(_MULTI_PHASE_CODEX.read_bytes())
+    trajectory = json.loads(_MULTI_PHASE_CODEX.read_text())
 
     rendered = render_run_info([trajectory], prices={})
 
@@ -129,8 +148,8 @@ def test_e2e_deep_mode_aggregates_fork_files(tmp_path: Path) -> None:
     archived = _write_trajectory(
         tmp_path, model="claude-sonnet-5", steps=[_user_step(), _sonnet5_transition_step()],
     )
-    paths = [_DEEP_PARENT, _DEEP_FORK_A, _DEEP_FORK_B, archived]
-    trajectories = [Trajectory.model_validate_json(path.read_bytes()) for path in paths]
+    paths = [*(_fixture(path, tmp_path) for path in (_DEEP_PARENT, _DEEP_FORK_A, _DEEP_FORK_B)), archived]
+    trajectories = [read_document_view(path.read_bytes()) for path in paths]
     out = render_run_info_block(paths)
     assert render_run_info(trajectories, prices=resolve_prices()) == out
     assert "- **Model:** mixed — see breakdown" in out
@@ -164,7 +183,7 @@ def test_duration_degrades_gracefully(tmp_path: Path) -> None:
     assert review_row.rstrip().endswith("| — |")
 
     # Corrupt negative counts clamp per phase while output from zero-input work is retained.
-    clamped = render_run_info_block([_write_trajectory(tmp_path, name="clamped.json", steps=[
+    clamped = render_run_info_block([_write_trajectory(tmp_path, name="clamped", steps=[
         _user_step(),
         _agent_step(step_id=2, phase="review", model="gpt-5.5", prompt=-5, completion=-2, cached=-3, cost_usd=0.0),
         {**_user_step("test"), "step_id": 3},
@@ -174,7 +193,7 @@ def test_duration_degrades_gracefully(tmp_path: Path) -> None:
     assert "| Review | gpt-5.5 | 0 | 0 | 0 | $0.00 |" in clamped
     assert "| Test & Heal | gpt-5.5 | 0 | 0 | 10 | $0.00 |" in clamped and "0 in → 10 out" in clamped
     # A backend alias is a fallback, never a rendered model identity.
-    alias = render_run_info_block([_single_phase_trajectory(tmp_path, name="alias.json", model="osprey",
+    alias = render_run_info_block([_single_phase_trajectory(tmp_path, name="alias", model="osprey",
                                                             phase="exploration", prompt=0, completion=0, cached=0)])
     assert "- **Model:** unknown" in alias and "| osprey |" not in alias
 
@@ -210,7 +229,7 @@ def test_report_duration_cells_use_phase_and_fork_timestamp_spans(tmp_path: Path
     parent = _write_trajectory(tmp_path, steps=steps)
     fork = _write_trajectory(
         tmp_path,
-        name="fork.json",
+        name="fork",
         session_id="fork",
         steps=[
             {**_user_step("fix"), "timestamp": (start + timedelta(seconds=150)).isoformat()},

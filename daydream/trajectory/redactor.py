@@ -1,12 +1,10 @@
-"""Fail-closed redaction of the ATIF text and tool-result surfaces."""
+"""Fail-closed redaction of the transcript text and tool-result surfaces."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import Any
 
 from daydream import ui
-from daydream.atif import Observation, ObservationResult, Step
 from daydream.redaction import (
     _is_native_credential_field as _is_native_credential_field,
     _is_sensitive_key as _is_sensitive_key,
@@ -17,111 +15,77 @@ from daydream.redaction import (
 
 _console = ui.create_console()
 
+_FAILED = "[REDACTION_FAILED]"
 
-class Redactor:
-    """Redact ATIF messages, reasoning, tool arguments, and observations.
 
-    Text uses the shared structured redactor; nested arguments use key-aware
-    container redaction. Failures replace the affected surface with a marker,
-    never raw content."""
+def _redact_text_parts(parts: list[Any]) -> list[Any]:
+    """Redact text parts in a message or observation, preserving non-text parts."""
+    return [
+        {**part, "text": redact_structured_text(part["text"]) if part.get("text") is not None else None}
+        if isinstance(part, dict) and part.get("type") == "text" else part
+        for part in parts
+    ]
 
-    def _redact_optional_text(self, value: str | None) -> str | None:
-        """Redact a possibly-None text field; degrade to [REDACTION_FAILED] on error."""
-        if value is None:
-            return None
-        return redact_structured_text(value)
 
-    def _redact_text_parts(self, parts: Sequence[Any]) -> list[Any]:
-        """Redact text parts in a message or observation, preserving non-text parts."""
-        return [
-            part.model_copy(update={"text": self._redact_optional_text(part.text)}) if part.type == "text" else part
-            for part in parts
-        ]
+def _redact_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Redact every tool-call argument with key-aware container redaction.
 
-    def _redact_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Redact every value inside a ToolCall.arguments dict (native walk).
-
-        Each value is walked recursively with key-aware sensitive-key
-        detection (:func:`redact_value`) so nested credentials under
-        lower/mixed/camel-case keys are replaced without a JSON round-trip;
-        the output keeps its declared ``dict[str, Any]`` shape and preserves
-        nested structure (CR-01). A failure on any one key degrades only that
-        key to ``"[REDACTION_FAILED]"`` per REDA-05.
-        """
-        out: dict[str, Any] = {}
-        for key, val in arguments.items():
-            try:
-                out[key] = (_redact_sensitive_text(val) if _is_native_credential_field(key, arguments)
-                            else redact_value(val, _is_sensitive_key(key) if isinstance(key, str) else False))
-            except Exception:  # noqa: BLE001 - REDA-05 redact-or-omit
-                out[key] = "[REDACTION_FAILED]"
-        return out
-
-    def _redact_observation(self, observation: Observation | None) -> Observation | None:
-        """Redact every string-valued ObservationResult.content in *observation*."""
-        if observation is None:
-            return None
-        new_results: list[ObservationResult] = []
-        for r in observation.results:
-            new_content: Any = r.content
-            if isinstance(r.content, str):
-                try:
-                    new_content = redact_structured_text(r.content)
-                except Exception:  # noqa: BLE001 - REDA-05 redact-or-omit
-                    new_content = "[REDACTION_FAILED]"
-            elif isinstance(r.content, list):
-                new_content = self._redact_text_parts(r.content)
-            new_results.append(r.model_copy(update={"content": new_content}))
-        return observation.model_copy(update={"results": new_results})
-
-    def redact_step(self, step: Step) -> Step:
-        """Return a redacted copy of *step* (REDA-04, REDA-05).
-
-        Applies the redaction rules uniformly to ``message``,
-        ``reasoning_content``, every ``ToolCall.arguments`` value, and
-        every ``ObservationResult.content`` string. Internal exceptions
-        degrade to ``"[REDACTION_FAILED]"`` for the offending field — never
-        raw pass-through.
-
-        Returns:
-            A new Step instance whose text-bearing fields have been run
-            through the redaction rules.
-        """
+    Nested credentials under lower/mixed/camel-case keys are replaced without a JSON
+    round-trip; a failure on one key degrades only that key (REDA-05)."""
+    out: dict[str, Any] = {}
+    for key, val in arguments.items():
         try:
-            updates: dict[str, Any] = {}
-            if isinstance(step.message, str):
-                updates["message"] = self._redact_optional_text(step.message)
-            elif isinstance(step.message, list):
-                updates["message"] = self._redact_text_parts(step.message)
-            if step.reasoning_content is not None:
-                updates["reasoning_content"] = self._redact_optional_text(step.reasoning_content)
-            if step.tool_calls is not None:
-                redacted_calls = [
-                    tc.model_copy(update={"arguments": self._redact_arguments(tc.arguments)}) for tc in step.tool_calls
-                ]
-                updates["tool_calls"] = redacted_calls
-            if step.observation is not None:
-                updates["observation"] = self._redact_observation(step.observation)
-            if not updates:
-                return step
-            return step.model_copy(update=updates)
-        except Exception as exc:  # noqa: BLE001 - REDA-05 redact-or-omit (top-level fallback)
-            ui.print_warning(_console, f"Redactor failure: {type(exc).__name__}")
-            # Wipe every text-bearing surface — partial wipes leak secrets
-            # if redaction failed mid-arguments / mid-observation.
-            safe_updates: dict[str, Any] = {"message": "[REDACTION_FAILED]"}
-            if step.reasoning_content is not None:
-                safe_updates["reasoning_content"] = "[REDACTION_FAILED]"
-            if step.tool_calls is not None:
-                safe_updates["tool_calls"] = [
-                    tc.model_copy(update={"arguments": {"_redaction": "[REDACTION_FAILED]"}}) for tc in step.tool_calls
-                ]
-            if step.observation is not None:
-                safe_updates["observation"] = step.observation.model_copy(
-                    update={
-                        "results": [
-                            r.model_copy(update={"content": "[REDACTION_FAILED]"}) for r in step.observation.results
-                        ]
-                    }
-                )
-            return step.model_copy(update=safe_updates)
+            out[key] = (_redact_sensitive_text(val) if _is_native_credential_field(key, arguments)
+                        else redact_value(val, _is_sensitive_key(key) if isinstance(key, str) else False))
+        except Exception:  # noqa: BLE001 - REDA-05 redact-or-omit
+            out[key] = _FAILED
+    return out
+
+
+def redact_result_content(result: dict[str, Any]) -> dict[str, Any]:
+    """Return *result* with its text content redacted; failures replace the content."""
+    content = result.get("content")
+    if isinstance(content, str):
+        try:
+            return {**result, "content": redact_structured_text(content)}
+        except Exception:  # noqa: BLE001 - REDA-05 redact-or-omit
+            return {**result, "content": _FAILED}
+    if isinstance(content, list):
+        return {**result, "content": _redact_text_parts(content)}
+    return result
+
+
+def redact_step(step: dict[str, Any]) -> dict[str, Any]:
+    """Return a redacted copy of one transcript step (REDA-04, REDA-05).
+
+    Redacts ``message``, ``reasoning_content``, every tool-call argument and every
+    observation result's text. Internal failures replace every text-bearing surface
+    with ``[REDACTION_FAILED]``, never raw pass-through."""
+    try:
+        updated = dict(step)
+        message = step.get("message")
+        if isinstance(message, str):
+            updated["message"] = redact_structured_text(message)
+        elif isinstance(message, list):
+            updated["message"] = _redact_text_parts(message)
+        if step.get("reasoning_content") is not None:
+            updated["reasoning_content"] = redact_structured_text(step["reasoning_content"])
+        if step.get("tool_calls") is not None:
+            updated["tool_calls"] = [{**call, "arguments": _redact_arguments(call["arguments"])}
+                                     for call in step["tool_calls"]]
+        if step.get("observation") is not None:
+            updated["observation"] = {**step["observation"], "results": [
+                redact_result_content(result) for result in step["observation"]["results"]]}
+        return updated
+    except Exception as exc:  # noqa: BLE001 - REDA-05 redact-or-omit (top-level fallback)
+        ui.print_warning(_console, f"Redactor failure: {type(exc).__name__}")
+        # Wipe every text-bearing surface: a partial wipe could leak a secret.
+        safe = dict(step, message=_FAILED)
+        if step.get("reasoning_content") is not None:
+            safe["reasoning_content"] = _FAILED
+        if step.get("tool_calls") is not None:
+            safe["tool_calls"] = [{**call, "arguments": {"_redaction": _FAILED}} for call in step["tool_calls"]]
+        if step.get("observation") is not None:
+            safe["observation"] = {"results": [{**result, "content": _FAILED}
+                                               for result in step["observation"]["results"]]}
+        return safe

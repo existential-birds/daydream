@@ -45,7 +45,7 @@ from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_cli_process import FakeCliScript, install_fake_cli_process
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 from tests.harness.pi_replay import make_mock_process, make_mock_process_from_fixture
-from tests.harness.trajectory import make_recorder
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 
 class _RetryableBackendError(RuntimeError):
@@ -77,7 +77,7 @@ def _agent_step_with_stop_reason(traj: dict[str, Any]) -> dict[str, Any]:
 
 def _budget_stop(recorder: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     """Recorded trajectory plus the single ``agent_budget_stop`` metadata."""
-    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
+    traj = read_trajectory(recorder.path)
     stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
     assert len(stops) == 1
     return traj, stops[0]["metadata"]
@@ -107,7 +107,7 @@ async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
     assert (output, continuation, reason) == ("partial output", None, "tool_call_budget_exceeded")
     assert ledger.stopped == BudgetStop("fix", "tool_calls", limit=5, spent=5, remaining_at_dispatch=5, reserved=0)
     assert closed and backend.cancel_calls == 0
-    trajectory = json.loads(recorder.path.read_text())
+    trajectory = read_trajectory(recorder.path)
     step = _agent_step_with_stop_reason(trajectory)
     assert step["extra"]["stop_reason"] == "tool_call_budget_exceeded"
     assert step["message"] == "partial output"
@@ -146,8 +146,8 @@ async def test_run_agent_abort_records_reason_and_turn_end(tmp_path: Path) -> No
         )
     assert reason == "tool_call_budget_exceeded"
     partial = next(snapshot for snapshot in snapshots if snapshot.status == "partial")
-    cleanup_document = json.loads(partial.documents[0].read_bytes())
-    final_document = json.loads(recorder.path.read_bytes())
+    cleanup_document = partial.documents[0].validated_payload(recorder.session_id)
+    final_document = read_trajectory(recorder.path)
     for document in (cleanup_document, final_document):
         step = _agent_step_with_stop_reason(document)
         assert step["extra"]["stop_reason"] == "tool_call_budget_exceeded"
@@ -316,7 +316,7 @@ async def test_host_admitted_starts_stay_charged_unless_a_retry_refunds_them(
     assert [binding.calls for binding in bindings] == [2, 1, 0]
     assert backend.cancel_calls == 0
     assert (scope.observed, scope.charged, scope.refunded) == (3, 2, 1)
-    trajectory = json.loads(recorder.path.read_text())
+    trajectory = read_trajectory(recorder.path)
     calls = [call for step in trajectory["steps"] for call in step.get("tool_calls") or []]
     assert [call["tool_call_id"] for call in calls] == ["read-1"]
 

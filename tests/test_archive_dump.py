@@ -7,7 +7,7 @@ import pytest
 
 from daydream.archive.errors import ArchivePublicationError
 from daydream.run_config import RunConfig
-from tests.test_archive import _setup_bundle, _strict_archive, _write_snapshot
+from tests.test_archive import _evidence_store, _setup_bundle, _strict_archive, _write_snapshot  # noqa: F401 - autouse evidence store
 
 
 def _contents(path: Path) -> dict[str, bytes]:

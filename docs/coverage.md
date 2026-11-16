@@ -3,7 +3,7 @@
 Run `make test` (also part of `make check`) for full branch coverage and
 `coverage.xml`. Focused pytest runs deliberately have no coverage floor.
 The authoritative floor and exclusions are in [pyproject.toml](../pyproject.toml).
-Vendored ATIF is excluded because it cannot receive local hand fixes.
+Vendored ATIF (`daydream/benchmarks/atif`) is excluded because it cannot receive local hand fixes.
 
 To raise the floor, measure the complete suite on current main with `make test`,
 round the observed percentage down to a whole percent, and raise `fail_under`

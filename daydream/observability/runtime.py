@@ -11,12 +11,12 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
 from importlib.metadata import version
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 import anyio
 from opentelemetry.metrics import NoOpMeterProvider
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import ReadableSpan, SpanLimits, TracerProvider
+from opentelemetry.sdk.trace import ReadableSpan, SpanLimits, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor, SpanExporter, SpanExportResult
 
 from daydream.observability.config import LOCAL_TRACE_DESTINATION, ObservabilityConfig, ObservabilityError
@@ -69,19 +69,15 @@ def current_run_trace_id() -> str | None:
 
 
 def associate_run_trajectory(session_id: str, *, pr_repo: str | None = None, pr_number: int | None = None) -> None:
-    """Link the early run span once its root trajectory identity is available."""
+    """Link the early run span once its root evidence identity is available."""
     session = current_session()
     if session is not None and session.root_scope is not None:
+        from daydream.observability.spans import associate_trajectory_identity, session_identity_attributes
+
         session.root_scope.attrs({
-            "daydream.session.id": session_id,
-            "daydream.trajectory.id": session_id,
-            "traceloop.association.properties.session_id": session_id,
-            "daydream.pr_repo": pr_repo,
-            "daydream.pr_number": pr_number,
+            **session_identity_attributes(session_id), "daydream.pr_repo": pr_repo, "daydream.pr_number": pr_number,
         })
         # Seed descendants even without a recorder; root exit resets this context.
-        from daydream.observability.spans import associate_trajectory_identity
-
         associate_trajectory_identity(session_id)
 
 
@@ -93,24 +89,55 @@ def record_local_trace(path: Path) -> None:
         session.provider.add_span_processor(SimpleSpanProcessor(exporter, meter_provider=NoOpMeterProvider()))
 
 
-class _SafeExporter(SpanExporter):
-    """Contain extension and SDK failures and sanitize their worker diagnostics."""
+class _EndedSpans(SpanProcessor):
+    """Count every span that ended while remote destinations were attached."""
 
-    def __init__(self, exporter: SpanExporter, policy: PrivacyPolicy) -> None:
+    def __init__(self) -> None:
+        self.count = 0
+        self._lock = threading.Lock()
+
+    def on_end(self, span: ReadableSpan) -> None:
+        with self._lock:
+            self.count += 1
+
+
+class _SafeExporter(SpanExporter):
+    """Contain extension and SDK failures, sanitize their worker diagnostics, and count delivery."""
+
+    def __init__(self, exporter: SpanExporter, policy: PrivacyPolicy, name: str = "") -> None:
         self.exporter = exporter
         self.policy = policy
+        self.name = name
+        self.received = 0
+        self.failed = 0
         self._shutdown = False
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        self.received += len(spans)
         with diagnostic_scope(self.policy):
             try:
                 result = self.exporter.export(spans)
                 if result != SpanExportResult.SUCCESS:
+                    self.failed += len(spans)
                     _logger.warning("Trace export failed; review execution continues")
                 return result
             except Exception:
+                self.failed += len(spans)
                 _logger.warning("Trace exporter raised an exception; review execution continues")
                 return SpanExportResult.FAILURE
+
+    def delivery(self, ended: int) -> dict[str, Any]:
+        """Spans this destination never received (queue drops, unflushed) or did not get acknowledged."""
+        report: dict[str, Any] = {"destination": self.name, "ended": ended, "dropped": max(0, ended - self.received),
+                                  "failed": self.failed}
+        snapshot = getattr(self.exporter, "delivery_snapshot", None)
+        if callable(snapshot):
+            try:
+                ledger = snapshot()
+                report.update(rejected=ledger.get("rejected", 0), unverified=ledger.get("unverified", 0))
+            except Exception:
+                report["unverified"] = None
+        return report
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
         with diagnostic_scope(self.policy):
@@ -185,6 +212,10 @@ class TraceSession:
         self._local_trace_pending = LOCAL_TRACE_DESTINATION in config.destinations
         self._closed = False
         self._unowned: list[_SafeExporter] = []
+        self._remote: list[_SafeExporter] = []
+        self._ended = _EndedSpans()
+        #: Per-destination delivery once the session closes; ``None`` when cleanup outlived its deadline.
+        self.delivery: list[dict[str, Any]] | None = []
         self.provider = TracerProvider(
             resource=self._build_resource(config),
             shutdown_on_exit=False,
@@ -264,8 +295,11 @@ class TraceSession:
                     if inspect.iscoroutine(raw_exporter):
                         raw_exporter.close()
                     raise ObservabilityError(f"Trace exporter '{name}' must return an OpenTelemetry SpanExporter")
-                exporter = _SafeExporter(raw_exporter, self.policy)
+                exporter = _SafeExporter(raw_exporter, self.policy, name)
                 self._unowned.append(exporter)
+                if not self._remote:
+                    self.provider.add_span_processor(self._ended)
+                self._remote.append(exporter)
                 # Use the same owned processor in CLI/notebooks, with no ambient
                 # Traceloop context callbacks or enabled internal metrics.
                 processor = BatchSpanProcessor(exporter, meter_provider=NoOpMeterProvider())
@@ -296,7 +330,22 @@ class TraceSession:
         with anyio.move_on_after(self.cleanup_timeout_s, shield=True) as deadline:
             await anyio.to_thread.run_sync(cleanup, abandon_on_cancel=True)
         if deadline.cancel_called:
-            _logger.warning("Trace cleanup exceeded its deadline; cleanup continues in the background")
+            self.delivery = None
+            if self._remote:
+                _logger.warning("Remote trace delivery is unknown: cleanup exceeded its deadline and continues in the "
+                                "background; local evidence is unaffected")
+            else:
+                _logger.warning("Trace cleanup exceeded its deadline; cleanup continues in the background")
+            return
+        self.delivery = [exporter.delivery(self._ended.count) for exporter in self._remote]
+        for report in self.delivery:
+            undelivered = report["dropped"] + report["failed"] + (report.get("rejected") or 0)
+            if undelivered or report.get("unverified"):
+                _logger.warning(
+                    "Remote trace delivery to %s is incomplete: %d of %d spans dropped before export, %d failed, "
+                    "%s rejected, %s unverified; local evidence is unaffected",
+                    report["destination"], report["dropped"], report["ended"], report["failed"],
+                    report.get("rejected", 0), report.get("unverified", 0))
 
 
 @asynccontextmanager

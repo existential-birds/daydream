@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel, Field
 
-from daydream.atif.models.observation_result import ObservationResult
+from daydream.benchmarks.atif.models.observation_result import ObservationResult
 
 
 class Observation(BaseModel):

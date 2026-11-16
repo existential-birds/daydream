@@ -13,10 +13,13 @@ import anyio
 import pytest
 
 from daydream import cli
-from daydream.atif import validate as atif_validate
 from daydream.commands.improve import _parse_improve_args
 from daydream.commands.review import _parse_args
 from daydream.run_config import RunConfig
+from daydream.trajectory import DOCUMENT_SUFFIX, read_document_view
+from daydream.trajectory.journal import read_journal
+from daydream.trajectory.view import SNAPSHOT_EVENT
+from tests.harness.trajectory import atif_valid as atif_validate
 
 
 def test_signal_handler_flushes_before_backend_registry_snapshot(monkeypatch: pytest.MonkeyPatch,) -> None:
@@ -289,16 +292,19 @@ def test_signal_flushes_all_runner_recorders(tmp_path: Path, git_repo: Path, ext
     run_root = git_repo / ".daydream" / "runs"
     run_dirs = [path for path in run_root.iterdir() if path.is_dir()]
     assert len(run_dirs) == 1
-    partials = sorted(run_dirs[0].rglob("*.partial"))
-    assert len(partials) == 3
-    by_name = {path.name: json.loads(path.read_text(encoding="utf-8")) for path in partials}
-    assert set(by_name) == {"trajectory.json.partial", "signal-a.json.partial", "signal-b.json.partial"}
-    assert all(atif_validate(item, validate_images=False) for item in by_name.values())
-    assert all(item.get("extra", {}).get("partial") is True for item in by_name.values())
+    documents = sorted(run_dirs[0].rglob(f"*{DOCUMENT_SUFFIX}"))
+    by_name = {path.name.split("--")[0].removesuffix(DOCUMENT_SUFFIX): path.read_bytes() for path in documents}
+    assert set(by_name) == {"evidence", "signal-a", "signal-b"}
+    # The signal appended one snapshot to every live document before the run unwound and sealed it aborted.
+    for raw in by_name.values():
+        assert [record.event_name for record in read_journal(raw).records].count(SNAPSHOT_EVENT) == 1
+    views = {name: read_document_view(raw) for name, raw in by_name.items()}
+    assert all(atif_validate(item, validate_images=False) for item in views.values())
+    assert all(item.get("extra", {}).get("partial") is True for item in views.values())
 
-    root_text = json.dumps(by_name["trajectory.json.partial"], sort_keys=True)
-    a_text = json.dumps(by_name["signal-a.json.partial"], sort_keys=True)
-    b_text = json.dumps(by_name["signal-b.json.partial"], sort_keys=True)
+    root_text = json.dumps(views["evidence"], sort_keys=True)
+    a_text = json.dumps(views["signal-a"], sort_keys=True)
+    b_text = json.dumps(views["signal-b"], sort_keys=True)
     assert "ROOT_SIGNAL_ONLY" in root_text
     assert "SIGNAL_A_ONLY" not in root_text and "SIGNAL_B_ONLY" not in root_text
     assert "SIGNAL_A_ONLY" in a_text
@@ -306,7 +312,7 @@ def test_signal_flushes_all_runner_recorders(tmp_path: Path, git_repo: Path, ext
     assert "SIGNAL_B_ONLY" in b_text
     assert "SIGNAL_A_ONLY" not in b_text and "ROOT_SIGNAL_ONLY" not in b_text
     assert "Traceback" not in stdout + stderr
-    assert "trajectory write failed" not in (stdout + stderr).lower()
+    assert "evidence write failed" not in (stdout + stderr).lower()
 
     calls = gh_log.read_text(encoding="utf-8").splitlines()
     assert calls == ["api /user", "repo view --json nameWithOwner -q .nameWithOwner"]

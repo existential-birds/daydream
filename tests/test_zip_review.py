@@ -14,7 +14,9 @@ import subprocess
 import zipfile
 from pathlib import Path
 
+from daydream.trajectory import RUN_DOCUMENT_NAME
 from tests.harness.git_helpers import git, init_repo
+from tests.harness.trajectory import evidence_document
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "zip-review.sh"
 
@@ -35,13 +37,14 @@ def test_zip_review_treats_archive_paths_as_data(tmp_path: Path) -> None:
         (run_dir / "review-output.md").write_text("review\n")
 
         if metadata_source == "manifest":
-            (run_dir / "trajectory.json").write_text("{}")
+            (run_dir / RUN_DOCUMENT_NAME).write_bytes(evidence_document("run-id", session_id="run-id"))
             (run_dir / "manifest.json").write_text(json.dumps({"git": {"branch": "team/from-manifest"}}))
         else:
             target_repo = case_root / "target-repo"
             init_repo(target_repo)
             git(target_repo, "checkout", "-b", "team/from-trajectory")
-            (run_dir / "trajectory.json").write_text(json.dumps({"extra": {"target_dir": str(target_repo)}}))
+            (run_dir / RUN_DOCUMENT_NAME).write_bytes(
+                evidence_document("run-id", session_id="run-id", extra={"target_dir": str(target_repo)}))
 
         result = subprocess.run(  # noqa: S603 - arguments are not user-controlled
             [str(SCRIPT), str(archive_root)], cwd=case_root, capture_output=True, text=True, check=False,
@@ -53,7 +56,7 @@ def test_zip_review_treats_archive_paths_as_data(tmp_path: Path) -> None:
         assert zipfile.is_zipfile(zip_path)
         with zipfile.ZipFile(zip_path) as zf:
             basenames = {Path(name).name for name in zf.namelist()}
-        assert "trajectory.json" in basenames
+        assert RUN_DOCUMENT_NAME in basenames
         assert "review-output.md" in basenames
 
         # The Python-shaped path was inert data; the embedded pathlib call never ran.
