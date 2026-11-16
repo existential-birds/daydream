@@ -80,6 +80,8 @@ _DIAGNOSTIC_LABEL_MAX_CHARS = 64
 _DIAGNOSTIC_LABEL_MAX_DISTINCT = 32
 _NON_JSON_EXCERPT_MAX_LINES = 20
 _NON_JSON_EXCERPT_MAX_CHARS_PER_LINE = 256
+# A stripped Rust backtrace frame (`N: symbol`) or its source location (`at path:line`).
+_BACKTRACE_FRAME = re.compile(r"\d+: |at ")
 # Only public error items activate this contract; absent markers cannot
 # justify invented tool events or invocation-wide coverage claims.
 # External contract: this literal identifies Codex CLI release/wire mode.
@@ -335,8 +337,14 @@ def _bounded_process_excerpt(value: str) -> str:
     return redact_structured_text(value)[:_NON_JSON_EXCERPT_MAX_CHARS_PER_LINE]
 
 
-def _mcp_result_text(content: Any) -> str:
-    """Join an MCP result made only of text blocks with newlines; other content becomes canonical JSON."""
+def _mcp_result_text(result: dict[str, Any]) -> str:
+    """Join MCP content made only of text blocks with newlines; other content becomes canonical JSON.
+
+    Structured content is recorded only when the result has no content.
+    """
+    content = result.get("content")
+    if not content and result.get("structured_content") is not None:
+        content = result["structured_content"]
     if isinstance(content, list) and all(
         isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
         for block in content
@@ -848,7 +856,7 @@ class CodexBackend:
                 return max(0.0, terminal_deadline - asyncio.get_running_loop().time())
             return idle_timeout_s
         non_json_lines: list[str] = []  # redacted/capped process-exit excerpts
-        non_json_backtrace = False  # a Codex error report's backtrace has started
+        in_backtrace = False  # inside a backtrace's header, frames and blank lines
         unmatched_seq = 0  # monotonic source for orphaned tool-result ids
 
         def _warn(reason: str) -> None:
@@ -922,7 +930,7 @@ class CodexBackend:
         transport: CliTransport | None = None
         execution_cwd = cwd
         shared_checkout: _SharedCheckout | None = None
-        # As with Pi and Claude, only a persisted call resumes: --ephemeral would still append to a resumed thread.
+        # As with Pi, only a persisted call resumes: --ephemeral would still append to a resumed thread.
         resumed = (continuation if persist_session and continuation is not None and continuation.backend == "codex"
                    else None)
 
@@ -1087,11 +1095,12 @@ class CodexBackend:
                     event = json.loads(raw_line)
                 except json.JSONDecodeError:
                     # Keep bounded raw lines only for the process-exit exception excerpt; diagnostics and
-                    # logs retain only the count. Blank lines and everything from anyhow's backtrace header
-                    # on are counted but not kept, so frames cannot push Codex's cause line out.
+                    # logs retain only the count. Blank lines and a backtrace (its header, then frame and
+                    # blank lines) are counted but not kept, so frames cannot push Codex's cause line out.
                     non_json_count += 1
-                    non_json_backtrace = non_json_backtrace or raw_line.casefold() == "stack backtrace:"
-                    if raw_line and not non_json_backtrace:
+                    in_backtrace = raw_line.casefold() == "stack backtrace:" or (
+                        in_backtrace and (not raw_line or _BACKTRACE_FRAME.match(raw_line) is not None))
+                    if raw_line and not in_backtrace:
                         if len(non_json_lines) >= _NON_JSON_EXCERPT_MAX_LINES:
                             non_json_lines.pop(0)
                         non_json_lines.append(_bounded_process_excerpt(raw_line))
@@ -1261,7 +1270,7 @@ class CodexBackend:
                         if "result" in item:
                             result = item["result"]
                             if isinstance(result, dict):
-                                result_content = _mcp_result_text(result.get("content"))
+                                result_content = _mcp_result_text(result)
                                 result_error = result.get("isError") is True
                             else:
                                 _warn("tool_result_not_object")

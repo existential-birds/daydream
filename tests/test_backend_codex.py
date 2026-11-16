@@ -90,7 +90,7 @@ async def test_malformed_mcp_tool_name_is_string_safe_and_diagnosed(tmp_path: Pa
     }
     process = make_mock_process([json.dumps(row) for row in [
         {"type": "item.started", "item": null_tool},
-        {"type": "item.completed", "item": {**null_tool, "result": {"content": []}}},
+        {"type": "item.completed", "item": {**null_tool, "result": {"content": None}}},
         {"type": "item.started", "item": mapping_tool},
         {"type": "item.completed", "item": {**mapping_tool, "result": {"content": []}}},
         {"type": "turn.completed", "usage": {}},
@@ -100,7 +100,7 @@ async def test_malformed_mcp_tool_name_is_string_safe_and_diagnosed(tmp_path: Pa
     results = [event for event in events if isinstance(event, ToolResultEvent)]
     diagnostics = [event for event in events if isinstance(event, DiagnosticEvent)]
     assert [(event.id, event.name) for event in starts] == [("null-tool", "unknown"), ("mapping-tool", "unknown")]
-    assert [event.id for event in results] == ["null-tool", "mapping-tool"]
+    assert [(event.id, event.output) for event in results] == [("null-tool", ""), ("mapping-tool", "")]
     assert [event.code for event in diagnostics] == ["codex_parser_coverage", "codex_parser_coverage"]
     assert [event.metadata["warnings"]["reasons"] for event in diagnostics] == [
         {"tool_not_string": 1}, {"tool_not_string": 2},
@@ -272,7 +272,7 @@ async def test_nonzero_exit_raises_with_captured_output() -> None:
     assert len(bounded) <= 64 and "ghp_" not in bounded and "[REDACTED" in bounded
 
 
-async def _continuation_token_resumes_case(tmp_path: Path, read_only: bool, persist_session: bool) -> None:
+async def _continuation_token_case(tmp_path: Path, read_only: bool, persist_session: bool) -> None:
     """A persisted call resumes a Codex thread; an ephemeral one starts fresh and offers no continuation.
 
     Both keep the requested output schema as native output.
@@ -318,10 +318,10 @@ async def _continuation_token_resumes_case(tmp_path: Path, read_only: bool, pers
         assert result.session_id == "th_abc123"
 
 
-async def test_continuation_token_resumes(tmp_path: Path) -> None:
+async def test_continuation_token_resumes_only_persisted_sessions(tmp_path: Path) -> None:
     for index, (read_only, persist_session) in enumerate([(False, True), (True, True), (False, False)]):
         try:
-            await _continuation_token_resumes_case(
+            await _continuation_token_case(
                 tmp_path=_case_dir(tmp_path, index), read_only=read_only, persist_session=persist_session,
             )
         except BaseException as exc:
@@ -733,7 +733,8 @@ async def test_parser_diagnostic_precedes_nonzero_process_exit() -> None:
         "not-json token=opaque-parser-secret /Users/private-person/.codex/config.toml "
         + "x" * 500
     )
-    # Codex's real required-MCP failure report: the cause twice, then a blank line and anyhow's backtrace.
+    # Codex's real required-MCP failure report: the cause twice, then a blank line and anyhow's backtrace. An
+    # earlier panic's backtrace ends at its first line that is not a frame.
     cause = (
         "required MCP servers failed to initialize: daydream: handshaking with MCP server failed: Send message error "
         "Transport [codex_rmcp_client::tool_list_changes::ToolListChanges<rmcp::transport::worker::WorkerTransport>] "
@@ -741,12 +742,19 @@ async def test_parser_diagnostic_precedes_nonzero_process_exit() -> None:
     )
     lines = [
         *[secret_line] * 30,
+        "thread 'tokio-runtime-worker' panicked at src/x.rs:1:1:",
+        "stack backtrace:",
+        "   0: rust_begin_unwind",
+        "             at /rustc/abc/library/std/src/panicking.rs:665:5",
+        "   1: <unknown>",
         f"2026-11-16T20:46:32.480714Z ERROR codex_core::session: Failed to create session: {cause}",
         f"Error: thread/start: thread/start failed: error creating thread: Fatal error: Failed to initialize session: "
         f"{cause}",
         "",
         "Stack backtrace:",
         *[f"  {frame}: <unknown>" for frame in range(24)],
+        "  24: std::rt::lang_start_internal",
+        "             at /rustc/abc/library/std/src/rt.rs:1:1",
     ]
     mock_proc = make_mock_process(lines)
     mock_proc.returncode = 9
@@ -761,8 +769,10 @@ async def test_parser_diagnostic_precedes_nonzero_process_exit() -> None:
     message = str(exc_info.value)
     assert "last 10 non-JSON lines" in message
     assert message.count("required MCP servers failed to initialize") == 2
-    assert message.splitlines()[-1].startswith("Error: thread/start:")
-    assert "<unknown>" not in message and "Stack backtrace" not in message
+    assert "thread 'tokio-runtime-worker' panicked" in message
+    assert message.split("\n")[-1].startswith("Error: thread/start:")
+    assert not any(frame in message.casefold() for frame in (
+        "stack backtrace", "<unknown>", "rust_begin_unwind", "panicking.rs", "lang_start_internal"))
     assert "opaque-parser-secret" not in message
     assert "/Users/private-person" not in message
     assert len(message) <= 3_000
@@ -937,7 +947,8 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
         },
         {
             "type": "item.completed",
-            "item": {"type": "mcp_tool_call", "id": "read", "tool": "Read", "result": {"content": "file contents"}},
+            "item": {"type": "mcp_tool_call", "id": "read", "tool": "Read",
+                     "result": {"content": "file contents", "structured_content": {"result": "file contents"}}},
         },
         {
             "type": "item.started",
@@ -966,6 +977,12 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
                      "status": "failed", "result": {"content": [{"type": "text", "text": "refused"},
                                                                 {"type": "text", "text": "second"}],
                                                     "structured_content": None}},
+        },
+        {"type": "item.started", "item": {"type": "mcp_tool_call", "id": "lookup", "tool": "Lookup", "arguments": {}}},
+        {
+            "type": "item.completed",
+            "item": {"type": "mcp_tool_call", "id": "lookup", "tool": "Lookup",
+                     "result": {"content": [], "structured_content": {"rows": [1]}}},
         },
         {
             "type": "item.completed",
@@ -1033,16 +1050,19 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
         ("read", "Read"),
         ("write", "Write"),
         ("refused", "Write"),
+        ("lookup", "Lookup"),
     ]
     results = {event.id: event for event in events if isinstance(event, ToolResultEvent)}
     assert results["shell"].output == "file.py\ntest.py" and not results["shell"].is_error
     patch_start = next(event for event in events if isinstance(event, ToolStartEvent) and event.id == "patch")
     assert patch_start.input == {"file": "main.py", "action": "modified"}
     assert results["patch"].output == "modified: main.py" and not results["patch"].is_error
-    # MCP text blocks join with newlines; any other content is canonical JSON, never a Python repr.
+    # MCP text blocks join with newlines; any other content, or structured content when there is none, is
+    # canonical JSON, never a Python repr.
     mcp_outputs = {
         "read": "file contents", "refused": "refused\nsecond",
         "write": '[{"text":"permission denied","type":"text"},{"data":"aGk=","mimeType":"image/png","type":"image"}]',
+        "lookup": '{"rows":[1]}',
     }
     assert {key: results[key].output for key in mcp_outputs} == mcp_outputs and results["write"].is_error
     assert results["refused"].is_error and results["refused"].status == "failed"
@@ -1073,12 +1093,14 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
     assert [json.loads(step["message"]) for step in steps[:-1]] == [json.loads(text) for text in expected_text[:-1]]
     assert steps[-1]["message"] == "Verified"
     assert steps[0]["reasoning_content"] == "I will inspect"
-    assert [call["tool_call_id"] for call in steps[0]["tool_calls"]] == ["shell", "patch", "read", "write", "refused"]
+    assert [call["tool_call_id"] for call in steps[0]["tool_calls"]] == [
+        "shell", "patch", "read", "write", "refused", "lookup"]
     recorded = {result["source_call_id"]: result.get("content") for result in steps[0]["observation"]["results"]}
     assert recorded.keys() == results.keys()
+    assert [recorded["read"], recorded["refused"]] == [mcp_outputs["read"], mcp_outputs["refused"]]
     # The trajectory redactor re-serializes JSON content, so the recorded JSON is compared by value.
-    assert [recorded["read"], recorded["refused"], json.loads(recorded["write"])] == [
-        mcp_outputs["read"], mcp_outputs["refused"], json.loads(mcp_outputs["write"])]
+    json_results = ("write", "lookup")
+    assert [json.loads(recorded[key]) for key in json_results] == [json.loads(mcp_outputs[key]) for key in json_results]
     assert process.returncode == 0 and backend._transports == []
     process.wait.assert_awaited()
     process.stdin.close.assert_called()
