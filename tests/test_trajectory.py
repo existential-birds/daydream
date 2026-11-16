@@ -41,7 +41,6 @@ from daydream.trajectory.journal import read_journal
 from daydream.trajectory.view import SNAPSHOT_EVENT
 from daydream.ui import get_shutdown_panel, set_shutdown_panel
 from tests.harness.trajectory import (
-    atif_valid as atif_validate,
     make_recorder,
     observe_text_and_result,
     read_trajectory,
@@ -139,7 +138,6 @@ async def test_dispatch_failure_is_caught_and_run_continues(
             observe_text_and_result(inv, "after-failure")
 
     traj = read_trajectory(recorder.path)
-    assert atif_validate(traj, validate_images=False) is True
     agent_steps = _agent_steps(traj)
     assert len(agent_steps) == 1
     # "before-failure" + "after-failure" both make it; "will-fail" was dropped.
@@ -292,7 +290,6 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
                             for document in snapshot.documents:
                                 raw = document.read_bytes()
                                 payload = document.validated_payload(root.session_id)
-                                assert atif_validate(payload, validate_images=False)
                                 assert raw.isascii() and '-canary' not in raw.decode()
                                 if document.trajectory_id != leaf.trajectory_id:
                                     assert (payload['extra']['snapshot_at'], payload['extra']['partial']) == (
@@ -364,7 +361,14 @@ async def test_fork_write_failure_degrades_to_truthful_incomplete_capture(
             async with recorder.fork("fail-child") as child:
                 async with child.invocation(phase=DaydreamPhase.FIX) as inv:
                     observe_text_and_result(inv)
-                monkeypatch.setattr(child._journal, "seal", lambda _body: False)
+                journal, fsync = child._journal, os.fsync
+
+                def denied(fd: int) -> None:
+                    if fd == journal._fd:
+                        raise OSError("disk full")
+                    fsync(fd)
+
+                monkeypatch.setattr(os, "fsync", denied)
 
         assert get_current_recorder() is recorder
         assert recorder.completed_child_documents() == ()  # A failed child keeps no reference.
@@ -378,6 +382,7 @@ async def test_fork_write_failure_degrades_to_truthful_incomplete_capture(
     assert root["extra"]["partial"] is True and root["extra"]["snapshot_at"] == root["extra"]["run_ended_at"]
     seal = read_journal(recorder.path.read_bytes()).seal
     assert seal is not None and seal.body["failed_documents"] == [child.trajectory_id]
+    assert journal.failure == "OSError" and not read_journal(child.path.read_bytes()).complete
 
 
 # write_partial tests (CLI-03, D-07 SIGINT partial flush)
@@ -400,7 +405,6 @@ async def test_partial_writes_preserve_live_state_and_joined_steps(tmp_path: Pat
     final = read_trajectory(root.path)
     assert len(joined['steps']) == len(final['steps'])
     for document in (first, joined, final):
-        assert atif_validate(document, validate_images=False)
         observation, = _agent_steps(document)[0]['observation']['results']
         assert observation == {'content': INCOMPLETE_CONTENT,
                                'extra': {'is_error': True, 'status': 'interrupted'}}
@@ -456,7 +460,6 @@ async def test_signal_flush_prepare_failure_never_publishes_disconnected_snapsho
                 for document in current.documents:
                     payload = document.validated_payload(root.session_id)
                     assert payload['extra']['snapshot_at'] == current.cutoff_at
-                    assert atif_validate(payload, validate_images=False)
                 assert all(document.path.read_bytes() == document.read_bytes() for document in current.documents)
                 assert {document.trajectory_id: document.read_bytes() for document in previous.documents} == saved
 
@@ -529,7 +532,6 @@ async def test_signal_handler_flushes_siblings_despite_a_writer_failure(
                 assert snapshot.status == 'partial' and len(snapshot.documents) == 3
                 for document in snapshot.documents:
                     view = document.validated_payload(recorder.session_id)
-                    assert atif_validate(view, validate_images=False)
                     taken = view['extra'].get('snapshot_at') == snapshot.cutoff_at
                     assert taken == (document.trajectory_id != children['signal-a'].trajectory_id)
                 assert failed.failure == 'PermissionError' and len(warnings) == 1

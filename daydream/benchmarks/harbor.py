@@ -34,7 +34,6 @@ from daydream.benchmarks.atif.models import Agent, FinalMetrics, Step, Trajector
 from daydream.trajectory import (
     DOCUMENT_SUFFIX,
     RUN_DOCUMENT_NAME,
-    RunWriteSnapshot,
     read_document_view,
     run_document_path,
     siblings_directory,
@@ -148,12 +147,6 @@ def _split(views: Iterable[tuple[str, dict[str, Any]]], session_id: str) -> Atif
     if root is None:
         raise AtifExportError("run evidence has no root document")
     return export_views(root, forks)
-
-
-def export_snapshot(snapshot: RunWriteSnapshot) -> AtifExport:
-    """Export a frozen run snapshot's checked evidence documents."""
-    return _split(((document.path.name, document.validated_payload(snapshot.root_trajectory_id))
-                   for document in snapshot.documents), snapshot.root_trajectory_id)
 
 
 def export_run_directory(run_dir: Path) -> AtifExport:

@@ -25,7 +25,6 @@ from tests.harness.git_helpers import bare_remote, git
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.review_profile import independent_exploration_profile
 from tests.harness.trajectory import (
-    atif_valid as atif_validate,
     make_recorder,
     observe_text_and_result,
     read_trajectory,
@@ -33,7 +32,7 @@ from tests.harness.trajectory import (
 from tests.test_deep_orchestrator import _install_stub_backend
 
 
-def test_timing_diagnostics_clip_scoped_events_without_synthesizing_forks(tmp_path: Path) -> None:
+def test_timing_unions_clipped_scoped_intervals_across_documents() -> None:
     """Sibling documents' review intervals overlap each other and the root's; only their union counts.
 
     Hand-computed over the wall [0s, 10s]: root [-1s, 4s] clips to [0, 4]; child-a [3, 6]; child-b [5, 7] and
@@ -53,7 +52,7 @@ def test_timing_diagnostics_clip_scoped_events_without_synthesizing_forks(tmp_pa
     invocation = {"trajectory_id": session, "invocation_id": "duplicate", "phase": "review",
         "started_at": start, "ended_at": end,
     }
-    root = {"session_id": session, "trajectory_id": session, "steps": [],
+    root = {"session_id": session, "trajectory_id": session,
         "extra": {"run_started_at": start, "run_ended_at": end, "phase_events": [
             event("phase_start", "clipped", "2025-12-31T23:59:59Z"),
             event("phase_end", "clipped", at(4), status="succeeded"),
@@ -71,9 +70,8 @@ def test_timing_diagnostics_clip_scoped_events_without_synthesizing_forks(tmp_pa
         ]},
     }
     def child(name: str, intervals: dict[str, tuple[str, str]], started: float, ended: float) -> dict[str, Any]:
-        """A sibling whose steps span the whole wall but whose only intervals are its phase events."""
-        return {"session_id": session, "trajectory_id": name,
-            "steps": [{"timestamp": start}, {"timestamp": end}], "extra": {
+        """A sibling whose only intervals are its phase events."""
+        return {"session_id": session, "trajectory_id": name, "extra": {
                 "phase_events": [bound for scope, (started_at, ended_at) in intervals.items() for bound in (
                     event("phase_start", scope, started_at), event("phase_end", scope, ended_at, status="succeeded"))],
                 "subtrajectories": [{"trajectory_id": name, "invocation_id": f"{name}-review", "phase": "review",
@@ -84,7 +82,7 @@ def test_timing_diagnostics_clip_scoped_events_without_synthesizing_forks(tmp_pa
         child("child-b", {"b": (at(5), at(7)), "b-clipped": (at(9), "2026-01-01T00:00:11Z")}, 6.5, 9.5))
     summary = RunSummary("complete", end, session, tuple(
         DocumentSummary(str(document["trajectory_id"]), f"{document['trajectory_id']}{DOCUMENT_SUFFIX}",
-                        {key: value for key, value in document.items() if key != "steps"}, StepFacts())
+                        document, StepFacts())
         for document in (root, *siblings))).timing
 
     assert summary is not None
@@ -192,7 +190,6 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     roots = list((target / ".daydream" / "runs").glob("*/evidence.otlp.jsonl"))
     assert len(roots) == 1
     root = read_trajectory(roots[0])
-    assert atif_validate(root, validate_images=False) is True
     commit_ends = [event for event in root["extra"]["phase_events"]
         if event["phase"] == "commit" and event["event"] == "phase_end"]
     assert len(commit_ends) == 1

@@ -30,7 +30,6 @@ async def test_pi_failure_records_redacted_process_tail_after_cleanup(
     child = binary / "pi"
     child.write_text(f"#!{sys.executable}\n" + '''
 import json, signal, sys, time
-from tests.harness.trajectory import read_trajectory
 def stop(*_):
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     print('late cleanup diagnostic', file=sys.stderr, flush=True)

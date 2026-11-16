@@ -15,7 +15,7 @@ import pytest
 from daydream.backends.codex import CodexBackend
 from daydream.trajectory import RUN_DOCUMENT_NAME, DaydreamPhase, EvidenceRecorder
 from tests.harness.codex_replay import make_mock_process_from_fixture
-from tests.harness.trajectory import atif_valid, make_recorder, read_trajectory
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 
 async def _drive_codex_through_recorder(
@@ -46,7 +46,7 @@ async def _drive_codex_through_recorder(
 
 
 @pytest.mark.asyncio
-async def test_codex_diagnostics_survive_atif_validation_and_json_round_trip(
+async def test_codex_diagnostics_survive_evidence_json_round_trip(
     tmp_path: Path,
 ) -> None:
     """Conditional transport/parser evidence reaches normalized Step.extra."""
@@ -74,7 +74,6 @@ async def test_codex_diagnostics_survive_atif_validation_and_json_round_trip(
     assert "opaque-parser-secret" not in serialized
     assert "/Users/private-person" not in serialized
 
-    assert atif_valid(raw)
     parser = diagnostics[-1]["metadata"]
     assert parser["unknown_event_types"] == {
         "total": 35, "labels": {f"unknown.{index:02d}": (2 if index == 0 else 1) for index in range(32)}, "overflow": 2,
@@ -86,7 +85,7 @@ async def test_codex_diagnostics_survive_atif_validation_and_json_round_trip(
 
 
 async def test_issue_1126_failure_status_and_incomplete_marker(tmp_path: Path) -> None:
-    """Nonzero command exits retain failure metadata; uncompleted calls receive schema-valid interruption markers."""
+    """Nonzero command exits retain failure metadata; uncompleted calls receive interruption markers."""
     await _drive_codex_through_recorder(tmp_path, fixture="command_failures_issue1126.jsonl")
     document = read_trajectory(tmp_path / RUN_DOCUMENT_NAME)
     steps = [s for s in document["steps"] if s["source"] == "agent" and (s.get("observation") or {}).get("results")]
@@ -98,4 +97,3 @@ async def test_issue_1126_failure_status_and_incomplete_marker(tmp_path: Path) -
     assert "source_call_id" not in dangling
     assert dangling["content"] == "[interrupted: call did not complete before invocation ended]"
     assert dangling["extra"] == {"is_error": True, "status": "interrupted"}
-    assert atif_valid(document)

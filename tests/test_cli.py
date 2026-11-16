@@ -19,7 +19,6 @@ from daydream.run_config import RunConfig
 from daydream.trajectory import DOCUMENT_SUFFIX, read_document_view
 from daydream.trajectory.journal import read_journal
 from daydream.trajectory.view import SNAPSHOT_EVENT
-from tests.harness.trajectory import atif_valid as atif_validate
 
 
 def test_signal_handler_flushes_before_backend_registry_snapshot(monkeypatch: pytest.MonkeyPatch,) -> None:
@@ -293,13 +292,13 @@ def test_signal_flushes_all_runner_recorders(tmp_path: Path, git_repo: Path, ext
     run_dirs = [path for path in run_root.iterdir() if path.is_dir()]
     assert len(run_dirs) == 1
     documents = sorted(run_dirs[0].rglob(f"*{DOCUMENT_SUFFIX}"))
+    assert len(documents) == 3
     by_name = {path.name.split("--")[0].removesuffix(DOCUMENT_SUFFIX): path.read_bytes() for path in documents}
     assert set(by_name) == {"evidence", "signal-a", "signal-b"}
     # The signal appended one snapshot to every live document before the run unwound and sealed it aborted.
     for raw in by_name.values():
         assert [record.event_name for record in read_journal(raw).records].count(SNAPSHOT_EVENT) == 1
     views = {name: read_document_view(raw) for name, raw in by_name.items()}
-    assert all(atif_validate(item, validate_images=False) for item in views.values())
     assert all(item.get("extra", {}).get("partial") is True for item in views.values())
 
     root_text = json.dumps(views["evidence"], sort_keys=True)

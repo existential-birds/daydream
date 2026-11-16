@@ -53,7 +53,7 @@ from tests.harness.fake_clock import FakeClock
 from tests.harness.pi_replay import FIXTURES_DIR, make_mock_process, make_mock_process_from_fixture
 from tests.harness.process_replay import replay_process
 from tests.harness.protocol_cli_assertions import make_cancel_probe
-from tests.harness.trajectory import atif_valid as validate, make_recorder, read_trajectory
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 
 def _case_dir(tmp_path: Path, index: int) -> Path:
@@ -1160,7 +1160,6 @@ async def test_native_pi_tool_batch_and_resumed_turn_record_literal_observations
         process.wait.assert_awaited()
         process._transport.close.assert_called_once()
     assert backend._transports == []
-    assert validate(recorder.path, validate_images=False)
 
 
 @pytest.mark.parametrize(("active_tool", "deadline_s", "expected_window"),

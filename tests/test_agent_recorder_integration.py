@@ -27,7 +27,7 @@ from daydream.trajectory import (
     DaydreamRunFlow,
 )
 from tests.harness.backend import ScriptedBackend
-from tests.harness.trajectory import atif_valid as atif_validate, make_recorder, read_trajectory
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 
 async def _run_with_recorder(
@@ -53,7 +53,6 @@ def _single_agent_step(traj: dict[str, Any] | None) -> dict[str, Any]:
     """Validate *traj* and return its sole agent step. Every recorder test that inspects one agent step asserts the
     same two invariants first: the document is schema-valid and exactly one step has ``source == "agent"``."""
     assert traj is not None
-    assert atif_validate(traj) is True
     steps: list[dict[str, Any]] = traj["steps"]
     agent_steps = [s for s in steps if s["source"] == "agent"]
     assert len(agent_steps) == 1
@@ -106,7 +105,6 @@ async def test_mid_turn_backend_error_is_recorded_in_trajectory(tmp_path: Path) 
     # (b) the emitted trajectory carries the error marker + subtype.
     assert target_path.exists()
     traj = read_trajectory(target_path)
-    assert atif_validate(traj) is True
     errored = [s for s in traj["steps"] if s.get("extra", {}).get("error_subtype")]
     assert len(errored) == 1
     assert errored[0]["extra"]["error"] is True

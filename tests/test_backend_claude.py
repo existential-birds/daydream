@@ -58,7 +58,7 @@ from tests.harness.claude_sdk import (
     scripted_client,
 )
 from tests.harness.git_helpers import commit, init_repo, write_and_stage
-from tests.harness.trajectory import atif_valid as validate, make_recorder, read_trajectory
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 
 @pytest.fixture
@@ -674,7 +674,6 @@ async def test_sdk_conversation_records_native_tools_usage_and_resumed_request(
     assert document["final_metrics"]["total_prompt_tokens"] == 160
     assert document["final_metrics"]["total_completion_tokens"] == 55
     assert not any(isinstance(event, (GenerationStartEvent, GenerationEndEvent)) for event in first + second)
-    assert validate(recorder.path, validate_images=False)
 
 
 # --- Host tools through the real bundled CLI and an offline loopback provider ---

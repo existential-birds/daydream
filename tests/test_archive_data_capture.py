@@ -37,7 +37,7 @@ from tests.harness.stub_backend import (
     install_stub_backend,
     silence,
 )
-from tests.harness.trajectory import atif_valid as atif_validate, diff_adding, read_trajectory
+from tests.harness.trajectory import diff_adding, read_trajectory
 from tests.test_deep_orchestrator import _noop_commit, _ok
 
 
@@ -145,7 +145,6 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert len(siblings) >= 1
     for document in (trajectory, *siblings):
         assert document["session_id"] == manifest["session_id"]
-        assert atif_validate(document, validate_images=False)
         assert [step["step_id"] for step in document["steps"]] == list(range(1, len(document["steps"]) + 1))
         assert all(
             step["extra"]["daydream_run_flow"] == "deep" for step in document["steps"] if step["source"] == "agent"

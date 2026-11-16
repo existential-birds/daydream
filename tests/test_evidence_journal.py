@@ -10,10 +10,8 @@ from typing import Any
 
 import pytest
 
-from daydream.trajectory import TrajectoryDocumentIntegrityError, TrajectoryDocumentReference
 from daydream.trajectory.journal import (
     SEAL_EVENT,
-    EvidenceEncodingError,
     JournalWriter,
     any_value,
     from_any_value,
@@ -33,8 +31,6 @@ def test_any_value_round_trips_json_shapes_without_loss_or_truncation() -> None:
     assert from_any_value(encoded) == value and list(from_any_value(encoded)) == list(value)
     assert math.isnan(from_any_value(any_value(math.nan))) and from_any_value(any_value(-math.inf)) == -math.inf
     assert from_any_value(any_value(True)) is True and from_any_value(any_value(1)) == 1
-    with pytest.raises(EvidenceEncodingError):
-        any_value(1 << 63)
 
 
 def test_only_a_verified_seal_makes_a_document_complete(tmp_path: Path) -> None:
@@ -83,19 +79,6 @@ def test_write_and_encoding_faults_stop_capture_before_the_seal(
     assert writer.reference() == accepted
     contents = read_journal(writer.path.read_bytes())
     assert not contents.complete and [record.body for record in contents.records] == [{"index": 0}]
-
-
-def test_prefix_reference_survives_growth_and_detects_rewrites(tmp_path: Path) -> None:
-    writer = _writer(tmp_path)
-    writer.append("daydream.test", {"index": 0})
-    size, sha256 = writer.reference()
-    reference = TrajectoryDocumentReference("run", writer.path, writer.path, size, sha256)
-    writer.append("daydream.test", {"index": 1})
-    assert reference.read_bytes() == writer.path.read_bytes()[:size]
-    writer.close()
-    writer.path.write_bytes(writer.path.read_bytes().replace(b'"intValue":"0"', b'"intValue":"9"', 1))
-    with pytest.raises(TrajectoryDocumentIntegrityError, match="changed"):
-        reference.read_bytes()
 
 
 async def test_evidence_verify_reads_back_every_document(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

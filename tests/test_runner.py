@@ -100,7 +100,7 @@ def _capture_snapshot(
     )
 
 def test_run_write_capture_retains_valid_final_without_io_and_records_invalid(
-    tmp_path: Path, capture_recorder: EvidenceRecorder
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capture_recorder: EvidenceRecorder
 ) -> None:
     """The recorder callback is a non-raising immutable handoff, not finalization."""
     # Documents are references: retention checks their metadata, never their files.
@@ -118,6 +118,14 @@ def test_run_write_capture_retains_valid_final_without_io_and_records_invalid(
         capture.retain(capture_recorder, invalid)
         assert capture.final is final
         assert isinstance(capture.validation_error, _RunSnapshotCaptureError)
+    # A BaseException during validation (a signal arriving mid-flush) propagates instead of being recorded.
+    capture = _RunWriteCapture(session_id="session")
+    def interrupt(_snapshot: RunWriteSnapshot, _session_id: str) -> None:
+        raise KeyboardInterrupt
+    monkeypatch.setattr(RunWriteSnapshot, "validate", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        capture.retain(capture_recorder, prepared)
+    assert (capture.partial, capture.final, capture.validation_error) == (None, None, None)
 
 def test_diagram_artifact_uses_the_captured_pr_and_the_run_auth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],

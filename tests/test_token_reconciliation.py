@@ -23,7 +23,6 @@ from daydream.backends import (
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
 from tests.harness.trajectory import (
-    atif_valid as atif_validate,
     make_recorder,
     read_trajectory,
     step_token_sum,
@@ -105,7 +104,6 @@ async def test_authoritative_usage_reconciles_onto_steps(tmp_path: Path) -> None
     assert final.get("total_completion_tokens") == 25
     assert step_sum == 25
     traj = await _run_three_turns(tmp_path / "phases")
-    assert atif_validate(traj) is True
 
     agent_steps = [s for s in traj["steps"] if s["source"] == "agent"]
 

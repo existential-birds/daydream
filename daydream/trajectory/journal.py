@@ -224,8 +224,13 @@ class JournalWriter:
                 assert self._fd is not None
                 os.fsync(self._fd)
             except OSError as exc:
-                # A seal that may not be durable never counts: references keep the unsealed prefix.
+                # A seal that may not be durable never counts: drop it from the file too, so
+                # every reader sees the unsealed prefix that references name.
                 self._seq, self._size, self._hash = unsealed
+                try:
+                    os.ftruncate(self._fd, self._size)
+                except OSError:
+                    pass
                 self._fail(exc)
                 return False
             self.sealed = True
