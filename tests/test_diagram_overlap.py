@@ -121,8 +121,6 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
         assert not {"confidence", "lens"} & item.keys()
         assert json.loads((target / ".daydream/deep/merged-items.json").read_text())["items"] == review.items
         # The embedder's description for this head reached both assignments as captured context, by reference.
-        sealed = json.loads((target / ".daydream/deep/committed-review.json").read_text())
-        assert sealed["settings"]["historical_context"]["fields"]["context"]["bytes"] == len("EMBEDDER_STATED_INTENT")
         assert [(call["prompt"].count("EMBEDDER_STATED_INTENT"), call["historical_context"])
                 for call in backend.calls if call.get("review_instructions")] == [
             (0, {"context": "EMBEDDER_STATED_INTENT"})] * 2

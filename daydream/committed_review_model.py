@@ -51,7 +51,7 @@ ADMIT_TOOL = "review_admit"
 LOOKUP_SCHEMA = strict_object({
     "target_id": _NULLABLE_SELECTOR, "path": _NULLABLE_SELECTOR,
     # Captured author text, which assignments name by size and digest and never carry.
-    "historical_context": {"enum": [None, "title", "body", "context"]},
+    "historical_context": {"anyOf": [{"type": "string", "enum": ["title", "body", "context"]}, {"type": "null"}]},
     "cursor": {"type": ["string", "null"], "maxLength": 256},
 })
 

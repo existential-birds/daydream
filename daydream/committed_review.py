@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import math
 import os
 import re
@@ -230,10 +231,11 @@ class Review:
             raise ValueError("captured plan exceeds retained per-target coverage capacity before review; "
                              "narrow the review base or exclusions and rerun") from exc
         self._export = (self._coverage.to_dict(), None if immutable_input is None else immutable_input.to_dict())
-        # A review whose findings export cannot hold even its coverage and captured input could retain no claim.
-        if committed_export_bytes(*self._export, []) > MAX_ARTIFACT_BYTES:
-            raise ValueError("captured plan and any immutable input leave no findings export capacity before "
-                             "review; narrow the review base or exclusions and rerun")
+        # Every claim must fit the findings export beside coverage and captured input, so a review that starts
+        # keeps room for one maximal submission of claims.
+        if committed_export_bytes(*self._export, []) + COMMITTED_SUBMISSION_MAX_BYTES > MAX_ARTIFACT_BYTES:
+            raise ValueError("captured plan and any immutable input leave no findings export capacity for a claim "
+                             "before review; narrow the review base or exclusions and rerun")
         self._checking = threading.Lock()
 
     def check(self) -> None:
@@ -386,13 +388,22 @@ class Review:
         return {**page, "target": {**described, "decided": entry["decided"], "owner": entry["owner"]}}
 
     def _content_page(self, query: dict[str, Any], body: bytes, offset: int) -> dict[str, Any]:
-        """One page of exact frozen bytes, ending on a UTF-8 character boundary."""
+        """One page of exact frozen bytes, ending on a UTF-8 character boundary.
+
+        The host measures a result JSON-escaped, where a control character takes six bytes, so a page also
+        stays within twice its byte bound escaped.
+        """
         if offset > len(body) or offset < len(body) and body[offset] & 0xC0 == 0x80:
             raise HostToolRejected("review_source.cursor: offset is outside the selected content; "
                                    "pass a next_cursor returned for this same query")
         end = min(len(body), offset + LOOKUP_PAGE_MAX_BYTES)
-        while end < len(body) and body[end] & 0xC0 == 0x80:
-            end -= 1
+        while True:
+            while end < len(body) and body[end] & 0xC0 == 0x80:
+                end -= 1
+            escaped = len(json.dumps(body[offset:end].decode(), ensure_ascii=False).encode())
+            if escaped <= 2 * LOOKUP_PAGE_MAX_BYTES:
+                break
+            end = offset + (end - offset) * 2 * LOOKUP_PAGE_MAX_BYTES // escaped
         chunk = body[offset:end]
         return {
             "status": "complete" if offset == 0 and end == len(body) else "partial", "query": query,
@@ -1140,6 +1151,7 @@ async def plan_review(
     config: RunConfig, work: WorkContext, backends: dict[str, Any], settings: dict[str, Any], *,
     run_id: str, revision: dict[str, Any], diff_path: Path, index_path: Path, files: list[str],
     started: float, allowed_tools: frozenset[str] | None = None, immutable_input: ImmutableReviewInput | None = None,
+    historical_context: dict[str, str] | None = None,
 ) -> ReviewProgram:
     """Plan the complete target population, its allowances and its schedule before any model work."""
     profile = config.review_profile
@@ -1161,7 +1173,7 @@ async def plan_review(
                            pipeline.review_wall_budget_s * (tier if profile.source_kind == "default" else 1))
     review = await anyio.to_thread.run_sync(lambda: Review(
         inputs, run_id, allowed_tools=allowed_tools, immutable_input=immutable_input,
-        historical_context=settings.pop("historical_context", None)))
+        historical_context=historical_context))
     if review.historical_context is not None:
         # Assignments and the sealed result carry what review_source serves, never the text itself.
         settings["historical_context"] = deepcopy(review.historical_context)
@@ -1247,10 +1259,8 @@ async def _run_committed_review(
             "model": hosted.model, "tools": sorted(HOSTED_PI_TOOLS),
             "trusted_prepared_source": True,
         }
-    if request.immutable_input is not None:
-        settings["historical_context"] = {
-            key: provenance[key] for key in ("title", "body", "context")
-        }
+    historical = (None if request.immutable_input is None
+                  else {key: provenance[key] for key in ("title", "body", "context")})
     for kind, phase in REVIEW_PHASES:
         name = _resolved_backend_name(config, phase)
         try:
@@ -1279,7 +1289,7 @@ async def _run_committed_review(
             assert original.head_sha is not None and original.base_sha is not None
             if author is not None and author.for_head(original.head_sha).strip():
                 # Opaque author text: one context value, with no title/body split invented for it.
-                settings["historical_context"] = {"context": author.description}
+                historical = {"context": author.description}
             captured = capture_source(source, captured_root, base_sha=original.base_sha,
                                       head_sha=original.head_sha, local=request.local, exclude=config.ignore_paths)
             lifetime.callback(_remove_capture, captured)
@@ -1349,7 +1359,7 @@ async def _run_committed_review(
                  git_ops.diff_name_only_strict(captured_root, original.base_sha, original.head_sha))
         program = await plan_review(
             config, work, backends, settings, run_id=run_id, revision=revision, diff_path=diff_path,
-            index_path=index_path, files=files, started=started,
+            index_path=index_path, files=files, started=started, historical_context=historical,
             allowed_tools=None if hosted is None else HOSTED_PI_TOOLS, immutable_input=request.immutable_input,
         )
         finish = program.finish

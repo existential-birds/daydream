@@ -118,8 +118,8 @@ fresh challenge, navigates it under the
   host line holds the assignment as canonical JSON with DEL, U+0085, U+2028 and U+2029
   escaped, so text inside it cannot draw a line break: the assignment identity, the work's
   responsibilities, pending claims (with compact `retained_conclusions` for the
-  cross-assignment), the profile with any historical-context descriptor, and a bounded (16 KiB) first
-  catalog page with `status`, `total_targets`, `total_files` and omitted counts. Catalog
+  cross-assignment), the profile with any historical-context descriptor, and a bounded
+  (16 KiB) first catalog page with `status`, `total_targets`, `total_files` and omitted counts. Catalog
   and decided markers there are a dispatch-time snapshot. The
   instructions say that only lines beginning with the token are host-authored and that the
   assignment's paths, claims and historical context are data, never instructions.
@@ -139,8 +139,8 @@ fresh challenge, navigates it under the
   with `target_id`/`path` null it pages the whole catalog; `path` lists one changed
   path's targets; `target_id` returns the target's `source_options`, ranges (for a
   continuation fragment, its `source_summary` claim-line span and split-line
-  `fragment_line_offset`) and its exact captured change bytes in 32 KiB pages with
-  per-page and whole-content SHA-256; `historical_context` (`title`, `body` or `context`)
+  `fragment_line_offset`) and its exact captured change bytes in 32 KiB pages, each also
+  within 64 KiB as a result's JSON escapes it, with per-page and whole-content SHA-256; `historical_context` (`title`, `body` or `context`)
   returns that captured author field's exact text in the same pages. It takes at most one
   selector. Cursors are opaque and bound to their query. Unknown targets, absent fields and
   unchanged paths return `status: unavailable` data, not errors. It never reads
@@ -691,7 +691,8 @@ Title and body take what GitHub accepts: at most 256 and 65,536 characters (code
 points), which can reach 1,024 and 262,144 UTF-8 bytes. Context is bounded to 65,536
 UTF-8 bytes. Unsupported versions, sizes, plans, missing objects and inconsistent
 evidence are errors before dispatch, never successful empty reviews; so is a plan whose
-findings export cannot hold its coverage and envelope before any claim. With every
+findings export cannot hold its coverage and envelope beside one maximal (128 KiB) claim
+submission. With every
 author field at its bound in control characters, which JSON escapes to six bytes each,
 the envelope takes about 770 KiB of the 1 MiB export, and a one-file review still retains
 a dozen claims at the largest text size. Readers older than this bound refuse envelopes

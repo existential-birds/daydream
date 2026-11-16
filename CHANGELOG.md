@@ -72,8 +72,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   512 and 8,192 UTF-8 bytes; `context` keeps its 65,536-byte bound. Daydream releases before
   this one refuse envelopes, results and findings that use the wider bounds, so upgrade
   readers before writers. A plan whose findings export cannot hold its coverage and any
-  immutable input before a single claim is now refused before review instead of running
-  with no capacity to retain one. See [immutable PR inputs](docs/runtime.md#immutable-pr-inputs).
+  immutable input beside one maximal claim submission is now refused before review
+  instead of running with no capacity to retain a claim. A `review_source` page of text
+  dense in control characters, which a result's JSON escapes to six bytes each, no longer
+  exceeds the host's result bound and ends the assignment: each page also stays within
+  64 KiB escaped. See [immutable PR inputs](docs/runtime.md#immutable-pr-inputs).
 
 ## [0.36.0] - 2026-11-15
 
