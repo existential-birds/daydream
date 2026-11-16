@@ -464,7 +464,14 @@ fixing reviews the checkout as is, so its diff is the commits plus tracked worki
 edits. When such edits exist the run says so before it reviews, and its coverage and
 committed result mark `analyzed_revision` with `tracked_worktree_edits: true`, with
 terminal/coverage version 3 and committed result schema 13; a clean checkout keeps
-version 1, schema 10 and no marker.
+version 1, schema 10 and no marker. Right after taking that diff the host freezes the
+tracked working tree and index as a dangling `git stash create` commit, leaving files,
+refs and the stash list untouched. New-side supporting selectors read that snapshot
+under the same [pinned-blob admission](#pi-host-tool-lifetime-and-limits), so their
+digest measures the reviewed working bytes while their `revision` stays `head_sha`
+beside the marker; untracked paths are unavailable, and the old side still reads the
+merge base. Without a snapshot those selectors are refused as unavailable, never read
+from `HEAD`, and the review still runs.
 
 Local capture compares the pinned merge base with final working bytes, combining
 committed and later tracked edits. The index is not another change layer. Undone

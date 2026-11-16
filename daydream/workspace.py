@@ -82,6 +82,8 @@ class WorkContext:
     and both SHA anchors are None only for explicitly admitted unborn Improve.
     ``run_id`` identifies ephemeral paths and intent files.
     ``review_git_context`` retains reviewed provenance independently of capture storage.
+    ``reviewed_worktree`` is the dangling commit freezing tracked uncommitted edits
+    when a fixing review's diff is taken; it backs that revision's new-side sources.
     """
 
     repo: Path
@@ -96,6 +98,7 @@ class WorkContext:
     captured_source: CapturedSource | None = field(default=None, kw_only=True, repr=False, compare=False)
     review_pr: PRInfo | None = field(default=None, kw_only=True, repr=False, compare=False)
     review_git_context: GitContext | None = field(default=None, kw_only=True, repr=False, compare=False)
+    reviewed_worktree: str | None = field(default=None, kw_only=True, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if (self.base_sha is None) != (self.head_sha is None):

@@ -317,6 +317,13 @@ async def run_deep(
             return 1
         except GitError:
             diff = None
+        if tracked_worktree_edits:
+            # Freeze the reviewed tracked bytes for new-side sources. Without a
+            # snapshot those selectors are refused as unavailable; review still runs.
+            try:
+                work = replace(work, reviewed_worktree=git_ops.stash_create(work.repo))
+            except GitError as exc:
+                print_warning(console, f"Reviewed working edits could not be frozen: {exc}")
     if diff is not None and run_artifacts is not None and config.dataset_capture:
         from daydream.dataset_capture import retain_original_task
 

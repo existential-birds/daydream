@@ -179,7 +179,8 @@ class StageInputFactory:
         after resolving, unless ``validated`` says the caller's endpoint ran it
         for this submission just before this call.
         """
-        sources = _SubmissionSources(self.revision, self.work.repo, self._source_aliases, self.captured_source)
+        sources = _SubmissionSources(self.revision, self.work.repo, self._source_aliases, self.captured_source,
+                                     worktree_snapshot=self.work.reviewed_worktree)
         try:
             install = prepare(sources)
         finally:
