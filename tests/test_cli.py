@@ -251,6 +251,7 @@ def test_signal_flushes_all_runner_recorders(tmp_path: Path, git_repo: Path, ext
         child_env.pop(name, None)
     child_env.update({"DAYDREAM_EXT_DIR": str(extension_dir), "DAYDREAM_SIGNAL_GH_LOG": str(gh_log),
             "DAYDREAM_SIGNAL_READY": str(ready), "PATH": os.pathsep.join((str(bin_dir), child_env.get("PATH", ""))),
+            "HOME": str(tmp_path / "home"),
         }
     )
     argv = [

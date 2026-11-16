@@ -9,12 +9,14 @@ import base64
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote
 
 import pytest
 from rich.console import Console
 
+from daydream.extensions import get_registry
 from daydream.findings import write_findings_artifact
 from daydream.pr_review import (
     ClassifiedIssues,
@@ -447,8 +449,11 @@ def test_artifact_post_never_acquires_live_trajectory_details(
         attempts.append("live acquisition")
         raise AssertionError("artifact posting attempted live trajectory acquisition")
 
+    # Import the built-in flow modules before patching so none keeps a stub.
+    get_registry()
     with monkeypatch.context() as patch:
-        patch.setattr("daydream.trajectory.get_current_recorder", forbidden)
+        # Every get_current_recorder alias reads this ContextVar at call time, including names bound before patching.
+        patch.setattr("daydream.trajectory.context._RECORDER_VAR", SimpleNamespace(get=forbidden))
         patch.setattr("daydream.pr_run_info.render_live_run_info", forbidden)
         patch.setattr("daydream.pr_comment_renderer.render_run_info_block", forbidden)
         patch.setattr("tempfile.TemporaryDirectory", forbidden)
