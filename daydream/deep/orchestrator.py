@@ -317,7 +317,7 @@ async def run_deep(
             return 1
         except GitError:
             diff = None
-        if tracked_worktree_edits:
+        if tracked_worktree_edits and mode != "diagram":
             # Freeze the reviewed tracked bytes for new-side sources. Without a
             # snapshot those selectors are refused as unavailable; review still runs.
             try:

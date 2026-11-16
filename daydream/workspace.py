@@ -83,7 +83,7 @@ class WorkContext:
     ``run_id`` identifies ephemeral paths and intent files.
     ``review_git_context`` retains reviewed provenance independently of capture storage.
     ``reviewed_worktree`` is the dangling commit freezing tracked uncommitted edits
-    when a fixing review's diff is taken; it backs that revision's new-side sources.
+    when a live-checkout review's diff is taken; it backs that revision's new-side sources.
     """
 
     repo: Path
