@@ -61,6 +61,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Finalized artifact trees that hold a directory beside a sibling whose name extends it with
+  a byte that sorts before `/`, such as `evidence/` beside `evidence.otlp.jsonl`, publish and
+  reopen again. Manifest validation now checks the depth-first order the tree walk writes
+  instead of refusing those manifests as unsorted, a refusal that could leave a publication
+  stuck in recovery ([#1904](https://github.com/existential-birds/daydream/issues/1904)).
+  Persisted manifests keep their format.
 - A fixing run that reviews uncommitted tracked edits now attributes new-side supporting
   source references to the reviewed working bytes, frozen when the diff is taken, instead
   of the committed `HEAD` file, so a reference to an uncommitted line is no longer refused

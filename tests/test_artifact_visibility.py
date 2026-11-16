@@ -632,6 +632,9 @@ async def test_artifact_session_preserves_resume_mtimes_across_publication_and_r
         dump_route = session.register_destination(dump, label=OutputLabel.DUMP_DIRECTORY)
         assert dump_route.write_path is None and not any(path.is_file() for path in dump.rglob("*"))
         document = _reference(session.daydream_dir / "runs" / session_id / RUN_DOCUMENT_NAME, session_id, payload)
+        # A directory beside a sibling whose name extends it (`evidence/`, `evidence.otlp.jsonl`) stays publishable.
+        (child := session.daydream_dir / "runs" / session_id / "evidence/child.json").parent.mkdir()
+        child.write_bytes(b"child")
         frozen = session.freeze(_snapshot(session_id, (document,)))
         assert (frozen.root / ".daydream/runs" / session_id / RUN_DOCUMENT_NAME).read_bytes() == payload
         with pytest.raises(ArtifactVisibilityError, match="frozen"):
@@ -639,15 +642,20 @@ async def test_artifact_session_preserves_resume_mtimes_across_publication_and_r
         late = session.finalization_merge_path(dump_route, snapshot=frozen)
         (late / "replace.txt").write_bytes(b"new")
         (late / "added.txt").write_bytes(b"added")
+        (late / "name").mkdir()
+        (late / "name/child").write_bytes(b"child")
+        (late / "name.ext").write_bytes(b"ext")
         _publish(session, frozen)
     assert findings.read_bytes() == b"published explicit bytes"
     assert (dump / "unrelated.bin").read_bytes() == b"preserve me"
     assert (dump / "replace.txt").read_bytes() == b"new" and (dump / "added.txt").read_bytes() == b"added"
+    assert (dump / "name/child").read_bytes() == b"child" and (dump / "name.ext").read_bytes() == b"ext"
     assert not unused_dump.exists() and not unused_dump.parent.exists()
     assert (source / ".daydream/deep/prior.md").read_bytes() == b"prior reasoning\n"
     assert not (source / ".daydream/review-cache").exists()
     assert not any((owner.artifact_state_root / "transactions").iterdir())
     assert (source / ".daydream/runs" / session_id / RUN_DOCUMENT_NAME).read_bytes() == payload
+    assert (source / ".daydream/runs" / session_id / "evidence/child.json").read_bytes() == b"child"
     canonical = owner.artifact_state_root / "canonical"
     for copied_deep in (source / ".daydream/deep", canonical / ".daydream/deep"):
         assert (copied_deep / "diff-key").stat().st_mtime_ns == key_mtime_ns
@@ -982,7 +990,8 @@ async def test_artifact_session_rejects_closed_recovery_manifest_untouched(
 ) -> None:
     # Each case retains private evidence in its workspace, so every case owns a fresh repository.
     for index, manifest_problem in enumerate(
-        ("duplicate-path", "embedded-dot", "bool-schema-version", "missing-proof", "bool-device-proof"),
+        ("duplicate-path", "normalized-duplicate", "embedded-dot", "bool-schema-version", "missing-proof",
+         "bool-device-proof"),
     ):
         await _run_case(_artifact_session_rejects_closed_recovery_manifest_untouched_case,
                         root=tmp_path / f"case-{index}", monkeypatch=monkeypatch, manifest_problem=manifest_problem)
@@ -1000,10 +1009,14 @@ async def _artifact_session_rejects_closed_recovery_manifest_untouched_case(sour
     raw_path = {"unsafe-path": "../escape", "duplicate-path": ".daydream", "leading-dot": "./runs",
         "embedded-dot": "runs/./record.json", "empty-component": "runs//record.json",
         "bool-schema-version": "runs/record.json", "missing-proof": "runs", "bool-device-proof": "runs",
+        "normalized-duplicate": "runs/e\u0301.json",
     }[manifest_problem]
     entry = {"path": raw_path, "kind": "directory", "size": 0, "mode": 0o700, "sha256": None}
     if manifest_problem == "duplicate-path":
         entries = [entry, entry]
+    elif manifest_problem == "normalized-duplicate":
+        # Distinct, individually valid raw paths in byte order; only the NFC uniqueness guard refuses them.
+        entries = [entry, {**entry, "path": "runs/\u00e9.json"}]
     else:
         entries = [entry]
     schema_version = True if manifest_problem == "bool-schema-version" else 1
@@ -1019,7 +1032,8 @@ async def _artifact_session_rejects_closed_recovery_manifest_untouched_case(sour
             "device": True if manifest_problem == "bool-device-proof" else metadata.st_dev,
         })
 
-    with pytest.raises(ArtifactVisibilityError, match="manifest"):
+    expected = "duplicate normalized paths" if manifest_problem == "normalized-duplicate" else "manifest"
+    with pytest.raises(ArtifactVisibilityError, match=expected):
         async with open_artifact_session(_work(source), session_id="blocked"):
             pass
     assert (source / ".daydream" / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
