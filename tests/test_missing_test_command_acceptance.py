@@ -6,6 +6,7 @@ Only the external backend is replaced in the runner regressions.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import replace
@@ -64,7 +65,8 @@ async def test_runner_rejects_missing_canonical_before_fix_or_test(
 
     The rejection is persisted as a no-execution verdict and recipe; the manifest
     candidate is never executed. Command-miss reasons have owner-level proof.
-    The owner's tracked edit is part of the reviewed subject: the run says so first and records it.
+    The owner's tracked edit is part of the reviewed subject: the run says so first and records it, and a
+    supporting reference into a line that exists only in that edit resolves against the reviewed bytes.
     Untracked files alone leave the reviewed subject exactly the commits, with no notice.
     """
     reason, source = "empty-argv", "config"
@@ -85,7 +87,11 @@ async def test_runner_rejects_missing_canonical_before_fix_or_test(
     deep = target / ".daydream" / "deep"
     for dirty in (False, True):
         if dirty:
-            (target / "base.txt").write_text("owner dirty bytes\n")
+            # Line 2 exists only in the tracked uncommitted edit; HEAD's base.txt has one line.
+            (target / "base.txt").write_text("base\nowner dirty bytes\n")
+            backend.review_claims = [{"title": "Sample issue", "file": "api.py", "line": 1, "supporting": [
+                {"path": "base.txt", "side": "new", "source_range": {"start": 2, "end": 2},
+                 "basis": "source_inspection"}]}]
             before = _state(target)
         rc = await run(config)
         assert rc != 0, "unconfigured validation cannot authorize a successful fix flow"
@@ -98,6 +104,12 @@ async def test_runner_rejects_missing_canonical_before_fix_or_test(
     assert backend.test_suite_calls == 0
     assert not _fix_prompts(backend)
     assert not any(call["prompt"].startswith("The tests failed") for call in backend.calls)
+    committed = json.loads((deep / "committed-review.json").read_text())
+    reviewed = hashlib.sha256((target / "base.txt").read_bytes()).hexdigest()
+    assert [(ref["path"], ref["side"], ref["source_range"], ref["artifact_sha256"])
+            for finding in committed["findings"] for ref in finding["payload"]["evidence_refs"]
+            if ref["role"] == "supporting"] == [("base.txt", "new", {"start": 2, "end": 2}, reviewed)], (
+        "a supporting reference into an uncommitted line resolves against the reviewed bytes")
     phases = _scan_trajectory_extra(target / ".daydream", trajectory, "daydream_phase")
     assert not {"test", "fix"}.intersection(phases)
     starts = _scan_phase_events(target / ".daydream", trajectory, "phase_start")

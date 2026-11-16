@@ -61,6 +61,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A fixing run that reviews uncommitted tracked edits now attributes new-side supporting
+  source references to the reviewed working bytes, frozen when the diff is taken, instead
+  of the committed `HEAD` file, so a reference to an uncommitted line is no longer refused
+  as out of range or recorded with `HEAD`'s digest
+  ([#1890](https://github.com/existential-birds/daydream/issues/1890)). Untracked files
+  stay unavailable as supporting sources; result schemas are unchanged. See
+  [captured local source](docs/runtime.md#captured-local-source).
 - The test suite passes on macOS again: the committed-review test for a changed path whose
   diff header overflows an assignment staged a 4,000-byte path through the working tree, which
   macOS's 1,024-byte path limit refuses. It now records the path in Git without writing it to

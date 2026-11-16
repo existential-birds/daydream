@@ -29,9 +29,10 @@ class StubBackend:
         self.model = model
         self._target = target
         # Claims the scripted review discovers, each ``{"title", "file", "line"}`` cited on the new
-        # side unless ``"side": "old"``; None proposes
-        # one "Sample issue" on the first changed target. ``review_verdict`` is the challenge's answer
-        # and ``review_undecided`` leaves that many trailing targets without a decision.
+        # side unless ``"side": "old"``, plus optional ``"supporting"`` source selectors appended after
+        # the assigned one; None proposes one "Sample issue" on the first changed target.
+        # ``review_verdict`` is the challenge's answer and ``review_undecided`` leaves that many
+        # trailing targets without a decision.
         self.review_claims: list[dict[str, Any]] | None = None
         self.review_verdict: str = "confirmed"
         self.review_undecided: int = 0
@@ -148,7 +149,8 @@ class StubBackend:
                 "trigger": "The changed path is exercised.", "consequence": "Callers observe the defect.",
                 "grounds": f"{claim['file']} changes this behavior.", "file": claim["file"], "line": line,
                 "severity": claim.get("severity", "medium"),
-                "evidence_refs": [{key: option[key] for key in ("source_id", "basis", "source_range")}]}})
+                "evidence_refs": [{key: option[key] for key in ("source_id", "basis", "source_range")},
+                                  *claim.get("supporting", ())]}})
         return {"claims": claims, "targets": [
             {"target_id": target["target_id"], "status": "reviewed", "reason": "Captured change inspected.",
              "evidence_refs": []} for target in decided]}

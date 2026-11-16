@@ -67,14 +67,24 @@ def source_revision(revision: Mapping[str, Any], side: str) -> str:
     return identity
 
 
+class _WorktreeSourceUnavailable(FrozenSourceRejected):
+    """No frozen tracked-worktree snapshot backs a marked revision's new side; another side can still resolve."""
+
+
 def _source_contents(root: Path, revision: Mapping[str, Any], side: str, path: str,
-                     captured_source: CapturedSource | None) -> tuple[str, bytes]:
+                     captured_source: CapturedSource | None, worktree_snapshot: str | None) -> tuple[str, bytes]:
     if captured_source is not None:
         if captured_source.revision_for(side) != source_revision(revision, side):
             raise GitError('captured source differs from analyzed revision')
         return captured_source.read(side, path)
     if 'source_id' in revision:
         raise GitError('captured working source is unavailable; restart review')
+    if side == 'new' and 'tracked_worktree_edits' in revision:
+        # The marker labels new-side refs head_sha, but the reviewed bytes are the
+        # tracked worktree frozen when the diff was taken; never substitute HEAD's blob.
+        if worktree_snapshot is None:
+            raise _WorktreeSourceUnavailable('new-side supporting source unavailable')
+        return frozen_source(root, worktree_snapshot, path)
     return frozen_source(root, source_revision(revision, side), path)
 
 
@@ -86,8 +96,8 @@ class _SupportingFacts:
 
 
 def _supporting_facts(root: Path, revision: Mapping[str, Any], side: str, path: str,
-                      captured: CapturedSource | None) -> _SupportingFacts:
-    _, contents = _source_contents(root, revision, side, path, captured)
+                      captured: CapturedSource | None, worktree_snapshot: str | None = None) -> _SupportingFacts:
+    _, contents = _source_contents(root, revision, side, path, captured, worktree_snapshot)
     try:
         contents.decode('utf-8')
         utf8 = True
@@ -109,8 +119,9 @@ class _SubmissionSources:
     """Callback-local host facts, revoked before the factory validates and installs."""
 
     def __init__(self, revision: dict[str, Any], root: Path, aliases: Mapping[str, str],
-                 captured: CapturedSource | None) -> None:
+                 captured: CapturedSource | None, *, worktree_snapshot: str | None = None) -> None:
         self.revision, self.root, self.aliases, self.captured = revision, root, aliases, captured
+        self.worktree_snapshot = worktree_snapshot
         self._facts: dict[tuple[str, str], _SupportingFacts] = {}
         self._active = True
 
@@ -119,7 +130,8 @@ class _SubmissionSources:
             raise RuntimeError('submission source resolver has closed')
         key = side, path
         if key not in self._facts:
-            self._facts[key] = _supporting_facts(self.root, self.revision, side, path, self.captured)
+            self._facts[key] = _supporting_facts(self.root, self.revision, side, path, self.captured,
+                                                 self.worktree_snapshot)
         return self._facts[key]
 
     def canonicalize(self, selectors: Any, expected: Iterable[dict[str, Any]], *,
@@ -227,6 +239,11 @@ def canonicalize_source_selectors(
                 try:
                     facts = (_submission._supporting(side, path) if _submission is not None else
                              _supporting_facts(source_root, revision, side, path, captured_source))
+                except _WorktreeSourceUnavailable as exc:
+                    rule = (': new-side supporting source unavailable because the reviewed working edits '
+                            'were not frozen; choose side old, use an assigned source_id, '
+                            'or remove this optional supporting selector.')
+                    raise SourceSelectorRejected(f'{field}{rule}', f'{generic}{rule}', source) from exc
                 except (FrozenSourceRejected, PathAbsentError) as exc:
                     rule = (': no available regular blob at the pinned revision; choose a regular file '
                             'on this side within the captured-source retrieval limit, '

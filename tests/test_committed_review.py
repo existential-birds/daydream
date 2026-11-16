@@ -1860,6 +1860,7 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
     The single-submission path never exercised partial batches: a rejected batch must
     leave no decision, claim or coverage reservation, earlier decisions are final,
     oversized batches are refused, and sealing types undecided targets per target.
+    Unresolvable supporting selectors, including an unfrozen tracked worktree's new side, are correctable.
     A final batch rejected on the reserved start was fatal, named one violation and lost
     every decision in it: a batch of that shape (128 decisions, 105 valid alone) is now
     correctable and installs nothing while its work is live. Once the work closes
@@ -1921,6 +1922,11 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
         ]:
             with pytest.raises(HostToolRejected, match=message):
                 _charged(binding, "review_admit", batch)
+        # Tracked working edits with no frozen snapshot refuse a new-side path correctably, never reading HEAD's blob.
+        review_inputs.revision["tracked_worktree_edits"] = True
+        with pytest.raises(HostToolRejected, match="new-side supporting source unavailable"):
+            _charged(binding, "review_admit", {"targets": [unreadable("api.py")], "claims": []})
+        del review_inputs.revision["tracked_worktree_edits"]
         final = {"targets": [decision(second, evidence_refs=[])], "claims": []}
         lost = {"targets": [unreadable("gone.py"), *(
             decision(second, target_id=f"{index}/" + "\u00e9" * 200) for index in range(3))],
