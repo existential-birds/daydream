@@ -1,0 +1,76 @@
+warning: The `UV_NATIVE_TLS` environment variable is deprecated and will be removed in a future release. Use `UV_SYSTEM_CERTS` instead.
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_runner_rejects_missing_canonical_before_fix_or_test ___________
+
+linked_worktree = (PosixPath('/tmp/pytest-of-root/pytest-3/test_runner_rejects_missing_ca0/main_repo'), PosixPath('/tmp/pytest-of-root/pytest-3/test_runner_rejects_missing_ca0/linked_worktree'))
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-3/test_runner_rejects_missing_ca0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fab6ec95220>
+make_config = <function make_config.<locals>._make at 0x7fab6e82a2a0>
+capsys = <_pytest.capture.CaptureFixture object at 0x7fab6e964c20>
+
+    async def test_runner_rejects_missing_canonical_before_fix_or_test(
+        linked_worktree: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """An empty-argv file command enters the real TOML loader and stops before any fix or suite.
+    
+        The rejection is persisted as a no-execution verdict and recipe; the manifest
+        candidate is never executed. Command-miss reasons have owner-level proof.
+        The owner's tracked edit is part of the reviewed subject: the run says so first and records it.
+        Untracked files alone leave the reviewed subject exactly the commits, with no notice.
+        """
+        reason, source = "empty-argv", "config"
+        _, target = linked_worktree
+        backend = _arrange(target, monkeypatch)
+        (target / ".daydream.toml").write_text('test_command = \'""\'\n')
+        (target / "owner-untracked.txt").write_text("owner untracked bytes\n")
+        counter = tmp_path / "candidate-runs"
+        candidate = tmp_path / "pytest"
+        candidate.write_text(f"#!/bin/sh\nprintf ran >> '{counter}'\nexit 0\n")
+        candidate.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+        trajectory = tmp_path / RUN_DOCUMENT_NAME
+        config = make_config(target, output_mode="loop", assume="yes", test_command=None,
+                             file_config=load_file_config(target), trajectory_path=trajectory)
+        notice = ("Fixing reviews the checkout as is: its tracked uncommitted edits are reviewed with the commits "
+                  "and committed with the fixes.")
+        deep = target / ".daydream" / "deep"
+        for dirty in (False, True):
+            if dirty:
+                (target / "base.txt").write_text("base\nowner dirty bytes\n")
+                backend.review_claims = [{**backend.review_claims[0], "supporting": [{
+                    "path": "base.txt", "side": "new", "source_range": {"start": 2, "end": 2},
+                    "basis": "source_inspection"}]}]
+                before = _state(target)
+            rc = await run(config)
+            assert rc != 0, "unconfigured validation cannot authorize a successful fix flow"
+            assert (notice in collapse_panel_text(capsys)) is dirty
+            coverage = json.loads((deep / "review-coverage.json").read_text())
+            assert (coverage["schema_version"], coverage["analyzed_revision"].get("tracked_worktree_edits")) == (
+                (3, True) if dirty else (1, None))
+        committed = json.loads((deep / "committed-review.json").read_text())
+        reviewed = hashlib.sha256((target / "base.txt").read_bytes()).hexdigest()
+>       assert [(ref["path"], ref["side"], ref["source_range"], ref["artifact_sha256"])
+                for finding in committed["findings"] for ref in finding["payload"]["evidence_refs"]
+                if ref["role"] == "supporting"] == [("base.txt", "new", {"start": 2, "end": 2}, reviewed)], (
+            "a supporting reference into an uncommitted line resolves against the reviewed bytes")
+E       AssertionError: a supporting reference into an uncommitted line resolves against the reviewed bytes
+E       assert [] == [('base.txt',...6a03b140ec8')]
+E         
+E         Right contains one more item: ('base.txt', 'new', {'start': 2, 'end': 2}, 'dd2c27244f8658daf866e7fc1b9ce38a76f19e28e9098978a40fb6a03b140ec8')
+E         Use -v to get more diff
+
+.scratch/issue-1890/test_extended_sketch.py:110: AssertionError
+============================= slowest 40 durations =============================
+1.40s call     .scratch/issue-1890/test_extended_sketch.py::test_runner_rejects_missing_canonical_before_fix_or_test
+0.19s setup    .scratch/issue-1890/test_extended_sketch.py::test_runner_rejects_missing_canonical_before_fix_or_test
+
+(1 durations < 0.005s hidden.  Use -vv to show these durations.)
+=========================== short test summary info ============================
+FAILED .scratch/issue-1890/test_extended_sketch.py::test_runner_rejects_missing_canonical_before_fix_or_test
+1 failed in 1.94s
+
+real	0m2.894s
+user	0m2.529s
+sys	0m0.287s

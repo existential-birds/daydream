@@ -1,0 +1,72 @@
+warning: The `UV_NATIVE_TLS` environment variable is deprecated and will be removed in a future release. Use `UV_SYSTEM_CERTS` instead.
+bringing up nodes...
+bringing up nodes...
+
+........................................................................ [ 61%]
+..............................................                           [100%]
+=============================== warnings summary ===============================
+daydream/phases/test_evidence.py:248
+daydream/phases/test_evidence.py:248
+daydream/phases/test_evidence.py:248
+daydream/phases/test_evidence.py:248
+  /home/user/daydream/daydream/phases/test_evidence.py:248: PytestCollectionWarning: cannot collect test class 'TestAndHealResult' because it has a __init__ constructor (from: tests/test_deep_orchestrator.py)
+    @dataclass(frozen=True)
+
+daydream/phases/test_evidence.py:162
+daydream/phases/test_evidence.py:162
+daydream/phases/test_evidence.py:162
+daydream/phases/test_evidence.py:162
+  /home/user/daydream/daydream/phases/test_evidence.py:162: PytestCollectionWarning: cannot collect test class 'TestAttemptEvidence' because it has a __init__ constructor (from: tests/test_deep_orchestrator.py)
+    @dataclass(frozen=True)
+
+tests/test_dataset_capture.py::test_terminal_failure_retains_owned_trace_and_partial_evidence
+  /home/user/daydream/.venv/lib/python3.14/site-packages/traceloop/sdk/prompts/model.py:12: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    class RegistryObjectBaseModel(BaseModel):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+============================= slowest 40 durations =============================
+3.08s call     tests/test_integration.py::test_runner_remote_ci_cancellation_persists_verdict_and_handoff
+2.87s call     tests/test_cli_main_integration.py::test_cli_main_only_fix_selects_fixing
+2.66s call     tests/deep_orchestrator/test_pipeline_intent_and_resume.py::test_pr_body_reaches_the_reviewer_as_bounded_untrusted_context
+2.28s call     tests/deep_orchestrator/test_findings_artifacts.py::test_embedded_fixing_is_selected_explicitly_and_persists_the_suite_verdict[operator-ignore-records-failure]
+2.05s call     tests/test_archive_data_capture.py::test_default_deep_run_populates_eval_captures_patch_and_current_merge_phase_state
+1.93s call     tests/test_trajectory_phase_events.py::test_real_fix_fallback_records_multiple_invocations_in_one_fork
+1.80s call     tests/deep_orchestrator/test_fix_guards_and_scope.py::test_fix_reverts_post_fix_edit_outside_reviewed_diff[True]
+1.72s call     tests/test_improve_flow.py::test_capable_improve_partial_plan_failure_is_safe_and_publishes_the_rest[asyncio]
+1.58s call     tests/deep_orchestrator/test_repair_job_acceptance.py::test_operator_grant_resumes_the_same_job_without_erasing_history
+1.36s call     tests/test_improve_flow.py::test_publication_failures_are_not_reported_as_planning_failures[asyncio]
+1.32s call     tests/deep_orchestrator/test_fix_guards_and_scope.py::test_test_healing_guard_reverts_generated_migration_edit
+1.24s call     tests/test_cli_github_app.py::test_cli_requested_branch_ignores_current_checkout_pr
+1.17s call     tests/test_improve_flow.py::test_vet_dispatch_interval_batch_failure_fails_closed_per_batch[asyncio]
+1.14s call     tests/test_diagram_overlap.py::test_embedded_review_preserves_backend_dispatch_boundaries[diagram]
+1.11s call     tests/deep_orchestrator/test_review_completion.py::test_snapshot_boundaries[live]
+1.01s call     tests/deep_orchestrator/test_review_completion.py::test_atomic_public_failure[later-run-moved-checkout]
+1.00s call     tests/test_deep_diagram_integration.py::test_diagram_phase_outcome_and_dispatch_interval_when_one_author_fails
+0.93s call     tests/deep_orchestrator/test_review_completion.py::test_atomic_public_failure[later-run-sealed-result-touched]
+0.90s call     tests/deep_orchestrator/test_review_completion.py::test_atomic_public_failure[prior-install]
+0.89s call     tests/deep_orchestrator/test_review_completion.py::test_atomic_public_failure[later-run-private-store-lost]
+0.86s call     tests/test_extension_seam_integration.py::test_extension_step_rewrites_items_before_the_review_is_sealed
+0.83s call     tests/test_missing_test_command_acceptance.py::test_runner_rejects_missing_canonical_before_fix_or_test
+0.82s call     tests/test_improve_flow.py::test_group_scope_slices_search_but_report_names_the_unaudited_rest[asyncio]
+0.79s call     tests/test_dataset_capture.py::test_terminal_failure_retains_owned_trace_and_partial_evidence
+0.77s call     tests/deep_orchestrator/test_review_completion.py::test_finalization_boundary[unconfined-path]
+0.77s call     tests/test_diagram_only_integration.py::test_findings_out_rejects_dirty_moved_or_unresolved_heads_before_diagram_export
+0.76s call     tests/test_improve_flow.py::test_improve_cli_discovers_nested_workspace_and_preserves_downstream_facts
+0.71s call     tests/deep_orchestrator/test_review_completion.py::test_finalization_boundary[fix]
+0.67s call     tests/test_runner.py::test_artifact_session_runner_cancellation_finalizes_then_propagates
+0.66s call     tests/test_integration_workspace.py::test_local_review_pins_remote_preferred_base_without_upstream
+0.66s call     tests/test_improve_flow.py::test_custom_improve_survey_uses_compatible_two_pass_fallback[asyncio]
+0.66s call     tests/test_diagram_only_integration.py::test_omitted_kind_posts_an_omission_notice_and_a_failed_kind_exits_one
+0.64s call     tests/test_improve_flow.py::test_branch_focus_manifest_retains_deleted_paths_without_reading_missing_files[asyncio]
+0.63s call     tests/test_extension_prompts_integration.py::test_legacy_markdown_plan_writer_override_blocks_with_sanitized_diagnostics[asyncio]
+0.62s call     tests/deep_orchestrator/test_review_completion.py::test_finalization_boundary[placement-replacement-worktree]
+0.61s call     tests/test_improve_flow.py::test_branch_fanout_preserves_serial_limits_and_quick_filtering[asyncio]
+0.59s call     tests/test_improve_flow.py::test_audit_dispatch_interval_preserves_isolation_when_all_failed[asyncio]
+0.58s call     tests/deep_orchestrator/test_review_completion.py::test_atomic_public_failure[staging]
+0.56s call     tests/test_improve_flow.py::test_full_improve_denies_glob_through_inward_then_outward_symlink[asyncio]
+0.54s call     tests/test_runner.py::test_fix_cycle_failing_tests_bounded_fix_then_handoff
+118 passed, 9 warnings in 19.86s
+
+real	0m20.456s
+user	0m50.601s
+sys	0m9.814s

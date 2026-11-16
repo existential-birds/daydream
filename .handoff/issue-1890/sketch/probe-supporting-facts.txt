@@ -1,0 +1,7 @@
+has_worktree_edits: True
+reviewed diff includes base.txt: True
+_supporting_facts(new, base.txt): _SupportingFacts(digest='f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac', lines=1, utf8=True)
+  sha256(HEAD bytes)    = f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac
+  sha256(reviewed bytes)= dd2c27244f8658daf866e7fc1b9ce38a76f19e28e9098978a40fb6a03b140ec8
+  RESOLVES AGAINST: HEAD (bug)
+canonicalize (line 2): REFUSED -> evidence_refs[1] supporting path 'base.txt' (new).source_range: allowed 1..1 with start <= end; choose a contained range or remove this optional supporting selector.
