@@ -206,15 +206,19 @@ def test_failed_commit_is_not_visible_and_abandoned_staging_recovers_privately(
     assert [run["run_id"] for run in read_records(store).runs] == ["run-1"]
     abandoned = store.root / "runs" / "record-abandoned.tmp"
     abandoned.write_bytes(b'{"partial":')
+    os.utime(abandoned, (0, 0))
     assert store.commit_run(run_record("retry")).diagnostics == ("recovered_interrupted_write",)
     assert {run["run_id"] for run in read_records(store).runs} == {"run-1", "retry"}
 
     def documents() -> Iterator[dict[str, Any]]:
-        """Stream while the store lock is free; another committer's recovery keeps this live stage."""
+        """Stream while the store lock is free; another committer's recovery keeps this live stage,
+        even where a held lock is granted to another descriptor, as on Docker Desktop bind mounts (#1883)."""
         with open(store.root / ".lock", "rb") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         live, = (store.root / "runs").glob("*.tmp")
-        assert store.commit_run(run_record("concurrent")).diagnostics == () and live.exists()
+        with monkeypatch.context() as shared:
+            shared.setattr(fcntl, "flock", lambda descriptor, operation: None)
+            assert store.commit_run(run_record("concurrent")).diagnostics == () and live.exists()
         assert {run["run_id"] for run in read_records(store).runs} == {"run-1", "retry", "concurrent"}
         yield {"schema_version": "ATIF-v1.7", "session_id": "streamed", "trajectory_id": "streamed",
                "agent": {"name": "daydream", "version": "test"},

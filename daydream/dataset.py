@@ -8,6 +8,7 @@ import os
 import re
 import stat
 import tempfile
+import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
@@ -507,13 +508,22 @@ def record_name(identity: str) -> str:
     return _sha(identity.encode()) + ".jsonl"
 
 
+# Recovery removes a stage only once it is unlocked and untouched this long. Some filesystems
+# grant a held lock to another descriptor: on Docker Desktop's macOS bind mounts (virtiofs
+# "fakeowner"), descriptors in one container can share a lock, so a live writer's stage
+# looked abandoned and recovery deleted it before publish (#1883).
+_STAGE_GRACE_SECONDS = 3600
+
+
 def _abandoned(staged: Path) -> bool:
-    """Whether a staged temp is still linked and no live writer holds its lock."""
+    """Whether a staged temp is still linked, unlocked, and untouched for the grace period."""
     try:
         handle = open(staged, "rb")
     except FileNotFoundError:
         return False
     with handle:
+        if time.time() - os.fstat(handle.fileno()).st_mtime <= _STAGE_GRACE_SECONDS:
+            return False
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -689,7 +699,9 @@ class LocalRecordStore:
         """Stage one run record outside the store lock, then compare or publish it under the lock.
 
         The stage is a ``*.tmp`` file created under the lock and locked by its writer until
-        it is published or removed, so interrupted-write recovery skips it while the writer lives.
+        it is published or removed, and recovery also skips any stage written within the last
+        hour, so interrupted-write recovery skips it while the writer lives even where the
+        filesystem doesn't keep the lock exclusive.
         """
         identity = envelope["run_id"]
         path = self._shard("runs", identity)
@@ -792,7 +804,8 @@ class LocalRecordStore:
         return member, record
 
     def _published(self, kind: str) -> list[str]:
-        # Called under the lock after recovery, so a remaining stage belongs to a live writer.
+        # Called under the lock after recovery. A remaining stage is a live writer's or one
+        # recovery hasn't reclaimed yet (younger than _STAGE_GRACE_SECONDS); never a record.
         names = []
         for path in sorted((self.root / kind).iterdir()):
             if path.suffix == ".tmp":
