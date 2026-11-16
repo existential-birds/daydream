@@ -80,6 +80,8 @@ _DIAGNOSTIC_LABEL_MAX_CHARS = 64
 _DIAGNOSTIC_LABEL_MAX_DISTINCT = 32
 _NON_JSON_EXCERPT_MAX_LINES = 20
 _NON_JSON_EXCERPT_MAX_CHARS_PER_LINE = 256
+# A stripped Rust backtrace frame (`N: symbol`) or its source location (`at path:line`).
+_BACKTRACE_FRAME = re.compile(r"\d+: |at ")
 # Only public error items activate this contract; absent markers cannot
 # justify invented tool events or invocation-wide coverage claims.
 # External contract: this literal identifies Codex CLI release/wire mode.
@@ -333,6 +335,26 @@ def _bounded_diagnostic_label(value: Any) -> str:
 def _bounded_process_excerpt(value: str) -> str:
     """Redact a complete non-JSON line before applying the exception cap."""
     return redact_structured_text(value)[:_NON_JSON_EXCERPT_MAX_CHARS_PER_LINE]
+
+
+def _mcp_result_text(result: dict[str, Any]) -> str:
+    """Join MCP content made only of text blocks with newlines; other content becomes canonical JSON.
+
+    Structured content is recorded only when the result has no content.
+    """
+    content = result.get("content")
+    if not content and result.get("structured_content") is not None:
+        content = result["structured_content"]
+    if isinstance(content, list) and all(
+        isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+        for block in content
+    ):
+        return "\n".join(block["text"] for block in content)
+    if isinstance(content, str):
+        return content
+    if content is None:
+        return ""
+    return json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def _record_unknown(
@@ -764,9 +786,10 @@ class CodexBackend:
         The default uses danger-full-access in the caller's cwd.
 
         finalization caps effort at low, preserving lower levels. Codex has no tool
-        disable control, so callers retain the host zero-tool guard. persist_session
-        is accepted but ignored. Turn failures raise CodexError; stdout silence raises
-        retryable StreamStalledError and run_agent retries with a fresh subprocess.
+        disable control, so callers retain the host zero-tool guard. persist_session=False
+        passes --ephemeral and never resumes or returns a continuation. Turn failures raise
+        CodexError; stdout silence raises retryable StreamStalledError and run_agent retries
+        with a fresh subprocess.
 
         host registers this attempt's MCP server through additive ``-c`` overrides and
         the child environment only. Its calls are charged by the endpoint; starts Codex
@@ -833,6 +856,7 @@ class CodexBackend:
                 return max(0.0, terminal_deadline - asyncio.get_running_loop().time())
             return idle_timeout_s
         non_json_lines: list[str] = []  # redacted/capped process-exit excerpts
+        in_backtrace = False  # inside a backtrace's header, frames and blank lines
         unmatched_seq = 0  # monotonic source for orphaned tool-result ids
 
         def _warn(reason: str) -> None:
@@ -906,6 +930,9 @@ class CodexBackend:
         transport: CliTransport | None = None
         execution_cwd = cwd
         shared_checkout: _SharedCheckout | None = None
+        # As with Pi, only a persisted call resumes: --ephemeral would still append to a resumed thread.
+        resumed = (continuation if persist_session and continuation is not None and continuation.backend == "codex"
+                   else None)
 
         try:
             if read_only:
@@ -916,7 +943,7 @@ class CodexBackend:
                     # CodexError on read-only prep failure covers the full prep.
                     raise CodexError("failed to create disposable read-only checkout") from exc
                 if is_worktree_root:
-                    if continuation is not None and continuation.backend == "codex":
+                    if resumed is not None:
                         # The thread retains its deleted clone cwd, not the newly rebound
                         # prompt path; refuse resumption rather than silently changing cwd.
                         raise CodexError(
@@ -953,6 +980,8 @@ class CodexBackend:
                 "--cd",
                 str(execution_cwd),
             ]
+            if not persist_session:
+                args.append("--ephemeral")
             effort = self.reasoning_effort
             if finalization:
                 effort = effort if effort in {"none", "minimal", "low"} else "low"
@@ -960,8 +989,8 @@ class CodexBackend:
                 args.extend(["-c", f'model_reasoning_effort="{effort}"'])
             if schema_path:
                 args.extend(["--output-schema", schema_path])
-            if continuation is not None and continuation.backend == "codex":
-                args.extend(["resume", continuation.data["thread_id"]])
+            if resumed is not None:
+                args.extend(["resume", resumed.data["thread_id"]])
 
             # Built off the event loop (asyncio.to_thread, like the sibling git
             # calls above), so the env copy and bounded xcrun probe never stall
@@ -1012,16 +1041,9 @@ class CodexBackend:
                 for name, own, other in zip(("NO_PROXY", "no_proxy"), exemptions, reversed(exemptions)):
                     child_env[name] = ",".join(filter(None, (own or other, "127.0.0.1")))
 
-            # P18 Task 1: closed typed effective-config admission from the
-            # exact argv built above. persist_session is accepted-but-not-passed
-            # on this CLI surface, so it stays None (documented unavailability,
-            # never an effective claim).
-            codex_resume_applied = (
-                continuation is not None and continuation.backend == "codex"
-            )
             codex_resume_thread: str | None = None
-            if continuation is not None and codex_resume_applied:
-                thread_value = continuation.data.get("thread_id")
+            if resumed is not None:
+                thread_value = resumed.data.get("thread_id")
                 codex_resume_thread = thread_value if isinstance(thread_value, str) else None
             if lifecycle is not None:
                 lifecycle.request_prepared()
@@ -1037,11 +1059,12 @@ class CodexBackend:
                     experimental_json=True,
                     native_output_schema=schema_path is not None,
                     read_only_isolation=read_only and execution_cwd != cwd,
-                    continuation_mode="resume" if codex_resume_applied else "fresh",
+                    persist_session=persist_session,
+                    continuation_mode="resume" if resumed is not None else "fresh",
                     model_mode="single",
                 ),
                 model_source="configured",
-                session_source="configured" if codex_resume_applied else None,
+                session_source="configured" if resumed is not None else None,
             )
 
             transport = CliTransport(
@@ -1071,13 +1094,16 @@ class CodexBackend:
                 try:
                     event = json.loads(raw_line)
                 except json.JSONDecodeError:
-                    # Keep bounded raw lines only for the existing process-exit
-                    # exception excerpt. Persistent diagnostics and logs retain
-                    # only the count, never the line payload.
+                    # Keep bounded raw lines only for the process-exit exception excerpt; diagnostics and
+                    # logs retain only the count. Blank lines and a backtrace (its header, then frame and
+                    # blank lines) are counted but not kept, so frames cannot push Codex's cause line out.
                     non_json_count += 1
-                    if len(non_json_lines) >= _NON_JSON_EXCERPT_MAX_LINES:
-                        non_json_lines.pop(0)
-                    non_json_lines.append(_bounded_process_excerpt(raw_line))
+                    in_backtrace = raw_line.casefold() == "stack backtrace:" or (
+                        in_backtrace and (not raw_line or _BACKTRACE_FRAME.match(raw_line) is not None))
+                    if raw_line and not in_backtrace:
+                        if len(non_json_lines) >= _NON_JSON_EXCERPT_MAX_LINES:
+                            non_json_lines.pop(0)
+                        non_json_lines.append(_bounded_process_excerpt(raw_line))
                     _logger.debug("codex: non-JSON line skipped")
                     for diagnostic in _take_early_diagnostics():
                         yield diagnostic
@@ -1244,8 +1270,7 @@ class CodexBackend:
                         if "result" in item:
                             result = item["result"]
                             if isinstance(result, dict):
-                                content = result.get("content", "")
-                                result_content = str(content)
+                                result_content = _mcp_result_text(result)
                                 result_error = result.get("isError") is True
                             else:
                                 _warn("tool_result_not_object")
@@ -1361,9 +1386,9 @@ class CodexBackend:
                                     break
 
                     continuation_token = None
-                    # A disposable checkout disappears after this invocation;
-                    # only sessions with a stable cwd can offer native resume.
-                    if thread_id and shared_checkout is None:
+                    # A disposable checkout disappears after this invocation and an ephemeral
+                    # thread is never stored: only persisted sessions with a stable cwd can resume.
+                    if persist_session and thread_id and shared_checkout is None:
                         continuation_token = ContinuationToken(
                             backend="codex",
                             data={"thread_id": thread_id},
