@@ -17,8 +17,7 @@ from daydream.pr_comment_renderer import (
 )
 from daydream.pricing import ModelPrice, resolve_prices
 from daydream.trajectory import DOCUMENT_SUFFIX, read_document_view
-from daydream.trajectory.journal import JournalWriter
-from daydream.trajectory.view import OPEN_EVENT, STEP_EVENT
+from tests.harness.trajectory import write_evidence
 
 # Committed fixtures cover Claude (cost_usd present) and Codex (cost_usd null,
 # synthesized via pricing). Tests needing a specific shape build inline via _write_trajectory.
@@ -54,16 +53,10 @@ def _user_step(phase: str = "review") -> dict[str, Any]:
 
 
 def _write_evidence(path: Path, payload: dict[str, Any]) -> Path:
-    """Write one document view's identity, root model and steps as an evidence document."""
+    """Write one document view (identity defaulted, root model and steps) as an evidence document."""
     session_id = payload.get("session_id") or "fixture"
-    writer = JournalWriter(path, resource={}, version="test")
-    writer.append(OPEN_EVENT, {
-        "session_id": session_id, "trajectory_id": payload.get("trajectory_id") or session_id,
-        "agent_version": "test", "agent_model_name": payload["agent"].get("model_name"), "extra": {},
-    })
-    for step in payload["steps"]:
-        writer.append(STEP_EVENT, step)
-    writer.seal({"run_ended_at": "2026-05-02T00:01:00Z", "final_metrics": {}})
+    write_evidence(path, {**payload, "session_id": session_id,
+                          "trajectory_id": payload.get("trajectory_id") or session_id})
     return path
 
 

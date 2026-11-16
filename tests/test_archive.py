@@ -73,8 +73,7 @@ from daydream.trajectory import (
     summarize_run,
 )
 from tests.harness.review_result import review_coverage
-from tests.harness.trajectory import make_manifest
-from tests.test_archive_integration import evidence_reference
+from tests.harness.trajectory import evidence_reference, make_manifest
 
 MakeConfig = Callable[..., RunConfig]
 
@@ -83,22 +82,14 @@ _DEFAULT_FINAL_METRICS: dict[str, Any] = {
 }
 
 
-_EVIDENCE_STORE: list[Path] = []
+def _document(store: Path, payload: Mapping[str, Any], path: Path) -> TrajectoryDocumentReference:
+    """An evidence reference whose logical ``path`` names it; its bytes live in the private *store*."""
+    private = store / f"{len(list(store.iterdir())) if store.is_dir() else 0}{DOCUMENT_SUFFIX}"
+    return evidence_reference(payload, private, logical_path=path)
 
 
-@pytest.fixture(autouse=True)
-def _evidence_store(tmp_path_factory: pytest.TempPathFactory) -> None:
-    """Private files behind the synthetic evidence references these tests freeze."""
-    _EVIDENCE_STORE[:] = [tmp_path_factory.mktemp("evidence")]
-
-
-def _document(payload: Mapping[str, Any], path: Path) -> TrajectoryDocumentReference:
-    """An evidence reference whose logical ``path`` names it; its bytes live in the private store."""
-    private = _EVIDENCE_STORE[0] / f"{len(list(_EVIDENCE_STORE[0].iterdir()))}{DOCUMENT_SUFFIX}"
-    return replace(evidence_reference(payload, private), path=path)
-
-
-def _write_snapshot(recorder: Any, *, status: str = "complete", phase_events: list[dict[str, Any]] | None = None,
+def _write_snapshot(store: Path, recorder: Any, *, status: str = "complete",
+    phase_events: list[dict[str, Any]] | None = None,
     final_metrics: dict[str, Any] | None = None, lifecycle: tuple[str, str] | None = None,
 ) -> RunWriteSnapshot:
     """Freeze the recorder's root with optional metric and lifecycle overrides.
@@ -121,7 +112,7 @@ def _write_snapshot(recorder: Any, *, status: str = "complete", phase_events: li
         cutoff_at = lifecycle[1]
     payload["final_metrics"] = dict(_DEFAULT_FINAL_METRICS) if final_metrics is None else final_metrics
     return RunWriteSnapshot(status=cast(Any, status), cutoff_at=cutoff_at, root_trajectory_id=trajectory_id,
-                            documents=(_document(payload, Path(recorder.path)),))
+                            documents=(_document(store, payload, Path(recorder.path)),))
 
 
 @dataclass
@@ -183,8 +174,9 @@ def _manifest_identity(**overrides: Any) -> ManifestRunIdentity:
 
 
 def _manifest_write_snapshot(
-    *, session_id: str = "abcd1234-0000-0000-0000-000000000000", final_metrics: Mapping[str, Any] | None = None,
-    extra: Mapping[str, Any] | None = None, path: Path = Path("/frozen") / RUN_DOCUMENT_NAME,
+    store: Path, *, session_id: str = "abcd1234-0000-0000-0000-000000000000",
+    final_metrics: Mapping[str, Any] | None = None, extra: Mapping[str, Any] | None = None,
+    path: Path = Path("/frozen") / RUN_DOCUMENT_NAME,
 ) -> RunWriteSnapshot:
     """Build explicit immutable root bytes for manifest-reducer tests."""
     snapshot_extra = dict(extra or {})
@@ -195,7 +187,7 @@ def _manifest_write_snapshot(
     return RunWriteSnapshot(
         status="complete", cutoff_at=str(snapshot_extra.get("run_ended_at", "2026-01-01T00:00:01Z")),
         root_trajectory_id=session_id,
-        documents=(_document(payload, path),),
+        documents=(_document(store, payload, path),),
     )
 
 
@@ -213,7 +205,7 @@ def _build(tmp_path: Path, *, git_ctx: GitContext | None = None, write_snapshot:
     run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL, identity: ManifestRunIdentity | None = None, **kw: Any,
 ) -> Manifest:
     """Build a manifest from immutable public archive inputs."""
-    snapshot = write_snapshot or _manifest_write_snapshot()
+    snapshot = write_snapshot or _manifest_write_snapshot(tmp_path / "evidence")
     return build_manifest_from_snapshot(run=_archive_snapshot(snapshot, run_flow=run_flow, identity=identity,),
         summary=summarize_run(snapshot), git_ctx=git_ctx if git_ctx is not None else GitContext(), status="complete",
         archive_path=tmp_path, **kw,
@@ -308,7 +300,8 @@ def _assemble_bundle(
     destinations: tuple[RoutedDestination, ...] = (),
 ) -> None:
     """Run the production bundle assembler over one frozen tree + snapshot."""
-    snapshot = write_snapshot if write_snapshot is not None else _write_snapshot(recorder)
+    snapshot = write_snapshot if write_snapshot is not None else _write_snapshot(target.parent / "evidence",
+                                                                                     recorder)
     _copy_snapshot_bundle(run=_archive_snapshot(snapshot, run_flow=recorder.run_flow),
         artifacts=ArtifactTreeSnapshot(
             session_id=recorder.session_id, workspace_key="workspace", root=target, manifest=manifest_tree(target),
@@ -547,7 +540,7 @@ def test_archive_rejects_repository_identity_the_producer_cannot_create(
 
     _strict_archive(target=target, session_id=recorder.session_id,
         config=make_config(target, archive=True, pr_repo=oversized, pr_number=42,),
-        write_snapshot=_write_snapshot(recorder,
+        write_snapshot=_write_snapshot(target.parent / "evidence", recorder,
             phase_events=[*_merge_events(recorder.session_id, "succeeded"),
                 _phase_start_event("fix", recorder.session_id, timestamp="2026-09-06T12:00:00Z"),
                 *[_phase_start_event(phase.value, recorder.session_id, timestamp="2026-09-06T12:00:00Z")
@@ -619,7 +612,7 @@ def test_archive_required_success_with_pending_advisory_is_succeeded(
     )
 
     _strict_archive(target=target, session_id=recorder.session_id, config=config,
-        write_snapshot=_write_snapshot(recorder,
+        write_snapshot=_write_snapshot(target.parent / "evidence", recorder,
             phase_events=[*_merge_events(recorder.session_id, "succeeded"),
                 _phase_start_event("fix", recorder.session_id, timestamp="2026-09-06T12:00:00Z"),
             ],
@@ -679,7 +672,7 @@ def test_current_merge_event_controls_pipeline_status(tmp_path: Path) -> None:
     # but only on this session's own coverage.
     no_diff = review_coverage(run_id="current", scope_ids=(), phases=("no_diff",))
     no_diff.record_phase("no_diff", "complete", noop=True)
-    run = _archive_snapshot(_manifest_write_snapshot(session_id="current"))
+    run = _archive_snapshot(_manifest_write_snapshot(tmp_path / "evidence", session_id="current"))
     for run_id, expected in (("current", "succeeded"), ("prior", "partial")):
         _write_deep(tmp_path, "review-coverage.json", {**no_diff.to_dict(), "run_id": run_id})
         assert pipeline._manifest_state(target_dir=tmp_path, run=run, frozen_extra={})["pipeline_status"] == expected
@@ -703,7 +696,7 @@ def test_archive_retains_malformed_frozen_merge_evidence_as_unknown(
     events = _merge_events(session_id, "not-a-status")
 
     _strict_archive(target=target, session_id=session_id, config=make_config(target, archive=True),
-        write_snapshot=_write_snapshot(recorder, phase_events=events),
+        write_snapshot=_write_snapshot(target.parent / "evidence", recorder, phase_events=events),
     )
 
     manifest = json.loads((archive_dir / "runs" / session_id / "manifest.json").read_text())
@@ -719,7 +712,7 @@ def test_archive_rejects_frozen_root_from_another_session(target: Path, archive_
     }
     snapshot = RunWriteSnapshot(
         status="complete", cutoff_at="2026-01-01T00:00:01Z", root_trajectory_id=recorder.session_id,
-        documents=(_document(payload, recorder.path),),
+        documents=(_document(target.parent / "evidence", payload, recorder.path),),
     )
 
     with pytest.raises(ValueError, match="frozen root trajectory identity"):
@@ -734,8 +727,9 @@ def test_archive_rejects_a_sibling_document_from_another_session(
 ) -> None:
     """The root is valid: bundle projection must reject the foreign fork without publishing a partial archive."""
     recorder = _MockRecorder(session_id="current-session")
-    root = _write_snapshot(recorder).documents[0]
-    foreign = _document({"session_id": "other-session", "trajectory_id": "fork-1"}, target / f"fork{DOCUMENT_SUFFIX}")
+    root = _write_snapshot(target.parent / "evidence", recorder).documents[0]
+    foreign = _document(target.parent / "evidence", {"session_id": "other-session", "trajectory_id": "fork-1"},
+                        target / f"fork{DOCUMENT_SUFFIX}")
     snapshot = RunWriteSnapshot(
         status="complete", cutoff_at="2026-01-01T00:00:01Z", root_trajectory_id=recorder.session_id,
         documents=(root, foreign),
@@ -765,7 +759,8 @@ def test_test_failed_from_verdict(tmp_path: Path) -> None:
     fixed = tmp_path / "fix-failures"
     _write_deep(fixed, "fix-failures.json", {"api.py": "verification failed"})
     state = pipeline._manifest_state(
-        target_dir=fixed, run=_archive_snapshot(_manifest_write_snapshot(session_id="current")), frozen_extra={},
+        target_dir=fixed, frozen_extra={},
+        run=_archive_snapshot(_manifest_write_snapshot(tmp_path / "evidence", session_id="current")),
     )
     assert state["status"] == "partial" and state["fix_failures"] == {"api.py": "verification failed"}
     assert state["phase_states"]["fix"] == {"ran": True, "status": "partial"}
@@ -786,7 +781,7 @@ def test_snapshot_manifest_provenance_rejects_malformed_identity(tmp_path: Path)
         ("session", {"pr_number": True}, "pr_number"), ("session", {"pr_number": 7, "pr_repo": None}, "pr_repo"),
         ("..", None, "session_id"),
     ):
-        snapshot = _manifest_write_snapshot(
+        snapshot = _manifest_write_snapshot(tmp_path / "evidence",
             session_id=session_id, extra=extra, final_metrics={}, path=tmp_path / RUN_DOCUMENT_NAME,
         )
         with pytest.raises(ValueError, match=message):

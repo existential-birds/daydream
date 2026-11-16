@@ -21,26 +21,6 @@ def _present(**fields: Any) -> dict[str, Any]:
     return {key: value for key, value in fields.items() if value is not None}
 
 
-def ToolCall(**fields: Any) -> dict[str, Any]:  # noqa: N802 - transcript-shaped test builders
-    return _present(**fields)
-
-
-def ObservationResult(**fields: Any) -> dict[str, Any]:  # noqa: N802
-    return _present(**fields)
-
-
-def Observation(*, results: list[dict[str, Any]]) -> dict[str, Any]:  # noqa: N802
-    return {"results": results}
-
-
-def ContentPart(**fields: Any) -> dict[str, Any]:  # noqa: N802
-    return _present(**fields)
-
-
-def ImageSource(**fields: Any) -> dict[str, Any]:  # noqa: N802
-    return _present(**fields)
-
-
 def _check_case(check: Callable[..., None], case: tuple[Any, ...]) -> None:
     """Run one table row, naming it in the failure report."""
     try:
@@ -93,7 +73,7 @@ def test_redactor_fails_closed_per_rule_per_key_and_per_field(monkeypatch: pytes
         return real(value, sensitive=sensitive)
     with monkeypatch.context() as patch:
         patch.setattr(redactor_mod, 'redact_value', redact)
-        step = redact_step(_agent_step(tool_calls=[ToolCall(
+        step = redact_step(_agent_step(tool_calls=[dict(
             tool_call_id='edit', function_name='Edit', arguments=arguments,
         )]))
     assert step.get("tool_calls") is not None
@@ -108,10 +88,10 @@ def test_redactor_fails_closed_per_rule_per_key_and_per_field(monkeypatch: pytes
 
     monkeypatch.setattr(redactor_mod, "redact_structured_text", _boom, raising=True)
     step = _agent_step(message="OPENAI_API_KEY=sk-leak1", reasoning_content="thinking about sk-leak2",
-        tool_calls=[ToolCall(
+        tool_calls=[dict(
                 tool_call_id="tc1", function_name="Edit", arguments={"old_string": "sk-leak3", "new_string": "x"},
             ),
-        ], observation=Observation(results=[ObservationResult(content="result with sk-leak4")],),
+        ], observation=dict(results=[dict(content="result with sk-leak4")],),
     )
     out = redact_step(step)
     serialized = str(out)
@@ -126,9 +106,9 @@ def test_redactor_fails_closed_per_rule_per_key_and_per_field(monkeypatch: pytes
 
 
 def test_redactor_scrubs_text_content_parts() -> None:
-    parts = [ContentPart(type="text", text="key=sk-test-secret123abc"),
-        ContentPart(type="image", source=ImageSource(media_type="image/png", path="screenshot.png"),),
-        ContentPart(type="text", text="clean text"),
+    parts = [dict(type="text", text="key=sk-test-secret123abc"),
+        dict(type="image", source=dict(media_type="image/png", path="screenshot.png"),),
+        dict(type="text", text="clean text"),
     ]
     step = {"step_id": 1, "timestamp": now_iso(), "source": "user", "message": parts,
             "extra": {"daydream_phase": "review", "daydream_run_flow": "normal"}}
@@ -262,14 +242,14 @@ def _assert_native_tagged_credential_redacted(kind: str, order: str, form: str, 
         result = redact_value(payload)
         assert redact_value(result) == result
     elif form == 'arguments':
-        out = redact_step(_agent_step(tool_calls=[ToolCall(
+        out = redact_step(_agent_step(tool_calls=[dict(
             tool_call_id='auth', function_name='Inspect', arguments=credential,
         )]))
         assert out.get("tool_calls") is not None
         result = {**payload, 'data': out["tool_calls"][0]["arguments"]}
     elif form == 'text-parts':
-        out = redact_step(_agent_step(observation=Observation(results=[ObservationResult(
-            content=[ContentPart(type='text', text=json.dumps(payload))],
+        out = redact_step(_agent_step(observation=dict(results=[dict(
+            content=[dict(type='text', text=json.dumps(payload))],
         )])))
         assert out.get("observation") is not None
         parts = out["observation"]["results"][0]["content"]
@@ -431,7 +411,7 @@ def test_redactor_sanitizes_http_observation_and_preserves_its_layout() -> None:
         'curl -H "Authorization: Bearer opaque-token-xyz" https://api\n'
         "saw Authorization: Bearer opaque-token-xyz in the log\nnext line stays"
     )
-    out = redact_step(_agent_step(observation=Observation(results=[ObservationResult(content=content)])))
+    out = redact_step(_agent_step(observation=dict(results=[dict(content=content)])))
     assert out.get("observation") is not None
     assert out["observation"]["results"][0]["content"] == (
         "Authorization: [REDACTED_CREDENTIAL]\nauthorization: Bearer [REDACTED_CREDENTIAL]\n"
@@ -462,13 +442,13 @@ def test_credential_rotation_diagnostic_redacts_independent_documents_and_preser
                 "installation ghs_abc123DEF456ghi789jkl012; Slack xoxb-test456abcdef\n"
                 "MONKEY_PATCH=enabled\nKEYBOARD_LAYOUT=qwerty\nAUTHOR=alice\nTOKENIZED=yes\nKEYSTORE=/etc/ks"
             ),
-            tool_calls=[ToolCall(tool_call_id="config", function_name="Configure", arguments={
+            tool_calls=[dict(tool_call_id="config", function_name="Configure", arguments={
                 "password": "opaque-plain-canary", "auth": {"metadata": "opaque-nested-canary"},
                 "max_tokens": 5, "tokenizer": "bpe", "passwordless": True, "keyStore": "ks",
             })],
-            observation=Observation(
+            observation=dict(
                 results=[
-                    ObservationResult(
+                    dict(
                         source_call_id="json-config",
                         content=(
                             '{"credentials": {"apiKey": "opaque-test-only-sentinel"}, "profiles": ['
@@ -476,10 +456,10 @@ def test_credential_rotation_diagnostic_redacts_independent_documents_and_preser
                             '{"apiKey": {\n  "nested": "opaque-test-only-sentinel"\n}}], "enabled": true}'
                         ),
                     ),
-                    ObservationResult(
+                    dict(
                         source_call_id="python-config", content="{'client_secret': 'opaque-test-only-sentinel'}"
                     ),
-                    ObservationResult(
+                    dict(
                         source_call_id="yaml-config",
                         content=(
                             "1apiKey:\n  nested: opaque-test-only-sentinel\n"
@@ -488,7 +468,7 @@ def test_credential_rotation_diagnostic_redacts_independent_documents_and_preser
                             "apiKey:\n  nested: opaque-test-only-sentinel"
                         ),
                     ),
-                    ObservationResult(
+                    dict(
                         source_call_id="rotation-log",
                         content=(
                             "apiKey: opaque-test-only-sentinel\nclient-secret = opaque-test-only-sentinel\n"

@@ -5,12 +5,12 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from daydream.dataset import LocalRecordStore, portable_evidence_document, semantic_evidence_digest
+from daydream.dataset import LocalRecordStore, semantic_evidence_digest
 from daydream.dataset_capture import capture_scoring
 from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig
 from daydream.training.reward import ScoringInputs
 from tests.harness.dataset import observation, run_record
-from tests.harness.trajectory import evidence_document
+from tests.harness.trajectory import portable_document
 
 CAPTURED_AT = "2026-10-04T10:00:00Z"
 VALID_AT = "2026-10-04T11:00:00Z"
@@ -29,10 +29,10 @@ def projection_run(
     steps = ({"step_id": 1, "source": "agent", "message": "review"},)
     children = [f"{run_id}:fix-{index}" for index in range(siblings)]
     # Actual capture holds standalone documents plus ordered root fork summaries.
-    documents = [portable_evidence_document(evidence_document(
+    documents = [portable_document(
         trajectory_id, session_id=run_id, steps=steps, parent=None if trajectory_id == run_id else run_id,
         subtrajectories=tuple({"trajectory_id": child} for child in children) if trajectory_id == run_id else (),
-    ), trajectory_id=trajectory_id, session_id=run_id) for trajectory_id in (run_id, *children)]
+    ) for trajectory_id in (run_id, *children)]
     provenance = {"profile": {"profile_schema_version": 2, "profile_name": profile,
                               "profile_source_kind": "builtin", "profile_digest": "d" * 64}, "stack": stack}
     scoring = capture_scoring(ScoringInputs(verifier_verdicts=None, format_valid=True, length=6), "review")

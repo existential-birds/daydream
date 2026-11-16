@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -24,56 +23,8 @@ from daydream.trajectory import (
     DaydreamRunFlow,
     EvidenceRecorder,
     RunWriteSnapshot,
-    TrajectoryDocumentReference,
-    now_iso,
 )
-from daydream.trajectory.journal import JournalWriter
-from daydream.trajectory.view import OPEN_EVENT, PHASE_EVENT, SNAPSHOT_EVENT, STEP_EVENT, SUBTRAJECTORY_EVENT
 from tests.harness.trajectory import make_recorder, read_trajectory
-
-
-def _add_user_step(recorder: EvidenceRecorder) -> None:
-    """Append one minimal user step to the recorder's evidence document."""
-    recorder._extend_steps([{"step_id": recorder._next_step_id(), "timestamp": now_iso(), "source": "user",
-        "message": "test prompt",
-        "extra": {"daydream_phase": DaydreamPhase.REVIEW.value, "daydream_run_flow": DaydreamRunFlow.NORMAL.value},
-    }])
-
-
-def evidence_reference(payload: Mapping[str, Any], private_path: Path) -> TrajectoryDocumentReference:
-    """Write a document view's content as evidence records at *private_path* and reference the whole file.
-
-    Steps without a ``step_id`` take their 1-based position.
-    ``extra.snapshot_at`` leaves the document unsealed behind a snapshot record; otherwise it is sealed
-    at ``extra.run_ended_at`` (default ``2026-01-01T00:00:01Z``) with the payload's final metrics."""
-    extra = dict(payload.get("extra") or {})
-    ended = extra.pop("run_ended_at", "2026-01-01T00:00:01Z")
-    snapshot_at = extra.pop("snapshot_at", None)
-    phase_events = extra.pop("phase_events", [])
-    subtrajectories = extra.pop("subtrajectories", [])
-    aborted = bool(extra.pop("partial", False))
-    metrics = dict(payload.get("final_metrics") or {})
-    private_path.parent.mkdir(parents=True, exist_ok=True)
-    writer = JournalWriter(private_path, resource={}, version="test")
-    writer.append(OPEN_EVENT, {
-        "session_id": payload["session_id"], "trajectory_id": payload["trajectory_id"], "descriptor": "",
-        "parent_trajectory_id": None, "run_flow": "normal", "agent_version": "test",
-        "agent_model_name": (payload.get("agent") or {}).get("model_name", ""), "extra": extra,
-    })
-    for index, step in enumerate(payload.get("steps") or [], start=1):
-        writer.append(STEP_EVENT, {"step_id": index, **step})
-    for event in phase_events:
-        writer.append(PHASE_EVENT, event)
-    for summary in subtrajectories:
-        writer.append(SUBTRAJECTORY_EVENT, summary)
-    if snapshot_at is None:
-        writer.seal({"run_ended_at": ended, "aborted": aborted, "capture_complete": True, "failed_documents": [],
-                     "final_metrics": metrics})
-    else:
-        writer.append(SNAPSHOT_EVENT, {"snapshot_at": snapshot_at, "final_metrics": metrics})
-    writer.close()
-    size, sha256 = writer.reference()
-    return TrajectoryDocumentReference(payload["trajectory_id"], private_path, private_path, size, sha256)
 
 
 def _finalize_strict_archive(recorder: EvidenceRecorder, snapshot: RunWriteSnapshot, config: Any, target: Path, *,
@@ -112,7 +63,8 @@ async def test_on_write_failure_does_not_raise(tmp_path: Path) -> None:
         raise RuntimeError("archive exploded")
     recorder = make_recorder(tmp_path, on_write=on_write_boom)
     async with recorder:
-        _add_user_step(recorder)
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+            invocation.observe_user_step("test prompt")
     traj_path = tmp_path / ".daydream" / RUN_DOCUMENT_NAME
     assert traj_path.exists()
     data = read_trajectory(traj_path)

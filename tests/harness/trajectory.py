@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import tempfile
+from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,7 @@ from daydream.backends import (
     ResultEvent,
     TextEvent,
 )
+from daydream.dataset import portable_evidence_document
 from daydream.trajectory import (
     RUN_DOCUMENT_NAME,
     DaydreamRunFlow,
@@ -20,7 +23,7 @@ from daydream.trajectory import (
     read_document_view,
 )
 from daydream.trajectory.journal import JournalWriter
-from daydream.trajectory.view import OPEN_EVENT, STEP_EVENT, SUBTRAJECTORY_EVENT
+from daydream.trajectory.view import OPEN_EVENT, PHASE_EVENT, SNAPSHOT_EVENT, STEP_EVENT, SUBTRAJECTORY_EVENT
 
 
 def make_recorder(tmp_path: Path, *, run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL, agent_model_name: str = "opus",
@@ -38,33 +41,73 @@ def read_trajectory(path: Path | TrajectoryDocumentReference) -> dict[str, Any]:
     return read_document_view(path.read_bytes())
 
 
+def write_evidence(path: Path, payload: Mapping[str, Any], *, parent: str | None = None, sealed: bool = True,
+) -> TrajectoryDocumentReference:
+    """Write a document view's content as real evidence records at *path* and reference the whole file.
+
+    The view's ``agent.model_name``, ``steps`` (numbered by position when they carry no ``step_id``),
+    ``final_metrics`` and ``extra`` become records: ``extra.phase_events`` and ``extra.subtrajectories``
+    their own records, ``extra.partial`` an aborted seal. ``extra.snapshot_at`` leaves the document
+    unsealed behind a snapshot record; otherwise it is sealed at ``extra.run_ended_at`` (default
+    ``2026-01-01T00:00:01Z``) unless *sealed* is false."""
+    extra = dict(payload.get("extra") or {})
+    ended = extra.pop("run_ended_at", "2026-01-01T00:00:01Z")
+    snapshot_at = extra.pop("snapshot_at", None)
+    phase_events = extra.pop("phase_events", [])
+    subtrajectories = extra.pop("subtrajectories", [])
+    aborted = bool(extra.pop("partial", False))
+    metrics = dict(payload.get("final_metrics") or {})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = JournalWriter(path, resource={}, version="test")
+    writer.append(OPEN_EVENT, {
+        "session_id": payload["session_id"], "trajectory_id": payload["trajectory_id"], "descriptor": "",
+        "parent_trajectory_id": parent, "run_flow": "normal", "agent_version": "test",
+        "agent_model_name": (payload.get("agent") or {}).get("model_name", ""), "extra": extra,
+    })
+    for index, step in enumerate(payload.get("steps") or [], start=1):
+        writer.append(STEP_EVENT, {"step_id": index, **step})
+    for event in phase_events:
+        writer.append(PHASE_EVENT, event)
+    for summary in subtrajectories:
+        writer.append(SUBTRAJECTORY_EVENT, summary)
+    if snapshot_at is not None:
+        writer.append(SNAPSHOT_EVENT, {"snapshot_at": snapshot_at, "final_metrics": metrics})
+    elif sealed:
+        writer.seal({"run_ended_at": ended, "aborted": aborted, "capture_complete": True, "failed_documents": [],
+                     "final_metrics": metrics})
+    writer.close()
+    size, sha256 = writer.reference()
+    return TrajectoryDocumentReference(payload["trajectory_id"], path, path, size, sha256)
+
+
+def evidence_reference(payload: Mapping[str, Any], private_path: Path, *, logical_path: Path | None = None,
+) -> TrajectoryDocumentReference:
+    """:func:`write_evidence`, optionally naming the reference by a logical path other than its file."""
+    reference = write_evidence(private_path, payload)
+    return reference if logical_path is None else replace(reference, path=logical_path)
+
+
 def evidence_document(
     trajectory_id: str, *, session_id: str = "11111111-2222-3333-4444-555555555555",
     steps: tuple[dict[str, Any], ...] = (), extra: dict[str, Any] | None = None,
     subtrajectories: tuple[dict[str, Any], ...] = (), parent: str | None = None, sealed: bool = True,
 ) -> bytes:
-    """Write one evidence document through the real journal writer and return its bytes."""
+    """The bytes of one evidence document written through the real journal writer."""
     with tempfile.TemporaryDirectory() as raw:
-        writer = JournalWriter(Path(raw) / RUN_DOCUMENT_NAME, resource={}, version="test")
-        writer.append(OPEN_EVENT, {
-            "session_id": session_id, "trajectory_id": trajectory_id, "descriptor": "",
-            "parent_trajectory_id": parent, "run_flow": "normal", "agent_version": "test",
-            "agent_model_name": "opus", "extra": {"run_started_at": "2026-01-01T00:00:00Z", **(extra or {})},
-        })
-        for step in steps:
-            writer.append(STEP_EVENT, step)
-        for summary in subtrajectories:
-            writer.append(SUBTRAJECTORY_EVENT, summary)
-        if sealed:
-            writer.seal({"run_ended_at": "2026-01-01T00:01:00Z", "aborted": False, "capture_complete": True,
-                         "failed_documents": [], "final_metrics": {"total_steps": len(steps)}})
-        writer.close()
-        return writer.path.read_bytes()
+        path = Path(raw) / RUN_DOCUMENT_NAME
+        write_evidence(path, {
+            "session_id": session_id, "trajectory_id": trajectory_id, "agent": {"model_name": "opus"},
+            "steps": list(steps), "final_metrics": {"total_steps": len(steps)},
+            "extra": {"run_started_at": "2026-01-01T00:00:00Z", "run_ended_at": "2026-01-01T00:01:00Z",
+                      **(extra or {}), "subtrajectories": list(subtrajectories)},
+        }, parent=parent, sealed=sealed)
+        return path.read_bytes()
 
 
-def trajectory_payload(trajectory_id: str, *, session_id: str = "11111111-2222-3333-4444-555555555555",) -> bytes:
-    """Encode an empty evidence document as a run snapshot references it."""
-    return evidence_document(trajectory_id, session_id=session_id)
+def portable_document(trajectory_id: str, *, session_id: str, **fields: Any) -> dict[str, Any]:
+    """One evidence document as a dataset run record embeds it."""
+    return portable_evidence_document(evidence_document(trajectory_id, session_id=session_id, **fields),
+                                      trajectory_id=trajectory_id, session_id=session_id)
 
 
 def root_trajectory(repo: Path) -> dict[str, Any]:
@@ -185,10 +228,3 @@ def diff_adding(line: str, *, file: str = "app.py") -> str:
         f"+{line}\n"
     )
 
-
-def atif_valid(document: dict[str, Any] | Path, **_options: Any) -> bool:
-    """Export one evidence document view (or document path) as ATIF; the exporter validates it."""
-    from daydream.benchmarks.harbor import export_views
-
-    export_views(read_trajectory(document) if isinstance(document, Path) else document, [])
-    return True

@@ -12,14 +12,14 @@ from typing import Any, cast
 
 import pytest
 
-from daydream.dataset import LocalRecordStore, StoreError, parse_run, portable_evidence_document
+from daydream.dataset import LocalRecordStore, StoreError, parse_run
 from daydream.dataset_capture import capture_run_record, capture_scoring
 from daydream.dataset_scoring import assemble_scoring_inputs
 from daydream.deep.render import insert_review_context
 from daydream.run_config import RunConfig
 from daydream.training.reward import ScoringInputs
 from tests.harness.dataset import observation, read_records, run_record
-from tests.harness.trajectory import evidence_document
+from tests.harness.trajectory import portable_document
 
 LEGACY_REVIEW = '# Review\n\n## Issues\n1. [a.py:1] Existing finding.\n'
 CONTEXT_REVIEW = insert_review_context(LEGACY_REVIEW, {
@@ -255,9 +255,8 @@ def test_snapshot_reads_validate_only_pinned_shards(tmp_path: Path) -> None:
 
 def _document(session_id: str, trajectory_id: str, *, steps: tuple[dict[str, Any], ...] = (
         {"step_id": 1, "source": "user", "message": "review"},), **fields: Any) -> dict[str, Any]:
-    """One captured evidence document as a run record embeds it."""
-    return portable_evidence_document(evidence_document(trajectory_id, session_id=session_id, steps=steps, **fields),
-                                      trajectory_id=trajectory_id, session_id=session_id)
+    """One captured evidence document, with one step unless the caller supplies its own."""
+    return portable_document(trajectory_id, session_id=session_id, steps=steps, **fields)
 
 
 def test_run_sections_require_complete_semantic_payload_and_bound_membership(tmp_path: Path) -> None:
@@ -300,9 +299,10 @@ def test_run_sections_require_complete_semantic_payload_and_bound_membership(tmp
     root = documents[0]
     faulted = LocalRecordStore(tmp_path / "faulted")
     for record, streamed_documents in (
-        (envelope, [root, child | {"session_id": "other"}]), (envelope, [root, child | {"trajectory_id": "run-1"}]),
+        # A child recorded under another run, a second root identity, and bytes that differ from their digest.
+        (envelope, [root, _document("other", "run-1:child")]), (envelope, [root, _document("run-1", "run-1")]),
         (envelope, [root, child | {"sha256": "0" * 64}]),
-        (envelope, [root, child | {"steps": []}]), (envelope, [child]), (raw, documents), (run_record(), documents),
+        (envelope, [child]), (raw, documents), (run_record(), documents),
     ):
         with pytest.raises(StoreError, match="invalid_or_unknown_record_schema"):
             faulted.commit_run(record, iter(streamed_documents))

@@ -5,7 +5,6 @@ import math
 import os
 import subprocess
 from contextlib import ExitStack
-from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -35,26 +34,16 @@ from daydream.trajectory import (
     summarize_run,
 )
 from tests.harness.git_helpers import git
-from tests.harness.trajectory import make_recorder
-from tests.test_archive_integration import evidence_reference
-
-_EVIDENCE_STORE: list[Path] = []
+from tests.harness.trajectory import evidence_reference, make_recorder
 
 
-@pytest.fixture(autouse=True)
-def _evidence_store(tmp_path_factory: pytest.TempPathFactory) -> None:
-    """Private files behind the evidence references fixture snapshots freeze."""
-    _EVIDENCE_STORE[:] = [tmp_path_factory.mktemp("evidence")]
-
-
-def _snapshot(root: dict[str, Any], *forks: dict[str, Any], cutoff_at: str = "2026-01-01T00:00:10Z",
+def _snapshot(store: Path, root: dict[str, Any], *forks: dict[str, Any], cutoff_at: str = "2026-01-01T00:00:10Z",
     status: Literal["complete", "partial"] = "complete",
 ) -> RunWriteSnapshot:
-    """Freeze explicitly identified fixture documents, each named by its ``_source_file``."""
-    documents = []
-    for index, payload in enumerate((root, *forks)):
-        reference = evidence_reference(payload, _EVIDENCE_STORE[0] / f"{index}{DOCUMENT_SUFFIX}")
-        documents.append(replace(reference, path=Path(payload["_source_file"])))
+    """Freeze explicitly identified fixture documents in *store*, each named by its ``_source_file``."""
+    documents = [evidence_reference(payload, store / f"{index}{DOCUMENT_SUFFIX}",
+                                    logical_path=Path(payload["_source_file"]))
+                 for index, payload in enumerate((root, *forks))]
     return RunWriteSnapshot(status=status, cutoff_at=cutoff_at, root_trajectory_id=root["trajectory_id"],
                             documents=tuple(documents))
 
@@ -66,7 +55,7 @@ def test_evaluation_uses_frozen_bytes_status_and_cutoff(tmp_path: Path) -> None:
         "extra": {"partial": False, "run_started_at": "2026-01-01T00:00:00Z",
             "run_ended_at": "2026-01-01T00:00:10Z", "snapshot_at": "2026-01-01T00:00:04Z"},
     }
-    snapshot = _snapshot(root, status="partial", cutoff_at="2026-01-01T00:00:10Z")
+    snapshot = _snapshot(tmp_path / "evidence", root, status="partial", cutoff_at="2026-01-01T00:00:10Z")
     snapshot.validate("frozen")
     live_path = tmp_path / ".daydream" / "runs" / "frozen" / RUN_DOCUMENT_NAME
     root["final_metrics"]["total_cost_usd"] = 99.0
@@ -111,7 +100,7 @@ def test_training_signals_preserve_independent_fork_outcomes_in_archive(tmp_path
     target.mkdir()
     recorder = make_recorder(target, session_id="training-outcomes")
     root = _root_trajectory(recorder.session_id)
-    snapshot = _snapshot(root, *(
+    snapshot = _snapshot(tmp_path / "evidence", root, *(
         root | {"_source_file": f"{name}{DOCUMENT_SUFFIX}", "trajectory_id": name, "steps": steps}
         for name, steps in population.items()
     ))
@@ -135,13 +124,13 @@ def test_training_signals_preserve_independent_fork_outcomes_in_archive(tmp_path
     assert (result["total_trajectories"], result["clean_for_training"], result["needs_review"]) == (12, 5, 7)
 
 
-def test_analyze_costs_aggregates_legacy_fork_metrics() -> None:
+def test_analyze_costs_aggregates_legacy_fork_metrics(tmp_path: Path) -> None:
     """A root without the whole-run metric scope bills its rows by summing every document's own totals."""
     root = _root_trajectory("legacy") | {"final_metrics": {"total_cost_usd": 1.0}}
     fork = root | {"_source_file": f"fork{DOCUMENT_SUFFIX}", "trajectory_id": "fork",
                    "final_metrics": {"total_cost_usd": 0.5}}
 
-    result = analyze_costs(summarize_run(_snapshot(root, fork)))
+    result = analyze_costs(summarize_run(_snapshot(tmp_path / "evidence", root, fork)))
 
     assert result["total_cost_usd"] == 1.5
     assert [(row["agent"], row["cost_usd"]) for row in result["by_agent"]] == [("main", 1.0), ("fork", 0.5)]
@@ -576,7 +565,7 @@ def test_analyze_session_reads_quality_from_explicit_code_workspace(tmp_path: Pa
     workspace = _quality_workspace(tmp_path, files, name="operational")
     public_source = tmp_path / "public-source"
     frozen = tmp_path / "frozen" / ".daydream"
-    snapshot = _snapshot(_root_trajectory("quality-split") | {"schema_version": "ATIF-v1.6"})
+    snapshot = _snapshot(tmp_path / "evidence", _root_trajectory("quality-split"))
     provenance = _artifact_provenance(
         public_source=public_source, private_base=tmp_path / "private", workspace_key="workspace",
         session_id="quality-split",
@@ -704,7 +693,7 @@ def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
     Files that only earlier builds wrote (stack records, alternatives, routing) count for nothing."""
     sid = "a80b9373-56d6-4062-9ab5-4c75e475ab67"
     dd, deep = _deep_dirs(tmp_path)
-    snapshot = _snapshot(_root_trajectory(sid) | {"final_metrics": {"total_cost_usd": 18.2056}})
+    snapshot = _snapshot(tmp_path / "evidence", _root_trajectory(sid) | {"final_metrics": {"total_cost_usd": 18.2056}})
     shipped = [_item(i, file="a.py", line=i + 1, description=f"high-{i}", confidence="HIGH", severity="high")
         for i in range(4)
     ]
@@ -759,7 +748,7 @@ def _assert_frozen_analysis_survives(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         root["final_metrics"] = {"total_cost_usd": 0.5}
         root["steps"] = [{"timestamp": "2026-01-01T00:00:02Z"}, {"timestamp": "2026-01-01T00:00:03Z"}]
         child = _root_trajectory("quality-unavailable") | {"trajectory_id": "child", "_source_file": "child.json"}
-        snapshot = _snapshot(root, child)
+        snapshot = _snapshot(tmp_path / "evidence", root, child)
         code_workspace: Path | CodeWorkspace = ws
         if unavailable in {"source-during-checkout-open", "denied-checkout-open"}:
             original_open = os.open
@@ -939,7 +928,7 @@ def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path
     assert all(RECORD_SOURCE_UIDS_KEY not in item for item in (items[0], items[3], items[4]))
     seed_merged_items(deep, items)
     result = analyze_session(
-        dd, summary=summarize_run(_snapshot(_root_trajectory("loc-session") | {"schema_version": "ATIF-v1.7"}))
+        dd, summary=summarize_run(_snapshot(tmp_path / "evidence", _root_trajectory("loc-session")))
     )
     location = result["location"]
     assert location["hunk_source"] == "hunk-index.json"

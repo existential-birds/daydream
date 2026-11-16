@@ -5,12 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, cast
 
+import anyio
 import pytest
 
 import daydream.pr_run_info as provider
 from daydream.artifact_visibility import (
     ArtifactSession,
 )
+from daydream.backends import MetricsEvent
 from daydream.pr_comment_renderer import FALLBACK_NOTE
 from daydream.pr_run_info import (
     LiveRunInfoSource,
@@ -18,11 +20,12 @@ from daydream.pr_run_info import (
 )
 from daydream.trajectory import (
     RUN_DOCUMENT_NAME,
+    DaydreamPhase,
     EvidenceRecorder,
     TrajectoryDocumentReference,
 )
 from daydream.trajectory.recorder import _SignalFlushRegistry
-from tests.harness.trajectory import evidence_document, make_recorder
+from tests.harness.trajectory import evidence_document, make_recorder, observe_text_and_result
 
 
 def _steps(
@@ -44,11 +47,18 @@ def _document(session_id: str, trajectory_id: str, *, phase: str = "review") -> 
 def _recorder(tmp_path: Path, session_id: str = "run-info", *, model: str = "gpt-5.5", prompt_tokens: int = 100,
     cost_usd: float | None = 0.01,
 ) -> EvidenceRecorder:
-    """A live root recorder whose evidence document already holds one review turn."""
+    """A root recorder whose evidence document holds one recorded review turn."""
     recorder = make_recorder(tmp_path, path=tmp_path / RUN_DOCUMENT_NAME, agent_model_name=model, session_id=session_id,
     )
-    recorder._open_document()
-    recorder._extend_steps(list(_steps(model=model, prompt_tokens=prompt_tokens, cost_usd=cost_usd)))
+
+    async def record() -> None:
+        async with recorder, recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+            invocation.observe_user_step("review")
+            invocation.observe(MetricsEvent(prompt_tokens=prompt_tokens, completion_tokens=10, cached_tokens=20,
+                                            cost_usd=cost_usd, message_id="m1", model_name=model))
+            observe_text_and_result(invocation, "done")
+
+    anyio.run(record)
     return recorder
 
 @pytest.mark.parametrize(("source", "diagnostic"),

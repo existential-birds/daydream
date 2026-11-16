@@ -23,7 +23,7 @@ from daydream.trajectory import (
     default_trajectory_path,
     summarize_run,
 )
-from tests.harness.trajectory import trajectory_payload
+from tests.harness.trajectory import evidence_document
 
 SESSION = "11111111-2222-3333-4444-555555555555"
 SIBLING = f"deep-python{DOCUMENT_SUFFIX}"
@@ -32,17 +32,17 @@ SIBLING = f"deep-python{DOCUMENT_SUFFIX}"
 def _write_run(target: Path) -> Path:
     root_document = default_trajectory_path(target, SESSION)
     root_document.parent.mkdir(parents=True, exist_ok=True)
-    root_document.write_bytes(trajectory_payload(SESSION, session_id=SESSION))
+    root_document.write_bytes(evidence_document(SESSION, session_id=SESSION))
     sibling = root_document.parent / SIBLINGS_DIRNAME / SIBLING
     sibling.parent.mkdir(parents=True, exist_ok=True)
-    sibling.write_bytes(trajectory_payload("fork-1", session_id=SESSION))
+    sibling.write_bytes(evidence_document("fork-1", session_id=SESSION))
     return root_document.parent
 
 
 def _snapshot(root_path: Path, status: Literal["complete", "partial"] = "complete") -> RunWriteSnapshot:
     """The written root plus a completed child referenced at a differently named private (frozen) copy."""
     private_child = root_path.parents[3] / f"frozen-copy{DOCUMENT_SUFFIX}"
-    child = trajectory_payload("fork-1", session_id=SESSION)
+    child = evidence_document("fork-1", session_id=SESSION)
     private_child.write_bytes(child)
     return RunWriteSnapshot(status=status, cutoff_at="2026-01-01T00:00:00Z", root_trajectory_id=SESSION,
         documents=(TrajectoryDocumentReference.written(SESSION, root_path, root_path, root_path.read_bytes()),
