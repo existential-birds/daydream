@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-11-15
+
 ### Changed
 
 - The committed-review tests now pin the immutable review envelope's UTF-8 byte bounds for
@@ -15,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test protected before, including a review diff key that does not match the reconstructed diff
   and blank hosted provider or model names. Test-only; no runtime behaviour changes
   ([#1826](https://github.com/existential-birds/daydream/issues/1826),
-  [#1827](https://github.com/existential-birds/daydream/issues/1827)).
+  [#1827](https://github.com/existential-birds/daydream/issues/1827), #1894).
 
 ### Removed
 
@@ -23,10 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `daydream-command.yml`, `daydream-review.yml` and `daydream-post.yml` workflows, the Codex CLI
   pin they installed (`.github/workflows/package.json`) and that pin's Dependabot npm block are
   gone. Reviews of this repository come from the hosted review service. No package user is
-  affected: `daydream setup` and the packaged templates it installs do not depend on them.
+  affected: `daydream setup` and the packaged templates it installs do not depend on them (#1881).
 - **Breaking (0.y.z):** The refusals that 0.35.0 kept only to name the replaced staged
   reviewer's review-profile keys, findings supervisor and prompt names are deleted
-  ([#1859](https://github.com/existential-birds/daydream/issues/1859)):
+  ([#1859](https://github.com/existential-birds/daydream/issues/1859), #1892):
   - A review profile's former `[pipeline]` keys (`assignment_policy`, `structural_enabled`,
     `arbitration_enabled`, `arbitration_min_severity`, `arbitration_contested_location`,
     `suppression_enabled`, `suppression_severity_classes` and
@@ -48,7 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     never runs; `daydream ext validate` no longer fails on it.
 - **Breaking (0.y.z):** The replaced staged reviewer's command-line options, flow aliases and
   `RunConfig` fields, which 0.35.0 kept only to refuse them with guidance, are deleted
-  ([#1857](https://github.com/existential-birds/daydream/issues/1857)):
+  ([#1857](https://github.com/existential-birds/daydream/issues/1857), #1885):
   - `--shallow`, `--stack`/`-s`, `--precision`, `--latency-profile`, `--no-review-cache`,
     `--start-at`, `--parse-model` and `--per-stack-review-model` now get the parser's own
     usage error and exit 2, for example `daydream: error: unrecognized arguments: --shallow`.
@@ -69,7 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     The archive index's `skill` column goes with the stored-format change below.
 - **Breaking (0.y.z):** The replaced staged reviewer's repository settings, which 0.35.0
   named in one warning and ignored, are no longer recognized
-  ([#1858](https://github.com/existential-birds/daydream/issues/1858)): `latency_profile`,
+  ([#1858](https://github.com/existential-birds/daydream/issues/1858), #1888): `latency_profile`,
   `shallow_fanout_threshold`, `precision_mode`, `deep_shard_enabled`, `deep_shard_max_files`,
   `deep_shard_max_bytes`, `deep_shard_fanout_cap`, `deep_shard_frontier_max`,
   `review_cache_enabled`, `review_cache_max_entries`, `review_cache_max_bytes`,
@@ -87,7 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     phases (`intent`, `merge`, `parse`, `per_stack_review`, `supervise`, `suppression` and
     `wonder`) are now ignored without notice.
 - **Breaking (0.y.z):** Readers of files that only the replaced staged reviewer wrote are
-  deleted ([#1860](https://github.com/existential-birds/daydream/issues/1860)):
+  deleted ([#1860](https://github.com/existential-birds/daydream/issues/1860), #1896):
   - `daydream.deep.routing_record.read_routing_record`, which read `latency-routing.json`. The
     archived `evaluation.json` no longer has the `latency_profile` and `routing` keys, and
     archive finalization no longer requires them.
@@ -101,7 +103,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `content_digest` and `verdict_reused`. Each decision keeps `item_uid`, `item_id`,
     `selected`, `reason_code` and `reason`.
 - **Breaking (0.y.z):** Leftovers of the replaced reviewer's phases, flags and public
-  directories are deleted ([#1861](https://github.com/existential-birds/daydream/issues/1861)):
+  directories are deleted ([#1861](https://github.com/existential-birds/daydream/issues/1861), #1896):
   - `DaydreamPhase.PARSE`, `INTENT` and `ALTERNATIVES`, and the run-info labels "Parse
     Feedback", "Understand Intent", "Alternatives" and "Merge Findings". No build emits these
     phases; a stored trajectory that names one is rendered under its own name ("Parse"), like
@@ -118,7 +120,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking (0.y.z):** Stored formats drop the names of the replaced reviewer's phases and
   lenses, and each changed format has a new version. Earlier versions are refused with their
   existing messages and never converted or deleted
-  ([#1852](https://github.com/existential-birds/daydream/issues/1852)):
+  ([#1852](https://github.com/existential-birds/daydream/issues/1852), #1896):
   - Findings artifacts (`--findings-out`, the bot's `findings.json`) drop each finding's
     `is_cross_stack` and move from schema 2 to 4, and immutable PR exports from 3 to 5.
     `post-findings` refuses an earlier artifact with `artifact failed schema validation:
@@ -150,7 +152,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The extension API moves from 10 to 11: `CommentFinding`, which a finding renderer
     receives, no longer has `is_cross_stack`. Declare `DAYDREAM_EXT_API = 11`.
 - **Breaking (0.y.z):** The tool-free agent mode that only the staged reviewer used is deleted
-  ([#1850](https://github.com/existential-birds/daydream/issues/1850)): `run_agent`'s
+  ([#1850](https://github.com/existential-birds/daydream/issues/1850), #1896): `run_agent`'s
   `tools_disabled` argument, the backend capability `supports_tools_disabled` and `PiBackend`'s
   tools-disabled path, which sent the prompt on standard input. Passing `tools_disabled` raises
   `TypeError`, and `review_system_instructions` now requires an investigation ledger. The
@@ -161,12 +163,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Data capture commits again when the dataset store is on a Docker Desktop (macOS) bind mount, as
-  it did before 0.35.0 (#1883). Those mounts can grant a held file lock to another descriptor, so a
+  it did before 0.35.0 (#1883, #1897). Those mounts can grant a held file lock to another descriptor, so a
   commit's interrupted-write recovery took a live staged record for abandoned and deleted it, and
   `commit_run` failed with `persistence_failed`. Recovery now also requires a staged `*.tmp` file
   to be untouched for an hour, so an interrupted write's leftover is removed an hour later
   instead of at the next commit.
-
 - `daydream setup` now installs the Daydream version that ran it. The packaged bot workflows
   carried a hard-coded commit that always lagged the release shipping them (the 0.35.2 templates
   installed v0.35.1, and every release from 0.28 to 0.35.0 installed a 0.28.0-era commit). They now
@@ -178,15 +179,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an earlier release read as customized: rerun `daydream setup` to move an existing install to
   the release you run. **Breaking (0.y.z)** for manual copies only: replace the placeholder as
   the [workflow README](daydream/templates/workflows/README.md#daydream-pin) describes
-  ([#1884](https://github.com/existential-birds/daydream/issues/1884)).
+  ([#1884](https://github.com/existential-birds/daydream/issues/1884), #1886).
 - Test healing saves and restores a forbidden generated-file edit whose bytes are not UTF-8,
   instead of stopping the fixing run with `UnicodeDecodeError`. Its recovery patch shows each
   such byte as U+FFFD, as review diffs do; the smart-quote scrub still skips an attribution diff
-  that is not UTF-8 ([#1870](https://github.com/existential-birds/daydream/issues/1870)).
+  that is not UTF-8 ([#1870](https://github.com/existential-birds/daydream/issues/1870), #1887).
 - A changed path that fits the checkout but sits over the OS path limit at the capture
   destination fails capture with the path, its length there and the limit, instead of
   "captured native source population changed", which describes a concurrent change
-  ([#1870](https://github.com/existential-birds/daydream/issues/1870)).
+  ([#1870](https://github.com/existential-birds/daydream/issues/1870), #1887).
 - A Pi committed-review turn that settles with nothing accepted and no host failure now raises
   the shared `host_tools.UnsubmittedTurn`, as Claude and Codex do, instead of a retryable stream
   truncation: it gets one fresh conversation (none after an earlier retryable provider failure)
@@ -194,14 +195,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as a completed turn. Before, it was retried up to the full attempt count and each try counted
   as a provider failure, which could open the circuit for the whole run. A stream that ends
   before it settles is still a truncation
-  ([#1872](https://github.com/existential-birds/daydream/issues/1872)).
+  ([#1872](https://github.com/existential-birds/daydream/issues/1872), #1887).
 - A diagram can cite a route file such as `src/routes/[slug]/+page.ts` or
   `app/routes/users.$userId.tsx`. Its spec's `file` fields no longer carry the model-path
   pattern; grounding accepts a citation that exactly names a Git-observed path of the captured
   change or the checked-out tree and holds every other path to the model grammar, so a bracket
   path that names no such file is still refused. Posting reads each cited file from the head
   tree by its exact name, percent-encoded on GitHub's contents API, and never expands it
-  ([#1879](https://github.com/existential-birds/daydream/issues/1879)).
+  ([#1879](https://github.com/existential-birds/daydream/issues/1879), #1887).
 - A `--fix` run on a checkout with tracked uncommitted edits no longer presents the committed
   head as the whole reviewed subject. It prints that those edits are reviewed with the commits
   and committed with the fixes, and its review coverage and committed review result mark
@@ -210,15 +211,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`RESULT_VERSIONS["worktree"]`), which earlier builds reject; only schema 13 may carry the
   marker. A clean checkout records and prints what it did before. A commit-bound findings
   artifact refuses the marker as it refuses a captured `source_id`
-  ([#1828](https://github.com/existential-birds/daydream/issues/1828)).
+  ([#1828](https://github.com/existential-birds/daydream/issues/1828), #1891).
 - An archived run whose base-to-head diff is empty now has pipeline status `succeeded` instead of
   `partial`. It returns before any merge, fix or test phase, and the archive now accepts its sealed
   no-diff review, bound to the same session, as the evidence that it finished
-  ([#1847](https://github.com/existential-birds/daydream/issues/1847)).
+  ([#1847](https://github.com/existential-birds/daydream/issues/1847), #1891).
 - A run captured with `--capture-data` is no longer recorded, or uploaded, as `success` when
   archive integrity or publication of its outputs then fails and the command exits 1. Capture
   and upload now run after archive finalization and publication, and such a run is recorded as
-  `failed` ([#1853](https://github.com/existential-birds/daydream/issues/1853)).
+  `failed` ([#1853](https://github.com/existential-birds/daydream/issues/1853), #1891).
 
 ## [0.35.2] - 2026-11-15
 
@@ -3177,7 +3178,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.35.2...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.36.0...HEAD
+[0.36.0]: https://github.com/existential-birds/daydream/compare/v0.35.2...v0.36.0
 [0.35.2]: https://github.com/existential-birds/daydream/compare/v0.35.1...v0.35.2
 [0.35.1]: https://github.com/existential-birds/daydream/compare/v0.35.0...v0.35.1
 [0.35.0]: https://github.com/existential-birds/daydream/compare/v0.34.0...v0.35.0

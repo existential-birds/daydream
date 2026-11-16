@@ -1,6 +1,6 @@
 [project]
 name = "daydream"
-version = "0.35.2"
+version = "0.36.0"
 description = "Automated code review and fix loop using Claude"
 requires-python = ">=3.14"
 dependencies = [

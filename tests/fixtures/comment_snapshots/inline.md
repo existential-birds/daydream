@@ -2,6 +2,6 @@
 
 B rationale
 
-<sub>🧙 Posted by [daydream v0.35.2](https://github.com/existential-birds/daydream)</sub>
+<sub>🧙 Posted by [daydream v0.36.0](https://github.com/existential-birds/daydream)</sub>
 
 <!-- daydream-finding: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->
