@@ -185,10 +185,15 @@ class Review:
 
     def __init__(
         self, inputs: StageInputFactory, run_id: str, *, allowed_tools: frozenset[str] | None = None,
-        immutable_input: ImmutableReviewInput | None = None,
+        immutable_input: ImmutableReviewInput | None = None, historical_context: dict[str, str] | None = None,
     ) -> None:
         self.inputs, self.run_id, self.immutable_input = inputs, run_id, immutable_input
         self._allowed_tools = allowed_tools
+        # Captured author text is served by reference: assignments carry only each field's size and digest.
+        self._historical = {key: text.encode() for key, text in (historical_context or {}).items() if text}
+        self.historical_context: dict[str, Any] | None = {"delivery": LOOKUP_TOOL, "fields": {
+            key: {"bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+            for key, body in self._historical.items()}} if self._historical else None
         self.assignments = deepcopy([part.assignment for part in inputs.parts])
         self._index = {part["target_id"]: index for index, part in enumerate(self.assignments)}
         self._by_file: dict[str, list[int]] = {}
@@ -225,6 +230,10 @@ class Review:
             raise ValueError("captured plan exceeds retained per-target coverage capacity before review; "
                              "narrow the review base or exclusions and rerun") from exc
         self._export = (self._coverage.to_dict(), None if immutable_input is None else immutable_input.to_dict())
+        # A review whose findings export cannot hold even its coverage and captured input could retain no claim.
+        if committed_export_bytes(*self._export, []) > MAX_ARTIFACT_BYTES:
+            raise ValueError("captured plan and any immutable input leave no findings export capacity before "
+                             "review; narrow the review base or exclusions and rerun")
         self._checking = threading.Lock()
 
     def check(self) -> None:
@@ -317,23 +326,35 @@ class Review:
 
     def catalog(self) -> dict[str, Any]:
         """The first bounded, explicitly partial page of the complete population."""
-        query: dict[str, Any] = {"target_id": None, "path": None}
+        query: dict[str, Any] = {"target_id": None, "path": None, "historical_context": None}
         return {**self._entries_page(query, list(range(len(self.assignments))), 0),
                 "total_files": len(self._by_file)}
 
     def lookup(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Serve exact frozen bytes or a catalog page; never mutates review state."""
-        target, path, cursor = arguments["target_id"], arguments["path"], arguments["cursor"]
-        if target is not None and path is not None:
-            raise HostToolRejected("review_source: select target_id or path, not both; use null for the other")
-        query = {"target_id": target, "path": path}
+        target, path, field = arguments["target_id"], arguments["path"], arguments["historical_context"]
+        cursor = arguments["cursor"]
+        if sum(selector is not None for selector in (target, path, field)) > 1:
+            raise HostToolRejected("review_source: select at most one of target_id, path and historical_context; "
+                                   "use null for the others")
+        query = {"target_id": target, "path": path, "historical_context": field}
         offset = 0
         if cursor is not None:
             match = _CURSOR.fullmatch(cursor)
             if match is None or self._cursor(query, 0).split(".")[1] != match[1]:
                 raise HostToolRejected("review_source.cursor: pass a next_cursor returned for this same "
-                                       "target_id/path query, or null for its first page")
+                                       "query, or null for its first page")
             offset = int(match[2])
+        if field is not None:
+            body = self._historical.get(field)
+            if body is None:
+                return {"status": "unavailable", "query": query,
+                        "reason": "no captured historical context of this name; profile.historical_context "
+                                  "lists the fields this review has"}
+            assert self.historical_context is not None
+            if hashlib.sha256(body).hexdigest() != self.historical_context["fields"][field]["sha256"]:
+                raise HostToolFatal("Frozen captured review input changed after preparation", code="input_unavailable")
+            return self._content_page(query, body, offset)
         if target is None:
             indices = list(range(len(self.assignments))) if path is None else self._by_file.get(path)
             if indices is None:
@@ -355,22 +376,26 @@ class Review:
             raise HostToolFatal("Frozen captured review input changed after preparation", code="input_unavailable")
         # Exact captured change bytes: a continuation's host notice is not captured content.
         body = diff.removeprefix(_CONTINUATION_NOTICE).encode() if part["kind"] == "continuation" else diff.encode()
-        if offset > len(body) or offset < len(body) and body[offset] & 0xC0 == 0x80:
-            raise HostToolRejected("review_source.cursor: offset is outside this target's content; "
-                                   "pass a next_cursor returned for this target")
-        end = min(len(body), offset + LOOKUP_PAGE_MAX_BYTES)
-        while end < len(body) and body[end] & 0xC0 == 0x80:
-            end -= 1
-        chunk = body[offset:end]
+        page = self._content_page(query, body, offset)
         described = {key: deepcopy(part[key]) for key in (
             "target_id", "file", "kind", "part_index", "part_count", "hunk_index", "source_options",
             "old_start", "old_count", "new_start", "new_count", "fragment_offset", "fragment_bytes",
             "old_line", "new_line", "segment_index", "segment_count", "fragment_line_offset",
             "source_summary") if key in part}
         entry = self._entry(part)
+        return {**page, "target": {**described, "decided": entry["decided"], "owner": entry["owner"]}}
+
+    def _content_page(self, query: dict[str, Any], body: bytes, offset: int) -> dict[str, Any]:
+        """One page of exact frozen bytes, ending on a UTF-8 character boundary."""
+        if offset > len(body) or offset < len(body) and body[offset] & 0xC0 == 0x80:
+            raise HostToolRejected("review_source.cursor: offset is outside the selected content; "
+                                   "pass a next_cursor returned for this same query")
+        end = min(len(body), offset + LOOKUP_PAGE_MAX_BYTES)
+        while end < len(body) and body[end] & 0xC0 == 0x80:
+            end -= 1
+        chunk = body[offset:end]
         return {
             "status": "complete" if offset == 0 and end == len(body) else "partial", "query": query,
-            "target": {**described, "decided": entry["decided"], "owner": entry["owner"]},
             "page": {"offset": offset, "bytes": len(chunk), "total_bytes": len(body),
                      "sha256": hashlib.sha256(chunk).hexdigest(),
                      "content_sha256": hashlib.sha256(body).hexdigest()},
@@ -912,9 +937,12 @@ challenge obligation. title is presentation only. Never claim an executed check 
 Navigation: the assignment's catalog is a bounded first page of the complete population; its status and omitted
 counts say what is not shown. review_source with target_id=null and path=null pages the whole catalog with
 next_cursor; path lists one changed path's targets; target_id returns that target's source_options, ranges
-and exact captured change bytes, paged by next_cursor. Re-request any target after context compaction instead
-of relying on summaries. Its page sha256 values identify exact frozen bytes. A claim line must fall inside a
-cited source_range or, for exact continuation fragments, inside that fragment's summarized line span.
+and exact captured change bytes, paged by next_cursor. historical_context returns the exact text of a captured
+author field that the profile's historical_context lists by size and sha256 (the PR title, body or other
+context), paged the same way; read it when the author's stated intent bears on the change. Re-request any
+target or field after context compaction instead of relying on summaries. Its page sha256 values identify exact
+frozen bytes. A claim line must fall inside a cited source_range or, for exact continuation fragments, inside
+that fragment's summarized line span.
 Submission: keep each batch under 32 KiB of arguments. review_admit admits one bounded batch now
 and returns a receipt; admitted decisions and claims are retained even if later work fails, and each
 target is decided at most once. Admit decisions as you reach them; the final batch may be small or empty.
@@ -932,8 +960,8 @@ A claim names a changed file. Non-empty evidence_refs of a reviewed target inclu
 source_ids; a claim's are never empty and, like a verdict's, include an assigned source_id. An assigned
 source_range only narrows the offered range. A supporting selector names a regular UTF-8 file of at most
 8 MiB inside the repository at the captured revision, with source_range inside its lines. review_source
-takes target_id or path, never both. A schema rejection names its first fault; any other names each distinct
-violation in its batch, how many items broke it and the first three of them. A rejected final
+takes at most one of target_id, path and historical_context. A schema rejection names its first fault; any
+other names each distinct violation in its batch, how many items broke it and the first three of them. A rejected final
 structured_output keeps its reserved start: correct it and submit again. Past 32 denied starts and such
 rejections the assignment closes. If its last submission is then a rejected final batch, the host keeps that
 batch's items that are valid alone, except any whose target or claim another item was refused for and, when
@@ -992,7 +1020,7 @@ def _instruction_json(value: Any) -> str:
 def bounded_author_description(config: RunConfig) -> FrozenAuthorDescription | None:
     """Refuse embedder-supplied author text over its UTF-8 bound before any source preparation."""
     author = config.frozen_author_description
-    if author is not None and len(author.description.encode()) > HISTORICAL_CONTEXT_MAX_BYTES["context"]:
+    if author is not None and len(author.description.encode()) > HISTORICAL_CONTEXT_MAX_BYTES:
         raise ValueError("frozen author description exceeds its encoded UTF-8 bound")
     return author
 
@@ -1002,7 +1030,7 @@ def fit_author_context(text: str) -> str:
 
     A pull request's author cannot avoid review with a long description: it is cut, never refused.
     """
-    total, bound = len(text.encode()), HISTORICAL_CONTEXT_MAX_BYTES["context"]
+    total, bound = len(text.encode()), HISTORICAL_CONTEXT_MAX_BYTES
     if total <= bound:
         return text
     marker = "\n[author description truncated by the host: first {} of " + f"{total} UTF-8 bytes]"
@@ -1131,8 +1159,12 @@ async def plan_review(
     settings["limits"].update(scale=scale, effective_tool_calls=tool_calls)
     finish = started + min(pipeline.reviewer_investigation_budget_s * scale + _FINALIZATION_S,
                            pipeline.review_wall_budget_s * (tier if profile.source_kind == "default" else 1))
-    review = await anyio.to_thread.run_sync(lambda: Review(inputs, run_id, allowed_tools=allowed_tools,
-                                                           immutable_input=immutable_input))
+    review = await anyio.to_thread.run_sync(lambda: Review(
+        inputs, run_id, allowed_tools=allowed_tools, immutable_input=immutable_input,
+        historical_context=settings.pop("historical_context", None)))
+    if review.historical_context is not None:
+        # Assignments and the sealed result carry what review_source serves, never the text itself.
+        settings["historical_context"] = deepcopy(review.historical_context)
     schedule = _Schedule(review, backends, tool_calls, settings, started=started,
                          deadline=finish - _FINALIZATION_S)
     return ReviewProgram(review, schedule, settings, backends, finish)
@@ -1592,7 +1624,8 @@ class _Schedule:
         try:
             await anyio.to_thread.run_sync(review.check)
             for target in work.targets if supplied else ():
-                returned = review.lookup({"target_id": target, "path": None, "cursor": None})
+                returned = review.lookup({"target_id": target, "path": None, "historical_context": None,
+                                          "cursor": None})
                 content = returned.pop("content")
                 prompt += (f"\n{token} Supplied target, as review_source returns it:"
                            f"\n{token} {_instruction_json(returned)}\n{content}")

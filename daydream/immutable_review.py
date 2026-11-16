@@ -17,15 +17,19 @@ from daydream.output_schema import strict_object
 
 _SHA = {"type": "string", "pattern": "^[0-9a-f]{40}$|^[0-9a-f]{64}$"}
 _DIGEST = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-# Captured author text is bounded in UTF-8 bytes before any of it reaches a model assignment.
-HISTORICAL_CONTEXT_MAX_BYTES = {"title": 512, "body": 8192, "context": 65536}
+# Captured author text is bounded before any of it reaches a model assignment: a pull request's title and
+# body by GitHub's own limits in characters (code points, as the schema counts them), so every pull request
+# GitHub accepts parses, and other captured context by UTF-8 bytes.
+HISTORICAL_TEXT_MAX_CHARS = {"title": 256, "body": 65536}
+HISTORICAL_CONTEXT_MAX_BYTES = 65536
 IMMUTABLE_REVIEW_INPUT_SCHEMA = strict_object({
     "schema_version": {"const": 1},
     "provenance": strict_object({
         "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", "maxLength": 256},
         "pr_number": {"type": "integer", "minimum": 1},
         **{key: _SHA for key in ("head_sha", "requested_base_sha", "comparison_base_sha")},
-        **{key: {"type": "string", "maxLength": limit} for key, limit in HISTORICAL_CONTEXT_MAX_BYTES.items()},
+        **{key: {"type": "string", "maxLength": limit} for key, limit in HISTORICAL_TEXT_MAX_CHARS.items()},
+        "context": {"type": "string", "maxLength": HISTORICAL_CONTEXT_MAX_BYTES},
     }),
     "materialization": strict_object({
         "kind": {"enum": ["exact", "synthetic"]},
@@ -51,7 +55,9 @@ def validate_immutable_input(value: dict[str, Any]) -> None:
         raise ValueError("immutable repository identity is malformed")
     if type(original["pr_number"]) is not int:
         raise ValueError("immutable PR number must be an exact positive integer")
-    if any(len(original[key].encode()) > limit for key, limit in HISTORICAL_CONTEXT_MAX_BYTES.items()):
+    # Encoding also refuses author text that is not well-formed Unicode; only context has a byte bound.
+    encoded = {key: original[key].encode() for key in ("title", "body", "context")}
+    if len(encoded["context"]) > HISTORICAL_CONTEXT_MAX_BYTES:
         raise ValueError("immutable historical context exceeds its UTF-8 bound")
     if local["kind"] == "exact":
         if any(original[key] != local[key] for key in ("head_sha", "requested_base_sha", "comparison_base_sha")):

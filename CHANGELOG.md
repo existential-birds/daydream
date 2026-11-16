@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking (0.y.z):** Committed review delivers captured author text (an immutable
+  input's title, body and context, a frozen author description or the pinned PR's
+  description) by reference, so a long description can no longer push every assignment's
+  first message past a native context window
+  ([#1761](https://github.com/existential-birds/daydream/issues/1761)). Each assignment's
+  `profile.historical_context`, and the sealed result's `settings.historical_context`, now
+  hold `{"delivery": "review_source", "fields": {...}}` with each field's UTF-8 size and
+  SHA-256 instead of the text. `review_source` serves the exact text through its new
+  `historical_context` argument, which every call now passes (null unless it selects a
+  field). Readers of the sealed `settings.historical_context` text find an immutable input's
+  text in `immutable_input`; a frozen description stays with the embedder that supplied it.
+  See [committed review](docs/runtime.md#committed-review-requestresult).
 - **Breaking (0.y.z):** Run evidence is local OpenTelemetry instead of ATIF
   ([#1717](https://github.com/existential-birds/daydream/issues/1717),
   [#1719](https://github.com/existential-birds/daydream/issues/1719),
@@ -53,6 +65,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   diff header overflows an assignment staged a 4,000-byte path through the working tree, which
   macOS's 1,024-byte path limit refuses. It now records the path in Git without writing it to
   disk, so `make check` (and the pre-push hook) no longer fails there.
+- `ImmutableReviewInput` accepts every pull request title and description GitHub accepts,
+  so hosted reviews of PRs with descriptions over 8 KiB no longer fail before analysis
+  ([#1761](https://github.com/existential-birds/daydream/issues/1761)). `title` and `body`
+  are bounded to 256 and 65,536 characters (code points), GitHub's own limits, instead of
+  512 and 8,192 UTF-8 bytes; `context` keeps its 65,536-byte bound. Daydream releases before
+  this one refuse envelopes, results and findings that use the wider bounds, so upgrade
+  readers before writers. A plan whose findings export cannot hold its coverage and any
+  immutable input before a single claim is now refused before review instead of running
+  with no capacity to retain one. See [immutable PR inputs](docs/runtime.md#immutable-pr-inputs).
 
 ## [0.36.0] - 2026-11-15
 
