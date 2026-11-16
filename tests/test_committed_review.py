@@ -1169,8 +1169,9 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
         assert not (cwd / ".git/hooks/post-checkout").exists()
         instructions = kwargs["review_system_instructions"]
         assert "captured/repository" not in prompt + instructions and '"pr_number"' not in prompt + instructions
-        # Captured author text is named by size and digest, never carried; review_source serves those bytes.
-        assert "Historical captured title" not in prompt + instructions
+        # Captured author text is named by size and digest, never carried: the maximal body alone would add 393,216
+        # JSON-escaped bytes to a first message that holds at most 64 KiB of claims. review_source serves its bytes.
+        assert len((prompt + instructions).encode()) < 131072
         binding = kwargs["host_tools"]
         lookup = binding.host_tools["review_source"].callback
         authored = {key: envelope["provenance"][key].encode() for key in ("title", "body", "context")}
