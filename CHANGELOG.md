@@ -67,6 +67,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `runner.run` used to refuse it with exit 1 or ignore it.
   - The `daydream.stack` trace span attribute and the `stack` parameter of `step_scope`.
     The archive index's `skill` column goes with the stored-format change below.
+- **Breaking (0.y.z):** The replaced staged reviewer's repository settings, which 0.35.0
+  named in one warning and ignored, are no longer recognized
+  ([#1858](https://github.com/existential-birds/daydream/issues/1858)): `latency_profile`,
+  `shallow_fanout_threshold`, `precision_mode`, `deep_shard_enabled`, `deep_shard_max_files`,
+  `deep_shard_max_bytes`, `deep_shard_fanout_cap`, `deep_shard_frontier_max`,
+  `review_cache_enabled`, `review_cache_max_entries`, `review_cache_max_bytes`,
+  `review_cache_max_age_days` and `verify_all`, with their `DaydreamFileConfig` fields.
+  - Any top-level key in `.daydream.toml` or `[tool.daydream]` that Daydream does not read now
+    fails to load the configuration, before any work, with one error naming each key, for
+    example `Unrecognized daydream settings in .daydream.toml or [tool.daydream]:
+    precision_mode` and exit 1; such keys used to be ignored. This includes
+    `[tool.daydream.bench]`, which used to log a warning, and misspellings such as
+    `test-command` for `test_command`. `[tool.daydream.workspace]` is read from
+    `pyproject.toml` only, as before. Every route that loads repository
+    configuration is affected: CLI review and fixing, `--diagram-only`, Improve, and a
+    non-hosted committed review without a supplied `file_config`. Remove the keys.
+  - Phase tables still accept any phase name, for extension phases, so tables for the retired
+    phases (`intent`, `merge`, `parse`, `per_stack_review`, `supervise`, `suppression` and
+    `wonder`) are now ignored without notice.
 - **Breaking (0.y.z):** Readers of files that only the replaced staged reviewer wrote are
   deleted ([#1860](https://github.com/existential-birds/daydream/issues/1860)):
   - `daydream.deep.routing_record.read_routing_record`, which read `latency-routing.json`. The

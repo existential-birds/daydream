@@ -1048,13 +1048,9 @@ the settings of the staged reviewer it replaced select nothing. Its command-line
 are gone, and `review` and `shallow` are ordinary custom flow names, unregistered unless an
 extension registers them.
 
-- **Ignored with one printed notice** naming each key: the repository settings
-  `latency_profile`, `shallow_fanout_threshold`, `precision_mode`, `deep_shard_enabled`,
-  `deep_shard_max_files`, `deep_shard_max_bytes`, `deep_shard_fanout_cap`,
-  `deep_shard_frontier_max`, `review_cache_enabled`, `review_cache_max_entries`,
-  `review_cache_max_bytes`, `review_cache_max_age_days`, `verify_all`, and the phase tables
-  `intent`, `merge`, `parse`, `per_stack_review`, `supervise`, `suppression` and `wonder`.
-  Every finding is verified before a fix, so `verify_all` selects nothing.
+- **Refused when loading repository settings:** any top-level key Daydream does not read,
+  such as the staged reviewer's settings, fails with one message naming each key. Phase
+  tables accept extension phases, so tables for retired phases are ignored.
   `[phases.review]` configures discovery and `[phases.arbiter]` configures the challenge.
 - **Refused:** a review or challenge backend without native host tools. Pi, Claude and
   Codex serve them; Osprey does not and cannot run a review.

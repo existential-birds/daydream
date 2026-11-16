@@ -172,7 +172,7 @@ def _improve_monorepo(tmp_path: Path, name: str, *, with_web: bool = True, branc
         "[project]\n"
         'name = "improve-monorepo"\n'
         "\n"
-        "[tool.daydream]\n"
+        "[tool.commands]\n"
         'test-command = "uv run pytest"\n'
         'scope-command = "git diff --exit-code"\n'
     )
@@ -210,7 +210,7 @@ def improve_scaled_monorepo_target(tmp_path: Path) -> Path:
             (pkg / f"view{index}.tsx").write_text('import React from "react"; export const V = () => <div/>;\n')
     (project / "README.md").write_text("# scaled\n")
     (project / "pyproject.toml").write_text(
-        '[project]\nname = "improve-scaled"\n\n[tool.daydream]\ntest-command = "uv run pytest"\n'
+        '[project]\nname = "improve-scaled"\n\n[tool.commands]\ntest-command = "uv run pytest"\n'
     )
     _init_repo(project)
     _git(project, "add", ".")

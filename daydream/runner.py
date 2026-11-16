@@ -91,7 +91,6 @@ from daydream.run_config import (
     _resolved_backend_name,
     _resolved_model,
     _resolved_reasoning_effort,
-    ignored_review_settings,
     runs_review,
 )
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context, resolve_gate
@@ -338,10 +337,6 @@ async def run(
     if refusal is not None:
         print_error(console, "Review Not Possible", refusal)
         return 1
-    ignored = ignored_review_settings(config)
-    if ignored:
-        print_warning(console, "Repository settings of the replaced staged reviewer are ignored; remove them: "
-                               + ", ".join(ignored))
     if config.dataset_capture_disabled:
         config = replace(config, dataset_capture=False)
     else:
