@@ -220,15 +220,16 @@ class JournalWriter:
             unsealed = self._seq, self._size, self._hash.copy()
             if not self._append_locked(SEAL_EVENT, sealed_body, {}):
                 return False
+            fd = self._fd
+            assert fd is not None
             try:
-                assert self._fd is not None
-                os.fsync(self._fd)
+                os.fsync(fd)
             except OSError as exc:
                 # A seal that may not be durable never counts: drop it from the file too, so
                 # every reader sees the unsealed prefix that references name.
                 self._seq, self._size, self._hash = unsealed
                 try:
-                    os.ftruncate(self._fd, self._size)
+                    os.ftruncate(fd, self._size)
                 except OSError:
                     pass
                 self._fail(exc)
