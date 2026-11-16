@@ -61,6 +61,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A Codex invocation that asks for no persisted session, as every committed-review
+  invocation does, now runs with `--ephemeral`, so Codex writes no session rollout or
+  thread rows for it under its home. Before, the Codex backend accepted
+  `persist_session=False` and ignored it, so Codex kept every invocation's session history
+  ([#1816](https://github.com/existential-birds/daydream/issues/1816)). Such an invocation
+  is never resumed and returns no continuation; persisted invocations and resume are
+  unchanged. Every Codex request's evidence now records `persist_session` instead of
+  leaving it unset. See [Codex host tools](docs/runtime.md#codex-host-tools).
+- When Codex exits with an error, such as a required MCP server it cannot initialize,
+  the raised error now shows Codex's own cause line
+  (`required MCP servers failed to initialize: <name>`). Before, the bounded excerpt kept
+  only the last output lines, which were backtrace frames. Blank lines and everything
+  from Codex's `Stack backtrace:` header on are still counted but no longer shown;
+  redaction and the excerpt's size bounds are unchanged
+  ([#1818](https://github.com/existential-birds/daydream/issues/1818)).
+- A Codex MCP tool result is now recorded as its text blocks joined with newlines, or as
+  JSON for any other content. Before, it was recorded as the Python repr of the content
+  list, such as `[{'type': 'text', 'text': 'refused'}]`. An empty result is now recorded
+  as empty instead of `[]`, so evaluation flags it as `empty_tool_result`. This changes
+  the recorded tool-result evidence for every Codex invocation, including
+  `daydream --backend codex` and committed review's host-tool results
+  ([#1818](https://github.com/existential-birds/daydream/issues/1818)).
 - An archived fixing run whose review completed with no findings is now recorded with
   `pipeline_status: succeeded` instead of `partial`. Fix and test are no longer required
   when this session's sealed review is complete with zero findings; already archived rows

@@ -1000,18 +1000,23 @@ refused before any process or server starts, and the disposable read-only checko
   variable is blanked inside model shell commands. Codex 0.139.0 and 0.153.4 also write
   the session environment to a shell-snapshot file under the Codex home that a model
   shell command can read, so on those versions the model can obtain the secret, and it
-  can then reach the provider as tool output and Codex's own session files; 0.163.0 and
-  0.169.0 do not expose it. The impact is bounded: the token serves one attempt's three
+  can then reach the provider as tool output; 0.163.0 and 0.169.0 do not expose it.
+  Codex removes the snapshot at exit and keeps no session files for these invocations
+  (see Session history). The impact is bounded: the token serves one attempt's three
   host tools, every call is charged and validated by the same binding, and the sandboxed
   shell could not open a loopback connection on those two versions. A process of the same
   user can also read the Codex process environment while it runs.
+- Session history: every committed-review invocation is non-persisted, so the command
+  passes `--ephemeral` and Codex writes no session rollout or thread rows for it. Its logs
+  and state databases, `installation_id` and shell snapshots remain its own.
 - Proxies: loopback is appended to `NO_PROXY` and `no_proxy` so no proxy receives the
   callback. Each name keeps the user's exemptions, taken from whichever name carries them.
 - Readiness: Codex initializes a required server before any model request and exits
-  non-zero when it cannot, which surfaces as its process failure. The host also requires
-  that this exact server served `tools/list` before the first turn starts, else
-  `native_readiness`. Codex exposes no view of the schema it registered, so there is
-  nothing to compare before model work.
+  non-zero when it cannot, which surfaces as its process failure; the raised error keeps
+  Codex's own cause line (`required MCP servers failed to initialize: <name>`), not its
+  backtrace. The host also requires that this exact server served `tools/list` before the
+  first turn starts, else `native_readiness`. Codex exposes no view of the schema it
+  registered, so there is nothing to compare before model work.
 - Schemas: Codex removes `maxLength`, `minLength`, `pattern`, `minimum`, `maximum`,
   `maxItems` and `uniqueItems` from the schema it shows the model; 0.139.0 also removes
   `minItems`, which the later versions keep. It passes object arguments through without
@@ -1052,9 +1057,7 @@ refused before any process or server starts, and the disposable read-only checko
   the outage circuit records a completed turn, not a failure. An assignment that ends unsubmitted
   keeps the reason `missing_output` unless a budget or deadline limit stops it first;
   that limit's reason is then sealed.
-- Not offered: resuming a native conversation with host tools, a capacity preflight, or
-  suppression of Codex's own session history, which it writes under its home as for
-  every run.
+- Not offered: resuming a native conversation with host tools or a capacity preflight.
 
 Exercised offline with a scripted local provider and no login, on Linux, against Codex
 CLI 0.139.0, 0.153.4, 0.163.0 and 0.169.0. On 0.139.0 a tool result reaches the model as
