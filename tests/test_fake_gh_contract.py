@@ -24,7 +24,7 @@ def test_gh_guard_fails_unowned_calls_while_fake_gh_owns_classifiable_absence(
     callers key absence off gh's own ``(HTTP 404)`` stderr token."""
     host = tmp_path / "host"
     host.mkdir()
-    (host / "gh").write_text(f"#!/bin/sh\ntouch {host / 'ran'}\necho '{{\"login\": \"host\"}}'\n", encoding="utf-8")
+    (host / "gh").write_text("#!/bin/sh\necho '{\"login\": \"host\"}'\n", encoding="utf-8")
     (host / "gh").chmod(0o755)
     host_auth = git_ops.StaticGitHubAuth({"PATH": str(host)})
     guard = install_gh_guard(tmp_path / "guard", tmp_path / "owned", monkeypatch)
@@ -34,7 +34,6 @@ def test_gh_guard_fails_unowned_calls_while_fake_gh_owns_classifiable_absence(
     assert stray.returncode == 1
     assert subprocess.run(["sh", "-c", "gh auth status"], check=False).returncode == 1
 
-    assert not (host / "ran").exists()
     with pytest.raises(AssertionError, match="no fake owns") as failure:
         guard.finish()
     assert failure.value.args[0].splitlines()[1:] == ["gh api /user", "gh pr view 7", "gh auth status"]

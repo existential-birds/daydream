@@ -557,14 +557,14 @@ class GhGuard:
             )
 
     def redirect(self, program: Any, env: Any) -> str | None:
-        """Return the guard shim when *program* resolves to the guard or to a gh outside the owned root."""
+        """Return the guard shim when *program* resolves to a gh outside the owned root.
+
+        The guard's own shim lies under the owned root in the suite, so a call resolving to it runs it unchanged.
+        """
         if program != "gh":
             return None
         found = shutil.which("gh", path=(os.environ if env is None else env).get("PATH", os.defpath))
-        if found is None:
-            return None
-        resolved = Path(found).resolve()
-        if resolved != self.shim and resolved.is_relative_to(self.owned_root):
+        if found is None or Path(found).resolve().is_relative_to(self.owned_root):
             return None
         return str(self.shim)
 
@@ -582,7 +582,7 @@ def install_gh_guard(root: Path, owned_root: Path, monkeypatch: pytest.MonkeyPat
         encoding="utf-8",
     )
     shim.chmod(0o755)
-    guard = GhGuard(shim.resolve(), log, owned_root.resolve())
+    guard = GhGuard(shim, log, owned_root.resolve())
     monkeypatch.setenv("PATH", os.pathsep.join((str(bin_dir), os.environ["PATH"])))
     real_run = subprocess.run
     real_exec = asyncio.create_subprocess_exec
