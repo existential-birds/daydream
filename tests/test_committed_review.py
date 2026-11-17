@@ -807,13 +807,18 @@ async def test_committed_capture_cleanup_keeps_ownership_after_session_close(
                 _walk_entry(repo.parent, root, foreign_before)
 
     async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, None]:
+        assignment = _assignment(prompt)
         binding = kwargs["host_tools"]
         async with binding.session():
-            value = _discovery(review_inputs)
-            value["claims"] = []
+            if assignment["kind"] == "challenge":
+                value = {"verdicts": [_verdict(review_inputs, assignment["claims"][0])], "claims": []}
+            else:
+                value = _discovery(review_inputs)
+                if cleanup_change == "source-replacement":
+                    value["claims"] = []
             binding.admit("terminal", "structured_output", value, terminal=True)
             accepted = binding.submit("terminal", value)
-            if cleanup_change == "git-routing":
+            if assignment["kind"] == "challenge":
                 raise primary
             binding.native_settled = True
         return accepted, None, None
@@ -827,7 +832,11 @@ async def test_committed_capture_cleanup_keeps_ownership_after_session_close(
         assert caught.value is primary
         payload = json.loads((repo / ".daydream/committed-review.json").read_text())
         validate_committed_result(payload)
-        assert payload["terminal_result"]["pipeline_state"] == "cancelled"
+        assert payload["terminal_result"]["pipeline_state"] == "cancelled" and len(payload["findings"]) == 1
+        # A confirmed claim sealed by a cancelled run was never handed over to the caller.
+        summary = json.loads((repo / ".daydream/review-summary.json").read_text())
+        assert summary["counts"]["findings"] == {"confirmed": 1, "delivered": 0}
+        assert summary["terminal"]["pipeline_state"] == "cancelled"
     else:
         result = await run_committed_review(review_request)
         assert result.complete and result.output_installed
