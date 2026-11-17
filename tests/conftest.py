@@ -19,7 +19,7 @@ from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
     from daydream.run_config import RunConfig
-from tests.harness.fake_gh import FakeGh, install_fake_gh
+from tests.harness.fake_gh import FakeGh, install_fake_gh, install_gh_guard
 from tests.harness.git_helpers import (
     bare_remote as _bare_remote,
     commit as _commit,
@@ -365,13 +365,21 @@ def _isolate_github_app_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_github_cli_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Hide host gh credentials; explicit test auth remains available."""
+def _isolate_github_cli(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Hide host gh credentials and fail any test that reaches a gh no fake owns.
+
+    ``fake_gh`` and test-owned shims under the pytest basetemp take over; explicit test auth remains available.
+    """
     for name in (
         "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST", "GH_REPO",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("GH_CONFIG_DIR", str(tmp_path / "gh-config"))
+    guard = install_gh_guard(tmp_path.parent / f"{tmp_path.name}-gh-guard", tmp_path_factory.getbasetemp(), monkeypatch)
+    yield
+    guard.finish()
 
 
 @pytest.fixture(autouse=True)

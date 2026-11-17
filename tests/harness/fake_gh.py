@@ -1,4 +1,5 @@
-"""Shared fake gh handler for synchronous interception and real-process lifecycle tests.
+"""Shared fake gh handler for synchronous interception and real-process lifecycle tests,
+plus the suite-wide guard that fails a test reaching any gh no fake owns.
 Non-gh commands, including Git against temp worktrees, run normally. Record argv/input
 payloads in JSONL; serve canned METHOD/endpoint responses before built-in behavior.
 Query-string-free keys are a fallback, and --jq emits real-gh-style NDJSON. GraphQL
@@ -8,10 +9,13 @@ pagination. Unsupported calls fail instead of inventing success.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -531,16 +535,69 @@ def _shim_main(state_dir: Path) -> int:
     return rc
 
 
-def block_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fail instead of executing the real ``gh`` CLI, keeping a suite hermetic."""
-    real_run = subprocess.run
+@dataclass
+class GhGuard:
+    """Fail-closed stand-in for every ``gh`` no explicit fake owns.
 
-    def guarded_run(args: list[Any], *pargs: Any, **kwargs: Any) -> Any:
-        if args and args[0] == "gh":
-            raise AssertionError("test attempted to execute the real gh CLI")
+    Its shim records argv and exits 1, so production failure handling stays exercised.
+    ``finish`` fails the owning test afterwards because production swallows the failure.
+    """
+
+    shim: Path
+    log: Path
+    owned_root: Path
+
+    def calls(self) -> list[str]:
+        return self.log.read_text(encoding="utf-8").splitlines() if self.log.exists() else []
+
+    def finish(self) -> None:
+        if calls := self.calls():
+            raise AssertionError(
+                "test reached a gh no fake owns; request fake_gh or a test-owned shim:\n" + "\n".join(calls)
+            )
+
+    def redirect(self, program: Any, env: Any) -> str | None:
+        """Return the guard shim when *program* resolves to the guard or to a gh outside the owned root."""
+        if program != "gh":
+            return None
+        found = shutil.which("gh", path=(os.environ if env is None else env).get("PATH", os.defpath))
+        if found is None:
+            return None
+        resolved = Path(found).resolve()
+        if resolved != self.shim and resolved.is_relative_to(self.owned_root):
+            return None
+        return str(self.shim)
+
+
+def install_gh_guard(root: Path, owned_root: Path, monkeypatch: pytest.MonkeyPatch) -> GhGuard:
+    """Put the guard shim first on PATH and redirect sync/async ``gh`` that no fake under *owned_root* owns."""
+    bin_dir = root / "bin"
+    bin_dir.mkdir(parents=True)
+    shim, log = bin_dir / "gh", root / "calls.log"
+    shim.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "gh $*" >> {shlex.quote(str(log))}\n'
+        "echo 'gh guard: no fake owns this gh call' >&2\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    guard = GhGuard(shim.resolve(), log, owned_root.resolve())
+    monkeypatch.setenv("PATH", os.pathsep.join((str(bin_dir), os.environ["PATH"])))
+    real_run = subprocess.run
+    real_exec = asyncio.create_subprocess_exec
+
+    def guarded_run(args: Any, *pargs: Any, **kwargs: Any) -> Any:
+        if isinstance(args, (list, tuple)) and args and (redirect := guard.redirect(args[0], kwargs.get("env"))):
+            args = [redirect, *args[1:]]
         return real_run(args, *pargs, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", guarded_run)
+    async def guarded_exec(program: Any, *args: Any, **kwargs: Any) -> Any:
+        return await real_exec(guard.redirect(program, kwargs.get("env")) or program, *args, **kwargs)
+
+    monkeypatch.setattr("daydream.git_ops.process.subprocess.run", guarded_run)
+    monkeypatch.setattr("daydream.git_ops.process.asyncio.create_subprocess_exec", guarded_exec)
+    return guard
 
 
 def install_fake_gh(state_dir: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:

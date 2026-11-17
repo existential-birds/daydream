@@ -23,13 +23,7 @@ from daydream.github_app import (
     resolve_credentials,
     resolve_run_identity,
 )
-from tests.harness.fake_gh import block_real_gh
 from tests.harness.rsa import generate_rsa_pem
-
-
-@pytest.fixture(autouse=True)
-def _block_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
-    block_real_gh(monkeypatch)
 
 
 def test_run_gh_resolves_auth_once_for_the_complete_retry_sequence() -> None:
