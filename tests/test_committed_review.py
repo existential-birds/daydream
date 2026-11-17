@@ -721,6 +721,10 @@ async def test_local_capture_corruption_retains_challenged_findings_and_unfinish
     # The explicit path offers the summary it installed beside its sealed result.
     assert result.summary == json.loads((repo / '.daydream/review-summary.json').read_text())
     assert result.summary is not None and result.summary['result_schema_version'] == RESULT_VERSIONS['local']
+    # A returned run hands over every sealed finding it confirmed.
+    assert len(value['findings']) >= 1
+    assert result.summary['counts']['findings'] == {'confirmed': len(value['findings']),
+                                                    'delivered': len(value['findings'])}
     assert [call['kind'] for call in calls] == ['discovery', 'challenge']
     # A blank author description is not supplied: no assignment carries it and nothing records it.
     assert not any('historical_context' in record for record in (value['settings'], *(c['profile'] for c in calls)))

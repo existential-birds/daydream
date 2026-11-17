@@ -293,7 +293,7 @@ recorded is `null`, never `0`; without a recorder every evidence-derived value i
 | `counts.assignments` | Planned assignments of the [assignment policy](#assignment-policy-and-work), `0` for a change with no diff |
 | `counts.targets` | `planned` targets, and `reviewed` / `not_reviewed` target decisions |
 | `counts.claims` | Claims `proposed`, then by disposition: `confirmed`, `rejected` (by the challenge) and `unresolved` |
-| `counts.findings` | Sealed `confirmed` findings and the items `delivered`; an extension step that rewrites the `deep` flow's items can make them differ, and a cancelled run delivers none |
+| `counts.findings` | Sealed `confirmed` findings and the items `delivered`; an extension step that rewrites the `deep` flow's items can make them differ, and a run that is cancelled or raises (such as an unsupported hosted policy) delivers none |
 | `budget_stops` | Count by host exhaustion reason code of sealed execution stops plus the schedule's [retained refusals](observability.md#budget-stops) |
 | `retries` | `total` retried attempts and their count `by_reason`, the recorded [`FailureClass`](../daydream/retry_policy.py) that admitted each |
 | `phases.review`, `phases.arbiter` | The `[phases.review]` (discovery, follow-up, cross-assignment) and `[phases.arbiter]` (challenge) work: config-resolved `backend`, `model` and `reasoning_effort`; `prompt_tokens`, `cached_tokens`, `completion_tokens` and `cost_usd`; and `wall_seconds`, the union of the phase's intervals |
