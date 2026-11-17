@@ -375,13 +375,18 @@ def _validate_work(records: list[dict[str, Any]], work: dict[str, dict[str, Any]
 
 @dataclass(frozen=True)
 class CommittedReviewResult:
-    """Sealed JSON bytes plus independent installation, capture and delivery facts."""
+    """Sealed JSON bytes plus independent installation, capture and delivery facts.
+
+    ``summary`` is the validated review summary staged beside the sealed result, or ``None``
+    when output staging failed before it was built (``output_error`` says why).
+    """
 
     json_text: str
     output_installed: bool
     capture_state: str
     delivery_state: str = "not_requested"
     output_error: str | None = None
+    summary: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         value: dict[str, Any] = json.loads(self.json_text)

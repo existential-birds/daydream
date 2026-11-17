@@ -31,8 +31,8 @@ class StubBackend:
         # Claims the scripted review discovers, each ``{"title", "file", "line"}`` cited on the new
         # side unless ``"side": "old"``, plus optional ``"supporting"`` source selectors appended after
         # the assigned one; None proposes one "Sample issue" on the first changed target.
-        # ``review_verdict`` is the challenge's answer and ``review_undecided`` leaves that many
-        # trailing targets without a decision.
+        # ``review_verdict`` is the challenge's answer unless a claim names its own ``"verdict"``, and
+        # ``review_undecided`` leaves that many trailing targets without a decision.
         self.review_claims: list[dict[str, Any]] | None = None
         self.review_verdict: str = "confirmed"
         self.review_undecided: int = 0
@@ -127,8 +127,10 @@ class StubBackend:
                 cursor = page["next_cursor"]
             fetched[field] = "".join(pages)
         if assignment["kind"] == "challenge":
+            verdicts = {claim["title"]: claim["verdict"] for claim in self.review_claims or () if "verdict" in claim}
             return {"claims": [], "verdicts": [
-                {"uid": claim["uid"], "revision": claim["revision"], "verdict": self.review_verdict,
+                {"uid": claim["uid"], "revision": claim["revision"],
+                 "verdict": verdicts.get(claim["title"], self.review_verdict),
                  "grounds": "Captured source was searched for counterevidence.", "evidence_refs": []}
                 for claim in assignment["claims"]]}
         targets = [lookup({"target_id": target, "path": None, "historical_context": None, "cursor": None})["target"]

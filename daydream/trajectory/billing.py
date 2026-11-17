@@ -1,15 +1,16 @@
 """Host-owned usage totals: one generation charge, unknown never zero, forks folded once.
 
 Each evidence document owns one :class:`UsageLedger`. Invocations charge the
-ledger of the document they record into; a completed fork folds its ledger into
-its parent once, so the root ledger is the run's whole total. Cached tokens stay a
-subset of prompt tokens and are never added to them. A dimension that was never
-observed stays ``None``; an observed zero stays zero.
+ledger of the document they record into, attributed to the invocation's phase; a
+completed fork folds its ledger (phase shares included) into its parent once, so
+the root ledger is the run's whole total and its phase shares sum to it. Cached
+tokens stay a subset of prompt tokens and are never added to them. A dimension
+that was never observed stays ``None``; an observed zero stays zero.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 #: Generic backend labels replaced by the first native model name.
@@ -32,19 +33,24 @@ class UsageLedger:
     cached: int | None = None
     cost: float | None = None
     folded_forks: bool = False
+    #: The same charges keyed by ``DaydreamPhase`` value; their sums equal this ledger's totals.
+    phases: dict[str, UsageLedger] = field(default_factory=dict)
 
-    def charge(self, *, prompt_tokens: int | None, completion_tokens: int | None,
+    def charge(self, *, phase: str, prompt_tokens: int | None, completion_tokens: int | None,
                cached_tokens: int | None, cost_usd: float | None) -> None:
-        """Add each observed dimension; an absent dimension changes nothing."""
-        for attribute, value in (("prompt", prompt_tokens), ("completion", completion_tokens),
-                                 ("cached", cached_tokens), ("cost", cost_usd)):
-            if value is not None:
-                setattr(self, attribute, (getattr(self, attribute) or 0) + value)
+        """Add each observed dimension to the total and to *phase*'s share; an absent one changes nothing."""
+        share = self.phases.setdefault(phase, UsageLedger())
+        for ledger in (self, share):
+            for attribute, value in (("prompt", prompt_tokens), ("completion", completion_tokens),
+                                     ("cached", cached_tokens), ("cost", cost_usd)):
+                if value is not None:
+                    setattr(ledger, attribute, (getattr(ledger, attribute) or 0) + value)
 
     def fold(self, child: UsageLedger) -> None:
-        """Fold one completed fork's total into this ledger exactly once."""
-        self.charge(prompt_tokens=child.prompt, completion_tokens=child.completion,
-                    cached_tokens=child.cached, cost_usd=child.cost)
+        """Fold one completed fork's phase shares, and so its total, into this ledger exactly once."""
+        for phase, share in child.phases.items():
+            self.charge(phase=phase, prompt_tokens=share.prompt, completion_tokens=share.completion,
+                        cached_tokens=share.cached, cost_usd=share.cost)
         self.folded_forks = True
 
     def final_metrics(self, total_steps: int) -> dict[str, Any]:

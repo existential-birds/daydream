@@ -236,6 +236,8 @@ class EvidenceRecorder:
     # appended as records; a fork's summary on its parent flattens them.
     _phase_events: list[PhaseEvent] = field(default_factory=list)
     _subtrajectories: list[dict[str, Any]] = field(default_factory=list)
+    #: Reason codes of host schedule refusals, which no dispatch or sealed execution entry records.
+    schedule_budget_stops: list[str] = field(default_factory=list)
     _aborted: bool = False
     on_write: TrajectoryWriteCallback | None = None
     _trajectory_id: str = ""
@@ -439,6 +441,11 @@ class EvidenceRecorder:
             partial_edit_handling=partial_edit_handling,
         )
 
+    def emit_schedule_budget_stop(self, phase: DaydreamPhase, *, reason: str, **facts: Any) -> None:
+        """Record and retain a host schedule refusal: its public reason code and the stop's durations/counts."""
+        self.schedule_budget_stops.append(reason)
+        self._emit_phase_event(phase, "schedule_budget_stop", budget_reason=reason, **facts)
+
     def emit_tool_veto(self, tool_name: str, reason: str, *, phase: DaydreamPhase = DaydreamPhase.FIX) -> None:
         """Record a tool-supervisor veto in the firing phase."""
         self._emit_phase_event(phase, "tool_veto", tool_name=tool_name, reason=reason)
@@ -467,7 +474,7 @@ class EvidenceRecorder:
         self._subtrajectories.append(safe)
         self._record(SUBTRAJECTORY_EVENT, safe, {"daydream.invocation.id": safe.get("invocation_id")})
 
-    def _recursive_invocation_summaries(self) -> list[dict[str, Any]]:
+    def invocation_summaries(self) -> list[dict[str, Any]]:
         """Flatten document-qualified invocation evidence through nested forks."""
         summaries: list[dict[str, Any]] = []
         for summary in self._subtrajectories:
@@ -478,7 +485,7 @@ class EvidenceRecorder:
                 summaries.extend(dict(item) for item in nested if isinstance(item, dict))
         return summaries
 
-    def _recursive_phase_event_summaries(self) -> list[dict[str, Any]]:
+    def phase_event_summaries(self) -> list[dict[str, Any]]:
         """Flatten identified phase evidence while retaining document identity."""
         summaries = [{**event.to_dict(), "trajectory_id": self.trajectory_id} for event in self._phase_events]
         for summary in self._subtrajectories:
@@ -505,8 +512,8 @@ class EvidenceRecorder:
             "started_at": started_at,
             "ended_at": ended_at,
             "sibling_trajectory_ref": sibling_trajectory_ref,
-            "phase_events": child._recursive_phase_event_summaries(),
-            "invocations": child._recursive_invocation_summaries(),
+            "phase_events": child.phase_event_summaries(),
+            "invocations": child.invocation_summaries(),
         }
         if identity is not None:
             summary["fork_id"] = identity.fork_id

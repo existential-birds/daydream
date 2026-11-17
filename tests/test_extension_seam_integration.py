@@ -57,7 +57,8 @@ async def test_extension_step_rewrites_items_before_the_review_is_sealed(
     )
     backend = StubBackend(multi_stack_target)
     backend.review_claims = [{"title": "Greeting drift", "file": "api.py", "line": 1},
-                             {"title": DROP_ME, "file": "App.tsx", "line": 1}]
+                             {"title": DROP_ME, "file": "App.tsx", "line": 1},
+                             {"title": "Refuted drift", "file": "api.py", "line": 1, "verdict": "rejected"}]
     install_backend(backend)
     delivered: list[FinalizedReview] = []
 
@@ -75,6 +76,14 @@ async def test_extension_step_rewrites_items_before_the_review_is_sealed(
     (captured,) = read_records(store).runs
     assert [(item["description"], item["item_uid"]) for item in captured["findings"]["value"]["items"]] == [
         (KEEP_ME, sealed["findings"][0]["item_uid"])]
+    # The summary beside the sealed review is the one delivered, counting what the sealed review cannot:
+    # the challenge's rejection and the extension's delivery.
+    summary = json.loads((multi_stack_target / ".daydream/deep/review-summary.json").read_text())
+    assert review.summary == summary and summary["run_id"] == sealed["run_id"]
+    assert summary["terminal"] == {key: sealed["terminal_result"][key]
+                                   for key in ("analysis_state", "pipeline_state", "reason_codes")}
+    assert summary["counts"]["claims"] == {"proposed": 3, "confirmed": 2, "rejected": 1, "unresolved": 0}
+    assert summary["counts"]["findings"] == {"confirmed": 2, "delivered": 1}
     printed = " ".join(capsys.readouterr().out.replace("║", " ").split())
     assert "Review complete: 1 confirmed finding delivered (the reviewer confirmed 2)." in printed
     assert "Confirmed findings: 1." in (multi_stack_target / ".daydream/deep/review-output.md").read_text()

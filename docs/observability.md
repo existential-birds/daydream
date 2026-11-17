@@ -191,6 +191,12 @@ evidence. `settings.native_contexts` holds opaque native
 configuration identities and phase associations; actual generation settings remain
 separate trajectory observations. Credentials stay private and refreshable.
 
+Each document's usage ledger also keeps a share per evidence phase, charged at the same
+sites as its total and folded with a fork under the same rule, so the shares sum to the
+total. A retried attempt's invocation summary records `retry_failure_class`, the bounded
+`FailureClass` that admitted the retry. The [review summary](runtime.md#committed-review-summary)
+reads these, the retained schedule refusals below and the phase intervals when it seals.
+
 ## Budget stops
 
 Every [budget stop](runtime.md#budget-ledger) appears on the trace once, as
@@ -204,6 +210,9 @@ its agent span, and a dispatch the host refuses before any agent runs on the enc
 step or run span. Values are counts or durations in seconds, never monotonic timestamps.
 A retry-ladder stop is a `daydream.retry.stop` event on its agent span carrying the evidence
 `agent_budget_stop` fields as `daydream.retry.*`, with or without a recorder.
+A committed-review dispatch the host schedule refuses is also retained in local evidence as a
+`schedule_budget_stop` phase event with the same facts and its public `budget_reason`:
+`host_wall_budget_exhaustion` for `time` and `host_tool_budget_exhaustion` for `tool_calls`.
 
 ## Codex lifecycle evidence
 

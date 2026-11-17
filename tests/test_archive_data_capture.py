@@ -23,7 +23,7 @@ from daydream.backends import (
     TextEvent,
 )
 from daydream.dataset import LocalRecordStore
-from daydream.run_config import RunConfig, _resolved_model
+from daydream.run_config import RunConfig, resolved_model
 from daydream.runner import run
 from daydream.training.labeler_signals import local_commit_applied_signal
 from daydream.trajectory import DOCUMENT_SUFFIX, RUN_DOCUMENT_NAME, siblings_directory
@@ -155,7 +155,7 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
 
     # Stored records name the reviewer that ran: discovery on the review phase's backend, not on a phase
     # table this build ignores. A version 3 manifest and index name it as the review, with no per-stack name or skill.
-    review_model = _resolved_model(RunConfig(backend="pi", review_backend="codex"), "review")
+    review_model = resolved_model(RunConfig(backend="pi", review_backend="codex"), "review")
     assert trajectory["extra"]["review_backend"] == "codex"
     recorded = manifest["run"]
     assert (recorded["review_backend"], recorded["review_model"], manifest["schema_version"]) == (
@@ -187,8 +187,9 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert recommended_text != diff_text
     assert "# daydream recommended change" in recommended_text
     assert "# daydream recommended change" not in diff_text
-    # The sealed result lives beside the other deep artifacts, so the archive and the dump retain it.
-    for filename in ("manifest.json", RUN_DOCUMENT_NAME, "diff.patch", "evaluation.json", "deep/committed-review.json"):
+    # The sealed result and its summary live beside the other deep artifacts, so the archive and the dump retain them.
+    for filename in ("manifest.json", RUN_DOCUMENT_NAME, "diff.patch", "evaluation.json", "deep/committed-review.json",
+                     "deep/review-summary.json"):
         assert (dump_dir / filename).is_file()
         assert (dump_dir / filename).read_bytes() == (run_dir / filename).read_bytes()
     assert json.loads((run_dir / "deep/committed-review.json").read_text())["run_id"] == manifest["session_id"]

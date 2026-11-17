@@ -117,7 +117,7 @@ async def plan_committed_review(
 ) -> None:
     """Plan the run's only reviewer on the flow's own workspace, session and backends, before any model work."""
     from daydream import committed_review
-    from daydream.run_config import _resolved_backend_name
+    from daydream.run_config import resolved_backend_name
 
     settings = committed_review.review_settings(ctx.config)
     description = _author_description(ctx)
@@ -127,7 +127,7 @@ async def plan_committed_review(
     for kind, phase in committed_review.REVIEW_PHASES:
         backends[kind] = reviewers.backend_for(phase)
         committed_review.bind_native_context(
-            settings, kind, phase, _resolved_backend_name(ctx.config, phase), backends[kind], ctx.work.source)
+            settings, kind, phase, resolved_backend_name(ctx.config, phase), backends[kind], ctx.work.source)
     state = DeepState(ctx.data)
     program = await committed_review.plan_review(
         ctx.config, ctx.work, backends, settings, run_id=run_id, revision=revision, diff_path=state.diff_path,
@@ -173,6 +173,8 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
     have rewritten the canonical items; an unusable projection fails the analysis.
     """
     from daydream.committed_review_output import allowance_sentence, write_committed_review_output
+    from daydream.committed_review_summary import SUMMARY_PHASES, build_review_summary
+    from daydream.run_config import resolved_phase_settings
     from daydream.runner import _write_findings_for_parsed
 
     state = DeepState(ctx.data)
@@ -222,8 +224,12 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
         print_warning(console, f"{outcome} Not finished: {unfinished}." + (f" {allowance}" if allowance else ""))
     # Under ``deep/``, a registered public directory: a top-level file would be an unknown public
     # name that refuses the next run, on this build and on an earlier one, once its private proof is gone.
+    summary = build_review_summary(
+        sealed, resolved_phases=resolved_phase_settings(ctx.config, SUMMARY_PHASES), recorder=get_current_recorder(),
+        delivered=delivered)
     write_committed_review_output(ctx.artifacts, sealed, report_path=DeepArtifact.MERGED_REPORT.at(state.dd),
-                                  result_path=state.dd / "committed-review.json")
+                                  result_path=state.dd / "committed-review.json",
+                                  summary=summary, summary_path=state.dd / "review-summary.json")
     ctx.data["terminal_review_result"] = result
     ctx.data['terminal_review_items'] = items
     # Embedded evaluation consumes the same validated result as publication,
@@ -231,7 +237,7 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
     # A cancelled run hands nothing over, to its embedder or to a poster: the published files hold the sealed result.
     handed_over = pipeline_state != "cancelled"
     if handed_over:
-        deliver_finalized_review(result, items, usage=run_usage())
+        deliver_finalized_review(result, items, usage=run_usage(), summary=summary)
     try:
         context = refresh_review_report(ctx, no_diff=no_diff)
     except (OSError, ValueError, TypeError, RecursionError, ArtifactSourceUnavailableError) as exc:

@@ -29,8 +29,8 @@ from daydream.run_config import (
     DEEP_FLOW_ALIASES,
     RunConfig,
     _default_backend_name,
-    _resolved_backend_name,
-    _resolved_model,
+    resolved_backend_name,
+    resolved_model,
 )
 from daydream.run_snapshot import ArchiveRunSnapshot, ManifestRunIdentity, RunPhaseCapabilities, RunProfileIdentity
 from daydream.trajectory import (
@@ -253,9 +253,9 @@ def _recorder_backend_names(
         DaydreamRunFlow.PR: ("review", True, False),
     }.get(flow_kind, ("review", True, True))
     return RecorderBackendNames(
-        backend=_resolved_backend_name(config, representative),
-        fix=_resolved_backend_name(config, "fix") if runs_fix else "",
-        test=_resolved_backend_name(config, "test") if runs_test else "",
+        backend=resolved_backend_name(config, representative),
+        fix=resolved_backend_name(config, "fix") if runs_fix else "",
+        test=resolved_backend_name(config, "test") if runs_test else "",
     )
 
 
@@ -313,8 +313,8 @@ def capture_manifest_run_identity(
     review_backend: str | None = None
     review_model: str | None = None
     if (config.flow_name is None or config.flow_name in DEEP_FLOW_ALIASES) and flow_kind is not DaydreamRunFlow.DIAGRAM:
-        review_backend = _resolved_backend_name(config, "review")
-        review_model = _resolved_model(config, "review")
+        review_backend = resolved_backend_name(config, "review")
+        review_model = resolved_model(config, "review")
         if review_model is None and review_backend == "pi":
             from daydream.backends.pi import _configured_pi_model
 
@@ -325,8 +325,8 @@ def capture_manifest_run_identity(
         backend=_default_backend_name(config),
         review_backend=review_backend,
         review_model=review_model,
-        fix_backend=_resolved_backend_name(config, "fix") if phases.fix else None,
-        test_backend=_resolved_backend_name(config, "test") if phases.test else None,
+        fix_backend=resolved_backend_name(config, "fix") if phases.fix else None,
+        test_backend=resolved_backend_name(config, "test") if phases.test else None,
         review_only=flow_kind is DaydreamRunFlow.TTT and config.output_mode == "review",
         deep=True,
         profile=None if profile is None else RunProfileIdentity(

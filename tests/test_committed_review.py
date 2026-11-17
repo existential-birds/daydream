@@ -40,6 +40,7 @@ from daydream.committed_review_model import (
     validate_committed_result,
 )
 from daydream.committed_review_output import render_committed_review
+from daydream.committed_review_summary import SUMMARY_PHASES, build_review_summary, validate_review_summary
 from daydream.deep.detection import StackAssignment
 from daydream.extensions.registry import Registry
 from daydream.findings import MAX_ARTIFACT_BYTES, committed_export_bytes
@@ -277,6 +278,17 @@ async def _challenge_case(review_inputs: StageInputFactory, change: str) -> None
         assert rejected["disposition"] == "rejected"
         assert rejected["challenge_evidence"][-1]["grounds"] == rejection["grounds"]
         assert all(c["uid"] != pending[0]["uid"] for c in value["findings"])
+        # Its summary counts the rejection; what nothing recorded (no settings, no recorder) is null, never zero.
+        summary = build_review_summary(value, resolved_phases=dict.fromkeys(SUMMARY_PHASES, dict.fromkeys(
+            ("backend", "model", "reasoning_effort"))), recorder=None, delivered=0)
+        validate_review_summary(summary)
+        assert summary["counts"]["claims"] == {"proposed": 1, "confirmed": 0, "rejected": 1, "unresolved": 0}
+        assert (summary["profile"], summary["counts"]["assignments"], summary["budget_stops"], summary["retries"],
+                {phase["wall_seconds"] for phase in summary["phases"].values()}) == (
+            dict.fromkeys(("name", "source_kind", "digest")), None, None, {"total": None, "by_reason": None}, {None})
+        # Only the current summary version validates.
+        with pytest.raises(ValueError, match="unsupported committed review summary version"):
+            validate_review_summary({**summary, "schema_version": 2})
     with pytest.raises(ValueError, match="sealed"):
         _assign(review, "challenge")
 
@@ -603,6 +615,12 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         assert trajectory["session_id"] == value["run_id"] and trajectory["extra"]["partial"]
         assert trajectory["final_metrics"]["total_prompt_tokens"] == 17
         assert trajectory["final_metrics"]["total_cost_usd"] == 0.002
+        # The summary beside it attributes that usage to the arbiter: observed values as recorded, the
+        # unreported cache and the review's unrecorded usage null rather than zero.
+        summary = json.loads((repo / ".daydream/review-summary.json").read_text())
+        assert summary["run_id"] == value["run_id"] and summary["terminal"]["pipeline_state"] == "cancelled"
+        assert {name: [phase[key] for key in ("prompt_tokens", "cached_tokens", "completion_tokens", "cost_usd")]
+                for name, phase in summary["phases"].items()} == {"review": [None] * 4, "arbiter": [17, None, 3, 0.002]}
         captured = captures[0]
         assert not captured.exists()
         assert f"worktree {captured}\n" not in git(repo, "worktree", "list", "--porcelain")
@@ -618,6 +636,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     assert injected and not result.output_installed and result.output_error is not None
     assert result.capture_state == "complete"
     assert not (repo / ".daydream/committed-review.json").exists()
+    assert not (repo / ".daydream/review-summary.json").exists()
     assert not (repo / ".review-output.md").exists()
     assert value["terminal_result"]["run_id"] == value["run_id"]
     assert value["analyzed_revision"]["head_sha"] == review_inputs.revision["head_sha"]
@@ -698,6 +717,9 @@ async def test_local_capture_corruption_retains_challenged_findings_and_unfinish
     ))
     value = result.to_dict()
     assert result.output_installed and not result.complete
+    # The explicit path offers the summary it installed beside its sealed result.
+    assert result.summary == json.loads((repo / '.daydream/review-summary.json').read_text())
+    assert result.summary is not None and result.summary['result_schema_version'] == RESULT_VERSIONS['local']
     assert [call['kind'] for call in calls] == ['discovery', 'challenge']
     # A blank author description is not supplied: no assignment carries it and nothing records it.
     assert not any('historical_context' in record for record in (value['settings'], *(c['profile'] for c in calls)))
@@ -2048,7 +2070,7 @@ async def test_denied_over_limit_discovery_start_cannot_spend_protected_challeng
     Previously challenge received the shared ledger's remainder, so discovery's
     rejected extra start (charged before the limit check) consumed one protected call.
     The challenge re-dispatch the host refuses for want of calls runs no agent, so its
-    budget stop is a trace event.
+    budget stop is a trace event, retained in local evidence for the review summary.
     """
     allocations: list[tuple[str, int]] = []
 
@@ -2108,6 +2130,8 @@ async def test_denied_over_limit_discovery_start_cannot_spend_protected_challeng
     refused = BudgetStop("committed", "tool_calls", limit=10, spent=10, remaining_at_dispatch=0, reserved=0)
     assert [dict(event.attributes or {}) for span in exporter.get_finished_spans() for event in span.events
             if event.name == "daydream.budget.stop"] == [refused.attributes()]
+    # The summary counts that refusal beside discovery's dispatch-level stop.
+    assert result.summary is not None and result.summary["budget_stops"] == {"host_tool_budget_exhaustion": 2}
 
 
 async def test_claim_lines_inside_continuation_fragments_use_summarized_spans(tmp_path: Path) -> None:

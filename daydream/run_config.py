@@ -1,5 +1,6 @@
 """Run policy and model/backend precedence, independent of flow execution."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -106,7 +107,7 @@ def _configured_phase_value(config: RunConfig, phase: str, setting: str) -> str 
     )
 
 
-def _resolved_backend_name(config: RunConfig, phase: str) -> str:
+def resolved_backend_name(config: RunConfig, phase: str) -> str:
     """Explicit per-phase backend > configured tiers > Claude fallback."""
     return getattr(config, f"{phase}_backend", None) or _configured_phase_value(config, phase, "backend") or "claude"
 
@@ -121,31 +122,35 @@ def _default_backend_name(config: RunConfig) -> str:
     return config.backend or file_config.backend or "claude"
 
 
-def _resolved_model(config: RunConfig, phase: str) -> str | None:
+def resolved_model(config: RunConfig, phase: str) -> str | None:
     """Explicit per-phase model > configured tiers > the resolved backend's table."""
     return (
         getattr(config, f"{phase}_model", None)
         or _configured_phase_value(config, phase, "model")
-        or PHASE_DEFAULT_MODELS.get(_resolved_backend_name(config, phase), {}).get(phase)
+        or PHASE_DEFAULT_MODELS.get(resolved_backend_name(config, phase), {}).get(phase)
     )
 
 
-def _explicit_reasoning_effort_pin(config: RunConfig, phase: str) -> str | None:
-    """Only explicit tiers; exclude latency routing and built-in defaults."""
-    return _configured_phase_value(config, phase, "reasoning_effort")
+def resolved_reasoning_effort(config: RunConfig, phase: str) -> str | None:
+    """Resolve effort: CLI global > file phase > file global > the resolved backend's table.
 
-
-def _resolved_reasoning_effort(config: RunConfig, phase: str) -> str | None:
-    """Resolve effort: CLI global > file phase > file global > backend default.
-
-    The default table uses the phase's resolved backend. None leaves the backend's
-    ambient default intact, such as Codex's model_reasoning_effort config.
+    None leaves the backend's ambient default intact, such as Codex's
+    model_reasoning_effort config.
     """
-    backend_name = _resolved_backend_name(config, phase)
     return (
-        _explicit_reasoning_effort_pin(config, phase)
-        or PHASE_DEFAULT_EFFORT.get(backend_name, {}).get(phase)
+        _configured_phase_value(config, phase, "reasoning_effort")
+        or PHASE_DEFAULT_EFFORT.get(resolved_backend_name(config, phase), {}).get(phase)
     )
+
+
+def resolved_phase_settings(config: RunConfig, phases: Iterable[str]) -> dict[str, dict[str, str | None]]:
+    """Return each phase's config-resolved ``backend``, ``model`` and ``reasoning_effort``.
+
+    These are the values Daydream hands the backend, not the model a provider served;
+    ``None`` means nothing resolved and the adapter's native default applies.
+    """
+    return {phase: {"backend": resolved_backend_name(config, phase), "model": resolved_model(config, phase),
+                    "reasoning_effort": resolved_reasoning_effort(config, phase)} for phase in phases}
 
 
 DEEP_FLOW_ALIASES = ("deep",)

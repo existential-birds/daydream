@@ -254,6 +254,10 @@ async def test_snapshot_boundaries(
         assert (review.repo / '.review-output.md').read_text().count(allowance.format('<code>', '</code>')) == 1
         exported = json.loads(partial.read_text())
         assert exported['terminal_result']['analysis_state'] == 'incomplete'
+        # The summary beside the sealed review counts the undecided target and the dispatch's budget stop.
+        summary = json.loads((review.repo / '.daydream/deep/review-summary.json').read_text())
+        assert summary['counts']['targets'] == {'planned': 5, 'reviewed': 4, 'not_reviewed': 1}
+        assert summary['budget_stops'] == {'host_tool_budget_exhaustion': 1}
         assert [finding['title'] for finding in exported['findings']] == ['Grounded defect']
         assert post(partial) == 0
         notice = fake_gh.calls('POST', 'repos/o/r/pulls/7/reviews')[-1].payload

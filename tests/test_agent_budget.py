@@ -263,8 +263,9 @@ async def test_host_admitted_starts_stay_charged_unless_a_retry_refunds_them(
 ) -> None:
     """HTTP admission charges the ledger even when the native start is lost with the stream.
 
-    A retry after a retryable failure regains that attempt's calls; a failure that is not
-    retried keeps them charged against the scope, so later work cannot spend them again.
+    A retry after a retryable failure regains that attempt's calls, and its evidence records the
+    failure class that admitted it; a failure that is not retried keeps them charged against the
+    scope, so later work cannot spend them again.
     Without a host submission, schema-valid assistant prose never becomes the result.
     """
     scope = BudgetLedger("stage:scope", deadline=anyio.current_time() + 60, limit=2, investigation=True,
@@ -319,6 +320,9 @@ async def test_host_admitted_starts_stay_charged_unless_a_retry_refunds_them(
     trajectory = read_trajectory(recorder.path)
     calls = [call for step in trajectory["steps"] for call in step.get("tool_calls") or []]
     assert [call["tool_call_id"] for call in calls] == ["read-1"]
+    # Only the retried attempt's evidence records the failure class that admitted it.
+    assert [summary.get("retry_failure_class") for summary in recorder.invocation_summaries()] == [
+        None, "SERVER_ERROR", None]
 
 
 @pytest.mark.parametrize(("failure", "reason"), [

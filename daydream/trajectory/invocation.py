@@ -232,6 +232,8 @@ class Invocation:
     _backend_lifecycle_snapshot: BackendLifecycleSnapshot | None = None
     _backend_lifecycle_collector: BackendLifecycleCollector | None = field(default=None, repr=False)
     _host_dispatch: dict[str, int | str] | None = None
+    # The recorded FailureClass of the failed attempt this attempt retries.
+    _retry_failure_class: str | None = None
     _requests: list[dict[str, Any]] = field(default_factory=list)
     _metered_message_ids: set[str] = field(default_factory=set)
 
@@ -256,6 +258,8 @@ class Invocation:
             summary["backend_lifecycle"] = lifecycle.to_dict()
         if self._host_dispatch is not None:
             summary["host_dispatch"] = dict(self._host_dispatch)
+        if self._retry_failure_class is not None:
+            summary["retry_failure_class"] = self._retry_failure_class
         if self._requests:
             summary["requests"] = redact_value(self._requests)
         return summary
@@ -263,6 +267,10 @@ class Invocation:
     def record_host_dispatch(self, dispatch: dict[str, int | str]) -> None:
         """Retain the host's dispatch measurement for this attempt."""
         self._host_dispatch = dispatch
+
+    def record_retry(self, failure_class: str) -> None:
+        """Retain the bounded failure class that admitted this retried attempt."""
+        self._retry_failure_class = failure_class
 
     def observe_backend_lifecycle(self, collector: BackendLifecycleCollector) -> None:
         """Bind only this host-owned attempt for immutable in-flight lifecycle observations."""
@@ -365,6 +373,7 @@ class Invocation:
             self.recorder._upgrade_model_name(event.model_name)
         # Per-dimension take-max within the invocation, summed across invocations.
         self.recorder.usage.charge(
+            phase=self.phase.value,
             prompt_tokens=None if event.input_tokens is None else delta.prompt,
             completion_tokens=None if event.output_tokens is None else delta.completion,
             cached_tokens=None if event.cached_tokens is None else delta.cached,
@@ -446,8 +455,9 @@ class Invocation:
             self.recorder._upgrade_model_name(event.model_name)
         # Invocation totals reconcile terminal CostEvents; the document ledger bills every turn.
         for ledger in (self._metered, self.recorder.usage):
-            ledger.charge(prompt_tokens=event.prompt_tokens, completion_tokens=event.completion_tokens,
-                          cached_tokens=event.cached_tokens, cost_usd=event.cost_usd)
+            ledger.charge(phase=self.phase.value, prompt_tokens=event.prompt_tokens,
+                          completion_tokens=event.completion_tokens, cached_tokens=event.cached_tokens,
+                          cost_usd=event.cost_usd)
         if event.generation_id:
             self._generation_ledger.record_usage(event)
 

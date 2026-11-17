@@ -25,21 +25,27 @@ from daydream.run_context import current_run_context
 
 @dataclass(frozen=True)
 class FinalizedReview:
-    """Callback-owned copies of terminal evidence, findings and usage; missing delivery is unavailable analysis."""
+    """Callback-owned copies of terminal evidence, findings, usage and the review summary.
+
+    Missing delivery is unavailable analysis. ``summary`` is the validated committed-review
+    summary written beside the sealed review (``deep/review-summary.json``).
+    """
 
     terminal_result: dict[str, Any]
     items: list[dict[str, Any]]
     usage: dict[str, Any] = dataclass_field(default_factory=dict)
+    summary: dict[str, Any] = dataclass_field(default_factory=dict)
 
 
 def deliver_finalized_review(result: dict[str, Any], items: list[dict[str, Any]],
-                             *, usage: dict[str, Any] | None = None) -> None:
+                             *, usage: dict[str, Any] | None = None, summary: dict[str, Any]) -> None:
     """Deliver frozen authority at the native terminal validation boundary."""
     context = current_run_context()
     handler = None if context is None else context.review_result_handler
     if handler is not None:
         validate_terminal_result(result)
-        handler(FinalizedReview(copy.deepcopy(result), copy.deepcopy(items), copy.deepcopy(usage or {})))
+        handler(FinalizedReview(copy.deepcopy(result), copy.deepcopy(items), copy.deepcopy(usage or {}),
+                                copy.deepcopy(summary)))
 
 
 class ReasonCode(StrEnum):

@@ -8,6 +8,7 @@ from typing import Any
 
 from daydream.artifact_visibility import ArtifactSession
 from daydream.committed_review_model import validate_committed_result
+from daydream.committed_review_summary import validate_review_summary
 from daydream.json_utils import atomic_write_bytes, atomic_write_json
 
 # The [pipeline] profile keys that raise the allowance behind each exhaustion reason; the wall caps the time.
@@ -83,10 +84,13 @@ def render_committed_review(payload: Mapping[str, Any]) -> str:
 
 def write_committed_review_output(
     session: ArtifactSession | None, payload: dict[str, Any], *, report_path: Path, result_path: Path,
+    summary: dict[str, Any], summary_path: Path,
 ) -> None:
-    """Stage the report first; an owning session supplies conflict-safe final publication."""
+    """Stage the report, the sealed result, then its summary; an owning session supplies final publication."""
     validate_committed_result(payload)
+    validate_review_summary(summary)
     if session is not None and payload['run_id'] != session.layout.session_id:
         raise ValueError('committed review output differs from its artifact run')
     atomic_write_bytes(report_path, render_committed_review(payload).encode('utf-8'))
     atomic_write_json(result_path, payload, trailing_newline=True)
+    atomic_write_json(summary_path, summary, trailing_newline=True)
