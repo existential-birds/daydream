@@ -28,7 +28,8 @@ class FinalizedReview:
     """Callback-owned copies of terminal evidence, findings, usage and the review summary.
 
     Missing delivery is unavailable analysis. ``summary`` is the validated committed-review
-    summary written beside the sealed review (``deep/review-summary.json``).
+    summary written beside the sealed review (``deep/review-summary.json``) when Daydream
+    delivers it, and ``{}`` when a direct caller supplies none.
     """
 
     terminal_result: dict[str, Any]
@@ -38,14 +39,15 @@ class FinalizedReview:
 
 
 def deliver_finalized_review(result: dict[str, Any], items: list[dict[str, Any]],
-                             *, usage: dict[str, Any] | None = None, summary: dict[str, Any]) -> None:
+                             *, usage: dict[str, Any] | None = None,
+                             summary: dict[str, Any] | None = None) -> None:
     """Deliver frozen authority at the native terminal validation boundary."""
     context = current_run_context()
     handler = None if context is None else context.review_result_handler
     if handler is not None:
         validate_terminal_result(result)
         handler(FinalizedReview(copy.deepcopy(result), copy.deepcopy(items), copy.deepcopy(usage or {}),
-                                copy.deepcopy(summary)))
+                                copy.deepcopy(summary or {})))
 
 
 class ReasonCode(StrEnum):
