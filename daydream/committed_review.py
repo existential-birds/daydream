@@ -1410,8 +1410,10 @@ async def _run_committed_review(
                 with anyio.CancelScope(shield=True):
                     if clock.monotonic() >= finish:
                         raise TimeoutError("finalization allowance exhausted before output staging")
+                    # A cancelled or unsupported run raises instead of returning: it hands nothing over.
+                    handed_over = cancellation is None and unsupported is None
                     built = build_review_summary(payload, config=config, recorder=recorder,
-                                                 delivered=len(payload["findings"]))
+                                                 delivered=len(payload["findings"]) if handed_over else 0)
                     write_committed_review_output(session, payload, report_path=report_path, result_path=result_path,
                                                   summary=built, summary_path=summary_path)
                     summary = built
