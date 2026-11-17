@@ -18,6 +18,7 @@ from tests.test_deep_orchestrator import (
 )
 
 
+@pytest.mark.usefixtures("fake_gh")
 async def test_pr_body_reaches_the_reviewer_as_bounded_untrusted_context(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     capsys: pytest.CaptureFixture[str],

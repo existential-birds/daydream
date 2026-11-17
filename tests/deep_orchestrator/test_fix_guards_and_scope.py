@@ -25,6 +25,7 @@ from tests.test_deep_orchestrator import (
 )
 
 
+@pytest.mark.usefixtures("fake_gh")
 async def test_test_healing_guard_reverts_generated_migration_edit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:

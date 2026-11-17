@@ -28,6 +28,8 @@ from tests.harness.git_helpers import commit, git
 from tests.harness.protocol_cli import ProtocolCli, install_protocol_cli
 from tests.harness.trajectory import read_trajectory
 
+pytestmark = pytest.mark.usefixtures("fake_gh")
+
 SOURCE_CANARY = "SOURCE_CANARY"
 PRIOR_REASONING_CANARY = "PRIOR_REASONING_CANARY"
 CURRENT_REASONING_CANARY = "CURRENT_REASONING_CANARY"

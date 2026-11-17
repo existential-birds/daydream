@@ -83,6 +83,7 @@ def test_immutable_handoff_rejects_mixed_identities_before_replacing_prior_outpu
         assert path.read_bytes() == b'prior completed output'
 
 
+@pytest.mark.usefixtures("fake_gh")
 def test_build_write_load_preserves_the_diagram_contract(tmp_path: Path, git_repo: Path) -> None:
     head = git_ops.head_sha(git_repo)
     pr = PRInfo(7, head, head, "main", "feature", "o", "r", "u")

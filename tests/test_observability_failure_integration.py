@@ -38,6 +38,8 @@ from tests.harness.backend import ScriptedBackend
 from tests.harness.otlp import TraceCollector, attributes, kind_of as _kind, otlp_collector
 from tests.harness.trajectory import read_trajectory
 
+pytestmark = pytest.mark.usefixtures("fake_gh")
+
 _RESULT_FILE = ".daydream/trace-failure-result.json"
 _FLOW_IMPORTS = """
 import anyio

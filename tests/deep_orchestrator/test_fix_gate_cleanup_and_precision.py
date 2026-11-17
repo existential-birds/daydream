@@ -61,6 +61,7 @@ async def test_cleanup_removes_the_review_report_only_when_enabled(
         assert report.exists() is kept, (cleanup, assume)
 
 
+@pytest.mark.usefixtures("fake_gh")
 async def test_deep_run_reports_persistent_git_timeout_distinctly(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

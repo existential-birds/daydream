@@ -30,6 +30,7 @@ InstallBackend = Callable[[object], object]
 _EMPTY_TURN = (TextEvent(text=""), ResultEvent(structured_output=None, continuation=None))
 
 
+@pytest.mark.usefixtures("fake_gh")
 async def test_extension_step_rewrites_items_before_the_review_is_sealed(
     ext_dir: ExtDir, multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
     capsys: pytest.CaptureFixture[str],
@@ -84,6 +85,7 @@ async def test_extension_step_rewrites_items_before_the_review_is_sealed(
     assert len(backend.calls) == calls
 
 
+@pytest.mark.usefixtures("fake_gh")
 async def test_bound_custom_flow_rejects_public_artifact_before_backend_entry(
     ext_dir: ExtDir, multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
 ) -> None:
@@ -132,6 +134,7 @@ async def test_builtin_and_fork_tool_supervisor_conflict_fails_loud(
     assert "config-enabled built-in" in output
     assert "extension-registered" in output
 
+@pytest.mark.usefixtures("fake_gh")
 async def test_pr_feedback_not_selectable_via_flow(
     multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
 ) -> None:
