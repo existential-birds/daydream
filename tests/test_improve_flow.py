@@ -69,6 +69,8 @@ from tests.harness.trajectory import (
     root_trajectory as _root_run_trajectory,
 )
 
+pytestmark = pytest.mark.usefixtures("fake_gh")
+
 MakeConfig = Callable[..., RunConfig]
 
 @pytest.fixture

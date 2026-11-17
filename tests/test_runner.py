@@ -55,6 +55,8 @@ from tests.harness.stub_backend import StubBackend
 from tests.harness.trajectory import make_recorder, read_trajectory
 from tests.test_deep_orchestrator import _pin_findings_pr
 
+pytestmark = pytest.mark.usefixtures("fake_gh")
+
 _RESULT = ResultEvent(structured_output=None, continuation=None)
 
 _ARTIFACT_PR = PRInfo(

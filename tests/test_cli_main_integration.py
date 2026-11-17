@@ -38,6 +38,8 @@ from tests.test_deep_orchestrator import (
 )
 from tests.test_improve_plans import _repo
 
+pytestmark = pytest.mark.usefixtures("fake_gh")
+
 
 def _silence_all(monkeypatch: pytest.MonkeyPatch) -> None:
     """Silence the shared agent harness plus the cli/runner gh and UI seams."""
