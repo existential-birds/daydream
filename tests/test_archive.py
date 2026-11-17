@@ -220,7 +220,7 @@ def _stored_manifest_row(archive_dir: Path, session_id: str, **fields: Any) -> d
 
 
 def test_null_in_hunk_rate_survives_manifest_and_db_as_null(tmp_path: Path) -> None:
-    """Undefined location accuracy stays NULL so reward reduction can omit the absent axis."""
+    """Undefined location accuracy stays NULL so metric reductions can omit the absent axis."""
     m = _build(tmp_path,
         evaluation={"timing": {"total_wall_clock_seconds": 42.5},
             "location": {"hunk_source": "none", "scored_items": 0, "in_hunk_rate": None,},

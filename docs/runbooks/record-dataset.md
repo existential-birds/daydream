@@ -11,7 +11,7 @@ daydream corpus dataset snapshot --store FRESH_STORE --observed-before ISO_TIMES
 ```
 
 Use the printed snapshot ID for harvest, adjudication, and corpus build. Harvest
-appends PR/base enrichment and scoring annotations without rewriting run
+appends PR/base enrichment and outcome annotations without rewriting run
 evidence. Human run labels append with `corpus label`. Per-finding labels append
 through the adjudication CLI; use `corpus adjudicate --help` for queue and preview
 inputs. Queues can be recreated from records and contain no remote checkpoint.

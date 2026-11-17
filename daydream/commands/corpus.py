@@ -10,7 +10,7 @@ from pathlib import Path
 
 import anyio
 
-from daydream.commands import calibrate, common, dataset
+from daydream.commands import common, dataset
 from daydream.dataset import LocalRecordStore, SnapshotRecords, StoreError, semantic_evidence_digest
 from daydream.json_utils import canonical_json
 from daydream.ui import create_console, print_error, print_info, print_success
@@ -133,7 +133,7 @@ def _handle_label_command(argv: list[str]) -> int:
             print_info(console, f"No prior label for {run['run_id']}.")
         evidence = {"outcome": args.outcome}
         now = datetime.now(timezone.utc).isoformat()
-        observation = {"schema_version": "daydream.observation.v3", "run_id": run["run_id"], "item_uid": None,
+        observation = {"schema_version": "daydream.observation.v4", "run_id": run["run_id"], "item_uid": None,
             "valid_at": now, "observed_at": now, "source": "manual", "author": args.author, "role": "rater",
             "policy_version": "human-outcome-v1", "rubric_version": "human-outcome-v1",
             "semantic_evidence": evidence, "evidence_digest": semantic_evidence_digest(evidence),
@@ -158,18 +158,16 @@ _CORPUS_SUBVERBS: dict[str, Callable[[list[str]], int]] = {
     "harvest": _handle_harvest_command,
     "build": _handle_build_corpus_command,
     "label": _handle_label_command,
-    "calibrate-reward": calibrate._handle_calibrate_reward_command,
     "adjudicate": _handle_adjudicate_command,
 }
 
 _CORPUS_USAGE = (
-    "usage: daydream corpus {dataset,harvest,build,label,calibrate-reward,adjudicate} ...\n\n"
+    "usage: daydream corpus {dataset,harvest,build,label,adjudicate} ...\n\n"
     "Data-pipeline sub-verbs:\n"
     "  dataset   publish/status/download JSONL evidence or select a frozen snapshot\n"
     "  harvest   append PR enrichment and annotations for selected run records\n"
     "  build     project a frozen record snapshot offline\n"
     "  label     append an authoritative human outcome label\n"
-    "  calibrate-reward  emit deterministic reward-calibration artifacts from derived corpus output\n"
     "  adjudicate  per-finding queue, preview, label, export, report, materialize, and harvest-snapshot"
 )
 

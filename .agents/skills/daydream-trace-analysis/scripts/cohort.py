@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 SCHEMA = "daydream.trace-cohort.v1"
-SECTIONS = ("original_task", "final_state", "recommended_patch", "trajectories", "findings", "verification", "scoring")
+SECTIONS = ("original_task", "final_state", "recommended_patch", "trajectories", "findings", "verification")
 MISSING = object()
 
 
@@ -92,8 +92,8 @@ def context(record):
 
 
 def run_row(record, source, line):
-    if not isinstance(record, dict) or record.get("schema_version") != "daydream.run.v3":
-        raise ValueError("expected a daydream.run.v3 capture object")
+    if not isinstance(record, dict) or record.get("schema_version") != "daydream.run.v4":
+        raise ValueError("expected a daydream.run.v4 capture object")
     if not isinstance(record.get("run_id"), str) or not record["run_id"]:
         raise ValueError("capture requires a nonempty run_id")
     captured_at = record.get("captured_at")

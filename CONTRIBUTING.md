@@ -208,7 +208,6 @@ This guide links rather than duplicates; these documents carry the detail:
 By task:
 
 - Tracing / observability → [docs/observability.md](docs/observability.md)
-- Corpus / training launches → [docs/training-launch.md](docs/training-launch.md)
 
 ## Shared agent skill workflow
 

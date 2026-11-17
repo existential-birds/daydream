@@ -347,8 +347,7 @@ def build_manifest_from_snapshot(
         shipped_duplication = findings.get("shipped_duplication", {})
         m.shipped_duplicate_pairs = shipped_duplication.get("near_duplicate_pairs")
 
-        # No scorable location means undefined, preserving None for reward
-        # renormalization.
+        # No scorable location means undefined, so the rate stays None.
         location = evaluation.get("location", {})
         m.location_in_hunk_rate = location.get("in_hunk_rate")
 

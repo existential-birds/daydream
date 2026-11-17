@@ -165,7 +165,7 @@ def _resolve_cli_observability(parser: argparse.ArgumentParser, args: argparse.N
 
 
 def _add_dry_run_argument(parser: argparse.ArgumentParser, help_text: str) -> None:
-    """Add the shared ``--dry-run`` option to a corpus/train subcommand parser."""
+    """Add the shared ``--dry-run`` option to a corpus subcommand parser."""
     parser.add_argument(
         "--dry-run",
         action="store_true",

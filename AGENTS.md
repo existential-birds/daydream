@@ -218,6 +218,5 @@ rules in these owners rather than expanding this file with defaults and inventor
 | Diagrams | [Diagram contract](docs/runtime.md#diagrams), [diagram-only flow](docs/extensions.md#diagram); `deep/diagram_grounding/` is the drawing authority, models supply JSON specs and the host renders Mermaid |
 | Tracing, timing, billing | [Observability](docs/observability.md); tracing is operator-controlled and owns a per-run provider, never a global provider or `Traceloop.init()` |
 | Improve audit/plans | [Improve implementation](daydream/improve/), [Improve flow](docs/extensions.md#improve); `services.py` owns shared service discovery |
-| Capture, harvest, adjudication, dataset publication, corpus projection | [Research](README.md#research), [record dataset workflow](docs/runbooks/record-dataset.md), [calibration](docs/calibration.md); preserve immutable evidence, repository provenance, and C5 benchmark isolation |
-| Training launches | [Training launch](docs/training-launch.md) |
+| Capture, harvest, adjudication, dataset publication, corpus projection | [Research](README.md#research), [record dataset workflow](docs/runbooks/record-dataset.md); preserve immutable evidence, repository provenance, and C5 benchmark isolation |
 | Bot/workflow publication or CI policy | [Packaged workflows](daydream/templates/workflows/README.md), [self-hosted bot](docs/self-hosted-bot-setup.md), [CI spend policy](.github/workflows/README.md#ci-spend-policy) |

@@ -19,7 +19,6 @@ from daydream.deep.records import item_source_uids
 from daydream.observability.runtime import current_run_trace_id
 from daydream.pr_review import compute_fingerprint, extract_item_fields, parsed_issues_from_items
 from daydream.timeutil import now_iso_utc
-from daydream.training.reward import DEFAULT_WEIGHTS, REWARD_VERSION, ScoringInputs, score_trajectory
 
 if TYPE_CHECKING:
     from daydream.artifact_visibility import ArtifactSession, ArtifactTreeSnapshot
@@ -99,7 +98,6 @@ def capture_run_record(
 
     Evidence documents stream into the store one checked read at a time, as their exact OTLP/JSON lines."""
     from daydream.dataset import LocalRecordStore, portable_evidence_document
-    from daydream.dataset_scoring import assemble_scoring_inputs
 
     store_path = config.dataset_store_path or Path.home() / ".daydream" / "dataset"
     resolved_store = store_path.resolve()
@@ -150,13 +148,6 @@ def capture_run_record(
     verification = collect_verification(deep, read_json, canonical_items) if review_sources else {}
     patch_path = root / "recommended.patch"
     patch = patch_path.read_text(encoding="utf-8") if review_sources and patch_path.is_file() else None
-    scoring_inputs = assemble_scoring_inputs(root) if review_sources else ScoringInputs(None, True, None)
-    review_path = next((path for path in (root / "review-output.md", deep / "review-output.md")
-                        if review_sources and path.is_file()), None)
-    review_text = review_path.read_text(encoding="utf-8") if review_path else None
-    has_scoring = bool(merged is not None or review_text is not None or scoring_inputs.verifier_verdicts
-                       or not scoring_inputs.format_valid)
-    scoring = capture_scoring(scoring_inputs, review_text)
     from daydream.artifact_visibility import ArtifactVisibilityError
 
     try:
@@ -189,7 +180,7 @@ def capture_run_record(
                                    trajectory_id=document.trajectory_id, session_id=artifacts.session_id)
         for document in selected.documents
     )
-    LocalRecordStore(store_path).commit_run({"schema_version": "daydream.run.v3",
+    LocalRecordStore(store_path).commit_run({"schema_version": "daydream.run.v4",
         "run_id": artifacts.session_id, "captured_at": selected.cutoff_at if selected else now_iso_utc(),
         "trace_id": current_run_trace_id(),
         "outcome": outcome, "original_task": evidence(original_task, absent="unavailable"),
@@ -207,25 +198,9 @@ def capture_run_record(
             "terminal_coverage": coverage} if merged is not None or coverage is not None else None,
             failed="merged-items.json" in acquisition_failures),
         "verification": evidence(verification or None, failed="recommendation-verdicts.json" in acquisition_failures),
-        "scoring": evidence(scoring if has_scoring else None), "provenance": provenance,
+        "provenance": provenance,
         "completeness": {"artifact_acquisition": "failed" if acquisition_failures else "complete",
             "trajectory": "unproduced" if selected is None else selected.status,
             "terminal_review": "unproduced" if coverage is None else "available"},
     }, documents)
 
-
-def capture_scoring(inputs: ScoringInputs, review_text: str | None) -> dict[str, Any]:
-    """Keep the producer's exact scoring length and existing intrinsic reducer."""
-    return {
-        "verifier_verdicts": inputs.verifier_verdicts,
-        "format_valid": inputs.format_valid,
-        "review_text": review_text,
-        "length": inputs.length,
-        "reward_policy": {"version": REWARD_VERSION, "configuration": {
-            **vars(DEFAULT_WEIGHTS),
-            "verdict_map": dict(DEFAULT_WEIGHTS.verdict_map),
-            "fp_penalty_map": dict(DEFAULT_WEIGHTS.fp_penalty_map),
-        }},
-        "persisted_breakdown": score_trajectory(inputs).to_dict(),
-        "posterior_cost": None,
-    }

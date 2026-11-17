@@ -5,7 +5,6 @@ import json
 import os
 import stat
 from collections.abc import Iterator
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -13,19 +12,10 @@ from typing import Any, cast
 import pytest
 
 from daydream.dataset import LocalRecordStore, StoreError, parse_run
-from daydream.dataset_capture import capture_run_record, capture_scoring
-from daydream.dataset_scoring import assemble_scoring_inputs
-from daydream.deep.render import insert_review_context
+from daydream.dataset_capture import capture_run_record
 from daydream.run_config import RunConfig
-from daydream.training.reward import ScoringInputs
 from tests.harness.dataset import observation, read_records, run_record
 from tests.harness.trajectory import portable_document
-
-LEGACY_REVIEW = '# Review\n\n## Issues\n1. [a.py:1] Existing finding.\n'
-CONTEXT_REVIEW = insert_review_context(LEGACY_REVIEW, {
-    'scopes': [], 'scopes_omitted': 0, 'verification': {'status': 'unproduced', 'value': None}, 'author_reported': None,
-})
-SCORING = ScoringInputs([{'verdict': 'consistent'}], True, len(LEGACY_REVIEW))
 
 
 @pytest.fixture
@@ -38,34 +28,13 @@ def store(tmp_path: Path) -> LocalRecordStore:
 def test_current_records_read_all_history_without_creating_snapshot(store: LocalRecordStore) -> None:
     trace_fields = {"trace_id": "0123456789abcdef0123456789abcdef"}
     store.commit_run(run_record("future-run", captured_at="2200-01-01T00:00:00Z", **trace_fields))
-    projected = capture_scoring(SCORING, CONTEXT_REVIEW)
-    historic = capture_scoring(replace(SCORING, length=len(CONTEXT_REVIEW)), CONTEXT_REVIEW)
-    legacy = capture_scoring(SCORING, LEGACY_REVIEW)
-    redacted = capture_scoring(replace(SCORING, length=len(LEGACY_REVIEW) + 7), LEGACY_REVIEW)
-    redacted['review_text_redaction'] = {'applied': True, 'policy': 'retained-redaction-policy'}
-    store.commit_run(run_record('scoring-projected', scoring={'status': 'available', 'value': projected}))
-    store.commit_run(run_record('scoring-historic', scoring={'status': 'available', 'value': historic}))
-    store.commit_run(run_record('scoring-legacy', scoring={'status': 'available', 'value': legacy}))
-    store.commit_run(run_record('scoring-redacted', scoring={'status': 'available', 'value': redacted}))
     store.append_observation(observation("future-observation", observed_at="2200-01-02T00:00:00Z"))
     assert list((store.root / "snapshots").iterdir()) == []
     current = store.read_records()
-    assert {record["run_id"] for record in current["runs"]} == {
-        "run-1", "future-run", "scoring-projected", "scoring-historic", "scoring-legacy", "scoring-redacted",
-    }
+    assert {record["run_id"] for record in current["runs"]} == {"run-1", "future-run"}
     assert [record["observation_id"] for record in current["observations"]] == ["future-observation"]
     assert {record["run_id"]: record["trace_id"] for record in current["runs"]} == {
         "run-1": None, "future-run": trace_fields.get("trace_id"),
-        "scoring-projected": None, "scoring-historic": None, "scoring-legacy": None, "scoring-redacted": None,
-    }
-    assert {r['run_id']: (r['scoring']['value']['review_text'], r['scoring']['value']['length'],
-                         r['scoring']['value'].get('review_text_redaction'))
-            for r in current['runs'] if r['run_id'].startswith('scoring-')} == {
-        'scoring-projected': (CONTEXT_REVIEW, len(LEGACY_REVIEW), None),
-        'scoring-historic': (CONTEXT_REVIEW, len(CONTEXT_REVIEW), None),
-        'scoring-legacy': (LEGACY_REVIEW, len(LEGACY_REVIEW), None),
-        'scoring-redacted': (LEGACY_REVIEW, len(LEGACY_REVIEW) + 7,
-                             {'applied': True, 'policy': 'retained-redaction-policy'}),
     }
     source = {"repository": "test-user/private-trajectories", "revision": "a" * 40}
     store.record_download_source(source, **current)
@@ -105,8 +74,6 @@ def test_download_source_refuses_symlink_without_touching_target(store: LocalRec
 def test_invalid_mutations_are_withheld(store: LocalRecordStore) -> None:
     store.append_observation(observation())
     for kind, raw, diagnostic in (
-        ("run", run_record(scoring={'status': 'available', 'value': capture_scoring(
-            replace(SCORING, length=len(LEGACY_REVIEW) + 7), LEGACY_REVIEW)}), "invalid_or_unknown_record_schema"),
         ("run", b"{private-malformed", "invalid_or_unknown_record_schema"),
         # Two findings cannot share one identity.
         ("run", run_record("run-2", findings={"status": "available", "value": {
@@ -323,8 +290,3 @@ def test_download_source_read_refuses_unsafe_provenance(
     path.write_text("[]")
     with pytest.raises(StoreError, match="invalid_download_source|unsafe_storage_path"):
         store.select_snapshot(observed_before="2100-01-01T00:00:00Z")
-
-
-def test_scoring_inputs_without_review_evidence_earn_no_credit(tmp_path: Path) -> None:
-    """A run with no verdicts and no review output in either location has no correctness or length signal."""
-    assert assemble_scoring_inputs(tmp_path) == ScoringInputs(None, True, None)

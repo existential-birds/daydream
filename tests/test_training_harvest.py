@@ -1,34 +1,22 @@
-"""Canonical record harvest preserves external evidence, rewards and temporal priors."""
+"""Canonical record harvest preserves external evidence and temporal labels."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import re
-from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import pytest
 
 from daydream import git_ops
 from daydream.dataset import LocalRecordStore
-from daydream.dataset_capture import capture_scoring
-from daydream.json_utils import canonical_json
 from daydream.pr_review import DAYDREAM_FOOTER, finding_marker
 from daydream.training import labeler_versions
-from daydream.training.harvest import HarvestConfig, build_annotation, make_harvest_services
-from daydream.training.harvest_types import HarvestEvidence, HarvestRow
-from daydream.training.labeler_signals import (
-    CommentResolutionSignal,
-    FixAppliedSignal,
-    PerFindingResolution,
-    PRMergeSignal,
-)
-from daydream.training.reward import ScoringInputs
-from daydream.training.rubric import Rubric
+from daydream.training.harvest import HarvestConfig, make_harvest_services
+from daydream.training.harvest_types import HarvestRow
 from tests.harness.adjudication import snapshot_id
-from tests.harness.dataset import observation
 from tests.harness.record_projection import projection_run
 from tests.harness.scripts import cli_main
 
@@ -60,9 +48,6 @@ def store_run(
             },
         }
     run["original_task"]["value"]["pr"] = {"repo": repo if number else None, "number": number}
-    run["scoring"]["value"] = capture_scoring(
-        ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}], format_valid=True, length=6), "review"
-    )
     run["provenance"]["repository_context"] = {
         "branch": "feature",
         "base_branch": "main",
@@ -193,7 +178,6 @@ def test_cli_harvest_retains_every_scoped_reply_and_explicit_content_availabilit
             assert source["body_sha256"] == capture["body_sha256"]
             assert "text" not in source and "updated_at" not in source
     annotations = [o for o in store.read_records()["observations"] if o["payload"]["type"] == "harvest-annotation"]
-    assert "visitor" not in annotations[0]["payload"]["annotation"]["reviewer_logins"]
     assert "reply_captures" not in annotations[0]["semantic_evidence"]["rubric_json"]
     frozen = store.read_records()
     comments.reverse()
@@ -254,11 +238,11 @@ def test_cli_invalid_reply_binding_is_row_isolated_without_fabricating_content(
     annotations = {o["run_id"]: o["payload"]["annotation"] for o in history
                    if o["payload"]["type"] == "harvest-annotation"}
     merge_time, reply_time = "2026-10-04T13:00:00Z", "2026-10-04T11:00:00Z"
-    assert {run_id: (a["labels"], a["pr_state"], a["has_posterior"], a["valid_at"])
+    assert {run_id: (a["labels"], a["pr_state"], a["valid_at"])
             for run_id, a in annotations.items()} == {
-        "404": ([], None, False, None), "422": ([], None, False, None),
-        "open": ([], "open", False, None), "closed": ([], "closed", False, None),
-        "merged": ([], "merged", False, merge_time), "reviewer": (["accepted"], "merged", True, reply_time),
+        "404": ([], None, None), "422": ([], None, None),
+        "open": ([], "open", None), "closed": ([], "closed", None),
+        "merged": ([], "merged", merge_time), "reviewer": (["accepted"], "merged", reply_time),
     }
     judgments = {o["run_id"]: o for o in history if o["payload"]["type"] == "finding-judgment"}
     assert len(history) == 12 and set(judgments) == {"404", "422", "open", "closed", "merged", "reviewer"}
@@ -333,83 +317,6 @@ def test_harvest_row_refuses_nonrecord_collection_shapes() -> None:
             HarvestRow.from_mapping({"session_id": "run", field_name: value}, row_number=1)
 
 
-def pure_annotation(
-    disposition: Literal["accepted", "rejected", "ambiguous", "unanswered", "missing"] = "rejected",
-    *,
-    prior: float | None = None,
-    n: int = 0,
-) -> Any:
-    resolution = PerFindingResolution(
-        fingerprint="a" * 64,
-        comment_id=1,
-        disposition=disposition,
-        evidence=(
-            {
-                "reply_id": 2,
-                "body": "maintainer reply",
-                "reason": "qualifying:owner",
-                "classifier_label": disposition,
-                "created_at": "2026-10-04T11:00:00Z",
-            },
-        ),
-        evidence_digest="b" * 64,
-    )
-    rubric = Rubric(
-        PRMergeSignal(merged=True, merged_at="2026-10-04T13:00:00Z"),
-        FixAppliedSignal("unknown", 0, 0, []),
-        CommentResolutionSignal(1, 1, 0),
-        None,
-        "pr_review",
-        (resolution,),
-    )
-    return build_annotation(
-        HarvestRow("run-1", head_sha="2" * 40, pr_repo="owner/repo", pr_number=1),
-        HarvestEvidence(
-            ScoringInputs(verifier_verdicts=({"issue_id": 1, "verdict": "consistent"},), length=10, format_valid=True),
-            rubric,
-            reviewer_logins=("alice",),
-            pooled_prior=prior,
-            prior_n=n,
-        ),
-    )
-
-
-def test_record_reviewer_prior_uses_strict_valid_cutoff_latest_shared_reviewers_and_repo_scope(tmp_path: Path) -> None:
-    store = store_run(tmp_path / "records", "current")
-    for run_id, repo, valid, label, stamp in [
-        ("past", "owner/repo", "2026-10-03T10:00:00Z", "rejected", "2026-10-04T10:00:00Z"),
-        ("past", "owner/repo", "2026-10-03T10:00:00Z", "accepted", "2026-10-04T11:00:00Z"),
-        ("edge", "owner/repo", "2026-10-04T11:00:00Z", "rejected", "2026-10-04T12:00:00Z"),
-        ("other", "owner/other", "2026-10-03T10:00:00Z", "rejected", "2026-10-04T12:00:00Z"),
-    ]:
-        if not any(r["run_id"] == run_id for r in store.read_records()["runs"]):
-            store.commit_run(projection_run(run_id, repo_slug=repo))
-        annotation = asdict(pure_annotation())
-        annotation.update(labels=[label], valid_at=valid)
-        store.append_observation(
-            observation(
-                f"{run_id}:{stamp}",
-                schema_version="daydream.observation.v3",
-                run_id=run_id,
-                item_uid=None,
-                role="automatic",
-                valid_at=valid,
-                observed_at=stamp,
-                semantic_evidence=annotation,
-                evidence_digest=hashlib.sha256(canonical_json(annotation).encode()).hexdigest(),
-                payload={"type": "harvest-annotation", "annotation": annotation, "labeler_policy_version": "test"},
-            )
-        )
-    services = make_harvest_services(HarvestConfig(store.root, snapshot_id(store)))
-    scoped = services.reviewer_prior(
-        ("alice",), before_valid_at="2026-10-04T11:00:00+00:00", exclude_session="current", repo_slug="owner/repo"
-    )
-    unscoped = services.reviewer_prior(
-        ("alice",), before_valid_at="2026-10-04T11:00:00Z", exclude_session="current", repo_slug=None
-    )
-    assert scoped == (0.0, 1) and unscoped == (0.5, 2)
-
-
 def test_harvest_rate_limit_preserves_successful_record_progress(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -478,7 +385,7 @@ def test_cli_orphan_relink_is_enrichment_without_rewriting_capture(
     assert store.read_records()["runs"] == original
 
 
-def test_cli_local_commit_signal_is_not_pr_posterior(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_local_commit_signal_labels_without_pr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from tests.conftest import _make_repo_with_main
     from tests.harness.git_helpers import commit, git
     from tests.harness.trajectory import diff_adding
@@ -511,8 +418,6 @@ def test_cli_local_commit_signal_is_not_pr_posterior(tmp_path: Path, monkeypatch
                 if o["payload"]["type"] == "harvest-annotation"
             )
             assert annotation["labels"] == (["accepted"] if landed else ["rejected"])
-            assert not annotation["has_posterior"]
-            assert json.loads(annotation["reward_json"]).get("posterior_cost") is None
 
 
 def test_cli_clone_uses_allowed_credential_free_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

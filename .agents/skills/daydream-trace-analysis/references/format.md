@@ -3,7 +3,7 @@
 ## Containers and identity
 
 The local store usually has `~/.daydream/dataset/runs/<digest>.jsonl`. Each
-nonblank line is a `daydream.run.v3` record, frequently hundreds of KB or more.
+nonblank line is a `daydream.run.v4` record, frequently hundreds of KB or more.
 Use the record's `run_id`, not the basename. Physical line numbers locate the
 record; JSON pointers locate evidence inside it. Earlier record versions are not
 read; inspect them with an earlier revision of this skill. For a cohort row, pass both its
@@ -14,7 +14,7 @@ the recorded ID, not its array position.
 | Location | Meaning |
 | --- | --- |
 | `schema_version`, `run_id`, `captured_at`, `outcome`, `trace_id` | Run identity and terminal outcome; trace ID can be null |
-| `original_task`, `trajectories`, `findings`, `verification`, `scoring`, `recommended_patch`, `final_state` | `{status, reason, value}` evidence wrappers |
+| `original_task`, `trajectories`, `findings`, `verification`, `recommended_patch`, `final_state` | `{status, reason, value}` evidence wrappers |
 | `completeness` | Separate acquisition, trajectory and terminal review availability |
 | `provenance` | Producer identity, repository/revision, configuration/profile, resolved phases, collection diagnostics |
 | `trajectories.value.root_trajectory_id` | Root document identity; do not assume documents are root-first |
@@ -25,8 +25,7 @@ Wrapper states include `available`, `unavailable`, `unproduced`, `withheld`,
 `failed`. Preserve state and reason. An unavailable section is not an empty
 result. An `available` wrapper requires a non-null `value`; fields inside that
 value may still be null. Success means the run completed, not that every tool
-succeeded or every finding is correct. Missing correctness scoring leaves
-finding correctness unestablished.
+succeeded or every finding is correct.
 
 ## Evidence documents and pointers
 

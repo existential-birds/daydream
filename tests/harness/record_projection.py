@@ -6,9 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.dataset import LocalRecordStore, semantic_evidence_digest
-from daydream.dataset_capture import capture_scoring
 from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig
-from daydream.training.reward import ScoringInputs
 from tests.harness.dataset import observation, run_record
 from tests.harness.trajectory import portable_document
 
@@ -35,7 +33,6 @@ def projection_run(
     ) for trajectory_id in (run_id, *children)]
     provenance = {"profile": {"profile_schema_version": 2, "profile_name": profile,
                               "profile_source_kind": "builtin", "profile_digest": "d" * 64}, "stack": stack}
-    scoring = capture_scoring(ScoringInputs(verifier_verdicts=None, format_valid=True, length=6), "review")
     sections = dict(provenance=provenance, original_task={"status": "available", "value": {
         "analyzed_revision": {"head_sha": "2" * 40, "merge_base_sha": "1" * 40,
                               "diff_key": f"diff-{run_id}", "pr_base_sha": None},
@@ -46,8 +43,7 @@ def projection_run(
         trajectories={"status": "available", "value": {"documents": documents, "root_trajectory_id": run_id,
                                                         "status": "complete", "cutoff_at": CAPTURED_AT}},
         findings={"status": "available", "value": {"claims": [], "items": items,
-                                                   "derivation": {}, "terminal_coverage": None}},
-        scoring={"status": "available", "value": scoring})
+                                                   "derivation": {}, "terminal_coverage": None}})
     return run_record(run_id, **{**sections, **overrides})
 
 

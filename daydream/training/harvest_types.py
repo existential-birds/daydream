@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from daydream.training._immutable_json import freeze_json
-from daydream.training.reward import ScoringInputs
 from daydream.training.rubric import Rubric
 
 
@@ -119,22 +118,9 @@ class HarvestRow:
 class HarvestEvidence:
     """Completed acquisition, with owned immutable nested signal collections."""
 
-    scoring_inputs: ScoringInputs
     rubric: Rubric
-    reviewer_logins: tuple[str, ...] = ()
-    pooled_prior: float | None = None
-    prior_n: int = 0
 
     def __post_init__(self) -> None:
-        verdicts = self.scoring_inputs.verifier_verdicts
-        object.__setattr__(
-            self,
-            "scoring_inputs",
-            replace(
-                self.scoring_inputs,
-                verifier_verdicts=None if verdicts is None else tuple(freeze_json(item) for item in verdicts),
-            ),
-        )
         resolutions = self.rubric.per_finding_resolutions
         object.__setattr__(
             self,
@@ -158,4 +144,3 @@ class HarvestEvidence:
                 ),
             ),
         )
-        object.__setattr__(self, "reviewer_logins", tuple(self.reviewer_logins))

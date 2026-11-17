@@ -68,7 +68,7 @@ trace and span ids. [The journal](../daydream/trajectory/journal.py) owns encodi
   the opt-in `local` trace file below.
 - **Consumers.** Archive, evaluation, `daydream summarize`, PR run info and dataset
   capture read documents through one checked read that reduces them to a view.
-  Dataset run records (`daydream.run.v3`) embed each document's exact lines with their
+  Dataset run records (`daydream.run.v4`) embed each document's exact lines with their
   source SHA-256. [`daydream.benchmarks.harbor`](../daydream/benchmarks/harbor.py)
   exports Harbor-compatible ATIF for benchmarks; ordinary runs never import it.
 

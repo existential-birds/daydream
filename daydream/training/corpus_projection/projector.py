@@ -11,8 +11,6 @@ from typing import Any, Mapping, cast
 
 from daydream.dataset import LocalRecordStore, evidence_document_view
 from daydream.json_utils import atomic_write_bytes, canonical_json
-from daydream.training.admission import REASON_CODE_C5_EXCLUDED_REPO, REASON_CODE_REPO_IDENTITY_MISSING
-from daydream.training.corpus import _is_posterior_leak, _trajectory_set_hash
 from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.corpus_projection.segments import segment
 from daydream.training.corpus_projection.selection import (
@@ -28,6 +26,8 @@ from daydream.training.record_evidence import sessions_from_snapshot
 from daydream.training.record_identity import normalize_repo_slug, record_finding_id
 
 SOURCE_IDENTITY_VERSION = "record-snapshot-v2"
+REASON_CODE_C5_EXCLUDED_REPO = "c5_excluded_repo"
+REASON_CODE_REPO_IDENTITY_MISSING = "repo_identity_missing"
 
 
 def _dump_jsonl(records: list[Record]) -> str:
@@ -76,8 +76,16 @@ class BuildFrozenCorpusConfig:
 def _refuse_posterior_evidence(
     session_id: str, fingerprint: str, evidence: list[Record], as_of: str | None,
 ) -> None:
+    """Refuse evidence whose valid_at is later than the as_of pin.
+
+    The snapshot already filters observed_at. Compare parsed datetimes so offsets,
+    Z/+00:00 spelling and subsecond precision cannot reorder evidence. Equality
+    is in-time; a missing pin or valid_at applies no exclusion."""
+    if as_of is None:
+        return
     for item in evidence:
-        if isinstance(item, Mapping) and _is_posterior_leak(dict(item), as_of):
+        valid_at = item.get("valid_at") if isinstance(item, Mapping) else None
+        if valid_at is not None and datetime.fromisoformat(str(valid_at)) > datetime.fromisoformat(as_of):
             raise ValueError(f"session {session_id!r} finding {fingerprint!r}: refusing posterior outcome evidence")
 
 
@@ -292,15 +300,6 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                 cast(dict[str, Any], rec["lineage"]).update(diff_digest=diff_digest, diff_ref=diff_ref)
             rec["task_identity"] = task_identity
             rec["schema_version"] = "3"
-            scoring = run["scoring"]
-            if scoring["status"] == "available":
-                rec["reward_version"] = scoring["value"]["persisted_breakdown"]["reward_version"]
-                rec["intrinsic_reward"] = scoring["value"]["persisted_breakdown"]
-                rec["verification"] = run["verification"]
-                rec["scoring"] = scoring
-            rec["has_posterior"] = bool(evidence)
-            rec["decisive_only"] = rec["disposition"] in {"accepted", "rejected"}
-            rec["decisive_mix"] = False
             if row.get("annotation") is not None:
                 rec["annotation"] = row["annotation"]
             records.append(rec)
@@ -374,9 +373,9 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         "salt": config.salt,
         "holdout_rate": config.holdout_rate,
         "val_rate": config.val_rate,
-        "trajectory_set_hash": _trajectory_set_hash(
-            sorted({str(r["session_id"]) for r in records})
-        ),
+        "trajectory_set_hash": hashlib.sha256(
+            "\n".join(sorted({str(r["session_id"]) for r in records})).encode("utf-8")
+        ).hexdigest(),
         "split_counts": split_counts,
         "exclusions_by_reason": dict(sorted(exclusions_by_reason.items())),
         **share_caps_entry,

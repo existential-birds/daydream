@@ -1,8 +1,7 @@
-"""Harvest immutable bronze signals into bitemporal label and reward annotations.
+"""Harvest immutable bronze signals into bitemporal outcome-label annotations.
 
 HarvestServices owns acquisition and persistence; build_annotation reduces a
-validated row and frozen evidence without I/O. Posterior false-positive cost
-stays beside the pure intrinsic composite. Qualifying decisive reply time pins
+validated row and frozen evidence without I/O. Qualifying decisive reply time pins
 PR outcomes, falling back to merge time; local outcomes have no valid-time pin.
 
 Each pass reads selected frozen run records. The record store deduplicates
@@ -34,7 +33,7 @@ from daydream.archive.git_safe import _DEFAULT_HOSTS, normalize_remote_url
 from daydream.dataset import LocalRecordStore
 from daydream.git_ops import GitError, GitHubAuth, RateLimitError
 from daydream.json_utils import canonical_json
-from daydream.training import labeler_versions, reward
+from daydream.training import labeler_versions
 from daydream.training.adjudication.snapshot import record_evidence_digest
 from daydream.training.backfill_cache import BackfillCache
 from daydream.training.harvest_types import HarvestEvidence, HarvestRow
@@ -54,16 +53,9 @@ from daydream.training.labeler_signals import (
     reviewer_logins_signal,
 )
 from daydream.training.record_evidence import section_value, validate_output_path
-from daydream.training.reward import FP_PENALTY_MAP, ScoringInputs, score_trajectory
 from daydream.training.rubric import Rubric, derive_outcome_label
 from daydream.trajectory import redact_text as _redact_text
 from daydream.ui import create_console, print_warning
-
-_PRIOR_SUFFICIENCY_THRESHOLD = 10
-"""Minimum pooled prior-run count for the empirical reviewer-set mean penalty to
-graduate from the ``0.5`` maximum-entropy default to the observed pooled mean
-(spec C4). Below this, ``outcome_prior`` is left ``None`` (the reducer applies the
-``0.5`` default), though ``outcome_prior_n`` still records the pooled count for audit."""
 
 
 class HarvestServices(Protocol):
@@ -97,18 +89,7 @@ class HarvestServices(Protocol):
 
     def github(self, repo: str, endpoint: str, **kwargs: Any) -> Any: ...
 
-    def reviewer_prior(
-        self,
-        logins: tuple[str, ...],
-        *,
-        before_valid_at: str,
-        exclude_session: str,
-        repo_slug: str | None,
-    ) -> tuple[float | None, int]: ...
-
     def set_pr_link(self, row: HarvestRow, number: int, repo: str) -> None: ...
-
-    def read_scoring_inputs(self, row: HarvestRow) -> ScoringInputs: ...
 
     def fix_applied(
         self,
@@ -128,8 +109,6 @@ class HarvestServices(Protocol):
     def append_annotation(self, row: HarvestRow, payload: AnnotationPayload) -> bool: ...
 
     def mark_session_done(self, session_id: str) -> None: ...
-
-    def now_iso(self) -> str: ...
 
     def backoff_sleep(self, seconds: float) -> None: ...
 
@@ -336,23 +315,15 @@ class AnnotationPayload:
 
     Unknown labels become []; evidence_sha is the captured head. valid_at is
     decisive PR reply time, then merge time, or None for local outcomes (the
-    writer maps None to observed_at). reward_json retains every score axis;
-    composite_reward is intrinsic only and may be uncomputable. rubric_json and
-    reviewer_logins preserve acquisition-time provenance. has_posterior is true
-    only for mapped maintainer feedback on a PR, never a local applied commit.
-    Reply classifier version and combined evidence digest pin the dedup axis;
+    writer maps None to observed_at). rubric_json preserves acquisition-time
+    provenance. Reply classifier version and combined evidence digest pin the dedup axis;
     no reply evidence yields a None digest."""
 
     labels: list[str]
     pr_state: str | None
     valid_at: str | None
-    reward_version: str
-    reward_json: str
-    composite_reward: float | None
     evidence_sha: str | None
     rubric_json: str | None
-    reviewer_logins: list[str]
-    has_posterior: bool
     reply_classifier_version: str | None = None
     reply_evidence_digest: str | None = None
 
@@ -376,8 +347,6 @@ def acquire_harvest_evidence(
                 raise
 
     reviewer_logins: list[str] = []
-    pooled_prior = None
-    prior_n = 0
     if pr_merge is None:
         rubric = _build_rubric_local(
             row,
@@ -401,23 +370,7 @@ def acquire_harvest_evidence(
             pr_author_logins=frozenset({pr_merge.author_login}) if pr_merge.author_login else frozenset(),
             review_author_logins=frozenset(reviewer_logins),
         )
-        pooled_prior, prior_n = services.reviewer_prior(
-            tuple(reviewer_logins),
-            before_valid_at=_rubric_valid_at(rubric) or services.now_iso(),
-            exclude_session=row.session_id,
-            repo_slug=row.repo_slug,
-        )
-
-    # Preserve the established boundary: bronze reads occur after posterior,
-    # reviewer, and prior acquisition.
-    scoring_inputs = services.read_scoring_inputs(row)
-    return HarvestEvidence(
-        scoring_inputs=scoring_inputs,
-        rubric=rubric,
-        reviewer_logins=tuple(reviewer_logins),
-        pooled_prior=pooled_prior,
-        prior_n=prior_n,
-    )
+    return HarvestEvidence(rubric=rubric)
 
 
 def build_annotation(row: HarvestRow, evidence: HarvestEvidence) -> AnnotationPayload:
@@ -425,37 +378,13 @@ def build_annotation(row: HarvestRow, evidence: HarvestEvidence) -> AnnotationPa
     rubric = evidence.rubric
     outcome_label = derive_outcome_label(rubric)
     labels = [outcome_label] if outcome_label != "unknown" else []
-    valid_at = _rubric_valid_at(rubric)
-
-    # Only a maintainer acting on a real PR is posterior evidence; a local commit
-    # containing the recommended lines is a weaker tier and must not enter the
-    # posterior population (the label is still recorded on `labels`).
-    posterior_feedback = outcome_label if rubric.posterior_source == "pr_review" else None
-    outcome_prior = evidence.pooled_prior if evidence.prior_n >= _PRIOR_SUFFICIENCY_THRESHOLD else None
-    rb = score_trajectory(
-        evidence.scoring_inputs,
-        pr_feedback=posterior_feedback,
-        outcome_prior=outcome_prior,
-        outcome_prior_n=evidence.prior_n,
-    )
-
-    if rb.reward_version != reward.REWARD_VERSION:
-        raise RuntimeError(
-            f"non-canonical reward_version {rb.reward_version!r} cannot be written to canonical storage"
-            f" (expected {reward.REWARD_VERSION!r})"
-        )
 
     return AnnotationPayload(
         labels=labels,
         pr_state=_pr_state_for_rubric(rubric),
-        valid_at=valid_at,
-        reward_version=rb.reward_version,
-        reward_json=json.dumps(rb.to_dict()),
-        composite_reward=rb.composite,
+        valid_at=_rubric_valid_at(rubric),
         evidence_sha=row.head_sha,
         rubric_json=json.dumps(rubric.to_dict()),
-        reviewer_logins=list(evidence.reviewer_logins),
-        has_posterior=isinstance(rb, reward.PosteriorBreakdown),
         reply_classifier_version=labeler_versions.REPLY_CLASSIFIER_VERSION,
         reply_evidence_digest=record_evidence_digest(
             [resolution.evidence for resolution in rubric.per_finding_resolutions or []]
@@ -721,45 +650,6 @@ class _ProductionHarvestServices:
             return cache(repo, endpoint, **kwargs)
         return self._uncached_github(repo, endpoint, **kwargs)
 
-    def reviewer_prior(
-        self,
-        logins: tuple[str, ...],
-        *,
-        before_valid_at: str,
-        exclude_session: str,
-        repo_slug: str | None,
-    ) -> tuple[float | None, int]:
-        if not logins:
-            return None, 0
-        winners: dict[str, dict[str, Any]] = {}
-        cutoff = datetime.fromisoformat(before_valid_at)
-        for observation in self._records.eligible_observations:
-            if observation["payload"]["type"] != "harvest-annotation" or observation["run_id"] == exclude_session:
-                continue
-            annotation = observation["payload"]["annotation"]
-            task = section_value(self._runs[observation["run_id"]], "original_task") or {}
-            if repo_slug is not None and (task.get("repository") or {}).get("repo_slug") != repo_slug:
-                continue
-            if datetime.fromisoformat(observation["valid_at"]) >= cutoff or not set(logins).intersection(
-                annotation["reviewer_logins"]
-            ):
-                continue
-            previous = winners.get(observation["run_id"])
-            if previous is None or (
-                datetime.fromisoformat(observation["observed_at"]),
-                observation["observation_id"],
-            ) > (
-                datetime.fromisoformat(previous["observed_at"]),
-                previous["observation_id"],
-            ):
-                winners[observation["run_id"]] = observation
-        penalties = [
-            FP_PENALTY_MAP[a["labels"][0]]
-            for o in winners.values()
-            if (a := o["payload"]["annotation"])["labels"] and a["labels"][0] in FP_PENALTY_MAP
-        ]
-        return (sum(penalties) / len(penalties), len(penalties)) if penalties else (None, 0)
-
     def _append_enrichment(self, run_id: str, kind: str, value: dict[str, Any]) -> None:
         self._append_typed(
             run_id,
@@ -769,16 +659,6 @@ class _ProductionHarvestServices:
 
     def set_pr_link(self, row: HarvestRow, number: int, repo: str) -> None:
         self._append_enrichment(row.session_id, "pr", {"number": number, "repo": repo})
-
-    def read_scoring_inputs(self, row: HarvestRow) -> ScoringInputs:
-        scoring = section_value(self._runs[row.session_id], "scoring")
-        if scoring is None:
-            return ScoringInputs(verifier_verdicts=None, format_valid=False, length=None)
-        return ScoringInputs(
-            verifier_verdicts=scoring["verifier_verdicts"],
-            format_valid=scoring["format_valid"],
-            length=scoring["length"],
-        )
 
     @staticmethod
     def _file_at(repo: Path, path: str, sha: str) -> str:
@@ -854,7 +734,7 @@ class _ProductionHarvestServices:
             LocalRecordStore(self.store_dir)
             .append_observation(
                 {
-                    "schema_version": "daydream.observation.v3",
+                    "schema_version": "daydream.observation.v4",
                     "observation_id": identity,
                     "run_id": run_id,
                     "item_uid": item_uid,

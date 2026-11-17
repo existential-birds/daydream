@@ -68,7 +68,7 @@ def append_observation(store: Any, obs: Mapping[str, Any], *, run_id: str, item_
 
     validate_observation(obs)
     value = {
-        "schema_version": "daydream.observation.v3",
+        "schema_version": "daydream.observation.v4",
         "run_id": run_id,
         "item_uid": item_uid,
         "valid_at": obs["valid_at"],

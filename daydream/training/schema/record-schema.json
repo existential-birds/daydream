@@ -263,28 +263,7 @@
         }
       }
     },
-    "reward_version": {
-      "type": "string"
-    },
-    "intrinsic_reward": {
-      "type": "object"
-    },
     "annotation": {
-      "type": "object"
-    },
-    "has_posterior": {
-      "type": "boolean"
-    },
-    "decisive_only": {
-      "type": "boolean"
-    },
-    "decisive_mix": {
-      "type": "boolean"
-    },
-    "verification": {
-      "type": "object"
-    },
-    "scoring": {
       "type": "object"
     },
     "item_uid": {
