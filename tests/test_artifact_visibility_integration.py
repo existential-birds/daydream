@@ -28,8 +28,6 @@ from tests.harness.git_helpers import commit, git
 from tests.harness.protocol_cli import ProtocolCli, install_protocol_cli
 from tests.harness.trajectory import read_trajectory
 
-pytestmark = pytest.mark.usefixtures("fake_gh")
-
 SOURCE_CANARY = "SOURCE_CANARY"
 PRIOR_REASONING_CANARY = "PRIOR_REASONING_CANARY"
 CURRENT_REASONING_CANARY = "CURRENT_REASONING_CANARY"
@@ -377,6 +375,7 @@ def _install_improve_strict_boundary(monkeypatch: pytest.MonkeyPatch) -> list[di
     patch_claude_sdk(monkeypatch, ImproveRouterClient)
     return observations
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.asyncio
 async def test_runner_improve_claude_strict_uses_audit_root_and_inline_sanctioned_input(
     tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, make_config: MakeConfig,
@@ -509,6 +508,7 @@ def _assert_archive_runs_empty(archive_dir: Path) -> None:
     runs = archive_dir / "runs"
     assert not runs.exists() or not list(runs.iterdir())
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.asyncio
 async def test_runner_external_adapter_cancellation_reaps_process_and_freezes_once(
     tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any,
@@ -552,6 +552,7 @@ async def test_runner_external_adapter_cancellation_reaps_process_and_freezes_on
     assert observation[0]["pid"] == pid
     _assert_single_partial_snapshot(repo, archive_dir, explicit_trajectory, backend=backend)
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.asyncio
 async def test_runner_claude_sdk_cancellation_completes_disconnect_before_freeze(
     tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, make_config: MakeConfig,
