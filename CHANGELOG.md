@@ -122,6 +122,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a temporary repository in the operator's home; the child now runs with `HOME`
   under the test's temporary directory
   ([#1790](https://github.com/existential-birds/daydream/issues/1790)).
+- Each committed-review sealed-result corruption case now pins the validator message of the
+  guard it targets, so a corruption rejected by the wrong guard, or a new case with no
+  expected message, fails the test instead of matching any error
+  ([#1804](https://github.com/existential-birds/daydream/issues/1804)).
 - `ImmutableReviewInput` accepts every pull request title and description GitHub accepts,
   so hosted reviews of PRs with descriptions over 8 KiB no longer fail before analysis
   ([#1761](https://github.com/existential-birds/daydream/issues/1761)). `title` and `body`

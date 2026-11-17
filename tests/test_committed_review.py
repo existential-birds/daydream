@@ -899,6 +899,10 @@ async def _sealed_result_case(review_inputs: StageInputFactory, corruption: str)
     elif corruption == "unchallenged-revision":
         value["claims"][0]["revision"] = 2
         value["claims"][0]["payload"]["trigger"] = "A new unchallenged trigger."
+        # Keep provenance valid so only the current-revision challenge guard can reject it.
+        author = value["claims"][0]["revised_by"]
+        next(w for w in value["work"] if w["work_id"] == author)["admitted_claims"].append(
+            {"uid": value["claims"][0]["uid"], "revision": 2})
     elif corruption == "foreign-plan":
         value["assignments"][0]["target_id"] = "foreign"
         value["planned_work_id"] = planned_work_id(value["analyzed_revision"], value["assignments"])
@@ -933,9 +937,12 @@ async def _sealed_result_case(review_inputs: StageInputFactory, corruption: str)
         _forge_completion(value)
     value["findings"] = deepcopy(value["claims"])
     with pytest.raises(ValueError, match={
+        "wrong-source": "captured revision/diff", "foreign-plan": "terminal target decisions differ",
+        "unchallenged-revision": "current-revision challenge evidence",
+        "empty-execution": "native execution cannot be complete",
         "self-judged": "invalid retained challenge evidence", "unrecorded-verdict": "invalid retained challenge",
         "forged-author": "identity/provenance", "overlap": "overlap",
-        "double-credit": "duplicate completion credit"}.get(corruption, "")):
+        "double-credit": "duplicate completion credit"}[corruption]):
         validate_committed_result(value)
 
 
