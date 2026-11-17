@@ -9,7 +9,7 @@ from rich.console import Console
 
 from daydream import git_ops
 from daydream.agent import console
-from daydream.commands import admin, corpus, improve, review, search, train
+from daydream.commands import admin, corpus, improve, review, search
 from daydream.diagnostics import format_verbose_exception, sanitize_verbose_message
 from daydream.phases import UnconfinedFindingError
 from daydream.run_context import active_backends
@@ -25,7 +25,6 @@ def _command_handlers() -> dict[str, Callable[[list[str]], int]]:
         "summarize": admin._handle_summarize_command,
         "evidence": admin._handle_evidence_command,
         "corpus": corpus._handle_corpus_command,
-        "train": train._handle_train_command,
         "post-findings": admin._handle_post_findings_command,
         "setup": admin._handle_setup_command,
         "ext": admin._handle_ext_command,

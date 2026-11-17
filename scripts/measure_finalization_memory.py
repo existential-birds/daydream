@@ -93,7 +93,6 @@ def _scenario(forks: int, body_kb: int, turns: int, root_invocations: int) -> di
     # Import lazily loaded consumers up front so stage figures exclude module loading.
     import daydream.archive.provenance  # noqa: F401
     import daydream.dataset  # noqa: F401
-    import daydream.dataset_scoring  # noqa: F401
     import daydream.deep.dedup  # noqa: F401
     import daydream.eval.analyzer  # noqa: F401
     import daydream.git_ops.immutable  # noqa: F401

@@ -128,36 +128,6 @@ def atomic_write_bytes(
     _publish_staged(path, tmp, dir_fsync=dir_fsync, mode=mode)
 
 
-def atomic_write_pair(
-    first: tuple[Path, bytes],
-    second: tuple[Path, bytes],
-    *,
-    fsync: bool = True,
-    dir_fsync: bool = False,
-    mode: int | None = None,
-) -> None:
-    """Stage both payloads before publishing either, then rename first and second.
-
-    Each rename is atomic; a failure after the first can leave a mixed pair. Staging
-    failures preserve both destinations, and failed temps are cleaned best-effort."""
-    first_path, first_content = first
-    second_path, second_content = second
-    first_tmp = _stage_bytes(first_path, first_content, fsync=fsync, mode=mode)
-    try:
-        second_tmp = _stage_bytes(second_path, second_content, fsync=fsync, mode=mode)
-    except BaseException:
-        with suppress(OSError):
-            os.unlink(first_tmp)
-        raise
-    try:
-        _publish_staged(first_path, first_tmp, dir_fsync=dir_fsync, mode=mode)
-    except BaseException:
-        with suppress(OSError):
-            os.unlink(second_tmp)
-        raise
-    _publish_staged(second_path, second_tmp, dir_fsync=dir_fsync, mode=mode)
-
-
 def atomic_write_json(
     path: Path,
     data: Any,

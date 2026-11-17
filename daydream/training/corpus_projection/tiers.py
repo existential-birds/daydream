@@ -1,5 +1,5 @@
 """Classify projection tiers solely from disposition and human/developer evidence.
-Intrinsic rewards and LLM self-scores cannot promote records to gold.
+LLM self-scores cannot promote records to gold.
 """
 
 from typing import Literal, Mapping

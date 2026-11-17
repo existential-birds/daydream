@@ -1,15 +1,11 @@
-"""Validated record inputs and immutable acquired harvest evidence."""
+"""Validated record inputs for harvest."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-from daydream.training._immutable_json import freeze_json
-from daydream.training.reward import ScoringInputs
-from daydream.training.rubric import Rubric
 
 
 @dataclass(frozen=True)
@@ -113,49 +109,3 @@ class HarvestRow:
             "pr_repo": self.pr_repo,
             "pr_number": self.pr_number,
         }
-
-
-@dataclass(frozen=True)
-class HarvestEvidence:
-    """Completed acquisition, with owned immutable nested signal collections."""
-
-    scoring_inputs: ScoringInputs
-    rubric: Rubric
-    reviewer_logins: tuple[str, ...] = ()
-    pooled_prior: float | None = None
-    prior_n: int = 0
-
-    def __post_init__(self) -> None:
-        verdicts = self.scoring_inputs.verifier_verdicts
-        object.__setattr__(
-            self,
-            "scoring_inputs",
-            replace(
-                self.scoring_inputs,
-                verifier_verdicts=None if verdicts is None else tuple(freeze_json(item) for item in verdicts),
-            ),
-        )
-        resolutions = self.rubric.per_finding_resolutions
-        object.__setattr__(
-            self,
-            "rubric",
-            replace(
-                self.rubric,
-                fix_applied=replace(
-                    self.rubric.fix_applied, window_commits=tuple(self.rubric.fix_applied.window_commits)
-                ),
-                per_finding_resolutions=(
-                    None
-                    if resolutions is None
-                    else tuple(
-                        replace(
-                            resolution,
-                            evidence=tuple(freeze_json(entry) for entry in resolution.evidence),
-                            reply_captures=tuple(freeze_json(capture) for capture in resolution.reply_captures),
-                        )
-                        for resolution in resolutions
-                    )
-                ),
-            ),
-        )
-        object.__setattr__(self, "reviewer_logins", tuple(self.reviewer_logins))

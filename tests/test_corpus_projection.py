@@ -15,7 +15,6 @@ from daydream.training.corpus_projection.segments import segment
 from daydream.training.corpus_projection.tiers import GoldGateError, classify_tier
 from daydream.training.exclusion import EXCLUSION_PATH
 from daydream.training.labeler_versions import reply_evidence_digest
-from daydream.training.stacks import load_dataset_v2
 from tests.harness.adjudication import reply_evidence
 from tests.harness.dataset import observation
 from tests.harness.record_projection import (
@@ -32,25 +31,22 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-def _resolution(disposition: str, *, reward: dict[str, object] | None = None, score: float | None = None,
-    evidence_after_as_of: bool = False,
+def _resolution(disposition: str, *, score: float | None = None, evidence_after_as_of: bool = False,
 ) -> dict[str, object]:
     r: dict[str, object] = {
         "fingerprint": "ab" * 32, "disposition": disposition, "evidence": [{"created_at": "2026-02-01T00:00:00+00:00"}],
     }
     if evidence_after_as_of:
         r["evidence_after_as_of"] = True
-    if reward is not None:
-        r["intrinsic_reward"] = reward
     if score is not None:
         r["llm_self_score"] = score
     return r
 
 
 def test_gold_requires_decisive_timely_evidence() -> None:
-    # C5: a perfect intrinsic score or a confident self-score with a
-    # non-decisive disposition must not classify gold — structurally.
-    assert classify_tier(_resolution("unanswered", reward={"composite": 10.0}, score=0.99)) == "task-only"
+    # C5: a confident self-score with a non-decisive disposition must not
+    # classify gold — structurally.
+    assert classify_tier(_resolution("unanswered", score=0.99)) == "task-only"
     with pytest.raises(TypeError):
         classify_tier("accepted")  # type: ignore[arg-type]  # gold input must carry evidence, not a bare label
     with pytest.raises(GoldGateError):
@@ -79,7 +75,7 @@ def _cli_args(config: BuildFrozenCorpusConfig) -> list[str]:
             "--out", str(config.out_dir / "corpus.jsonl")]
 
 
-def test_cli_build_records_keeps_finding_population_task_reward_and_lineage(tmp_path: Path) -> None:
+def test_cli_build_records_keeps_finding_population_and_lineage(tmp_path: Path) -> None:
     """One frozen mixed-source population owns emission, complete adjudication and provenance.
 
     Per-row helper tests miss interactions between canonical source identities, nonvoting captured
@@ -146,7 +142,6 @@ def test_cli_build_records_keeps_finding_population_task_reward_and_lineage(tmp_
         assert row["lineage"]["source_identity_version"] == "record-snapshot-v2"
         assert row["profile"]["profile_name"] == "deep-review"
         assert row["stack"] == (None if row["session_id"] == "unknown-stack" else "python")
-        assert row["intrinsic_reward"] == run["scoring"]["value"]["persisted_breakdown"]
     report = json.loads((config.out_dir / "adjudication-report.json").read_text())
     assert {(entry["session_id"], entry["item_uid"]): entry["disposition"] for entry in report} == {
         ("sess-a", "item:2"): "ambiguous",
@@ -163,7 +158,6 @@ def test_cli_build_records_keeps_finding_population_task_reward_and_lineage(tmp_
     assert lineage["snapshot"]["snapshot_id"] == config.snapshot_id
     assert len(lineage["content_digests"]) == 16  # seven captured runs and nine observations
     assert (config.out_dir / "SHA256SUMS").is_file() and (config.out_dir / "_SUCCESS").is_file()
-    assert len(load_dataset_v2(config.out_dir)) == 7
 
 
 def test_cli_identity_and_benchmark_refusal_writes_no_projection(
@@ -199,25 +193,6 @@ def test_required_frozen_inputs_fail_before_output(tmp_path: Path) -> None:
     assert not config.out_dir.exists()
 
 
-def test_v2_loader_rejects_incomplete_wrong_version_and_malformed_outputs(tmp_path: Path) -> None:
-    store = seed_projection_store(tmp_path)
-    config = projection_config(store, tmp_path)
-    build_frozen_corpus(config)
-    (config.out_dir / "_SUCCESS").unlink()
-    with pytest.raises(ValueError, match="_SUCCESS"):
-        load_dataset_v2(config.out_dir)
-    (config.out_dir / "_SUCCESS").write_text("ok\n")
-    # Force a nonempty split regardless of deterministic membership.
-    row = _read_jsonl(config.out_dir / "corpus.jsonl")[0]
-    row["schema_version"] = "1"
-    (config.out_dir / "train.jsonl").write_text(json.dumps(row) + "\n")
-    with pytest.raises(ValueError, match="schema_version"):
-        load_dataset_v2(config.out_dir)
-    (config.out_dir / "train.jsonl").write_text("not-json\n")
-    with pytest.raises(json.JSONDecodeError):
-        load_dataset_v2(config.out_dir)
-
-
 def test_configuration_requires_matching_temporal_pin(tmp_path: Path) -> None:
     store = seed_projection_store(tmp_path)
     config = projection_config(store, tmp_path, as_of="2026-10-04T00:00:00Z")
@@ -240,18 +215,15 @@ def test_cli_posterior_annotation_preserves_captured_native_profile_with_claim_s
     run["findings"]["value"]["claims"] = [{"stack": "python", "records": [{"uid": "claim:1"}]}]
     store.commit_run(run)
     append_projection_evidence(store, run, dispositions=("accepted",))
-    breakdown = run["scoring"]["value"]["persisted_breakdown"]
     annotation = {"labels": ["accepted"], "pr_state": "closed", "valid_at": "2026-10-04T11:00:00Z",
-                  "reward_version": breakdown["reward_version"], "reward_json": json.dumps(breakdown),
-                  "composite_reward": breakdown["composite"], "evidence_sha": "1" * 40,
-                  "rubric_json": json.dumps({"posterior_source": "pr_review"}), "reviewer_logins": ["alice"],
-                  "has_posterior": True, "reply_classifier_version": "980-classifier-r1", "reply_evidence_digest": None}
+                  "evidence_sha": "1" * 40, "rubric_json": json.dumps({"posterior_source": "pr_review"}),
+                  "reply_classifier_version": "980-classifier-r1", "reply_evidence_digest": None}
     semantic, capture = reply_evidence("9", "good catch\ncafé ☕\n")
     annotation["rubric_json"] = json.dumps({"posterior_source": "pr_review", "per_finding_resolutions": [{
         "fingerprint": run["findings"]["value"]["items"][0]["fingerprint"], "disposition": "accepted",
         "evidence": [semantic], "evidence_digest": reply_evidence_digest([semantic]), "reply_captures": [capture],
     }]})
-    store.append_observation(observation("harvest", schema_version="daydream.observation.v3", run_id="sess-a",
+    store.append_observation(observation("harvest", schema_version="daydream.observation.v4", run_id="sess-a",
         item_uid=None, role="automatic", semantic_evidence=[], evidence_digest=semantic_evidence_digest([]),
         payload={"type": "harvest-annotation", "annotation": annotation, "labeler_policy_version": "980-policy-r1"}))
     config = projection_config(store, tmp_path)
@@ -260,7 +232,6 @@ def test_cli_posterior_annotation_preserves_captured_native_profile_with_claim_s
     assert row["profile"] == run["provenance"]["profile"]
     assert row["stack"] == "python"
     assert row["annotation"] == annotation
-    assert row["intrinsic_reward"] == breakdown
     assert row["reply_captures"] == [capture]
     assert row["evidence"] == [semantic]
     jsonschema.validate(row, json.loads((config.out_dir / "schema.json").read_text()))

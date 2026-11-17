@@ -14,13 +14,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fixture_evidence import v3_record
+from fixture_evidence import v4_record
 
 SCRIPT = Path(__file__).with_name("cohort.py")
 
 
 def capture(run_id, captured_at, outcome="success", padding=0):
-    return v3_record({"schema_version": "daydream.run.v3", "run_id": run_id, "captured_at": captured_at,
+    return v4_record({"schema_version": "daydream.run.v4", "run_id": run_id, "captured_at": captured_at,
             "outcome": outcome, "completeness": {"trajectory": "complete"},
             "provenance": {"producer": {"version": "1", "commit": "producer-sha"},
                            "resolved_phases": {"fix": {"backend": "codex", "model": "model"}},

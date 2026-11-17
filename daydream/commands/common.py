@@ -164,15 +164,6 @@ def _resolve_cli_observability(parser: argparse.ArgumentParser, args: argparse.N
         parser.error(str(exc))
 
 
-def _add_dry_run_argument(parser: argparse.ArgumentParser, help_text: str) -> None:
-    """Add the shared ``--dry-run`` option to a corpus/train subcommand parser."""
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help=help_text,
-    )
-
-
 def _print_namespace_help(usage: str, *, error: bool = False) -> None:
     """Print usage to stderr for errors, otherwise stdout."""
 

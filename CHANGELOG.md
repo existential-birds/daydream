@@ -73,6 +73,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each retry's failure class and the host schedule's refused dispatches. See
   [committed-review summary](docs/runtime.md#committed-review-summary).
 
+### Removed
+
+- **Breaking (0.y.z):** The training stages, outcome model, reward calibration and
+  capture-time reward are deleted
+  ([#1898](https://github.com/existential-birds/daydream/issues/1898)):
+  - `daydream train` and `daydream corpus calibrate-reward` are gone; `train` is no longer a
+    recognized verb.
+  - The training stage coordinator, stacks, lineage guard, gate, outcome reward model,
+    calibration and capture-time reward scoring are deleted.
+  - New records are `daydream.run.v4`, with no `scoring` section, and
+    `daydream.observation.v4`, with no reward fields in harvest annotations.
+  - Corpus projections drop the reward, posterior and decisive fields.
+  - Earlier stores, `daydream.snapshot.v1` snapshots and Hub destinations are refused with the
+    existing message and nothing is converted; use a fresh store or destination.
+
 ### Fixed
 
 - A Codex invocation that asks for no persisted session, as every committed-review

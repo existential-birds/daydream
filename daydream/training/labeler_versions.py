@@ -1,4 +1,4 @@
-"""Reply-labeling and evidence-digest version axes evolve independently of reward.REWARD_VERSION. This
+"""Reply-labeling and evidence-digest version axes evolve independently. This
 module has no training-package imports, allowing archive consumers to use its stamps without an
 adjudication import cycle.
 """

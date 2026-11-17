@@ -214,7 +214,6 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert sorted(verdicts["selection"]) == ["decisions", "selected"]
     assert verdicts["verdicts"][0]["issue_id"] == item["id"]
     assert verification["fix-outcomes.json"]["outcomes"][item["item_uid"]]["verdict"] == "resolved"
-    assert captured["scoring"]["value"]["persisted_breakdown"]["correctness_per_finding"] == [1.0]
 
 
 def test_local_commit_applied_signal_uses_recommended_patch(tmp_path: Path,

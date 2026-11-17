@@ -11,7 +11,6 @@ import tempfile
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -23,7 +22,6 @@ from pydantic import JsonValue, TypeAdapter
 
 from daydream.artifacts.filesystem import _create_private_directory, _projection_path
 from daydream.artifacts.models import ArtifactVisibilityError
-from daydream.deep.render import without_review_context
 from daydream.json_utils import _publish_staged, atomic_write_bytes, canonical_json
 from daydream.training.adjudication.precedence import effective_adjudication
 from daydream.training.labeler_versions import reply_evidence_digest
@@ -69,17 +67,10 @@ def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
 _STRING = {"type": "string"}
 _ID = {"type": "string", "minLength": 1}
 _SHA = {"type": "string", "pattern": "^[a-f0-9]{64}$"}
-_NUMBER = {"type": "number"}
 _BOOL = {"type": "boolean"}
 _MAP = {"type": "object"}
-_COUNT = {"type": "integer", "minimum": 0}
 _CLAIM = _object(extra=True, uid=_ID)
 _ITEM = _object(extra=True, item_uid=_ID, source_uids=_array(_ID), fingerprint=_SHA)
-_BREAKDOWN = _object(optional=("false_positive_penalty", "posterior_cost", "outcome_prior", "outcome_prior_n"),
-    correctness_per_finding=_nullable(_array(_NUMBER)), format_valid=_BOOL, length_penalty=_nullable(_NUMBER),
-    composite=_nullable(_NUMBER), axes_present={"type": "object", "additionalProperties": _BOOL}, reward_version=_ID,
-    false_positive_penalty=_nullable(_NUMBER), posterior_cost=_nullable(_NUMBER),
-    outcome_prior=_nullable(_NUMBER), outcome_prior_n=_nullable(_COUNT))
 _RUN_PAYLOADS = {
     "original_task": _object(optional=("source_diff_sha256", "redaction"),
         analyzed_revision=_object(optional=("pr_base_sha", "source_id"), head_sha=_ID, merge_base_sha=_ID, diff_key=_ID,
@@ -99,21 +90,13 @@ _RUN_PAYLOADS = {
         _object(extra=True, issues=_array(_CLAIM)), _array(_CLAIM)]})),
         items=_array(_ITEM), derivation=_MAP, terminal_coverage=_nullable(_MAP)),
     "verification": {**_object(extra=True, item_associations=_array(_MAP)), "minProperties": 2},
-    "scoring": _object(optional=("review_text_redaction", "source_review_sha256"),
-        verifier_verdicts=_nullable(_array(_MAP)), format_valid=_BOOL, review_text=_nullable(_STRING),
-        length=_nullable(_COUNT), persisted_breakdown=_BREAKDOWN, posterior_cost=_nullable(_NUMBER),
-        reward_policy=_object(version=_ID, configuration=_object(
-            w_len=_NUMBER, w_fp=_NUMBER, len_tau=_NUMBER, len_scale={"type": "number", "exclusiveMinimum": 0},
-            verdict_map={"type": "object", "additionalProperties": _NUMBER},
-            fp_penalty_map={"type": "object", "additionalProperties": _NUMBER})),
-        review_text_redaction=_nullable(_MAP), source_review_sha256=_nullable(_SHA)),
 }
 _AVAILABILITY = {"enum": ["available", "unavailable", "unproduced", "withheld", "failed"]}
 _EVIDENCE = _object(optional=("value", "reason"), status=_AVAILABILITY, value={}, reason=_nullable(_STRING))
 _EVIDENCE["if"] = {"properties": {"status": {"const": "available"}}}
 _EVIDENCE["then"] = {"required": ["value"], "properties": {"value": {"not": {"type": "null"}}}}
 _EVIDENCE["else"] = {"properties": {"value": {"type": "null"}}}
-_RUN_SCHEMA = _object(schema_version={"const": "daydream.run.v3"}, run_id=_ID, captured_at=_STRING,
+_RUN_SCHEMA = _object(schema_version={"const": "daydream.run.v4"}, run_id=_ID, captured_at=_STRING,
     outcome={"enum": ["success", "failed", "interrupted"]}, provenance=_MAP, completeness=_MAP,
     trace_id=_nullable(_STRING))
 _RUN_SCHEMA["properties"].update({name: {"allOf": [_EVIDENCE, {
@@ -131,7 +114,7 @@ _REPLY_CAPTURE = _object(optional=("text", "captured_sha256", "redaction_provena
 _OBSERVATION_SCHEMA = _object(
     optional=("item_uid", "classifier_version", "correction", "reply_captures", "evidence_digest_scheme",
               "review_required"),
-    schema_version={"const": "daydream.observation.v3"}, observation_id=_ID, run_id=_ID,
+    schema_version={"const": "daydream.observation.v4"}, observation_id=_ID, run_id=_ID,
     item_uid=_nullable(_STRING), valid_at=_STRING, observed_at=_STRING, source=_ID, author=_ID,
     role={"enum": ["rater", "adjudicator", "model-suggested", "automatic"]}, policy_version=_ID, rubric_version=_ID,
     classifier_version=_nullable(_STRING), evidence_digest=_SHA, semantic_evidence={},
@@ -139,34 +122,26 @@ _OBSERVATION_SCHEMA = _object(
     reply_captures=_array(_REPLY_CAPTURE),
     evidence_digest_scheme={"enum": ["canonical-json-v1", "reply-evidence-v1"]}, review_required=_BOOL,
     payload={"oneOf": [
-        _object(optional=("reviewer_logins", "outcome_prior", "outcome_prior_n", "rubric"),
-            type={"const": "run-label"}, label={"enum": ["accepted", "rejected", "contested", "unknown"]},
-            reviewer_logins=_array(_STRING), outcome_prior=_nullable(_NUMBER), outcome_prior_n=_COUNT, rubric=_MAP),
+        _object(type={"const": "run-label"}, label={"enum": ["accepted", "rejected", "contested", "unknown"]}),
         _object(optional=("record_id",), type={"const": "finding-judgment"}, disposition={"enum": [
             "accepted", "rejected", "ambiguous", "unanswered", "missing", "unknown"]},
             rationale=_ID, record_id=_nullable(_SHA)),
         _object(type={"const": "enrichment"}, kind={"enum": ["pr", "base"]}, evidence=_EVIDENCE)]})
 _HARVEST_ANNOTATION = _object(
     labels=_array(_STRING), pr_state=_nullable(_STRING), valid_at=_nullable(_STRING),
-    reward_version=_ID, reward_json=_STRING, composite_reward=_nullable(_NUMBER),
-    evidence_sha=_nullable(_STRING), rubric_json=_nullable(_STRING), reviewer_logins=_array(_STRING),
-    has_posterior=_BOOL, reply_classifier_version=_nullable(_STRING), reply_evidence_digest=_nullable(_SHA))
+    evidence_sha=_nullable(_STRING), rubric_json=_nullable(_STRING),
+    reply_classifier_version=_nullable(_STRING), reply_evidence_digest=_nullable(_SHA))
 _OBSERVATION_SCHEMA["properties"]["payload"]["oneOf"].append(_object(
     type={"const": "harvest-annotation"}, annotation=_HARVEST_ANNOTATION, labeler_policy_version=_ID))
 _MEMBER = _object(identity=_ID, record_digest=_SHA, shard={"type": "string", "pattern": "^[a-f0-9]{64}\\.jsonl$"},
                   shard_digest=_SHA)
-_SNAPSHOT_SCHEMA = _object(schema_version={"const": "daydream.snapshot.v1"}, snapshot_id=_SHA,
-    observed_before=_STRING, valid_before=_nullable(_STRING), runs=_array(_MEMBER), observations=_array(_MEMBER))
-_SNAPSHOT_V2_SCHEMA = deepcopy(_SNAPSHOT_SCHEMA)
-_SNAPSHOT_V2_SCHEMA["properties"].update(
-    schema_version={"const": "daydream.snapshot.v2"},
+_SNAPSHOT_SCHEMA = _object(schema_version={"const": "daydream.snapshot.v2"}, snapshot_id=_SHA,
+    observed_before=_STRING, valid_before=_nullable(_STRING), runs=_array(_MEMBER), observations=_array(_MEMBER),
     source=_nullable(_object(repository=_ID, revision={"type": "string", "pattern": "^[a-f0-9]{40}$"},
-                            manifest_sha256=_nullable(_SHA))))
-_SNAPSHOT_V2_SCHEMA["required"].append("source")
-_VALIDATORS = {"daydream.run.v3": Draft202012Validator(_RUN_SCHEMA),
-               "daydream.observation.v3": Draft202012Validator(_OBSERVATION_SCHEMA),
-               "daydream.snapshot.v1": Draft202012Validator(_SNAPSHOT_SCHEMA),
-               "daydream.snapshot.v2": Draft202012Validator(_SNAPSHOT_V2_SCHEMA)}
+                             manifest_sha256=_nullable(_SHA))))
+_VALIDATORS = {"daydream.run.v4": Draft202012Validator(_RUN_SCHEMA),
+               "daydream.observation.v4": Draft202012Validator(_OBSERVATION_SCHEMA),
+               "daydream.snapshot.v2": Draft202012Validator(_SNAPSHOT_SCHEMA)}
 
 
 class _InvalidRecord(ValueError):
@@ -187,14 +162,14 @@ def _invalid(name: str) -> Iterator[None]:
 
 def _parse(raw: Mapping[str, Any] | str | bytes, version: str) -> Record:
     name = "ObservationRecord" if version.startswith("daydream.observation.") else (
-        "RunRecord" if version == "daydream.run.v3" else "Snapshot")
+        "RunRecord" if version == "daydream.run.v4" else "Snapshot")
     with _invalid(name):
         value = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
         if not isinstance(value, dict) or value.get("schema_version") != version or version not in _VALIDATORS:
             raise ValueError("schema_version")
         _JSON.validate_python(value)
         evidence_default = {"status": "unproduced", "value": None, "reason": None}
-        if version == "daydream.run.v3":
+        if version == "daydream.run.v4":
             value = {"provenance": {}, "completeness": {}, "trace_id": None, **value}
             for field in _RUN_PAYLOADS:
                 value[field] = {**evidence_default, **value.get(field, {})}
@@ -204,7 +179,7 @@ def _parse(raw: Mapping[str, Any] | str | bytes, version: str) -> Record:
             _timestamp(value["observed_at"])
         if not _VALIDATORS[version].is_valid(value):
             raise ValueError("record")
-        if version == "daydream.run.v3":
+        if version == "daydream.run.v4":
             _validate_run_evidence(value)
         elif version.startswith("daydream.observation."):
             _validate_observation(value)
@@ -242,7 +217,7 @@ def _run_envelope(
                 value["trajectories"] = {**section, "value": {**payload, "documents": [{}]}}
         elif documents is not None:
             raise ValueError("record")
-    envelope = _parse(value, "daydream.run.v3")
+    envelope = _parse(value, "daydream.run.v4")
     if documents is not None:
         envelope["trajectories"]["value"]["documents"] = f"documents-{uuid4().hex}"
     return envelope, documents
@@ -298,11 +273,11 @@ def parse_run(raw: Mapping[str, Any] | str | bytes) -> Record:
 
 
 def parse_observation(raw: Mapping[str, Any] | str | bytes) -> Record:
-    return _parse_typed(raw, versions=("daydream.observation.v3",), name="ObservationRecord")
+    return _parse_typed(raw, versions=("daydream.observation.v4",), name="ObservationRecord")
 
 
 def parse_snapshot(raw: Mapping[str, Any] | str | bytes) -> Record:
-    return _parse_typed(raw, versions=("daydream.snapshot.v1", "daydream.snapshot.v2"), name="Snapshot")
+    return _parse_typed(raw, versions=("daydream.snapshot.v2",), name="Snapshot")
 
 
 def validate_record_targets(runs: Sequence[Record], observations: Sequence[Record]) -> None:
@@ -399,20 +374,6 @@ def _validate_run_evidence(run: Record) -> None:
         for association in verification["item_associations"]:
             if association.get("item_uid") not in items:
                 raise ValueError("verification association references an absent finding item")
-    if run["scoring"]["status"] == "available":
-        scoring = run["scoring"]["value"]
-        if scoring["persisted_breakdown"]["reward_version"] != scoring["reward_policy"]["version"]:
-            raise ValueError("reward breakdown version differs from persisted policy")
-        if scoring["persisted_breakdown"]["format_valid"] != scoring["format_valid"]:
-            raise ValueError("reward breakdown format gate differs from scoring input")
-        if not {"correctness", "length"} <= scoring["persisted_breakdown"]["axes_present"].keys():
-            raise ValueError("reward breakdown requires explicit correctness/length presence")
-        if scoring["review_text"] is not None and scoring["length"] not in {
-            len(scoring["review_text"]), len(without_review_context(scoring["review_text"])),
-        }:
-            provenance = scoring.get("review_text_redaction") or {}
-            if not provenance.get("applied") or not provenance.get("policy"):
-                raise ValueError("scoring length differs from retained review text without redaction provenance")
 
 
 def portable_evidence_document(raw: bytes, *, trajectory_id: str, session_id: str) -> dict[str, Any]:
@@ -888,7 +849,7 @@ class LocalRecordStore:
                 expected_id = value.pop("snapshot_id")
                 if expected_id != snapshot_id or _sha(canonical_json(value).encode()) != snapshot_id:
                     raise StoreError("snapshot_digest_mismatch")
-                if value["schema_version"] not in ("daydream.snapshot.v1", "daydream.snapshot.v2"):
+                if value["schema_version"] != "daydream.snapshot.v2":
                     raise StoreError("unknown_snapshot_schema")
                 pinned = parse_snapshot({"snapshot_id": snapshot_id, **value})
             except (TypeError, KeyError, ValueError, RecursionError) as error:

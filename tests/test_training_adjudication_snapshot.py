@@ -1,12 +1,10 @@
 """Tests for the shared per-finding annotation snapshot serializer (issue #1055, Task 1)."""
 
 import hashlib
-from collections.abc import Mapping
 from typing import Any
 
 import pytest
 
-from daydream.training._immutable_json import freeze_json
 from daydream.training.adjudication.snapshot import build_canonical_record, record_evidence_digest
 from daydream.training.labeler_versions import reply_evidence_digest
 
@@ -21,11 +19,10 @@ def _resolution(fp: str = "fp-1", digest: str = "d" * 32) -> dict[str, Any]:
     }
 
 
-def _mutable_and_frozen_resolution() -> tuple[dict[str, Any], Mapping[str, Any]]:
+def _nested_resolution() -> dict[str, Any]:
     source_evidence = [{"reply_id": 1, "body_sha256": "abc", "context": {"labels": ["accepted", "reviewed"]}}]
-    resolution = {**_resolution(), "disposition": "accepted", "evidence": source_evidence,
-                  "evidence_digest": reply_evidence_digest(source_evidence)}
-    return resolution, freeze_json(resolution)
+    return {**_resolution(), "disposition": "accepted", "evidence": source_evidence,
+            "evidence_digest": reply_evidence_digest(source_evidence)}
 
 
 def _snapshot_session() -> dict[str, object]:
@@ -37,13 +34,12 @@ def _snapshot_session() -> dict[str, object]:
     }
 
 
-def test_record_evidence_digest_matches_frozen_shared_digest_with_nested_json() -> None:
-    mutable, frozen = _mutable_and_frozen_resolution()
+def test_record_evidence_digest_matches_shared_digest_with_nested_json() -> None:
+    mutable = _nested_resolution()
 
     canonical = (b'[{"body": "", "body_sha256": "abc", "context": {"labels": ["accepted", "reviewed"]}, '
                  b'"reply_id": 1}]')
     expected = hashlib.sha256(canonical).hexdigest()
-    assert record_evidence_digest([frozen["evidence"]]) == expected
     assert record_evidence_digest([mutable["evidence"]]) == expected
 
 
