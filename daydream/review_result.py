@@ -84,6 +84,14 @@ def reason_for_exception(exc: BaseException) -> ReasonCode:
     }.get(classify_failure(exc).failure_class, ReasonCode.BACKEND_FAILURE)
 
 
+#: The host exhaustion reasons :func:`reason_for_budget` assigns; any other reason is not a budget stop.
+BUDGET_REASON_CODES = frozenset({
+    ReasonCode.HOST_WALL_BUDGET_EXHAUSTION,
+    ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION,
+    ReasonCode.HOST_PIPELINE_BUDGET_EXHAUSTION,
+})
+
+
 def reason_for_budget(reason: str) -> ReasonCode:
     """Classify the canonical host stop vocabulary at its trusted boundary."""
     if reason.startswith('tool_vetoed'):

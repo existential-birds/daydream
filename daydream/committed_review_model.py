@@ -378,7 +378,7 @@ class CommittedReviewResult:
     """Sealed JSON bytes plus independent installation, capture and delivery facts.
 
     ``summary`` is the validated review summary staged beside the sealed result, or ``None``
-    when output staging failed before it was built (``output_error`` says why).
+    when output staging failed before it was staged (``output_error`` says why).
     """
 
     json_text: str

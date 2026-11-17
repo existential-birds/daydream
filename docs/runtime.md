@@ -277,24 +277,23 @@ the same session: `.daydream/deep/review-summary.json` in the `deep` flow,
 hosted `output_dir`. The `deep` flow hands the same value to an embedder's result handler as
 `FinalizedReview.summary`; a cancelled run writes it and, as before, delivers nothing.
 `CommittedReviewResult.summary` offers it on the explicit path, `None` when output staging
-failed before it was built. A build or write failure is handled as a failed sealed-result
-write. The summary calls no model and never changes the sealed payload, dispatch, verdicts or
+failed. A build or write failure is handled as a failed sealed-result write. The summary calls no model and never changes the sealed payload, dispatch, verdicts or
 terminal states.
 
 [`committed_review_summary`](../daydream/committed_review_summary.py) owns the strict
-schema. `schema_version` is `1`; `validate_review_summary` refuses any other version, and
-nothing converts one. Every value comes from evidence the run retained. A value that was not
+schema. `schema_version` is `1`; `validate_review_summary` refuses any other version or
+shape, and nothing converts one. Every value comes from evidence the run retained. A value that was not
 recorded is `null`, never `0`; without a recorder every evidence-derived value is `null`.
 
 | Field | Source |
 |---|---|
 | `run_id`, `result_schema_version`, `daydream_version` | The sealed result and `daydream.__version__` |
-| `profile` | `name`, `source_kind` and `digest` from the sealed `settings` |
+| `profile` | `name` (empty for a profile without one), `source_kind` and `digest` from the sealed `settings` |
 | `terminal` | The sealed `analysis_state`, `pipeline_state` and `reason_codes` |
-| `counts.assignments` | Planned assignments of the [assignment policy](#assignment-policy-and-work); `null` without one, such as a change with no diff |
+| `counts.assignments` | Planned assignments of the [assignment policy](#assignment-policy-and-work), `0` for a change with no diff |
 | `counts.targets` | `planned` targets, and `reviewed` / `not_reviewed` target decisions |
 | `counts.claims` | Claims `proposed`, then by disposition: `confirmed`, `rejected` (by the challenge) and `unresolved` |
-| `counts.findings` | Sealed `confirmed` findings and the items `delivered`; an extension step that rewrites the `deep` flow's items can make them differ |
+| `counts.findings` | Sealed `confirmed` findings and the items `delivered`; an extension step that rewrites the `deep` flow's items can make them differ, and a cancelled run delivers none |
 | `budget_stops` | Count by host exhaustion reason code of sealed execution stops plus the schedule's [retained refusals](observability.md#budget-stops) |
 | `retries` | `total` retried attempts and their count `by_reason`, the recorded [`FailureClass`](../daydream/retry_policy.py) that admitted each |
 | `phases.review`, `phases.arbiter` | The `[phases.review]` (discovery, follow-up, cross-assignment) and `[phases.arbiter]` (challenge) work: config-resolved `backend`, `model` and `reasoning_effort`; `prompt_tokens`, `cached_tokens`, `completion_tokens` and `cost_usd`; and `wall_seconds`, the union of the phase's intervals |

@@ -195,7 +195,7 @@ Each document's usage ledger also keeps a share per evidence phase, charged at t
 sites as its total and folded with a fork under the same rule, so the shares sum to the
 total. A retried attempt's invocation summary records `retry_failure_class`, the bounded
 `FailureClass` that admitted the retry. The [review summary](runtime.md#committed-review-summary)
-reads these, the retained schedule refusals below and the phase intervals when it seals.
+reads them.
 
 ## Budget stops
 

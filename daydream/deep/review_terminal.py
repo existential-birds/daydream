@@ -173,8 +173,7 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
     have rewritten the canonical items; an unusable projection fails the analysis.
     """
     from daydream.committed_review_output import allowance_sentence, write_committed_review_output
-    from daydream.committed_review_summary import SUMMARY_PHASES, build_review_summary
-    from daydream.run_config import resolved_phase_settings
+    from daydream.committed_review_summary import build_review_summary
     from daydream.runner import _write_findings_for_parsed
 
     state = DeepState(ctx.data)
@@ -222,11 +221,12 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
         unfinished = "; ".join(review_warnings(state.dd)) or ", ".join(result["reason_codes"])
         allowance = allowance_sentence(result["reason_codes"], str)
         print_warning(console, f"{outcome} Not finished: {unfinished}." + (f" {allowance}" if allowance else ""))
+    # A cancelled run hands nothing over, to its embedder or to a poster: the published files hold the sealed result.
+    handed_over = pipeline_state != "cancelled"
+    summary = build_review_summary(sealed, config=ctx.config, recorder=get_current_recorder(),
+                                   delivered=delivered if handed_over else 0)
     # Under ``deep/``, a registered public directory: a top-level file would be an unknown public
     # name that refuses the next run, on this build and on an earlier one, once its private proof is gone.
-    summary = build_review_summary(
-        sealed, resolved_phases=resolved_phase_settings(ctx.config, SUMMARY_PHASES), recorder=get_current_recorder(),
-        delivered=delivered)
     write_committed_review_output(ctx.artifacts, sealed, report_path=DeepArtifact.MERGED_REPORT.at(state.dd),
                                   result_path=state.dd / "committed-review.json",
                                   summary=summary, summary_path=state.dd / "review-summary.json")
@@ -234,8 +234,6 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
     ctx.data['terminal_review_items'] = items
     # Embedded evaluation consumes the same validated result as publication,
     # before optional rendering, without inventing a live GitHub PR target.
-    # A cancelled run hands nothing over, to its embedder or to a poster: the published files hold the sealed result.
-    handed_over = pipeline_state != "cancelled"
     if handed_over:
         deliver_finalized_review(result, items, usage=run_usage(), summary=summary)
     try:

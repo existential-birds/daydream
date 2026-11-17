@@ -67,13 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Every committed review writes a schema-versioned summary, `review-summary.json`, beside its
   sealed result (`.daydream/deep/review-summary.json` in the `deep` flow), and offers it as
   `FinalizedReview.summary` and `CommittedReviewResult.summary`
-  ([#1899](https://github.com/existential-birds/daydream/issues/1899)). It counts
-  assignments, targets by decision, claims by disposition and findings confirmed and
-  delivered; copies the terminal states and reason codes; counts budget stops and retries by
-  reason; and gives each phase's resolved backend, model and effort, tokens, cost and wall
-  seconds, plus the profile and Daydream version. Unrecorded values are `null`, never `0`. To
-  supply it, evidence now keeps per-phase usage shares, the failure class that admitted each
-  retry and the host schedule's refused dispatches. See
+  ([#1899](https://github.com/existential-birds/daydream/issues/1899)): counts, terminal
+  states, budget stops and retries by reason, and each phase's resolved settings, usage, cost
+  and wall time, with unrecorded values `null`. Local evidence gains per-phase usage shares,
+  each retry's failure class and the host schedule's refused dispatches. See
   [committed-review summary](docs/runtime.md#committed-review-summary).
 
 ### Fixed

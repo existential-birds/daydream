@@ -60,7 +60,7 @@ from daydream.committed_review_model import (
     validate_committed_result,
 )
 from daydream.committed_review_output import write_committed_review_output
-from daydream.committed_review_summary import SUMMARY_PHASES, build_review_summary
+from daydream.committed_review_summary import build_review_summary
 from daydream.config import REVIEWER_BATCHES_PER_ALLOWANCE
 from daydream.deep.detection import StackAssignment
 from daydream.findings import MAX_ARTIFACT_BYTES, committed_export_bytes
@@ -94,7 +94,7 @@ from daydream.review_result import (
 )
 from daydream.review_source_refs import SOURCE_SELECTORS_SCHEMA, SourceSelectorRejected, _SubmissionSources
 from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
-from daydream.run_config import FrozenAuthorDescription, RunConfig, resolved_backend_name, resolved_phase_settings
+from daydream.run_config import FrozenAuthorDescription, RunConfig, resolved_backend_name
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 from daydream.runner import _resolve_backend
 from daydream.trajectory import RUN_DOCUMENT_NAME, DaydreamPhase, DaydreamRunFlow, phase_scope
@@ -1410,11 +1410,11 @@ async def _run_committed_review(
                 with anyio.CancelScope(shield=True):
                     if clock.monotonic() >= finish:
                         raise TimeoutError("finalization allowance exhausted before output staging")
-                    summary = build_review_summary(
-                        payload, resolved_phases=resolved_phase_settings(config, SUMMARY_PHASES),
-                        recorder=recorder, delivered=len(payload["findings"]))
+                    built = build_review_summary(payload, config=config, recorder=recorder,
+                                                 delivered=len(payload["findings"]))
                     write_committed_review_output(session, payload, report_path=report_path, result_path=result_path,
-                                                  summary=summary, summary_path=summary_path)
+                                                  summary=built, summary_path=summary_path)
+                    summary = built
                     if findings_path is not None:
                         from daydream.findings import build_committed_findings_artifact, write_findings_artifact
 

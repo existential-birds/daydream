@@ -184,28 +184,11 @@ def compute_timing_summary(summary: RunSummary) -> TimingSummary | None:
     invocation_rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
     malformed_invocations = 0
     for document in summary.documents:
-        extra = _timing_mapping(document.metadata.get("extra"))
-        summaries = extra.get("subtrajectories")
-        direct_invocations = (
-            [
-                item
-                for item in summaries
-                if isinstance(item, dict) and "invocation_id" in item
-            ]
-            if isinstance(summaries, list)
-            else []
-        )
-        if isinstance(summaries, list):
-            malformed_invocations += sum(
-                1
-                for item in summaries
-                if isinstance(item, dict)
-                and "invocation_id" not in item
-                and "invocations" not in item
-                and "started_at" in item
-                and "ended_at" in item
-            )
-        for invocation in direct_invocations:
+        summaries = [item for item in _timing_list(_timing_mapping(document.metadata.get("extra"))
+                                                   .get("subtrajectories")) if isinstance(item, dict)]
+        malformed_invocations += sum(1 for item in summaries if "invocation_id" not in item
+                                     and "invocations" not in item and "started_at" in item and "ended_at" in item)
+        for invocation in (item for item in summaries if "invocation_id" in item):
             invocation_id = invocation.get("invocation_id")
             row_trajectory_id = invocation.get("trajectory_id")
             if not isinstance(row_trajectory_id, str) or not isinstance(invocation_id, str):
