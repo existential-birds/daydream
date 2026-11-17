@@ -360,6 +360,8 @@ async def test_fork_write_failure_degrades_to_truthful_incomplete_capture(
         with patch("daydream.ui.print_warning", lambda _console, message: warnings_emitted.append(message)):
             async with recorder.fork("fail-child") as child:
                 async with child.invocation(phase=DaydreamPhase.FIX) as inv:
+                    inv.observe(MetricsEvent(message_id="lost", prompt_tokens=5, completion_tokens=1,
+                                             cached_tokens=None, cost_usd=None))
                     observe_text_and_result(inv)
                 journal, fsync = child._journal, os.fsync
 
@@ -372,6 +374,8 @@ async def test_fork_write_failure_degrades_to_truthful_incomplete_capture(
 
         assert get_current_recorder() is recorder
         assert recorder.completed_child_documents() == ()  # A failed child keeps no reference.
+        # Nor does its usage fold, in total or in its phase's share.
+        assert (recorder.usage.prompt, recorder.usage.phases) == (None, {})
         flush_active_signal_recorders()
         assert [document.trajectory_id for document in snapshots[-1].documents] == [recorder.trajectory_id]
 

@@ -581,6 +581,8 @@ async def _run_agent(
 
             _logger.debug("invocation ledger %s: deadline=%s limit=%s", budget.owner, effective_deadline, budget.limit)
 
+            # The FailureClass that admitted the next attempt, retained on that attempt's evidence.
+            retry_failure_class: str | None = None
             for attempt in range(max_attempts + 1):
                 # Reset accumulated state BEFORE the deadline checks: a failed
                 # attempt's partial output must never leak into the invocation
@@ -714,6 +716,8 @@ async def _run_agent(
                     ):
                         if inv is not None:
                             inv.observe_backend_lifecycle(lifecycle)
+                            if retry_failure_class is not None:
+                                inv.record_retry(retry_failure_class)
                             inv.observe_user_step(prompt=attempt_prompt)
                         dispatch = _measure_host_dispatch(
                             prompt=attempt_prompt,
@@ -965,6 +969,7 @@ async def _run_agent(
                         # Every gate passed. This attempt's calls are refunded only if
                         # the retry dispatches; time is never refunded.
                         pending_refund += budget.charged - refund_point
+                        retry_failure_class = classification.failure_class.value
                         continue
                     if classification.retries_allowed and exception_max_retries > 0:
                         _emit_ladder_stop("retry_attempts_exhausted")

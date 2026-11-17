@@ -25,21 +25,29 @@ from daydream.run_context import current_run_context
 
 @dataclass(frozen=True)
 class FinalizedReview:
-    """Callback-owned copies of terminal evidence, findings and usage; missing delivery is unavailable analysis."""
+    """Callback-owned copies of terminal evidence, findings, usage and the review summary.
+
+    Missing delivery is unavailable analysis. ``summary`` is the validated committed-review
+    summary written beside the sealed review (``deep/review-summary.json``) when Daydream
+    delivers it, and ``{}`` when a direct caller supplies none.
+    """
 
     terminal_result: dict[str, Any]
     items: list[dict[str, Any]]
     usage: dict[str, Any] = dataclass_field(default_factory=dict)
+    summary: dict[str, Any] = dataclass_field(default_factory=dict)
 
 
 def deliver_finalized_review(result: dict[str, Any], items: list[dict[str, Any]],
-                             *, usage: dict[str, Any] | None = None) -> None:
+                             *, usage: dict[str, Any] | None = None,
+                             summary: dict[str, Any] | None = None) -> None:
     """Deliver frozen authority at the native terminal validation boundary."""
     context = current_run_context()
     handler = None if context is None else context.review_result_handler
     if handler is not None:
         validate_terminal_result(result)
-        handler(FinalizedReview(copy.deepcopy(result), copy.deepcopy(items), copy.deepcopy(usage or {})))
+        handler(FinalizedReview(copy.deepcopy(result), copy.deepcopy(items), copy.deepcopy(usage or {}),
+                                copy.deepcopy(summary or {})))
 
 
 class ReasonCode(StrEnum):
@@ -76,6 +84,14 @@ def reason_for_exception(exc: BaseException) -> ReasonCode:
         FailureClass.SCHEMA: ReasonCode.MALFORMED_OUTPUT,
         FailureClass.TOOL_POLICY: ReasonCode.POLICY_VETO,
     }.get(classify_failure(exc).failure_class, ReasonCode.BACKEND_FAILURE)
+
+
+#: The host exhaustion reasons :func:`reason_for_budget` assigns; any other reason is not a budget stop.
+BUDGET_REASON_CODES = frozenset({
+    ReasonCode.HOST_WALL_BUDGET_EXHAUSTION,
+    ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION,
+    ReasonCode.HOST_PIPELINE_BUDGET_EXHAUSTION,
+})
 
 
 def reason_for_budget(reason: str) -> ReasonCode:

@@ -88,9 +88,9 @@ from daydream.run_config import (
     RunConfig,
     _default_backend_name,
     _file_config_or_empty,
-    _resolved_backend_name,
-    _resolved_model,
-    _resolved_reasoning_effort,
+    resolved_backend_name,
+    resolved_model,
+    resolved_reasoning_effort,
     runs_review,
 )
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context, resolve_gate
@@ -146,9 +146,9 @@ def _resolve_backend(
     execution_input: BackendExecutionInput | None = None,
 ) -> Backend:
     """Resolve and optionally cache a phase backend; the resolved effort participates in the cache key."""
-    backend_name = _resolved_backend_name(config, phase)
-    resolved_model = _resolved_model(config, phase)
-    resolved_effort = _resolved_reasoning_effort(config, phase)
+    backend_name = resolved_backend_name(config, phase)
+    model = resolved_model(config, phase)
+    effort = resolved_reasoning_effort(config, phase)
     audit_root = (
         audit_workspace.repo.resolve(strict=True)
         if audit_workspace is not None
@@ -164,8 +164,8 @@ def _resolve_backend(
         # ``cwd`` stays pi-only: it exists solely to resolve Pi's configured
         # default model, and widening it churns every patched create_backend.
         kwargs: dict[str, Any] = {
-            "model": resolved_model,
-            "reasoning_effort": resolved_effort,
+            "model": model,
+            "reasoning_effort": effort,
             "audit_root": audit_root,
             "audit_outward_symlinks": audit_outward_symlinks,
         }
@@ -177,7 +177,7 @@ def _resolve_backend(
 
     if cache is None:
         return _make()
-    cache_key = (backend_name, resolved_model, resolved_effort, audit_root)
+    cache_key = (backend_name, model, effort, audit_root)
     if cache_key not in cache:
         cache[cache_key] = _make()
     return cache[cache_key]
@@ -196,7 +196,7 @@ def _preflight_improve_backends(ctx: FlowContext) -> None:
         raise AuditIsolationError("claude", "wrong_root", phase="recon")
     expected_root = audit.repo.resolve(strict=True)
     for phase in _IMPROVE_MODEL_PHASES:
-        backend_name = _resolved_backend_name(ctx.config, phase)
+        backend_name = resolved_backend_name(ctx.config, phase)
         try:
             backend = ctx.backend_for(phase)
         except AuditIsolationError as exc:
@@ -272,7 +272,7 @@ def _load_selected_adapters(config: RunConfig) -> None:
     The default backend covers phases without their own setting; unused adapters stay unloaded.
     """
     phases = ("review", "fix", "test", *_file_config_or_empty(config).phases)
-    load_adapters({_default_backend_name(config), *(_resolved_backend_name(config, phase) for phase in phases)})
+    load_adapters({_default_backend_name(config), *(resolved_backend_name(config, phase) for phase in phases)})
 
 
 def _run_posts_to_github(config: RunConfig) -> bool:
@@ -305,7 +305,7 @@ def _review_refusal(config: RunConfig) -> str | None:
     from daydream.committed_review import REVIEW_PHASES, bounded_author_description, host_tools_refusal
 
     for kind, phase in REVIEW_PHASES:
-        name = _resolved_backend_name(config, phase)
+        name = resolved_backend_name(config, phase)
         if name == "osprey":
             return host_tools_refusal(kind, name)
     try:
@@ -357,7 +357,7 @@ async def run(
         ) -> Backend:
             return _resolve_backend(
                 flow_config, phase, cache, cwd=cwd, audit_workspace=audit,
-                execution_input=execution.backends.get(_resolved_backend_name(flow_config, phase), backend_execution),
+                execution_input=execution.backends.get(resolved_backend_name(flow_config, phase), backend_execution),
             )
 
         backend_factory = create_for_context
@@ -367,7 +367,7 @@ async def run(
     quiet = config.quiet
     if quiet:
         codex_in_use = any(
-            _resolved_backend_name(config, phase) == "codex"
+            resolved_backend_name(config, phase) == "codex"
             for phase in ("review", "fix", "test")
         )
         if codex_in_use:
@@ -384,7 +384,7 @@ async def run(
                 config, private_roots=private_roots, run_context=run_context,
                 backend_factory=backend_factory,
                 backend_execution=(None if execution is None else execution.backends.get(
-                    _resolved_backend_name(config, "review"), execution.backend)),
+                    resolved_backend_name(config, "review"), execution.backend)),
                 github_execution=None if execution is None else execution.github,
             )
         except anyio.get_cancelled_exc_class():

@@ -195,6 +195,9 @@ async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Pa
     root = snapshot.documents[0].validated_payload(recorder.session_id)
     assert root["final_metrics"]["total_prompt_tokens"] == 190
     assert root["final_metrics"]["total_cost_usd"] == pytest.approx(0.50006)
+    # Phase shares fold with their forks, nested ones included, and sum to the root total.
+    assert {phase: (share.prompt, share.cached, share.cost) for phase, share in recorder.usage.phases.items()} == {
+        "review": (140, 14, 0.00006), "deep": (50, 5, 0.5)}
     assert not any(item.get("descriptor") == "empty-child" for item in root["extra"]["subtrajectories"])
 
     _finalize_strict_archive(recorder, snapshot, RunConfig(run_eval=True, archive=True), workspace)

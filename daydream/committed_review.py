@@ -14,7 +14,7 @@ import uuid
 from collections.abc import Callable, Iterable
 from contextlib import AsyncExitStack
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +60,7 @@ from daydream.committed_review_model import (
     validate_committed_result,
 )
 from daydream.committed_review_output import write_committed_review_output
+from daydream.committed_review_summary import build_review_summary
 from daydream.config import REVIEWER_BATCHES_PER_ALLOWANCE
 from daydream.deep.detection import StackAssignment
 from daydream.findings import MAX_ARTIFACT_BYTES, committed_export_bytes
@@ -80,7 +81,7 @@ from daydream.json_utils import canonical_json, validate_json_schema
 from daydream.observability.spans import record_budget_stop
 from daydream.prompt_budget import SanctionedInputUnavailable, truncate_utf8_to_budget
 from daydream.redaction import redact_text
-from daydream.review_budget import BudgetDimension, BudgetLedger, review_scale_for_diff
+from daydream.review_budget import BudgetDimension, BudgetLedger, BudgetStop, review_scale_for_diff
 from daydream.review_profile import ResolvedProfile, build_default_profile, resolve_from_runconfig
 from daydream.review_result import (
     AnalyzedRevision,
@@ -93,7 +94,7 @@ from daydream.review_result import (
 )
 from daydream.review_source_refs import SOURCE_SELECTORS_SCHEMA, SourceSelectorRejected, _SubmissionSources
 from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
-from daydream.run_config import FrozenAuthorDescription, RunConfig, _resolved_backend_name
+from daydream.run_config import FrozenAuthorDescription, RunConfig, resolved_backend_name
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 from daydream.runner import _resolve_backend
 from daydream.trajectory import RUN_DOCUMENT_NAME, DaydreamPhase, DaydreamRunFlow, phase_scope
@@ -1262,7 +1263,7 @@ async def _run_committed_review(
     historical = (None if request.immutable_input is None
                   else {key: provenance[key] for key in ("title", "body", "context")})
     for kind, phase in REVIEW_PHASES:
-        name = _resolved_backend_name(config, phase)
+        name = resolved_backend_name(config, phase)
         try:
             inputs_by_kind[kind] = (hosted_input if hosted_input is not None
                                     else BackendExecutionInput.from_environment(dict(os.environ), backend=name))
@@ -1309,6 +1310,7 @@ async def _run_committed_review(
         lifetime.enter_context(bind_run_context(context))
         session = await lifetime.enter_async_context(open_artifact_session(work, session_id=run_id, owner=owner))
         report_path, result_path = session.review_output, session.daydream_dir / "committed-review.json"
+        summary_path = session.daydream_dir / "review-summary.json"
         findings_path: Path | None = None
         if hosted is None:
             session.register_destination(source / ".daydream", label=OutputLabel.PUBLIC_DAYDREAM)
@@ -1323,8 +1325,13 @@ async def _run_committed_review(
             result_route = session.register_destination(
                 hosted.output_dir / "committed-review.json", label=OutputLabel.FINDINGS_OUTPUT,
             )
+            summary_route = session.register_destination(
+                hosted.output_dir / "review-summary.json", label=OutputLabel.FINDINGS_OUTPUT,
+            )
             assert report_route.write_path is not None and result_route.write_path is not None
-            report_path, result_path = report_route.write_path, result_route.write_path
+            assert summary_route.write_path is not None
+            report_path, result_path, summary_path = (
+                report_route.write_path, result_route.write_path, summary_route.write_path)
             if request.immutable_input is not None:
                 findings_route = session.register_destination(
                     hosted.output_dir / "findings.json", label=OutputLabel.FINDINGS_OUTPUT,
@@ -1393,6 +1400,7 @@ async def _run_committed_review(
             payload = program.seal()
             output_error: str | None = None
             installed = False
+            summary: dict[str, Any] | None = None
             capture_state = (
                 "failed" if capture.validation_error is not None else
                 "complete" if capture.final is not None else
@@ -1402,7 +1410,13 @@ async def _run_committed_review(
                 with anyio.CancelScope(shield=True):
                     if clock.monotonic() >= finish:
                         raise TimeoutError("finalization allowance exhausted before output staging")
-                    write_committed_review_output(session, payload, report_path=report_path, result_path=result_path)
+                    # A cancelled or unsupported run raises instead of returning: it hands nothing over.
+                    handed_over = cancellation is None and unsupported is None
+                    built = build_review_summary(payload, config=config, recorder=recorder,
+                                                 delivered=len(payload["findings"]) if handed_over else 0)
+                    write_committed_review_output(session, payload, report_path=report_path, result_path=result_path,
+                                                  summary=built, summary_path=summary_path)
+                    summary = built
                     if findings_path is not None:
                         from daydream.findings import build_committed_findings_artifact, write_findings_artifact
 
@@ -1420,7 +1434,8 @@ async def _run_committed_review(
                     installed = True
             except Exception as exc:
                 output_error = type(exc).__name__
-            return CommittedReviewResult(canonical_json(payload), installed, capture_state, output_error=output_error)
+            return CommittedReviewResult(canonical_json(payload), installed, capture_state, output_error=output_error,
+                                         summary=summary)
         finally:
             if cancellation is not None:
                 # Successful publication must precede session teardown;
@@ -1444,6 +1459,17 @@ def _host_entry(assignment: str, reason: str, *, cleanup_complete: bool = True) 
     return {"assignment": assignment, "work_id": None, "accepted": False, "settled": cleanup_complete,
             "cleanup_complete": cleanup_complete, "reason": reason,
             "allocation": None, "observed_starts": None, "overshoot": None}
+
+
+_SCHEDULE_STOP_REASONS = {"time": ReasonCode.HOST_WALL_BUDGET_EXHAUSTION,
+                          "tool_calls": ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION}
+
+
+def _record_schedule_stop(recorder: Any, phase: DaydreamPhase, stop: BudgetStop) -> None:
+    """A refused dispatch has no execution entry: trace it and retain it in local evidence."""
+    record_budget_stop(stop)
+    if recorder is not None:
+        recorder.emit_schedule_budget_stop(phase, reason=_SCHEDULE_STOP_REASONS[stop.dimension].value, **asdict(stop))
 
 
 def _split(total: int, count: int) -> list[int]:
@@ -1524,7 +1550,7 @@ class _Schedule:
                     "time" if self.local.expired() else
                     "tool_calls" if _remaining(self.local) < _MIN_WORK_CALLS * len(groups) else None)
                 if dimension is not None:
-                    record_budget_stop(self.local.stop(dimension))
+                    _record_schedule_stop(recorder, DaydreamPhase.REVIEW, self.local.stop(dimension))
                     break
                 await self._round(review.plan("follow_up", groups), recorder, self.local, self.local_reserves)
             # Required regardless of local results; it inherits every still-unfinished target.
@@ -1535,7 +1561,8 @@ class _Schedule:
         retried = False
         while pending := {(claim["uid"], claim["revision"]) for claim in review.pending()}:
             if (exhausted := _remaining(self.ledger) < 1) or self.ledger.expired():
-                record_budget_stop(self.ledger.stop("tool_calls" if exhausted else "time"))
+                _record_schedule_stop(recorder, DaydreamPhase.CHALLENGE,
+                                      self.ledger.stop("tool_calls" if exhausted else "time"))
                 break
             fresh = not pending <= attempted
             progressed = any(review.work[work_id].progress > 0 for work_id in last)

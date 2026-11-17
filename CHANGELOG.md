@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking (0.y.z):** `daydream.run_config` names the resolved per-phase settings publicly:
+  `resolved_backend_name`, `resolved_model`, `resolved_reasoning_effort` and the new
+  `resolved_phase_settings(config, phases)`, which returns each phase's `backend`, `model` and
+  `reasoning_effort` ([#1899](https://github.com/existential-birds/daydream/issues/1899)). The
+  private `_resolved_*` names are gone; callers such as a benchmark harness move to
+  `resolved_phase_settings(config, sorted(PHASE_DEFAULT_MODELS[backend]))`.
 - **Breaking (0.y.z):** Committed review delivers captured author text (an immutable
   input's title, body and context, a frozen author description or the pinned PR's
   description) by reference, so a long description can no longer push every assignment's
@@ -58,6 +64,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Each file is checked with Harbor's validator.
 - `daydream evidence verify RUN_DIR` reads a run's evidence back and reports each
   document's record count, size, SHA-256 and seal, exiting 1 when anything is incomplete.
+- Every committed review writes a schema-versioned summary, `review-summary.json`, beside its
+  sealed result (`.daydream/deep/review-summary.json` in the `deep` flow), and offers it as
+  `FinalizedReview.summary` and `CommittedReviewResult.summary`
+  ([#1899](https://github.com/existential-birds/daydream/issues/1899)): counts, terminal
+  states, budget stops and retries by reason, and each phase's resolved settings, usage, cost
+  and wall time, with unrecorded values `null`. Local evidence gains per-phase usage shares,
+  each retry's failure class and the host schedule's refused dispatches. See
+  [committed-review summary](docs/runtime.md#committed-review-summary).
 
 ### Fixed
 

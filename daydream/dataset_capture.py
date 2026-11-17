@@ -175,12 +175,9 @@ def capture_run_record(
         provenance["profile"] = {"profile_schema_version": profile.schema_version,
                                  "profile_name": profile.name, "profile_source_kind": profile.source_kind,
                                  "profile_digest": profile.digest}
-    from daydream.run_config import _resolved_backend_name, _resolved_model, _resolved_reasoning_effort
+    from daydream.run_config import resolved_phase_settings
 
-    provenance["resolved_phases"] = {phase: {
-        "backend": _resolved_backend_name(config, phase), "model": _resolved_model(config, phase),
-        "reasoning_effort": _resolved_reasoning_effort(config, phase),
-    } for phase in ("review", "arbiter", "verify", "fix", "test")}
+    provenance["resolved_phases"] = resolved_phase_settings(config, ("review", "arbiter", "verify", "fix", "test"))
     provenance["file_configuration"] = None if config.file_config is None else asdict(config.file_config)
     provenance["collection_diagnostics"] = acquisition_failures
     def evidence(value: Any, *, failed: bool = False, absent: str = "unproduced") -> dict[str, Any]:

@@ -13,6 +13,7 @@ import pytest
 from daydream import git_ops, runner
 from daydream.artifact_visibility import private_root_locations
 from daydream.backends import BackendExecutionInput, create_backend as real_create_backend
+from daydream.config import PHASE_DEFAULT_MODELS
 from daydream.config_file import DaydreamFileConfig
 from daydream.github_app import GitHubExecutionInput
 from daydream.review_result import FinalizedReview
@@ -114,6 +115,16 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
         assert review.terminal_result["analysis_state"] == "complete"
         assert review.terminal_result["analyzed_revision"]["head_sha"] == git(target, "rev-parse", "HEAD")
         assert [scope["scope_id"] for scope in review.terminal_result["planned_scopes"]] == ["committed:00000"]
+        # Its summary names each phase's config-resolved settings; the stub reports no usage, so usage is
+        # unrecorded (null), never zero, while each phase's own intervals give it a wall time.
+        phases = review.summary["phases"]
+        assert {name: (phase["backend"], phase["model"], phase["reasoning_effort"])
+                for name, phase in phases.items()} == {
+            name: ("codex", PHASE_DEFAULT_MODELS["codex"][name], effort)
+            for name, effort in (("review", "medium"), ("arbiter", "high"))}
+        assert {phase[key] for phase in phases.values()
+                for key in ("prompt_tokens", "cached_tokens", "completion_tokens", "cost_usd")} == {None}
+        assert all(phase["wall_seconds"] > 0 for phase in phases.values())
         (item,) = review.items
         assert {key: item[key] for key in ("id", "file", "line", "description", "severity")} == {
             "id": 1, "file": "README.md", "line": 1, "description": "Sample issue", "severity": "medium"}

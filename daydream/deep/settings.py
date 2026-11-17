@@ -19,9 +19,8 @@ if TYPE_CHECKING:
 def _resolve_config_value[T: (int, float, bool)](config: RunConfig, attr: str, default: T) -> T:
     """Resolve a scalar setting: ``RunConfig`` attr (when present) > file config > default.
 
-    Precedence mirrors ``_resolve_backend`` / ``_resolved_model`` at
-    ``runner.py:295-326``. Uses ``is not None`` checks rather than truthiness
-    so a configured value of ``0`` / ``0.0`` is honored.
+    Unlike the truthiness-based model/backend resolvers in ``run_config``, this
+    uses ``is not None`` checks so a configured value of ``0`` / ``0.0`` is honored.
     """
     value = getattr(config, attr, None)
     if value is not None:

@@ -1,7 +1,7 @@
 """Pure timing and invocation-coverage reduction over a frozen run's document summaries."""
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -89,6 +89,62 @@ def _clip_intervals(
     ]
 
 
+def _timing_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _phase_intervals(
+    events: Iterable[Any], diagnostics: dict[str, int],
+) -> dict[str, list[tuple[datetime, datetime]]]:
+    """Pair identified ``phase_start``/``phase_end`` events into each phase's well-formed intervals."""
+    identified: dict[tuple[str, str, str], dict[str, list[datetime]]] = {}
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        phase = event.get("phase")
+        kind = event.get("event")
+        timestamp = _timing_timestamp(event.get("timestamp"))
+        if not isinstance(phase, str) or kind not in {"phase_start", "phase_end"}:
+            continue
+        session_id = event.get("session_id")
+        scope_id = event.get("scope_id")
+        if not isinstance(session_id, str) or not session_id or not isinstance(scope_id, str) or not scope_id:
+            diagnostics["malformed_interval"] += 1
+            continue
+        if kind == "phase_end" and event.get("status") not in {status.value for status in LifecycleStatus}:
+            diagnostics["malformed_interval"] += 1
+            continue
+        key = (session_id, scope_id, phase)
+        bucket = identified.setdefault(key, {"phase_start": [], "phase_end": []})
+        if timestamp is None:
+            diagnostics["malformed_interval"] += 1
+        else:
+            bucket[kind].append(timestamp)
+
+    phase_intervals: dict[str, list[tuple[datetime, datetime]]] = {}
+    for (_session_id, _scope_id, phase), pair in identified.items():
+        starts = pair["phase_start"]
+        ends = pair["phase_end"]
+        if len(starts) != 1 or len(ends) != 1:
+            if len(starts) > 1 or len(ends) > 1:
+                diagnostics["duplicate_interval"] += 1
+            else:
+                diagnostics["orphaned_interval"] += 1
+            continue
+        start, end = starts[0], ends[0]
+        if end < start:
+            diagnostics["malformed_interval"] += 1
+            continue
+        phase_intervals.setdefault(phase, []).append((start, end))
+    return phase_intervals
+
+
+def phase_wall_seconds(events: Iterable[Any], phase: str) -> float | None:
+    """Seconds covered by the union of *phase*'s closed intervals in live phase events; ``None`` without one."""
+    intervals = _phase_intervals(events, {key: 0 for key in _TIMING_DIAGNOSTIC_KEYS}).get(phase)
+    return round(_interval_seconds(_union_intervals(intervals)), 3) if intervals else None
+
+
 def compute_timing_summary(summary: RunSummary) -> TimingSummary | None:
     """Reduce one frozen run's document summaries without reading live recorder state."""
     diagnostics = {key: 0 for key in _TIMING_DIAGNOSTIC_KEYS}
@@ -106,50 +162,9 @@ def compute_timing_summary(summary: RunSummary) -> TimingSummary | None:
     if wall is None:
         return None
 
-    identified: dict[tuple[str, str, str], dict[str, list[datetime]]] = {}
-    for document in summary.documents:
-        extra = _timing_mapping(document.metadata.get("extra"))
-        events = extra.get("phase_events")
-        if not isinstance(events, list):
-            continue
-        for event in events:
-            if not isinstance(event, dict):
-                continue
-            phase = event.get("phase")
-            kind = event.get("event")
-            timestamp = _timing_timestamp(event.get("timestamp"))
-            if not isinstance(phase, str) or kind not in {"phase_start", "phase_end"}:
-                continue
-            session_id = event.get("session_id")
-            scope_id = event.get("scope_id")
-            if not isinstance(session_id, str) or not session_id or not isinstance(scope_id, str) or not scope_id:
-                diagnostics["malformed_interval"] += 1
-                continue
-            if kind == "phase_end" and event.get("status") not in {status.value for status in LifecycleStatus}:
-                diagnostics["malformed_interval"] += 1
-                continue
-            key = (session_id, scope_id, phase)
-            bucket = identified.setdefault(key, {"phase_start": [], "phase_end": []})
-            if timestamp is None:
-                diagnostics["malformed_interval"] += 1
-            else:
-                bucket[kind].append(timestamp)
-
-    phase_intervals: dict[str, list[tuple[datetime, datetime]]] = {}
-    for (_session_id, _scope_id, phase), pair in identified.items():
-        starts = pair["phase_start"]
-        ends = pair["phase_end"]
-        if len(starts) != 1 or len(ends) != 1:
-            if len(starts) > 1 or len(ends) > 1:
-                diagnostics["duplicate_interval"] += 1
-            else:
-                diagnostics["orphaned_interval"] += 1
-            continue
-        start, end = starts[0], ends[0]
-        if end < start:
-            diagnostics["malformed_interval"] += 1
-            continue
-        phase_intervals.setdefault(phase, []).append((start, end))
+    phase_events = [event for document in summary.documents
+                    for event in _timing_list(_timing_mapping(document.metadata.get("extra")).get("phase_events"))]
+    phase_intervals = _phase_intervals(phase_events, diagnostics)
 
     clipped_by_phase = {
         phase: _union_intervals(_clip_intervals(intervals, wall)) for phase, intervals in phase_intervals.items()
@@ -169,28 +184,11 @@ def compute_timing_summary(summary: RunSummary) -> TimingSummary | None:
     invocation_rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
     malformed_invocations = 0
     for document in summary.documents:
-        extra = _timing_mapping(document.metadata.get("extra"))
-        summaries = extra.get("subtrajectories")
-        direct_invocations = (
-            [
-                item
-                for item in summaries
-                if isinstance(item, dict) and "invocation_id" in item
-            ]
-            if isinstance(summaries, list)
-            else []
-        )
-        if isinstance(summaries, list):
-            malformed_invocations += sum(
-                1
-                for item in summaries
-                if isinstance(item, dict)
-                and "invocation_id" not in item
-                and "invocations" not in item
-                and "started_at" in item
-                and "ended_at" in item
-            )
-        for invocation in direct_invocations:
+        summaries = [item for item in _timing_list(_timing_mapping(document.metadata.get("extra"))
+                                                   .get("subtrajectories")) if isinstance(item, dict)]
+        malformed_invocations += sum(1 for item in summaries if "invocation_id" not in item
+                                     and "invocations" not in item and "started_at" in item and "ended_at" in item)
+        for invocation in (item for item in summaries if "invocation_id" in item):
             invocation_id = invocation.get("invocation_id")
             row_trajectory_id = invocation.get("trajectory_id")
             if not isinstance(row_trajectory_id, str) or not isinstance(invocation_id, str):

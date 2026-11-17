@@ -578,6 +578,9 @@ async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
     assert sealed["findings"] == [] and sealed["terminal_result"]["analysis_state"] == "incomplete"
     coverage = json.loads((reviewed / ".daydream/deep/review-coverage.json").read_text())
     assert coverage["run_id"] == sealed["run_id"]
+    # Its summary is written beside it, though nothing is delivered.
+    summary = json.loads((reviewed / ".daydream/deep/review-summary.json").read_text())
+    assert (summary["run_id"], summary["terminal"]["pipeline_state"]) == (sealed["run_id"], "cancelled")
     assert "Admitted before cancellation" in (reviewed / ".review-output.md").read_text()
     assert not list((tmp_path / "private").rglob("review-capture-*"))
 

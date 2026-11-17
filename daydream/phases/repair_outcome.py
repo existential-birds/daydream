@@ -24,7 +24,7 @@ from pathlib import Path
 
 from daydream.redaction import redact_text
 from daydream.repository_paths import InvalidRepositoryFilePath, canonicalize_repository_file_path
-from daydream.review_result import ReasonCode, reason_for_budget
+from daydream.review_result import BUDGET_REASON_CODES, ReasonCode, reason_for_budget
 
 
 class RepairOutcome(StrEnum):
@@ -38,15 +38,6 @@ class RepairOutcome(StrEnum):
     BUDGET_INTERRUPTED = "budget_interrupted"
     EXECUTION_ERROR = "execution_error"
     SCOPE_BLOCKED = "scope_blocked"
-
-
-# The stop vocabulary `reason_for_budget` owns. A reason already outside that
-# table is a non-budget host stop, never a guess about which budget ran out.
-_BUDGET_REASON_CODES = frozenset({
-    ReasonCode.HOST_WALL_BUDGET_EXHAUSTION,
-    ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION,
-    ReasonCode.HOST_PIPELINE_BUDGET_EXHAUSTION,
-})
 
 
 def repair_reason_code(reason: str | None) -> ReasonCode | None:
@@ -78,7 +69,7 @@ def classify_repair_outcome(abort_reason: str | None, output: str) -> RepairOutc
     """
     if abort_reason is not None:
         code = repair_reason_code(abort_reason)
-        if code in _BUDGET_REASON_CODES:
+        if code in BUDGET_REASON_CODES:
             return RepairOutcome.BUDGET_INTERRUPTED
         return RepairOutcome.EXECUTION_ERROR
     # The host never reads success out of a turn's prose: a blank turn and a

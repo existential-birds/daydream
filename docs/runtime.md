@@ -266,7 +266,46 @@ same artifact session as described below. The ordinary CLI, embedded and bot
 routes run this program as the review step of the `deep` flow and write its sealed
 result to `.daydream/deep/committed-review.json`, where the archive and
 `--dump-artifacts` retain it; `run_committed_review` keeps publishing
-`.daydream/committed-review.json`. External delivery remains separate integration work.
+`.daydream/committed-review.json`. Each sealed result has a [summary](#committed-review-summary)
+beside it. External delivery remains separate integration work.
+
+### Committed-review summary
+
+The writer that stages the sealed result then writes `review-summary.json` beside it, through
+the same session: `.daydream/deep/review-summary.json` in the `deep` flow,
+`.daydream/review-summary.json` from `run_committed_review`, and `review-summary.json` in a
+hosted `output_dir`. The `deep` flow hands the same value to an embedder's result handler as
+`FinalizedReview.summary`; a cancelled run writes it and, as before, delivers nothing.
+`CommittedReviewResult.summary` offers it on the explicit path, `None` when output staging
+failed. A build or write failure is handled as a failed sealed-result write. The summary calls no model and never changes the sealed payload, dispatch, verdicts or
+terminal states.
+
+[`committed_review_summary`](../daydream/committed_review_summary.py) owns the strict
+schema. `schema_version` is `1`; `validate_review_summary` refuses any other version or
+shape, and nothing converts one. Every value comes from evidence the run retained. A value that was not
+recorded is `null`, never `0`; without a recorder every evidence-derived value is `null`.
+
+| Field | Source |
+|---|---|
+| `run_id`, `result_schema_version`, `daydream_version` | The sealed result and `daydream.__version__` |
+| `profile` | `name` (empty for a profile without one), `source_kind` and `digest` from the sealed `settings` |
+| `terminal` | The sealed `analysis_state`, `pipeline_state` and `reason_codes` |
+| `counts.assignments` | Planned assignments of the [assignment policy](#assignment-policy-and-work), `0` for a change with no diff |
+| `counts.targets` | `planned` targets, and `reviewed` / `not_reviewed` target decisions |
+| `counts.claims` | Claims `proposed`, then by disposition: `confirmed`, `rejected` (by the challenge) and `unresolved` |
+| `counts.findings` | Sealed `confirmed` findings and the items `delivered`; an extension step that rewrites the `deep` flow's items can make them differ, and a run that is cancelled or raises (such as an unsupported hosted policy) delivers none |
+| `budget_stops` | Count by host exhaustion reason code of sealed execution stops plus the schedule's [retained refusals](observability.md#budget-stops) |
+| `retries` | `total` retried attempts and their count `by_reason`, the recorded [`FailureClass`](../daydream/retry_policy.py) that admitted each |
+| `phases.review`, `phases.arbiter` | The `[phases.review]` (discovery, follow-up, cross-assignment) and `[phases.arbiter]` (challenge) work: config-resolved `backend`, `model` and `reasoning_effort`; `prompt_tokens`, `cached_tokens`, `completion_tokens` and `cost_usd`; and `wall_seconds`, the union of the phase's intervals |
+
+Phase usage comes from each evidence document's per-phase [usage share](observability.md#committed-review-evidence)
+and inherits billing's semantics: it sums the dimensions observed, so a cost can be partial when
+some invocations were unpriced, and a fork whose evidence failed to seal drops out as it does
+from the run total. It covers only review work; `FinalizedReview.usage` covers the whole run.
+Resolved settings are what Daydream hands the backend, not the model a provider served; `null`
+leaves the adapter's native default, as Pi's does. `daydream.run_config` names them publicly:
+`resolved_backend_name`, `resolved_model`, `resolved_reasoning_effort` and
+`resolved_phase_settings(config, phases)`.
 
 ### Assignment policy and work
 
@@ -632,7 +671,8 @@ Every investigation work, fresh challenge/rechallenge and retry keeps the same p
 and [budget ledger](#budget-ledger). Tool admission intersects grants before effects, and domain
 submission may change only the assigned in-memory Review state.
 
-Trusted host writers publish `review-output.md`, `committed-review.json` and a copy of
+Trusted host writers publish `review-output.md`, `committed-review.json`, its
+[summary](#committed-review-summary) `review-summary.json` and a copy of
 the root [evidence document](observability.md#local-evidence) `evidence.otlp.jsonl` (or
 its partial counterpart) under `output_dir` using the same
 private session and conflict-safe installation. Existing source public artifacts
@@ -678,7 +718,8 @@ result = await run_committed_review(CommittedReviewRequest(
 `source` is the prepared checkout whose HEAD, raw bytes and modes are validated;
 `immutable_bundle` supplies the actual frozen bytes when `bundle_sha256` is set.
 The host's output directory receives `review-output.md`, `committed-review.json`,
-strict `findings.json` and trajectory evidence through the same artifact session.
+`review-summary.json`, strict `findings.json` and trajectory evidence through the same
+artifact session.
 
 The envelope has two strict groups:
 
