@@ -35,6 +35,7 @@ def _coverage_metadata_keys(value: object) -> set[str]:
     return keys
 
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.parametrize("passed,ignored,exit_code,retries", [
     pytest.param(False, True, 0, 0, id="operator-ignore-records-failure"),
 ])

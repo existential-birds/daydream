@@ -215,6 +215,7 @@ def _osprey_lines(canary: str) -> list[str]:
         ),
     ]
 
+@pytest.mark.usefixtures("fake_gh")
 async def test_osprey_strict_protocol_fixture_through_runner(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig], monkeypatch: pytest.MonkeyPatch,
 ) -> None:

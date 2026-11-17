@@ -83,6 +83,7 @@ def _configure(monkeypatch: pytest.MonkeyPatch, base_url: str, destination: str)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
     monkeypatch.setenv("DAYDREAM_TRACE_TO", destination)
 
+@pytest.mark.usefixtures("fake_gh")
 async def test_runner_redacts_encoded_and_decoded_url_credentials_despite_malformed_unrelated_url(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,

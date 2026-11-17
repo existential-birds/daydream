@@ -57,6 +57,7 @@ def _state(target: Path) -> tuple[str, str, dict[str, bytes]]:
     }
 
 
+@pytest.mark.usefixtures("fake_gh")
 async def test_runner_rejects_missing_canonical_before_fix_or_test(
     linked_worktree: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     capsys: pytest.CaptureFixture[str],

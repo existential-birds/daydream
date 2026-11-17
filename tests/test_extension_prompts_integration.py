@@ -50,6 +50,7 @@ def _plan_writer_override(*, raises_on_first_call: bool = False) -> str:
         "    r.override_prompt('plan-writer', _plan_writer)\n"
     )
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 async def test_legacy_markdown_plan_writer_override_blocks_with_sanitized_diagnostics(
     ext_dir: ExtDir, improve_monorepo_target: Path, make_config: Callable[..., RunConfig],

@@ -87,6 +87,7 @@ async def _run_deep(target: Path, **overrides: Any) -> int:
 # --- rows -----------------------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("fake_gh")
 async def test_operator_grant_resumes_the_same_job_without_erasing_history(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
     mute_side_effects: Mute,

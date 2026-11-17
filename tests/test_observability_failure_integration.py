@@ -108,6 +108,7 @@ class _ActiveToolBackend:
     async def cancel(self) -> None:
         """Backend-wide shutdown is not part of this scenario."""
 
+@pytest.mark.usefixtures("fake_gh")
 async def test_runner_cleanup_outage_preserves_captured_root_and_review_output(
     ext_dir: ExtDir, feature_branch_repo: Path,
     make_config: Callable[..., RunConfig], install_backend: Callable[[object], object],
@@ -148,6 +149,7 @@ async def test_runner_cleanup_outage_preserves_captured_root_and_review_output(
     assert "review completed during outage" in json.dumps(record["trajectories"]["value"])
 
 
+@pytest.mark.usefixtures("fake_gh")
 async def test_runner_partial_outcome_preserves_the_budget_stop_record(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
@@ -261,6 +263,7 @@ class _ExactAllocationBackend(_NoCancelBackend):
         yield TextEvent("final answer")
         yield ResultEvent(None, None)
 
+@pytest.mark.usefixtures("fake_gh")
 async def test_runner_exact_allocation_bills_children_and_chain_matches_wire(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch, artifact_runtime_root: Path,
@@ -346,6 +349,7 @@ class _LateMissingMetricsBackend(_NoCancelBackend):
         yield TextEvent("answer")
         yield ResultEvent(None, None)
 
+@pytest.mark.usefixtures("fake_gh")
 async def test_runner_late_missing_metrics_bill_chain_children_stay_custom(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,

@@ -93,6 +93,7 @@ def owned_trace_id(exporter: InMemorySpanExporter, run_id: str) -> str:
     return identity
 
 
+@pytest.mark.usefixtures("fake_gh")
 async def test_terminal_failure_retains_owned_trace_and_partial_evidence(
     config: RunConfig, monkeypatch: pytest.MonkeyPatch, memory_exporters: list[InMemorySpanExporter],
 ) -> None:

@@ -62,6 +62,7 @@ _ARTIFACT_PR = PRInfo(
     url="https://example.invalid/owner/repo/pull/7",
 )
 
+@pytest.mark.usefixtures("fake_gh")
 async def test_unborn_improve_approved_head_rejected_before_backend(
     tmp_path: Path, make_config: Callable[..., RunConfig],
 ) -> None:
@@ -257,6 +258,7 @@ def _assert_one_published_run(repo: Path, archive_dir: Path) -> tuple[Path, Path
     return public_runs[0], archived_runs[0]
 
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.parametrize("failure_mode", [
     "none", "source-replaced", "source-missing-worktree", "git-redirect-capture-worktree",
 ])
@@ -512,6 +514,7 @@ def _make_recording_dispatch(
         return stub
     return _record
 
+@pytest.mark.usefixtures("fake_gh")
 async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path,
 ) -> None:
@@ -579,6 +582,7 @@ async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
     assert not list((tmp_path / "private").rglob("review-capture-*"))
 
 
+@pytest.mark.usefixtures("fake_gh")
 async def test_run_rejects_head_mismatch_on_real_worktree(
     monkeypatch: pytest.MonkeyPatch,
     silence_runner_ui: None,  # noqa: F841
@@ -760,6 +764,7 @@ def _assert_single_handoff(repo: Path, body: str) -> None:
     assert len(handoffs) == 1, f"expected exactly one handoff.md, got {handoffs!r}"
     assert handoffs[0].read_text(encoding="utf-8").startswith(body)
 
+@pytest.mark.usefixtures("fake_gh")
 async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
     monkeypatch: pytest.MonkeyPatch, feature_branch_repo: Path, make_config: Callable[..., 'RunConfig'],
 ) -> None:

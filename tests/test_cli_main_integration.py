@@ -73,6 +73,7 @@ def _denied_observability(*a: Any, **k: Any) -> Any:
     """Injected failing observability resolver: the pre-config failure case."""
     raise RuntimeError("observability boom")
 
+@pytest.mark.usefixtures("fake_gh")
 def test_cli_main_only_fix_selects_fixing(
     git_repo: Path, tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Callable[..., None],
     capsys: pytest.CaptureFixture[str],
@@ -147,6 +148,7 @@ def test_cli_main_confinement_valueerror_is_actionable_not_fatal(
     assert "Finding file must be a confined repository-relative path" in out
     assert "Fatal Error" not in out  # actionable, not the bare generic string
 
+@pytest.mark.usefixtures("fake_gh")
 def test_cli_main_rejects_workspace_copy_traversal(repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Reject traversal through --copy with exit 1 and no external-file/worktree residue.
 
@@ -240,6 +242,7 @@ def visibility_case(
     return _setup
 
 
+@pytest.mark.usefixtures("fake_gh")
 def test_artifact_visibility_cli_codex_publication_collision_restores_and_exits_one(
     visibility_case: Callable[..., _VisibilityCase], tmp_path: Path
 ) -> None:

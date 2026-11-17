@@ -111,6 +111,7 @@ def _flow_context_with_audit_root(root: Path, *, audit_repo: Path,) -> FlowConte
         audit_workspace=boundary,
     )
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 async def test_unsupported_improve_backend_fails_atomic_preflight(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
@@ -139,6 +140,7 @@ async def test_unsupported_improve_backend_fails_atomic_preflight(
     assert _git_status_porcelain(improve_monorepo_target) == before_status
 
 
+@pytest.mark.usefixtures("fake_gh")
 def test_improve_cli_discovers_nested_workspace_and_preserves_downstream_facts(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: Any,
 ) -> None:
@@ -227,6 +229,7 @@ def test_improve_cli_discovers_nested_workspace_and_preserves_downstream_facts(
     assert _git_status_porcelain(repo) == ""
 
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 async def test_custom_improve_survey_uses_compatible_two_pass_fallback(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
@@ -265,6 +268,7 @@ async def test_custom_improve_survey_uses_compatible_two_pass_fallback(
     assert all(not Path(call["cwd"]).exists() for call in backend.calls)
 
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 async def test_improve_git_environment_refusal_names_key_without_value(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
@@ -354,6 +358,7 @@ def _make_unborn_improve_repo(tmp_path: Path) -> Path:
     git(repo, "add", ".gitignore", "tracked.bin")
     return repo
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 async def test_full_improve_denies_glob_through_inward_then_outward_symlink(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, tmp_path: Path,
@@ -382,6 +387,7 @@ async def test_full_improve_denies_glob_through_inward_then_outward_symlink(
     assert _git_status_porcelain(repo) == before_status
     assert (outside / "secret.txt").read_text(encoding="utf-8") == "never enumerate\n"
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 async def test_full_improve_uses_independent_unborn_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -402,6 +408,7 @@ async def test_full_improve_uses_independent_unborn_snapshot(
     assert _git_status_porcelain(repo) == before_status
     assert all(not path.exists() for path in backend.audit_paths)
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 async def test_unborn_improve_cancellation_cleans_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -436,6 +443,7 @@ async def test_unborn_improve_cancellation_cleans_snapshot(
     assert git_ops.is_unborn_head(repo)
     assert all(not path.exists() for path in backend.audit_paths)
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 async def test_unborn_commit_anchored_improve_modes_fail_before_backend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], make_config: MakeConfig,
@@ -608,6 +616,7 @@ def _append_improve_config(target: Path, body: str) -> DaydreamFileConfig:
     return load_file_config(target)
 
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 async def test_audit_dispatch_interval_preserves_isolation_when_all_failed(
     improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
@@ -648,6 +657,7 @@ async def test_audit_dispatch_interval_preserves_isolation_when_all_failed(
 def _not_audited_section(report: str) -> str:
     return report.split("## What was not audited")[1].split("## ")[0]
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 async def test_report_names_unaudited_partitions_and_failed_groups(
     improve_scaled_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
@@ -700,6 +710,7 @@ async def test_report_names_unaudited_partitions_and_failed_groups(
     assert "docs:group-01" in coverage["failed_assignments"]
 
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 async def test_vet_dispatch_interval_batch_failure_fails_closed_per_batch(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
@@ -766,6 +777,7 @@ class _AuditFindingCredentialBackend(ProductionPathBackend):
         return events
 
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 async def test_capable_improve_partial_plan_failure_is_safe_and_publishes_the_rest(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
@@ -828,6 +840,7 @@ async def test_capable_improve_partial_plan_failure_is_safe_and_publishes_the_re
     assert all(_AUDIT_FINDING_SECRET not in text for text in observables)
     assert "coverage 05. OPENAI_API_KEY=[REDACTED" in "\n".join(observables)
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 async def test_branch_focus_manifest_retains_deleted_paths_without_reading_missing_files(
     improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
@@ -887,6 +900,7 @@ async def test_branch_focus_manifest_retains_deleted_paths_without_reading_missi
     assert not (repo / regular).is_symlink() and (repo / linked).is_symlink()
 
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 async def test_branch_fanout_preserves_serial_limits_and_quick_filtering(
     improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -913,6 +927,7 @@ async def test_branch_fanout_preserves_serial_limits_and_quick_filtering(
     assert "Lowest-leverage findings dropped by tier cap: 10" in report
 
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 @pytest.mark.parametrize("phase", ["audit", "vet"])
 async def test_branch_cancellation_joins_provider_streams_before_snapshot_cleanup(
@@ -954,6 +969,7 @@ async def test_branch_cancellation_joins_provider_streams_before_snapshot_cleanu
     assert dispatch_encloses_children(dispatch, repo)
 
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 async def test_branch_focus_on_base_branch_reports_and_exits_cleanly(
     improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
@@ -962,6 +978,7 @@ async def test_branch_focus_on_base_branch_reports_and_exits_cleanly(
     assert code == 1
 
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 async def test_group_scope_slices_search_but_report_names_the_unaudited_rest(
     improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig, monkeypatch: pytest.MonkeyPatch,
@@ -1005,6 +1022,7 @@ async def _run_publish(make_config: MakeConfig, repo: Path, **overrides: Any) ->
 async def _run_plan_subverb(make_config: MakeConfig, repo: Path) -> int:
     return await _run_improve(make_config, repo, improve_plan_description="add rate limiting")
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 async def test_plan_subverb_repairs_invalid_plan_once_then_blocks_without_truncating(
     improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
@@ -1037,6 +1055,7 @@ async def test_plan_subverb_repairs_invalid_plan_once_then_blocks_without_trunca
     assert "PRIVATE_SCHEMA_SECRET" not in persisted
     assert "TOKEN=" not in persisted
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 async def test_an_edited_file_left_unquoted_is_repaired_before_the_plan_lands(
     improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
@@ -1162,6 +1181,7 @@ def test_scope_narrowing_does_not_widen_for_a_repo_root_service(tmp_path: Path) 
     )
     assert [(stack.stack_name, list(stack.files)) for stack in scoped] == [("python", ["services/api/inner/main.py"])]
 
+@pytest.mark.usefixtures("fake_gh")
 @pytest.mark.anyio
 async def test_publication_failures_are_not_reported_as_planning_failures(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
