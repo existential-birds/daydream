@@ -85,8 +85,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New records are `daydream.run.v4`, with no `scoring` section, and
     `daydream.observation.v4`, with no reward fields in harvest annotations.
   - Corpus projections drop the reward, posterior and decisive fields.
-  - Earlier stores and Hub destinations are refused with the existing message and nothing is
-    converted; use a fresh store or destination.
+  - Earlier stores, `daydream.snapshot.v1` snapshots and Hub destinations are refused with the
+    existing message and nothing is converted; use a fresh store or destination.
 
 ### Fixed
 
