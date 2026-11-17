@@ -50,16 +50,15 @@ def projection_run(
 def append_projection_evidence(
     store: LocalRecordStore, run: dict[str, Any], *,
     dispositions: tuple[str, ...] = ("accepted", "rejected", "ambiguous"),
-    role: str = "rater", evidence_valid_at: str = VALID_AT,
 ) -> None:
     """Append per-host-item judgments to an already committed run."""
     run_id = run["run_id"]
     for item, disposition in zip(run["findings"]["value"]["items"], dispositions):
         evidence = [{"reply_id": item["item_uid"], "classifier_label": disposition,
-                     "valid_at": evidence_valid_at, "created_at": evidence_valid_at,
+                     "valid_at": VALID_AT, "created_at": VALID_AT,
                      "body": "confirmed"}] if disposition in {"accepted", "rejected"} else []
         store.append_observation(observation(f"{run_id}:{item['item_uid']}:judgment", run_id=run_id,
-            item_uid=item["item_uid"], role=role, valid_at=evidence_valid_at,
+            item_uid=item["item_uid"], role="rater", valid_at=VALID_AT,
             semantic_evidence=evidence, evidence_digest=semantic_evidence_digest(evidence),
             payload={"type": "finding-judgment", "disposition": disposition, "rationale": "fixture judgment"}))
 

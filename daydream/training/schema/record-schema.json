@@ -30,7 +30,6 @@
     "record_type": {
       "enum": [
         "outcome-finding",
-        "process-trace",
         "task-only"
       ]
     },
@@ -116,12 +115,6 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$",
       "description": "sha256 of finding_text."
-    },
-    "prompt": {
-      "type": "string"
-    },
-    "completion": {
-      "type": "string"
     },
     "diff": {
       "type": "string",

@@ -124,7 +124,7 @@ async def test_terminal_failure_retains_owned_trace_and_partial_evidence(
     assert raw["original_task"]["status"] == "available"
     assert raw["provenance"]["collection_diagnostics"]["fix-failures.json"] == {
         "status": "failed", "reason": "malformed_json", "raw_text": "{malformed"}
-    # A version 3 record names no routing or per-stack setting of the replaced reviewer.
+    # A version 4 record names no routing or per-stack setting of the replaced reviewer.
     assert raw["schema_version"] == "daydream.run.v4"
     assert not {"latency_profile", "latency_route", "latency_routing"} & raw["provenance"].keys()
     effective = raw["provenance"]["effective_configuration"]

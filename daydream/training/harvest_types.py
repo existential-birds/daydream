@@ -1,14 +1,11 @@
-"""Validated record inputs and immutable acquired harvest evidence."""
+"""Validated record inputs for harvest."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-from daydream.training._immutable_json import freeze_json
-from daydream.training.rubric import Rubric
 
 
 @dataclass(frozen=True)
@@ -112,35 +109,3 @@ class HarvestRow:
             "pr_repo": self.pr_repo,
             "pr_number": self.pr_number,
         }
-
-
-@dataclass(frozen=True)
-class HarvestEvidence:
-    """Completed acquisition, with owned immutable nested signal collections."""
-
-    rubric: Rubric
-
-    def __post_init__(self) -> None:
-        resolutions = self.rubric.per_finding_resolutions
-        object.__setattr__(
-            self,
-            "rubric",
-            replace(
-                self.rubric,
-                fix_applied=replace(
-                    self.rubric.fix_applied, window_commits=tuple(self.rubric.fix_applied.window_commits)
-                ),
-                per_finding_resolutions=(
-                    None
-                    if resolutions is None
-                    else tuple(
-                        replace(
-                            resolution,
-                            evidence=tuple(freeze_json(entry) for entry in resolution.evidence),
-                            reply_captures=tuple(freeze_json(capture) for capture in resolution.reply_captures),
-                        )
-                        for resolution in resolutions
-                    )
-                ),
-            ),
-        )

@@ -11,7 +11,6 @@ import tempfile
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -123,8 +122,7 @@ _OBSERVATION_SCHEMA = _object(
     reply_captures=_array(_REPLY_CAPTURE),
     evidence_digest_scheme={"enum": ["canonical-json-v1", "reply-evidence-v1"]}, review_required=_BOOL,
     payload={"oneOf": [
-        _object(optional=("rubric",),
-            type={"const": "run-label"}, label={"enum": ["accepted", "rejected", "contested", "unknown"]}, rubric=_MAP),
+        _object(type={"const": "run-label"}, label={"enum": ["accepted", "rejected", "contested", "unknown"]}),
         _object(optional=("record_id",), type={"const": "finding-judgment"}, disposition={"enum": [
             "accepted", "rejected", "ambiguous", "unanswered", "missing", "unknown"]},
             rationale=_ID, record_id=_nullable(_SHA)),
@@ -137,18 +135,13 @@ _OBSERVATION_SCHEMA["properties"]["payload"]["oneOf"].append(_object(
     type={"const": "harvest-annotation"}, annotation=_HARVEST_ANNOTATION, labeler_policy_version=_ID))
 _MEMBER = _object(identity=_ID, record_digest=_SHA, shard={"type": "string", "pattern": "^[a-f0-9]{64}\\.jsonl$"},
                   shard_digest=_SHA)
-_SNAPSHOT_SCHEMA = _object(schema_version={"const": "daydream.snapshot.v1"}, snapshot_id=_SHA,
-    observed_before=_STRING, valid_before=_nullable(_STRING), runs=_array(_MEMBER), observations=_array(_MEMBER))
-_SNAPSHOT_V2_SCHEMA = deepcopy(_SNAPSHOT_SCHEMA)
-_SNAPSHOT_V2_SCHEMA["properties"].update(
-    schema_version={"const": "daydream.snapshot.v2"},
+_SNAPSHOT_SCHEMA = _object(schema_version={"const": "daydream.snapshot.v2"}, snapshot_id=_SHA,
+    observed_before=_STRING, valid_before=_nullable(_STRING), runs=_array(_MEMBER), observations=_array(_MEMBER),
     source=_nullable(_object(repository=_ID, revision={"type": "string", "pattern": "^[a-f0-9]{40}$"},
-                            manifest_sha256=_nullable(_SHA))))
-_SNAPSHOT_V2_SCHEMA["required"].append("source")
+                             manifest_sha256=_nullable(_SHA))))
 _VALIDATORS = {"daydream.run.v4": Draft202012Validator(_RUN_SCHEMA),
                "daydream.observation.v4": Draft202012Validator(_OBSERVATION_SCHEMA),
-               "daydream.snapshot.v1": Draft202012Validator(_SNAPSHOT_SCHEMA),
-               "daydream.snapshot.v2": Draft202012Validator(_SNAPSHOT_V2_SCHEMA)}
+               "daydream.snapshot.v2": Draft202012Validator(_SNAPSHOT_SCHEMA)}
 
 
 class _InvalidRecord(ValueError):
@@ -284,7 +277,7 @@ def parse_observation(raw: Mapping[str, Any] | str | bytes) -> Record:
 
 
 def parse_snapshot(raw: Mapping[str, Any] | str | bytes) -> Record:
-    return _parse_typed(raw, versions=("daydream.snapshot.v1", "daydream.snapshot.v2"), name="Snapshot")
+    return _parse_typed(raw, versions=("daydream.snapshot.v2",), name="Snapshot")
 
 
 def validate_record_targets(runs: Sequence[Record], observations: Sequence[Record]) -> None:
@@ -856,7 +849,7 @@ class LocalRecordStore:
                 expected_id = value.pop("snapshot_id")
                 if expected_id != snapshot_id or _sha(canonical_json(value).encode()) != snapshot_id:
                     raise StoreError("snapshot_digest_mismatch")
-                if value["schema_version"] not in ("daydream.snapshot.v1", "daydream.snapshot.v2"):
+                if value["schema_version"] != "daydream.snapshot.v2":
                     raise StoreError("unknown_snapshot_schema")
                 pinned = parse_snapshot({"snapshot_id": snapshot_id, **value})
             except (TypeError, KeyError, ValueError, RecursionError) as error:

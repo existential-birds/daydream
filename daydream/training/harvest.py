@@ -36,7 +36,7 @@ from daydream.json_utils import canonical_json
 from daydream.training import labeler_versions
 from daydream.training.adjudication.snapshot import record_evidence_digest
 from daydream.training.backfill_cache import BackfillCache
-from daydream.training.harvest_types import HarvestEvidence, HarvestRow
+from daydream.training.harvest_types import HarvestRow
 from daydream.training.labeler_signals import (
     CommentResolutionSignal,
     FixAppliedSignal,
@@ -333,7 +333,7 @@ def acquire_harvest_evidence(
     *,
     services: HarvestServices,
     repo_resolution: Path | None,
-) -> HarvestEvidence:
+) -> Rubric:
     """Acquire one row's complete external evidence in established order."""
     repo_clone = repo_resolution or services.store_dir
     pr_merge = None
@@ -346,36 +346,33 @@ def acquire_harvest_evidence(
             if not _is_benign_pr_absence(exc):
                 raise
 
-    reviewer_logins: list[str] = []
     if pr_merge is None:
-        rubric = _build_rubric_local(
+        return _build_rubric_local(
             row,
             services=services,
             repo_clone=repo_clone,
             clone_resolved=repo_resolution is not None,
         )
-    else:
-        try:
-            reviewer_logins = reviewer_logins_signal(row.as_signal_row(), gh_api=services.github)
-        except RateLimitError:
-            raise
-        except GitError:
-            pass
-        rubric = _build_rubric_pr(
-            row,
-            services=services,
-            github=services.github,
-            repo_clone=repo_clone,
-            pr_merge=pr_merge,
-            pr_author_logins=frozenset({pr_merge.author_login}) if pr_merge.author_login else frozenset(),
-            review_author_logins=frozenset(reviewer_logins),
-        )
-    return HarvestEvidence(rubric=rubric)
+    reviewer_logins: list[str] = []
+    try:
+        reviewer_logins = reviewer_logins_signal(row.as_signal_row(), gh_api=services.github)
+    except RateLimitError:
+        raise
+    except GitError:
+        pass
+    return _build_rubric_pr(
+        row,
+        services=services,
+        github=services.github,
+        repo_clone=repo_clone,
+        pr_merge=pr_merge,
+        pr_author_logins=frozenset({pr_merge.author_login}) if pr_merge.author_login else frozenset(),
+        review_author_logins=frozenset(reviewer_logins),
+    )
 
 
-def build_annotation(row: HarvestRow, evidence: HarvestEvidence) -> AnnotationPayload:
-    """Purely reduce validated row and immutable evidence into an annotation."""
-    rubric = evidence.rubric
+def build_annotation(row: HarvestRow, rubric: Rubric) -> AnnotationPayload:
+    """Purely reduce a validated row and its acquired rubric into an annotation."""
     outcome_label = derive_outcome_label(rubric)
     labels = [outcome_label] if outcome_label != "unknown" else []
 
@@ -861,12 +858,12 @@ def collect_annotation(
                 services.set_pr_link(row, number, slug)
             row = replace(row, pr_number=number, pr_repo=slug)
 
-    evidence = acquire_harvest_evidence(
+    rubric = acquire_harvest_evidence(
         row,
         services=services,
         repo_resolution=repo_resolution,
     )
-    return row, build_annotation(row, evidence)
+    return row, build_annotation(row, rubric)
 
 
 async def run_harvest(

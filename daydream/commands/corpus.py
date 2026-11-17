@@ -32,7 +32,7 @@ def _build_build_corpus_parser() -> argparse.ArgumentParser:
     for dimension in ("stack", "repo", "profile"):
         parser.add_argument(f"--max-{dimension}-share", type=float,
                             help=f"Maximum projected share of one {dimension}, in (0, 1].")
-    common._add_dry_run_argument(parser, "Print the projection summary without writing output.")
+    parser.add_argument("--dry-run", action="store_true", help="Print the projection summary without writing output.")
     parser.add_argument("--as-of", help="Optional UTC temporal pin; cannot broaden snapshot eligibility.")
     return parser
 
@@ -73,7 +73,7 @@ def _build_harvest_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="daydream corpus harvest",
         description="Acquire PR evidence for frozen records and append immutable annotations and enrichment.")
     _add_record_inputs(parser)
-    common._add_dry_run_argument(parser, "Build annotations without writing observations.")
+    parser.add_argument("--dry-run", action="store_true", help="Build annotations without writing observations.")
     parser.add_argument("--session", help="Restrict runs to this run ID prefix.")
     parser.add_argument("--cache-dir", type=Path, default=Path("~/.daydream/harvest-cache/"))
     parser.add_argument("--repo-clone-root", type=Path, help="Cached clone directory (default: <cache-dir>/repos/).")
