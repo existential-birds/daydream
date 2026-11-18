@@ -14,6 +14,7 @@ from daydream.json_utils import atomic_write_bytes, canonical_json
 from daydream.training.corpus_projection.provenance import extract_profile
 from daydream.training.corpus_projection.segments import segment
 from daydream.training.corpus_projection.selection import (
+    SHARE_DIMENSION_NAMES,
     Record,
     _apply_share_caps,
     _share_caps_report,
@@ -61,7 +62,7 @@ class BuildFrozenCorpusConfig:
     max_profile_share: float | None = None
 
     def __post_init__(self) -> None:
-        for dimension in ("repo", "profile"):
+        for dimension in SHARE_DIMENSION_NAMES:
             share = getattr(self, f"max_{dimension}_share")
             if share is not None and not 0 < share <= 1:
                 raise ShareCapRangeError(dimension, share)
@@ -309,7 +310,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
     exclusions_by_reason["non-decisive-adjudication"] = len(adjudication)
 
     share_caps_report: dict[str, Any] | None = None
-    share_limits = {"repo": config.max_repo_share, "profile": config.max_profile_share}
+    share_limits = {name: getattr(config, f"max_{name}_share") for name in SHARE_DIMENSION_NAMES}
     if any(limit is not None for limit in share_limits.values()):
         records, share_exclusions = _apply_share_caps(records, share_limits)
         exclusions_by_reason.update({f"share-cap:{k}": n for k, n in share_exclusions.items()})

@@ -27,13 +27,14 @@ def retain_group_limits(
 
 
 _SHARE_DIMENSIONS: tuple[tuple[str, Callable[[Record], Any]], ...] = (
-    # One dimension table consumed by both the share-cap selection stage and
-    # the report builder, so the vocabulary uses (limit keys, configured keys,
-    # applied keys, exclusion-key prefixes, ``max_<name>_share`` flags) can
-    # never drift apart.
+    # The one dimension table: selection, the report, config validation, the
+    # projector's limits and the CLI flags all derive their keys from it. Only
+    # the public ``BuildFrozenCorpusConfig.max_<name>_share`` fields repeat the
+    # names, and reading a missing field by name fails loudly.
     ("repo", lambda r: cast(dict[str, Any], r.get("lineage") or {}).get("repo_slug")),
     ("profile", lambda r: cast(dict[str, Any], r.get("profile") or {}).get("profile_name")),
 )
+SHARE_DIMENSION_NAMES: tuple[str, ...] = tuple(name for name, _getter in _SHARE_DIMENSIONS)
 
 
 def _max_keep_count(total: int, limit: float) -> int:
