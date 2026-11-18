@@ -544,8 +544,10 @@ async def _post_review_from_report_empty_items_posts_diagram_case(
             return _NO_ISSUES
 
         monkeypatch.setattr(pr_review, "classify", classify)
-        # A projection finalization rejected still posts the outcome after an extension step removed the file.
-        for summary, readable in ((None, True), ("⚠️ **Review failed.**", True), ("⚠️ **Review failed.**", False)):
+        # A projection finalization rejected still posts the outcome after an extension step removed the file;
+        # a readable projection without the file skips silently.
+        for summary, readable in ((None, True), ("⚠️ **Review failed.**", True), ("⚠️ **Review failed.**", False),
+                                  ("⚠️ **Review failed.**", True)):
             if not readable:
                 merged.unlink()
             status = await pr_review.post_review_to_pr_from_report(
@@ -553,9 +555,10 @@ async def _post_review_from_report_empty_items_posts_diagram_case(
                 post=True, approve_on_clean=True, renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO,
                 review_complete=False, findings_readable=readable, review_summary=summary,
             )
-            assert status == (pr_review.PostStatus.POSTED if summary else pr_review.PostStatus.NOTHING_TO_POST)
+            posted = summary is not None and (not readable or merged.exists())
+            assert status == (pr_review.PostStatus.POSTED if posted else pr_review.PostStatus.NOTHING_TO_POST)
             plan = captured.pop("plan", None)
-            assert (plan is None) if summary is None else (
+            assert (plan is None) if not posted else (
                 plan is not None and plan.event is pr_review.ReviewEvent.COMMENT and plan.review_summary == summary)
         assert seen == [[], []]
         assert warnings[-2:] == [f"{problem}; posting the review outcome without findings."

@@ -102,9 +102,10 @@ async def post_review_to_pr_from_report(
     if not findings_readable or not isinstance(items, list) or len(issues) != len(items):
         # A corrupt, partially-written or misshapen merged-items.json must not crash
         # the run, and an item the parser drops must not let a clean review approve
-        # over it (#400). Items that parse but that finalization sealed as an unusable
-        # projection are never posted either. An incomplete review cannot approve, so its
-        # sealed outcome still posts as a findings-free COMMENT; otherwise skip the post cleanly.
+        # over it (#400). Items that finalization sealed as an unusable projection, including
+        # a file a later step deleted, are never posted either. An incomplete review cannot
+        # approve, so its sealed outcome still posts as a findings-free COMMENT; otherwise skip
+        # the post cleanly.
         problem = (f"Could not read {merged_items_path.name}" if findings_readable
                    else "Merged items are unusable")
         if review_complete or not review_summary:
