@@ -90,26 +90,18 @@ def _apply_share_caps(
         # Empty population (no decisive findings): configured caps exclude
         # nothing — a previously completing zero-record build stays completing.
         return population, exclusions
-    # Fail-closed degeneracy pre-check against the original input population:
-    # a cap that cannot keep a single record of an over-share group covering
-    # the whole input would collapse it to zero — refuse before doing any work.
-    # (Populations reduced by earlier dimensions or by a fixed-point re-pass
-    # are handled by the fail-closed sole-value check in the trim loop below,
-    # so this check is invariant and runs once per configured dimension on the
-    # entry population.)
     entry_total = len(population)
     for dimension, flag, getter, limit in dimensions:
-        entry_counts = Counter(map(getter, population))
-        for value, count in entry_counts.items():
-            if count / entry_total > limit and count == entry_total:
-                if _max_keep_count(entry_total, limit) == 0:
-                    _raise_share_caps_fail_closed(
-                        flag=flag,
-                        limit=limit,
-                        dimension=dimension,
-                        population=entry_total,
-                        value=value,
-                    )
+        # Kept: an all-one-profile entry that keeps none refuses as profile before repo trims reword it.
+        entry_values = set(map(getter, population))
+        if len(entry_values) == 1 and _max_keep_count(entry_total, limit) == 0:
+            _raise_share_caps_fail_closed(
+                flag=flag,
+                limit=limit,
+                dimension=dimension,
+                population=entry_total,
+                value=next(iter(entry_values)),
+            )
     previous_size = -1
     while len(population) != previous_size:
         previous_size = len(population)
@@ -124,11 +116,9 @@ def _apply_share_caps(
                         # population is still <= limit.
                         allowed = _max_keep_count(total, limit)
                         if allowed == 0 and count == total:
-                            # Sole remaining value after earlier reductions or
-                            # exclusions: trimming it further would empty the
-                            # population entirely — the same terminal state as
-                            # the entry degeneracy pre-check above, so fail
-                            # closed (never emit a lone value above its cap).
+                            # Sole remaining value: trimming it would empty the
+                            # population, so fail closed (never emit a lone
+                            # value above its cap).
                             _raise_share_caps_fail_closed(
                                 flag=flag,
                                 limit=limit,

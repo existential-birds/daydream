@@ -42,14 +42,10 @@ def _handle_build_corpus_command(argv: list[str]) -> int:
     from dataclasses import replace
 
     from daydream.training.corpus_projection import BuildFrozenCorpusConfig, build_frozen_corpus
+    from daydream.training.corpus_projection.projector import ShareCapRangeError
 
     args = _build_build_corpus_parser().parse_args(argv)
     console = create_console()
-    for dimension in ("repo", "profile"):
-        value = getattr(args, f"max_{dimension}_share")
-        if value is not None and not 0.0 < value <= 1.0:
-            print_error(console, f"Invalid --max-{dimension}-share", "Must be in (0, 1].")
-            return 1
     try:
         config = BuildFrozenCorpusConfig(out_dir=args.out.parent,
             store_dir=args.store.expanduser(), snapshot_id=args.snapshot_id,
@@ -60,6 +56,9 @@ def _handle_build_corpus_command(argv: list[str]) -> int:
                 summary = build_frozen_corpus(replace(config, out_dir=Path(td)))
         else:
             summary = build_frozen_corpus(config)
+    except ShareCapRangeError as exc:
+        print_error(console, f"Invalid --max-{exc.dimension}-share", "Must be in (0, 1].")
+        return 1
     except (OSError, ValueError, TypeError) as exc:
         print_error(console, "Corpus build refused", str(exc))
         return 1

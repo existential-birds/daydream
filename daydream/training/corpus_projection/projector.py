@@ -38,6 +38,14 @@ def _write_artifact(path: Path, data: bytes) -> None:
     atomic_write_bytes(path, data, fsync=False, dir_fsync=False, mode=None)
 
 
+class ShareCapRangeError(ValueError):
+    """A ``max_<dimension>_share`` outside (0, 1]; ``dimension`` names the capped field."""
+
+    def __init__(self, dimension: str, share: float) -> None:
+        super().__init__(f"max_{dimension}_share must be in (0.0, 1.0], got {share}")
+        self.dimension = dimension
+
+
 @dataclass(frozen=True)
 class BuildFrozenCorpusConfig:
     """Pinned input membership and projection settings; no network or repository checkout required."""
@@ -53,16 +61,16 @@ class BuildFrozenCorpusConfig:
     max_profile_share: float | None = None
 
     def __post_init__(self) -> None:
+        for dimension in ("repo", "profile"):
+            share = getattr(self, f"max_{dimension}_share")
+            if share is not None and not 0 < share <= 1:
+                raise ShareCapRangeError(dimension, share)
         for name in ("out_dir", "store_dir"):
             object.__setattr__(self, name, Path(getattr(self, name)))
         output_root = self.out_dir.expanduser().resolve()
         store_root = self.store_dir.expanduser().resolve()
         if output_root.is_relative_to(store_root) or store_root.is_relative_to(output_root):
             raise ValueError("corpus output overlaps the record store namespace")
-        for name in ("max_repo_share", "max_profile_share"):
-            share = getattr(self, name)
-            if share is not None and not 0 < share <= 1:
-                raise ValueError(f"{name} must be in (0.0, 1.0], got {share}")
         if self.holdout_rate < 0 or self.val_rate < 0 or self.holdout_rate + self.val_rate > 1:
             raise ValueError("split rates must be nonnegative and sum to at most 1")
         if self.as_of is not None:
