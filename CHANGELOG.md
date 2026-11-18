@@ -101,8 +101,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `pairs[].a_lens`/`b_lens`.
   - Earlier records, stores and archive indexes are refused with the existing messages and
     nothing is converted; use a fresh store, Hub destination or archive directory.
-- **Breaking (0.y.z):** Data paths with no producer are removed
-  ([#1920](https://github.com/existential-birds/daydream/pull/1920)):
+- **Breaking (0.y.z):** Data paths with no producer, found during
+  [#1920](https://github.com/existential-birds/daydream/pull/1920), are removed:
   - The unverified-location demotion is gone. Its producer was retired in
     [#1834](https://github.com/existential-birds/daydream/issues/1834), so no finding carried
     `location_cited_line` or `location_distrust`. `--findings-out` findings drop
@@ -115,7 +115,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     [#1895](https://github.com/existential-birds/daydream/issues/1895), is removed along with
     `daydream corpus build --max-stack-share`. Corpus records move to training-record schema
     `"4"`, annotation queues to `daydream.annotation-queue.v3`, annotation exports to
-    `daydream.annotation-export.v3`, annotation snapshots to `1055-snapshot-r2` and the
+    `daydream.annotation-export.v3`, annotation snapshots to `annotation-snapshot/1055-snapshot-r2` and the
     lineage `share_caps` block to version 2. Adjudication report strata are keyed by profile
     only. Earlier queues and exports are refused with the existing messages and nothing is
     converted; rebuild the corpus and re-export the queue.

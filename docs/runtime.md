@@ -11,7 +11,7 @@ Local captured review coverage uses terminal version 2 and a distinct `source_id
 commit-bound findings envelopes reject that identity instead of relabeling it.
 A fixing run over tracked uncommitted edits uses terminal version 3
 ([captured local source](#captured-local-source)).
-Immutable PR exports use schema 5, retaining original PR provenance separately
+Immutable PR exports use schema 7, retaining original PR provenance separately
 from the materialized analyzed revision (see [immutable PR inputs](#immutable-pr-inputs)).
 Diagram artifacts carry no review coverage; unsupported schemas are rejected.
 

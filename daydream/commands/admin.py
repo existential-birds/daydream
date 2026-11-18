@@ -179,12 +179,12 @@ def _build_post_findings_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--base-sha",
         metavar="SHA",
-        help="Independently trusted requested base tip (required for immutable findings schema 3).",
+        help="Independently trusted requested base tip (required for immutable findings).",
     )
     parser.add_argument(
         "--comparison-sha",
         metavar="SHA",
-        help="Independently trusted original comparison base (required for immutable findings schema 3).",
+        help="Independently trusted original comparison base (required for immutable findings).",
     )
     parser.add_argument(
         "--bot-login",
