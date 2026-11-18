@@ -54,7 +54,6 @@ from daydream.phases import (
     severity_sorted,
 )
 from daydream.phases.test_evidence import test_command_fact
-from daydream.repository_paths import strip_dot_slash
 from daydream.run_context import resolve_run_context
 from daydream.test_execution import TestCommandDiagnostic
 from daydream.trajectory import (
@@ -170,9 +169,6 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     except CANONICAL_ITEMS_ERRORS as exc:
         print_error(console, "Fix preflight failed", f"merged items are malformed: {type(exc).__name__}")
         return Stop(1)
-    # Normalize legal ./ prefixes once to match Git-derived footprint paths.
-    for _item in items:
-        _item["file"] = strip_dot_slash(_item["file"])
     stamp_item_uids(items)
     if not items:
         print_success(console, "No actionable items -- done.")
