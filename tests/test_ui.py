@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
 from io import StringIO
 from pathlib import Path
 
@@ -40,13 +39,6 @@ from daydream.ui.panels import LiveToolPanelRegistry
 from daydream.ui.theme import _TASK_PROMPT_MAX_LINES
 from daydream.ui.tools import format_callback_progress
 from tests.harness.backend import ScriptedBackend
-
-
-def _capture_console(fn: Callable[[Console], None]) -> str:
-    """Run *fn* against a recording console and return the captured text."""
-    console = Console(file=StringIO(), record=True, force_terminal=True, width=200)
-    fn(console)
-    return console.export_text()
 
 
 def _ask(console: Console, message: str, default: str = "n") -> str:
