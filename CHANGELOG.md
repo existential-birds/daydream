@@ -132,15 +132,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `merged-items.json` the same way review finalization does and stops before fixing when
     an extension step left malformed items. The Verdict Join table no longer has an "Other"
     row.
-  - Built-in fix phases called directly from an extension (`daydream.phases.phase_fix`,
-    `phase_fix_batched`, `phase_fix_parallel`) no longer silently drop non-string
-    `related_files` entries or report a missing `item_uid` as `ValueError`. Pass canonical
-    items as the fix gate produces them: a malformed item now raises `TypeError` or `KeyError`
+- **Breaking (0.y.z):** Built-in phases and helpers expect canonical items as the fix gate
+  produces them, and some Python names are removed
+  ([#1921](https://github.com/existential-birds/daydream/pull/1921)):
+  - `daydream.phases.phase_fix`, `phase_fix_batched`, `phase_fix_parallel`,
+    `group_items_by_footprint` and `phase_fix_verify` no longer default a missing
+    `description`, drop non-string `related_files` entries, accept a missing integer `id`
+    or report a missing `item_uid` as `ValueError`. A malformed item raises `TypeError` or
+    `KeyError`, which `phase_fix_parallel` records as that group's failure
     ([#1924](https://github.com/existential-birds/daydream/issues/1924)).
   - `daydream.phases.phase_verify_recommendations(backend, work, items, *, deep_dir, strategy,
     run_context)` takes the fix gate's validated items instead of a `merged_items_path` that
     it re-read, so a later rewrite of `merged-items.json` can no longer crash verification or
-    change which findings it verifies.
+    change which findings it verifies. Its prompt lists findings in severity order.
+  - `daydream.pr_review.extract_item_fields` and `ItemFields` are removed; use
+    `parsed_issues_from_items` ([#1922](https://github.com/existential-birds/daydream/issues/1922)).
+    `daydream.training.corpus_projection.provenance.extract_provenance` is now
+    `extract_profile` and returns only the profile mapping.
 
 ### Fixed
 
@@ -148,10 +156,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Review finalization warns "Cannot validate terminal findings: RecursionError" and the fix
   gate stops at its preflight, as they already did for other malformed merged items
   ([#1931](https://github.com/existential-birds/daydream/issues/1931)).
-- PR posting and run-data capture no longer crash on a malformed `merged-items.json`
-  (too deeply nested, not UTF-8, or not an object of item objects). Posting warns that it
-  could not read the file and skips the post, and capture records `malformed_json`, as for
-  other unreadable files
+- PR posting no longer crashes or treats damage as a clean review when `merged-items.json`
+  is too deeply nested, not UTF-8, not an object with an `items` list, or holds items
+  without a file. It warns that it could not read the file and skips the post, so no
+  approval follows ([#1932](https://github.com/existential-birds/daydream/issues/1932)).
+- Run-data capture records a too deeply nested artifact as `malformed_json` instead of
+  losing the run record ("Run evidence could not be persisted (RecursionError)")
   ([#1932](https://github.com/existential-birds/daydream/issues/1932)).
 - A Codex invocation that asks for no persisted session, as every committed-review
   invocation does, now runs with `--ephemeral`, so Codex writes no session rollout or
