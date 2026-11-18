@@ -95,16 +95,18 @@ async def post_review_to_pr_from_report(
         payload = json.loads(merged_items_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
         payload = None
-    items = payload.get("items", []) if isinstance(payload, dict) else None
-    if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+    items = payload.get("items") if isinstance(payload, dict) else None
+    issues = parsed_issues_from_items(items) if isinstance(items, list) and all(
+        isinstance(item, dict) for item in items) else []
+    if not isinstance(items, list) or len(issues) != len(items):
         # A corrupt, partially-written or misshapen merged-items.json must not crash
-        # the run; treat it like a missing file and skip the post cleanly (#400).
+        # the run, and an item the parser drops must not let a clean review approve
+        # over it; skip the post cleanly (#400).
         print_warning(
             console,
             f"Could not read {merged_items_path.name}; skipping PR post.",
         )
         return PostStatus.NOTHING_TO_POST
-    issues = parsed_issues_from_items(items)
     if not issues and not approve_on_clean and not review_warnings and not (diagram_blocks and diagram_blocks.strip()):
         # A complete pinned review answers its own earlier unfinished notice; _post still validates the target.
         notice = superseding_completion_notice(
@@ -137,7 +139,7 @@ async def post_review_to_pr_from_report(
 
 
 def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
-    """Convert canonical items to postable findings with severity and provenance.
+    """Convert canonical items to postable findings with severity, confidence and fingerprint.
 
     Items without a nonempty file path are dropped; a Git name is kept exact."""
     out: list[ParsedIssue] = []

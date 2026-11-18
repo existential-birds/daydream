@@ -515,9 +515,23 @@ async def _post_review_from_report_empty_items_posts_diagram_case(
     with_diagram: bool,
 ) -> None:
     merged = tmp_path / "merged-items.json"
-    merged.write_text(json.dumps({"items": []}))
     blocks = "<details><summary><h3>Flowchart</h3></summary>\nX\n</details>"
     captured = _stub_post(monkeypatch, pr, _NO_ISSUES)
+    warnings: list[str] = []
+    monkeypatch.setattr(pr_review, "print_warning", lambda _c, message: warnings.append(message))
+    # Unreadable, misshapen or file-less items never approve over findings the reader would drop.
+    for body in ("[" * 100_000, b"\xff", "[]", '{"items": "x"}', '{"items": [1]}', "{}",
+                 '{"items": [{"id": 1, "description": "d", "rationale": "r", "severity": "high"}]}'):
+        merged.write_bytes(body if isinstance(body, bytes) else body.encode())
+        warnings.clear()
+        status = await pr_review.post_review_to_pr_from_report(
+            tmp_path, merged, console=_FakeConsole(),  # type: ignore[arg-type]
+            post=True, approve_on_clean=True, diagram_blocks=blocks if with_diagram else None,
+            renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO,
+        )
+        assert status == pr_review.PostStatus.NOTHING_TO_POST and not captured
+        assert warnings == ["Could not read merged-items.json; skipping PR post."]
+    merged.write_text(json.dumps({"items": []}))
 
     status = await pr_review.post_review_to_pr_from_report(
         tmp_path,
