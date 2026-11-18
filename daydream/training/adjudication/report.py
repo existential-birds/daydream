@@ -45,7 +45,6 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
     adjudicator resolutions. The admission gate requires both outcome-bearing classes for
     class_balance_ok.
     """
-    adjudicated = 0
     silver_task_only = 0
     accepted = 0
     rejected = 0
@@ -78,7 +77,6 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
         )
         if decisive:
             if outcome_bearing:
-                adjudicated += 1
                 if not has_human_decision:
                     unresolved += 1
                 if disposition == "accepted":
@@ -99,7 +97,7 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
                 inter_rater_agreeing += 1
 
     return {
-        "outcome_coverage": {"adjudicated": adjudicated},
+        "outcome_coverage": {"adjudicated": accepted + rejected},
         "silver_task_only_count": silver_task_only,
         "class_balance": {"accepted": accepted, "rejected": rejected},
         "unresolved": unresolved,

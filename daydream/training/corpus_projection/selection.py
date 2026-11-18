@@ -50,7 +50,6 @@ def _max_keep_count(total: int, limit: float) -> int:
 
 def _raise_share_caps_fail_closed(
     *,
-    flag: str,
     limit: float,
     dimension: str,
     population: int | None = None,
@@ -58,6 +57,7 @@ def _raise_share_caps_fail_closed(
     values: list[Any] | None = None,
 ) -> NoReturn:
     """Refuse a cap that would empty a nonempty population, naming the dimension."""
+    flag = f"max_{dimension}_share"
     if values is not None:
         raise ValueError(
             f"{flag}={limit} would reduce the total population to zero across "
@@ -79,11 +79,11 @@ def _apply_share_caps(
     None values form their own (none) bucket. Count each exclusion by dimension
     and value. An initially empty corpus stays empty, but trimming a nonempty
     population to zero raises ValueError. Input order never affects selection."""
-    dimensions: list[tuple[str, str, Callable[[Record], Any], float]] = []
+    dimensions: list[tuple[str, Callable[[Record], Any], float]] = []
     for name, getter in _SHARE_DIMENSIONS:
         limit = limits.get(name)
         if limit is not None:
-            dimensions.append((name, f"max_{name}_share", getter, limit))
+            dimensions.append((name, getter, limit))
     exclusions: dict[str, int] = {}
     population = sorted(records, key=lambda r: str(r["record_id"]))
     if not population:
@@ -91,12 +91,12 @@ def _apply_share_caps(
         # nothing — a previously completing zero-record build stays completing.
         return population, exclusions
     entry_total = len(population)
-    for dimension, flag, getter, limit in dimensions:
-        # Kept: an all-one-profile entry that keeps none refuses as profile before repo trims reword it.
+    for dimension, getter, limit in dimensions:
+        # Entry check for later dimensions: earlier trims would otherwise make a different dimension refuse,
+        # or report a smaller population.
         entry_values = set(map(getter, population))
         if len(entry_values) == 1 and _max_keep_count(entry_total, limit) == 0:
             _raise_share_caps_fail_closed(
-                flag=flag,
                 limit=limit,
                 dimension=dimension,
                 population=entry_total,
@@ -105,7 +105,7 @@ def _apply_share_caps(
     previous_size = -1
     while len(population) != previous_size:
         previous_size = len(population)
-        for dimension, flag, getter, limit in dimensions:
+        for dimension, getter, limit in dimensions:
             while True:
                 total = len(population)
                 counts = Counter(map(getter, population))
@@ -120,7 +120,6 @@ def _apply_share_caps(
                             # population, so fail closed (never emit a lone
                             # value above its cap).
                             _raise_share_caps_fail_closed(
-                                flag=flag,
                                 limit=limit,
                                 dimension=dimension,
                                 population=total,
@@ -135,7 +134,6 @@ def _apply_share_caps(
                     exclusions[key] = exclusions.get(key, 0) + count
                 if not kept:
                     _raise_share_caps_fail_closed(
-                        flag=flag,
                         limit=limit,
                         dimension=dimension,
                         values=list(over),

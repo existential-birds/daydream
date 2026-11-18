@@ -312,10 +312,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
     share_limits = {"repo": config.max_repo_share, "profile": config.max_profile_share}
     if any(limit is not None for limit in share_limits.values()):
         records, share_exclusions = _apply_share_caps(records, share_limits)
-        for excl_key, excl_count in share_exclusions.items():
-            exclusions_by_reason[f"share-cap:{excl_key}"] = (
-                exclusions_by_reason.get(f"share-cap:{excl_key}", 0) + excl_count
-            )
+        exclusions_by_reason.update({f"share-cap:{k}": n for k, n in share_exclusions.items()})
         share_caps_report = _share_caps_report(records, share_exclusions, share_limits)
 
     # Aggregate only emitted evidence; capped-out records must not advance lineage valid_at.

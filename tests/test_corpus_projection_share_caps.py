@@ -61,19 +61,27 @@ def test_real_cli_applies_caps_and_pins_matching_report(
     assert json.loads((tmp_path / "direct" / "lineage.json").read_text())["share_caps"] == report
 
 
-def test_cli_refuses_invalid_share_before_creating_output(tmp_path: Path) -> None:
+def test_cli_refuses_invalid_share_before_creating_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
     store = seed_projection_store(tmp_path)
     config = projection_config(store, tmp_path)
     assert cli_main(["corpus", "build", "--store", str(store.root), "--snapshot-id", config.snapshot_id,
                      "--out", str(config.out_dir / "corpus.jsonl"), "--max-profile-share", "1.5"]) == 1
+    output = capsys.readouterr().out
+    assert "Invalid --max-profile-share" in output
+    assert "Must be in (0, 1]." in output
     assert not config.out_dir.exists()
 
 
 def test_build_caps_fail_closed_without_output(tmp_path: Path) -> None:
-    # Two mono-profile records: 0.1 keeps none at entry; 0.6 keeps one, whose 100% share
-    # can no longer be trimmed. Both terminal states fail closed instead of emitting it.
-    for cap in (0.1, 0.6):
+    # Two mono-repo, mono-profile records: 0.1 keeps none at entry, so profile refuses before
+    # the earlier repo cap can; 0.6 keeps one, whose 100% share can no longer be trimmed.
+    # Both terminal states fail closed instead of emitting it.
+    for cap, repo_cap in ((0.1, 0.5), (0.6, None)):
         root = tmp_path / str(cap)
         with pytest.raises(ValueError, match="max_profile_share"):
-            build_frozen_corpus(projection_config(seed_projection_store(root), root, max_profile_share=cap))
+            build_frozen_corpus(projection_config(
+                seed_projection_store(root), root, max_repo_share=repo_cap, max_profile_share=cap,
+            ))
         assert not (root / "out").exists()
