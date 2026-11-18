@@ -24,10 +24,7 @@ class ReviewEvent(StrEnum):
 
 @dataclass
 class ParsedIssue:
-    """A finding with a potentially stale line hint and stable cross-run fingerprint.
-
-    Location demotion retains the original severity for the approval gate.
-    Off-vocabulary severity is tracked separately from an omitted severity."""
+    """A finding with a potentially stale line hint and stable cross-run fingerprint."""
 
     path: str
     line: int | None
@@ -36,9 +33,6 @@ class ParsedIssue:
     confidence: str | None = None
     severity: str | None = None
     fingerprint: str | None = None
-    location_distrust: bool = False
-    severity_before_demotion: str | None = None
-    severity_off_vocabulary: bool = False
 
 
 @dataclass(frozen=True)
@@ -114,21 +108,6 @@ class PRInfo:
     head_repo: str | None = None
     # GitHub base tip at initial lookup, distinct from base_sha (diff merge-base).
     pr_base_sha: str | None = None
-
-
-@dataclass(frozen=True)
-class ItemFields:
-    """Normalized canonical finding fields, before comment rendering."""
-
-    path: str
-    line_int: int | None
-    description: str
-    rationale: str
-    severity: str | None
-    confidence: str | None
-    location_distrust: bool = False
-    severity_before_demotion: str | None = None
-    severity_off_vocabulary: bool = False
 
 
 @dataclass

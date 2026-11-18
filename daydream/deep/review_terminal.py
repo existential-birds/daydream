@@ -27,6 +27,32 @@ from daydream.review_result import ReasonCode, deliver_finalized_review
 from daydream.trajectory import DaydreamPhase, get_current_recorder, phase_scope, run_usage
 from daydream.ui import print_info, print_warning
 
+# MERGED_ITEMS_SCHEMA relaxed for canonical records that extension steps may rewrite.
+_CANONICAL_ITEMS_SCHEMA = copy.deepcopy(MERGED_ITEMS_SCHEMA)
+_CANONICAL_ITEMS_SCHEMA["additionalProperties"] = True
+_CANONICAL_ITEMS_SCHEMA["properties"]["items"]["items"].update(
+    additionalProperties=True, required=["id", "description", "file", "line", "rationale"])
+_CANONICAL_ITEMS_SCHEMA["properties"]["items"]["items"]["properties"].update(
+    line={"type": ["integer", "null"]}, confidence={"enum": ["HIGH", "MEDIUM", "LOW"]})
+# What load_canonical_items raises for unreadable, undecodable, too deeply nested, unconfined or
+# schema-invalid items.
+CANONICAL_ITEMS_ERRORS = (OSError, ValueError, RecursionError, jsonschema.ValidationError)
+
+
+def load_canonical_items(repo: Path, path: Path) -> list[dict[str, Any]]:
+    """Read merged items that extension steps may have rewritten; raise on any malformed record.
+
+    Canonical items carry host identities and an integer display ``id``; confidence and lens are
+    optional because the reviewer asserts none, and severity because an extension step may drop
+    it, which withholds approval. Never normalize malformed records away.
+    """
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    validate_json_schema(payload, _CANONICAL_ITEMS_SCHEMA)
+    if not all(git_observed_path_is_confined(repo, item["file"], allow_leaf_symlink=True) for item in payload["items"]):
+        raise ValueError("a finding path is not a confined repository path")
+    items: list[dict[str, Any]] = payload["items"]
+    return items
+
 
 def refresh_review_report(ctx: FlowContext, *, no_diff: bool = False) -> dict[str, Any]:
     """Refresh presentation after authorized work without refreezing or republishing review authority."""
@@ -187,24 +213,9 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
     path = DeepArtifact.MERGED_ITEMS.at(state.dd)
     if not no_diff:
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            # Canonical items carry host identities; confidence and lens are optional because the reviewer
-            # asserts none, and severity because an extension step may drop it, which withholds approval.
-            # Never normalize malformed records away.
-            schema = copy.deepcopy(MERGED_ITEMS_SCHEMA)
-            schema["additionalProperties"] = True
-            item_schema = schema["properties"]["items"]["items"]
-            item_schema["additionalProperties"] = True
-            item_schema["required"] = ["id", "description", "file", "line", "rationale"]
-            item_schema["properties"]["line"] = {"type": ["integer", "null"]}
-            item_schema["properties"]["confidence"] = {"enum": ["HIGH", "MEDIUM", "LOW"]}
-            validate_json_schema(payload, schema)
-            if not all(git_observed_path_is_confined(ctx.work.repo, item["file"], allow_leaf_symlink=True)
-                       for item in payload["items"]):
-                raise ValueError("a finding path is not a confined repository path")
-            items = payload["items"]
+            items = load_canonical_items(ctx.work.repo, path)
             projection_valid = True
-        except (OSError, ValueError, AttributeError, jsonschema.ValidationError) as exc:
+        except CANONICAL_ITEMS_ERRORS as exc:
             print_warning(console, f"Cannot validate terminal findings: {type(exc).__name__}")
     sealed = program.seal(projection_valid=projection_valid)
     result = sealed["terminal_result"]

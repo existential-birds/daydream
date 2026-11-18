@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import json
-from io import StringIO
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from rich.console import Console
 
 from daydream import agent_retry
 from daydream.agent import run_agent
@@ -21,6 +19,7 @@ from daydream.observability.runtime import trace_run
 from daydream.review_budget import BudgetLedger, BudgetStop
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import DaydreamPhase
+from tests.conftest import capture_agent_console
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 from tests.harness.pi_replay import make_mock_process
@@ -169,8 +168,7 @@ async def test_failure_classification_and_per_error_caps_decide_retries(
 
 async def test_backend_error_reaches_the_console_redacted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A categoryless backend failure surfaces its message with embedded credentials redacted."""
-    recording = Console(file=StringIO(), record=True, force_terminal=True, width=200)
-    monkeypatch.setattr("daydream.agent.console", recording)
+    recording, _ = capture_agent_console(monkeypatch, record=True, force_terminal=True, width=200)
     backend = ScriptedBackend(events=[RuntimeError("overloaded-502 ZAI_API_KEY=leaked-secret-abc123")],
                               retry_attempts=0)
     context = RunContext(InteractionPolicy())

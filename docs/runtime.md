@@ -6,12 +6,12 @@ and `daydream --help-all` for settings rather than copying defaults into docs.
 
 ## Terminal review findings contract
 
-Ordinary `--findings-out` uses schema version 4 with committed `terminal_result` version 1.
+Ordinary `--findings-out` uses schema version 6 with committed `terminal_result` version 1.
 Local captured review coverage uses terminal version 2 and a distinct `source_id`;
 commit-bound findings envelopes reject that identity instead of relabeling it.
 A fixing run over tracked uncommitted edits uses terminal version 3
 ([captured local source](#captured-local-source)).
-Immutable PR exports use schema 5, retaining original PR provenance separately
+Immutable PR exports use schema 7, retaining original PR provenance separately
 from the materialized analyzed revision (see [immutable PR inputs](#immutable-pr-inputs)).
 Diagram artifacts carry no review coverage; unsupported schemas are rejected.
 
@@ -777,7 +777,7 @@ invalidate captured analysis. Trusted repository/PR/provenance stays on result a
 evidence control surfaces; model assignments name only the approved bounded historical
 context, which `review_source` serves. Model-facing profile serialization never carries trusted provenance.
 
-Strict immutable findings schema 5 binds the outer original repository/PR/head to
+Strict immutable findings schema 7 binds the outer original repository/PR/head to
 the envelope and typed coverage to its local head/comparison/diff key. Export does
 not grant publication authority. Its publisher must independently supply and
 validate repository, PR, original head, requested base and comparison SHA;

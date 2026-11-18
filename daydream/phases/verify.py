@@ -74,17 +74,16 @@ async def _run_verifier(
 async def phase_verify_recommendations(
     backend: Backend,
     work: WorkContext,
+    items: list[dict[str, Any]],
     *,
-    merged_items_path: Path,
     deep_dir: Path,
     strategy: str | None = None,
     run_context: RunContext | None = None,
 ) -> dict[str, Any]:
-    """Classify every canonical item and persist the verdicts the verifier returns for them."""
+    """Classify the gate-validated canonical items and persist the verdicts returned for them."""
     run_context = resolve_run_context(run_context)
     output_path = DeepArtifact.VERDICTS.at(deep_dir)
 
-    items: list[dict[str, Any]] = json.loads(merged_items_path.read_text()).get("items", [])
     prompt = get_registry().prompt("verify")(
         strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["verification"].content,
         items=items,
@@ -106,7 +105,7 @@ async def phase_verify_recommendations(
 
 def _asked_verdicts(fresh_verdicts: list[dict[str, Any]], items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep only the verdicts for the findings this turn was asked to verify."""
-    asked = {item_id for item in items if isinstance(item_id := item.get("id"), int) and not isinstance(item_id, bool)}
+    asked = {item["id"] for item in items}
     return [verdict for verdict in fresh_verdicts if verdict.get("issue_id") in asked]
 
 
@@ -181,11 +180,10 @@ async def phase_fix_verify(
     # get the honest non-fixed terminal, never a silent drop.
     verdicts: list[dict[str, Any]] = []
     for item in items:
-        issue_id = item.get("id")
-        entry = by_id.get(issue_id) if isinstance(issue_id, int) else None
+        entry = by_id.get(item["id"])
         if entry is None:
             entry = {
-                "issue_id": issue_id,
+                "issue_id": item["id"],
                 "verdict": "unresolved",
                 "reason": "no verifier verdict",
             }

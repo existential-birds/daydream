@@ -47,11 +47,14 @@ def render_github_review_context(
     unfinished = [outcome for kind in ('stack_outcomes', 'phase_outcomes')
                   for outcome in (terminal_result or {}).get(kind, []) if outcome['status'] != 'complete']
     warnings = dict.fromkeys(review_warnings)
+    unreadable = terminal_result is not None and not terminal_result['projection_valid']
     if state == 'complete' and not warnings:
         return ''
     heading = ('Review completeness unavailable' if state is None else
                f'Review {state}' if state != 'complete' else 'Review incomplete')
     lines = [f'⚠️ **{heading}.**']
+    if unreadable:
+        lines.append(_findings_line(terminal_result, 0))
     diagnostics: dict[str, None] = {}
     for outcome in unfinished:
         key = outcome.get('scope_id', outcome.get('phase'))
@@ -64,7 +67,7 @@ def render_github_review_context(
     lines.extend('- ' + _text(warning, 512) for warning in list(diagnostics)[:8])
     if len(diagnostics) > 8:
         lines.append(f'- {len(diagnostics) - 8} additional notices; see run artifacts.')
-    if state not in {None, 'complete'} and not unfinished:
+    if state not in {None, 'complete'} and not unfinished and not unreadable:
         lines.append('Review did not finish; see run artifacts.')
     if terminal_result is not None and (sentence := allowance_sentence(terminal_result['reason_codes'])):
         lines.append(sentence)
@@ -107,10 +110,13 @@ def _host_attempt(attempt: Any) -> bool:
             and (identity['outcome'] == 'truncated' or attempt['passed'] == (identity['outcome'] == 'passed')))
 
 
+UNREADABLE_FINDINGS_LINE = 'The findings could not be read after the review; the sealed result keeps them.'
+
+
 def _findings_line(terminal_result: dict[str, Any] | None, findings_count: int) -> str:
     """Count the findings, or say that an unusable items projection left none to count."""
     if terminal_result is not None and not terminal_result.get('projection_valid', True):
-        return 'The findings could not be read after the review; the sealed result keeps them.'
+        return UNREADABLE_FINDINGS_LINE
     return 'No confirmed findings.' if not findings_count else f'Confirmed findings: {findings_count}.'
 
 

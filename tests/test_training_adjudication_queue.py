@@ -22,7 +22,6 @@ def _session(sid: str, fingerprint: str, disposition: str, digest: str) -> dict[
                 "evidence_digest": digest,
                 "evidence_digest_scheme": "canonical-json-v1",
                 "profile": "pr_review",
-                "stack": "python",
             }
         ],
     }

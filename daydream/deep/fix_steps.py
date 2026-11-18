@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -23,6 +22,7 @@ from daydream.deep.fix_state import EvidenceKey, FixCycleState
 from daydream.deep.quality_gate import QualityGateThresholds, _evaluate_quality_gate, capture_quality
 from daydream.deep.records import stamp_item_uids
 from daydream.deep.repair_coordinator import continue_repair_job, repair_job_id
+from daydream.deep.review_terminal import CANONICAL_ITEMS_ERRORS, load_canonical_items
 from daydream.deep.scope_issues import (
     _resolve_changed_files,
 )
@@ -54,7 +54,6 @@ from daydream.phases import (
     severity_sorted,
 )
 from daydream.phases.test_evidence import test_command_fact
-from daydream.repository_paths import strip_dot_slash
 from daydream.run_context import resolve_run_context
 from daydream.test_execution import TestCommandDiagnostic
 from daydream.trajectory import (
@@ -89,10 +88,7 @@ def _attach_verdicts(items: list[dict[str, Any]], payload: dict[str, Any]) -> li
             "unverified_assumptions": assumptions if isinstance(assumptions, list) else [],
         }
     for item in items:
-        item_id = item.get("id")
-        if not isinstance(item_id, int):
-            continue
-        match = verdict_lookup.get(item_id)
+        match = verdict_lookup.get(item["id"])
         if match is not None:
             item["verifier_verdict"] = match["verdict"]
             item["evidence"] = match["evidence"]
@@ -166,16 +162,13 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         print_error(console, "Fix preflight failed", str(exc))
         return Stop(1)
 
-    # Read canonical merged items directly (validated above). Replaces an LLM
-    # re-parse of the markdown, which silently dropped structural findings; here
-    # they are ordinary tagged items that reach phase_fix like any other.
-    items_file: Path = deep_state.items_file
-    items: list[dict[str, Any]] = json.loads(items_file.read_text())["items"]
-    # Normalize legal ./ prefixes once to match Git-derived footprint paths.
-    for _item in items:
-        _file = _item.get("file")
-        if isinstance(_file, str):
-            _item["file"] = strip_dot_slash(_file)
+    # Read canonical merged items directly; extension steps may have rewritten
+    # them since review finalization, so refuse any malformed record.
+    try:
+        items = load_canonical_items(ctx.work.repo, deep_state.items_file)
+    except CANONICAL_ITEMS_ERRORS as exc:
+        print_error(console, "Fix preflight failed", f"merged items are malformed: {type(exc).__name__}")
+        return Stop(1)
     stamp_item_uids(items)
     if not items:
         print_success(console, "No actionable items -- done.")
@@ -243,7 +236,7 @@ async def _step_verify(ctx: FlowContext) -> None:
         verdicts_payload = await phase_verify_recommendations(
             ctx.backend_for("verify"),
             ctx.work,
-            merged_items_path=deep_state.items_file,
+            items,
             deep_dir=dd,
             strategy=ctx.strategy("verification"),
             run_context=ctx.run_context,
@@ -274,23 +267,20 @@ def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> 
     if iteration in (None, 1) or not outcomes:
         initial_dispatch = [dict(i) for i in canonical]
         for item in initial_dispatch:
-            uid = item.get("item_uid")
-            target = item.get("file")
-            if isinstance(uid, str) and isinstance(target, str):
-                state.last_fix_target_by_uid[uid] = target
+            state.last_fix_target_by_uid[item["item_uid"]] = item["file"]
         return initial_dispatch
     round_number = iteration if isinstance(iteration, int) else 1
     dispatched: list[dict[str, Any]] = []
     for item in canonical:
-        uid = item.get("item_uid")
-        outcome = outcomes.get(uid) if isinstance(uid, str) else None
+        uid = item["item_uid"]
+        outcome = outcomes.get(uid)
         if not outcome or outcome.get("verdict") not in ACTIONABLE_VERDICTS:
             continue
         copy = dict(item)
         if outcome.get("verdict") in RETARGETABLE_VERDICTS:
             accepted = state.footprint.accept_retarget(
                 ctx.work.repo,
-                str(uid),
+                uid,
                 outcome.get("path"),
                 phase="fix",
                 round_number=round_number,
@@ -300,9 +290,7 @@ def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> 
                 copy["fix_verify_path"] = accepted
         copy["fix_verify_verdict"] = outcome.get("verdict")
         copy["fix_verify_reason"] = outcome.get("reason") or ""
-        target = copy.get("file")
-        if isinstance(uid, str) and isinstance(target, str):
-            state.last_fix_target_by_uid[uid] = target
+        state.last_fix_target_by_uid[uid] = copy["file"]
         dispatched.append(copy)
     return dispatched
 
@@ -479,11 +467,7 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
             code_workspace=ctx.work.repo,
             dd=deep_state.dd,
             candidates={path for path in snapshot.paths if path.endswith(".py")}
-            | {
-                str(item["file"])
-                for item in deep_state.items
-                if isinstance(item.get("file"), str) and str(item["file"]).endswith(".py")
-            },
+            | {item["file"] for item in deep_state.items if item["file"].endswith(".py")},
             before=quality_before,
             before_unavailable_reason=quality_unavailable,
             iteration=deep_state.iteration,
@@ -514,11 +498,7 @@ async def verify_retained_tree(
             round_number=pass_number,
             run_context=ctx.run_context,
         )
-    by_id = {
-        item.get("id"): item
-        for item in items
-        if isinstance(item.get("id"), int) and isinstance(item.get("item_uid"), str)
-    }
+    by_id = {item["id"]: item for item in items}
     state = DeepState(ctx.data).fix_cycle_state
     outcomes: dict[str, dict[str, Any]] = {}
     for verdict in verdicts:
@@ -618,11 +598,7 @@ def _render_fix_outcome_summary(
     """
     if not outcomes:
         return
-    numbering_by_uid = {
-        item["item_uid"]: num
-        for num, item in enumerate(items, start=1)
-        if isinstance(item.get("item_uid"), str)
-    }
+    numbering_by_uid = {item["item_uid"]: num for num, item in enumerate(items, start=1)}
     total = len(items)
     for outcome_key, verdict in outcomes.items():
         num = numbering_by_uid.get(outcome_key)

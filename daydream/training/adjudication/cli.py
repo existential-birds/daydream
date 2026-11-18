@@ -80,7 +80,7 @@ def _queue(records: SnapshotRecords) -> list[dict[str, object]]:
 
 def _state(path: Path) -> tuple[LocalRecordStore, SnapshotRecords, list[dict[str, Any]]]:
     reference = json.loads((path / "reference.json").read_text())
-    if reference.get("schema_version") != "daydream.annotation-queue.v2":
+    if reference.get("schema_version") != "daydream.annotation-queue.v3":
         raise ValueError("invalid annotation queue reference")
     store = LocalRecordStore(Path(reference["store"]))
     records = store.read_snapshot(reference["snapshot_id"])
@@ -165,7 +165,7 @@ def handle_adjudicate(argv: list[str]) -> int:
             _write(
                 args.state_dir / "reference.json",
                 {
-                    "schema_version": "daydream.annotation-queue.v2",
+                    "schema_version": "daydream.annotation-queue.v3",
                     "store": str(store.root),
                     "snapshot_id": args.snapshot_id,
                 },
@@ -195,9 +195,6 @@ def handle_adjudicate(argv: list[str]) -> int:
                         print(item["record_id"])
             else:
                 report = build_report(enriched)
-                report["strata"] = [
-                    {"stack": key[0], "profile": key[1], "count": count} for key, count in report["strata"].items()
-                ]
                 print(json.dumps(report, sort_keys=True, default=str))
         return 0
     except (ValueError, OSError, KeyError, TypeError) as exc:

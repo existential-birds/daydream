@@ -12,12 +12,12 @@ SCHEMA = json.loads((Path(__file__).parent.parent / "daydream/training/schema/re
 
 def _base_record(**overrides: Any) -> dict[str, Any]:
     record: dict[str, Any] = {
-        "schema_version": "3", "record_id": "a" * 64, "record_type": "outcome-finding", "tier": "gold",
+        "schema_version": "4", "record_id": "a" * 64, "record_type": "outcome-finding", "tier": "gold",
         "session_id": "session-1", "trajectory_id": "traj-1", "task_segment": "seg-1", "finding_fingerprint": "b" * 64,
         "disposition": "accepted",
         "profile": {"profile_schema_version": "1", "profile_name": "default", "profile_source_kind": "builtin",
             "profile_digest": "c" * 64,
-        }, "stack": "python", "outcome_label": "correct",
+        }, "outcome_label": "correct",
         "lineage": {"hub_commit": "d" * 40, "snapshot_id": "f" * 64,
             "source_identity_version": "record-snapshot-v2", "content_digests": ["e" * 64],
             "labeler_policy_version": "1", "reply_classifier_version": "1", "rubric_schema_version": "1",

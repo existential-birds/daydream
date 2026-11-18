@@ -11,9 +11,10 @@ from typing import Any, Mapping, cast
 
 from daydream.dataset import LocalRecordStore, evidence_document_view
 from daydream.json_utils import atomic_write_bytes, canonical_json
-from daydream.training.corpus_projection.provenance import extract_provenance
+from daydream.training.corpus_projection.provenance import extract_profile
 from daydream.training.corpus_projection.segments import segment
 from daydream.training.corpus_projection.selection import (
+    SHARE_DIMENSION_NAMES,
     Record,
     _apply_share_caps,
     _share_caps_report,
@@ -38,6 +39,14 @@ def _write_artifact(path: Path, data: bytes) -> None:
     atomic_write_bytes(path, data, fsync=False, dir_fsync=False, mode=None)
 
 
+class ShareCapRangeError(ValueError):
+    """A ``max_<dimension>_share`` outside (0, 1]; ``dimension`` names the capped field."""
+
+    def __init__(self, dimension: str, share: float) -> None:
+        super().__init__(f"max_{dimension}_share must be in (0.0, 1.0], got {share}")
+        self.dimension = dimension
+
+
 @dataclass(frozen=True)
 class BuildFrozenCorpusConfig:
     """Pinned input membership and projection settings; no network or repository checkout required."""
@@ -49,21 +58,20 @@ class BuildFrozenCorpusConfig:
     holdout_rate: float = 0.1
     val_rate: float = 0.1
     salt: str = "daydream-projection-salt"
-    max_stack_share: float | None = None
     max_repo_share: float | None = None
     max_profile_share: float | None = None
 
     def __post_init__(self) -> None:
+        for dimension in SHARE_DIMENSION_NAMES:
+            share = getattr(self, f"max_{dimension}_share")
+            if share is not None and not 0 < share <= 1:
+                raise ShareCapRangeError(dimension, share)
         for name in ("out_dir", "store_dir"):
             object.__setattr__(self, name, Path(getattr(self, name)))
         output_root = self.out_dir.expanduser().resolve()
         store_root = self.store_dir.expanduser().resolve()
         if output_root.is_relative_to(store_root) or store_root.is_relative_to(output_root):
             raise ValueError("corpus output overlaps the record store namespace")
-        for name in ("max_stack_share", "max_repo_share", "max_profile_share"):
-            share = getattr(self, name)
-            if share is not None and not 0 < share <= 1:
-                raise ValueError(f"{name} must be in (0.0, 1.0], got {share}")
         if self.holdout_rate < 0 or self.val_rate < 0 or self.holdout_rate + self.val_rate > 1:
             raise ValueError("split rates must be nonnegative and sum to at most 1")
         if self.as_of is not None:
@@ -89,14 +97,9 @@ def _refuse_posterior_evidence(
             raise ValueError(f"session {session_id!r} finding {fingerprint!r}: refusing posterior outcome evidence")
 
 
-def _provenance_for(resolution: Mapping[str, Any], run: Mapping[str, Any]) -> dict[str, Any]:
-    prov = extract_provenance(resolution)
-    captured = extract_provenance(run)
-    if not any(prov["profile"].values()):
-        prov["profile"] = captured["profile"]
-    if prov["stack"] is None:
-        prov["stack"] = captured["stack"]
-    return prov
+def _profile_for(resolution: Mapping[str, Any], run: Mapping[str, Any]) -> dict[str, Any]:
+    profile = extract_profile(resolution)
+    return profile if any(profile.values()) else extract_profile(run)
 
 
 def _max_valid_at(evidence: list[Record], base: str | None) -> str | None:
@@ -152,7 +155,6 @@ def project_findings(session: Mapping[str, object]) -> tuple[list[Record], list[
             tier = "silver"
         disposition = resolution.get("disposition")
         evidence = list(resolution.get("evidence") or [])
-        provenance = extract_provenance(resolution)
         item_uid = resolution.get("item_uid")
         if not isinstance(item_uid, str) or not item_uid:
             raise ValueError(f"project_findings: session {session_id!r} resolution missing host item_uid")
@@ -170,8 +172,7 @@ def project_findings(session: Mapping[str, object]) -> tuple[list[Record], list[
             "evidence": evidence,
             "reply_captures": resolution.get("reply_captures", []),
             "correction": resolution.get("correction"),
-            "profile": provenance["profile"],
-            "stack": provenance["stack"],
+            "profile": extract_profile(resolution),
         }
         record["item_uid"] = item_uid
         records.append(record)
@@ -264,8 +265,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                 continue
             evidence = cast(list[Record], rec["evidence"])
             _refuse_posterior_evidence(run_id, fingerprint, evidence, as_of)
-            prov = _provenance_for(resolution, run["provenance"])
-            rec["profile"], rec["stack"] = prov["profile"], prov["stack"]
+            rec["profile"] = _profile_for(resolution, run["provenance"])
             rec["lineage"] = {
                 "hub_commit": hub_commit, "snapshot_id": config.snapshot_id,
                 "source_identity_version": SOURCE_IDENTITY_VERSION,
@@ -299,7 +299,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                 task_identity.update(diff_digest=diff_digest, diff_ref=diff_ref)
                 cast(dict[str, Any], rec["lineage"]).update(diff_digest=diff_digest, diff_ref=diff_ref)
             rec["task_identity"] = task_identity
-            rec["schema_version"] = "3"
+            rec["schema_version"] = "4"
             if row.get("annotation") is not None:
                 rec["annotation"] = row["annotation"]
             records.append(rec)
@@ -310,28 +310,11 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
     exclusions_by_reason["non-decisive-adjudication"] = len(adjudication)
 
     share_caps_report: dict[str, Any] | None = None
-    if (
-        config.max_stack_share is not None
-        or config.max_repo_share is not None
-        or config.max_profile_share is not None
-    ):
-        records, share_exclusions = _apply_share_caps(
-            records,
-            max_stack_share=config.max_stack_share,
-            max_repo_share=config.max_repo_share,
-            max_profile_share=config.max_profile_share,
-        )
-        for excl_key, excl_count in share_exclusions.items():
-            exclusions_by_reason[f"share-cap:{excl_key}"] = (
-                exclusions_by_reason.get(f"share-cap:{excl_key}", 0) + excl_count
-            )
-        share_caps_report = _share_caps_report(
-            records,
-            share_exclusions,
-            max_stack_share=config.max_stack_share,
-            max_repo_share=config.max_repo_share,
-            max_profile_share=config.max_profile_share,
-        )
+    share_limits = {name: getattr(config, f"max_{name}_share") for name in SHARE_DIMENSION_NAMES}
+    if any(limit is not None for limit in share_limits.values()):
+        records, share_exclusions = _apply_share_caps(records, share_limits)
+        exclusions_by_reason.update({f"share-cap:{k}": n for k, n in share_exclusions.items()})
+        share_caps_report = _share_caps_report(records, share_exclusions, share_limits)
 
     # Aggregate only emitted evidence; capped-out records must not advance lineage valid_at.
     valid_at = _max_valid_at([cast(Record, rec["lineage"]) for rec in records], as_of)

@@ -714,7 +714,8 @@ async def test_bound_phase_fix_transports_only_named_private_inputs(
 async def test_fix_entrypoints_reject_invalid_finding_file_refs(
     git_repo: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every fix entry point rejects unconfined or missing files; turn wall cuts follow the group budget.
+    """Every fix entry point rejects unconfined or missing files; turn wall cuts follow the group budget;
+    an unrestorable group reports its final restore failure.
 
     Batched cases put the bad reference second to exercise the entire preflight loop.
     """
@@ -767,6 +768,16 @@ async def test_fix_entrypoints_reject_invalid_finding_file_refs(
             backend, work, confined, footprint=footprint, round_snapshot=_round_snapshot(
                 git_repo, footprint.run_allowed_paths), group_max_wall_s=group_wall)
         assert failures == expected
+
+    # A group that cannot be restored after the cut fails with the final restore failure.
+    def refuse_restore(*_a: Any, **_k: Any) -> None:
+        raise OSError("restore refused")
+
+    monkeypatch.setattr(git_ops, "restore_group_worktree_from_snapshot", refuse_restore)
+    assert await phases.phase_fix_parallel(
+        backend, work, confined, footprint=footprint, round_snapshot=_round_snapshot(
+            git_repo, footprint.run_allowed_paths), group_max_wall_s=DEFAULT_WALL_BUDGET_S + 600,
+    ) == {"src/ok.py": "RuntimeError: failed to restore the complete fix group after it failed"}
 
 
 @pytest.mark.asyncio

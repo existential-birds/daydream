@@ -48,7 +48,7 @@ def run_canonical_harvest(store_dir: Path, snapshot_id: str, materialize_dir: Pa
     validate_output_path(store_dir, materialize_dir)
     manifest_path = materialize_dir / _MANIFEST_FILENAME
     pin = json.loads(manifest_path.read_text())
-    if pin.get("schema_version") != "daydream.annotation-export.v2":
+    if pin.get("schema_version") != "daydream.annotation-export.v3":
         raise ValueError("invalid annotation export schema")
     old = read_jsonl(
         materialize_dir / _ANNOTATIONS_FILENAME,

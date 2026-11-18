@@ -7,11 +7,13 @@ import sys
 import tempfile
 from collections.abc import Callable, Iterator
 from functools import wraps
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from rich.console import Console
 
 from daydream.artifacts import ownership as artifact_ownership
 from daydream.extensions import EXTENSION_API_VERSION
@@ -55,6 +57,26 @@ def _fsync_without_durability(fd: Any) -> None:
 
 # Fsync is a large share of a real-path run. Fault tests patch over this seam.
 os.fsync = _fsync_without_durability
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_sessionstart(session: pytest.Session) -> Iterator[None]:
+    """Drop package attributes naming submodules that coverage imported and then unloaded.
+
+    A dotted ``--cov`` source (``daydream.ui.summary``) makes coverage import its parent
+    package and then remove it from ``sys.modules``. In an xdist worker coverage starts
+    here, after this conftest imported ``daydream``, so ``daydream.ui`` survives as a
+    stale attribute: ``from daydream import ui`` would bind it while ``patch()`` targets
+    the reimported module. Without the attribute, later imports bind the live module."""
+    yield
+    for name, package in list(sys.modules.items()):
+        if package is None or not (name == "daydream" or name.startswith("daydream.")):
+            continue
+        for attr, value in list(vars(package).items()):
+            child = f"{name}.{attr}"
+            if getattr(value, "__name__", None) == child and sys.modules.get(child) is not value:
+                delattr(package, attr)
+
 
 # Real-Git fixtures share tests.harness.git_helpers.
 
@@ -291,6 +313,19 @@ def install_backend(monkeypatch: pytest.MonkeyPatch) -> Callable[[object], objec
         return backend
 
     return _install
+
+
+def capture_agent_console(monkeypatch: pytest.MonkeyPatch, **options: Any) -> tuple[Console, StringIO]:
+    """Point the shared agent console at a buffer for this test only.
+
+    Modules bind ``daydream.agent.console`` when imported, some lazily inside ``run_agent``,
+    so replacing the object would leave them holding a test's buffer; configure it in place."""
+    import daydream.agent as agent_mod
+
+    output = StringIO()
+    for name, value in vars(Console(file=output, **options)).items():
+        monkeypatch.setattr(agent_mod.console, name, value)
+    return agent_mod.console, output
 
 
 def silence_module_console(monkeypatch: pytest.MonkeyPatch, module: str, *, keep: tuple[str, ...] = ()) -> None:

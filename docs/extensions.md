@@ -51,8 +51,9 @@ with an extension error. `exploration` is no longer a step of `deep`. Replacing 
 `review` phase (`register_phase(..., replace=True)`) does not replace the reviewer: the
 planned review is never dispatched, so the run seals without evidence and ends as a
 failed review with exit 1. Rewrite findings in a step after `load-items` instead; if that
-step leaves the items unusable, the review also ends as failed and its report says the
-findings could not be read.
+step leaves the items unusable, finalization rejects them: the review also ends as failed and
+its report says the findings could not be read. Any posted review comment says so and posts no
+findings, including when a later step damages items finalization accepted.
 
 ### Diagram
 
@@ -258,8 +259,9 @@ only in the diagram-only flow.
 A canonical item is one confirmed finding of the review: `id`, `uid`, `item_uid`,
 `source_uids`, `file`, `line`, `description`, `rationale` and `severity`. It carries no
 confidence, lens or `related_files`. Preserve `item_uid` (the durable item), `uid` and
-`source_uids` through filtering/rewriting; `id` is a renumberable display position and
-explicit empty provenance remains empty. `line` is a head-side line or absent; `file` is
+`source_uids` through filtering/rewriting, and keep explicit empty provenance empty.
+`id` is a renumberable integer display position, never a boolean; review finalization
+and the fix gate refuse any other value. `line` is a head-side line or null; `file` is
 a confined repository path ([terminal check](runtime.md#terminal-review-findings-contract)). Mint
 identities only at host birth/validation, never from content. Accessors live in
 [records.py](../daydream/deep/records.py).

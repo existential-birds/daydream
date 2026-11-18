@@ -103,10 +103,16 @@ async def test_terminal_failure_retains_owned_trace_and_partial_evidence(
     backend.review_failure = RuntimeError("terminal offline failure")
     # Evidence that cannot be decoded is retained as text with its reason, never dropped.
     finalize = review_terminal.finalize_review
+    fileless = {"id": 1, "item_uid": "fileless", "description": "No file", "rationale": "No file"}
+    too_deep = "[" * 100_000
 
     def with_malformed_evidence(ctx: Any, *args: Any, **kwargs: Any) -> int:
-        (ctx.data["dd"] / "fix-failures.json").write_text("{malformed")
-        return finalize(ctx, *args, **kwargs)
+        (ctx.data["dd"] / "fix-failures.json").write_text(too_deep)
+        (ctx.data["dd"] / "fix-outcomes.json").write_text("{malformed")
+        status = finalize(ctx, *args, **kwargs)
+        # An extension step then leaves a finding without a file; capture names the shape failure.
+        (ctx.data["dd"] / "merged-items.json").write_text(json.dumps({"items": [fileless]}))
+        return status
 
     monkeypatch.setattr(review_terminal, "finalize_review", with_malformed_evidence)
     config = replace(config, observability=ObservabilityConfig(destinations=("memory",)))
@@ -123,7 +129,11 @@ async def test_terminal_failure_retains_owned_trace_and_partial_evidence(
     assert raw["trace_id"] == owned_trace_id(memory_exporters[0], raw["run_id"])
     assert raw["original_task"]["status"] == "available"
     assert raw["provenance"]["collection_diagnostics"]["fix-failures.json"] == {
+        "status": "failed", "reason": "malformed_json", "raw_text": too_deep}
+    assert raw["provenance"]["collection_diagnostics"]["fix-outcomes.json"] == {
         "status": "failed", "reason": "malformed_json", "raw_text": "{malformed"}
+    assert raw["provenance"]["collection_diagnostics"]["merged-items.json"] == {
+        "status": "failed", "reason": "malformed_shape", "raw_json": {"items": [fileless]}}
     # A version 5 record names no routing or per-stack setting of the replaced reviewer.
     assert raw["schema_version"] == "daydream.run.v5"
     assert not {"latency_profile", "latency_route", "latency_routing"} & raw["provenance"].keys()

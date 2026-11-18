@@ -24,12 +24,14 @@ def _add_record_inputs(parser: argparse.ArgumentParser) -> None:
 
 
 def _build_build_corpus_parser() -> argparse.ArgumentParser:
+    from daydream.training.corpus_projection.selection import SHARE_DIMENSION_NAMES
+
     parser = argparse.ArgumentParser(prog="daydream corpus build",
         description="Project frozen run and observation records into deterministic training examples, offline.")
     _add_record_inputs(parser)
     parser.add_argument("--out", type=Path, required=True,
                         help="Corpus JSONL path; manifests and lineage go beside it.")
-    for dimension in ("stack", "repo", "profile"):
+    for dimension in SHARE_DIMENSION_NAMES:
         parser.add_argument(f"--max-{dimension}-share", type=float,
                             help=f"Maximum projected share of one {dimension}, in (0, 1].")
     parser.add_argument("--dry-run", action="store_true", help="Print the projection summary without writing output.")
@@ -42,25 +44,24 @@ def _handle_build_corpus_command(argv: list[str]) -> int:
     from dataclasses import replace
 
     from daydream.training.corpus_projection import BuildFrozenCorpusConfig, build_frozen_corpus
+    from daydream.training.corpus_projection.projector import ShareCapRangeError
+    from daydream.training.corpus_projection.selection import SHARE_DIMENSION_NAMES
 
     args = _build_build_corpus_parser().parse_args(argv)
     console = create_console()
-    for dimension in ("stack", "repo", "profile"):
-        value = getattr(args, f"max_{dimension}_share")
-        if value is not None and not 0.0 < value <= 1.0:
-            print_error(console, f"Invalid --max-{dimension}-share", "Must be in (0, 1].")
-            return 1
     try:
         config = BuildFrozenCorpusConfig(out_dir=args.out.parent,
             store_dir=args.store.expanduser(), snapshot_id=args.snapshot_id,
             as_of=args.as_of,
-            max_stack_share=args.max_stack_share, max_repo_share=args.max_repo_share,
-            max_profile_share=args.max_profile_share)
+            **{f"max_{name}_share": getattr(args, f"max_{name}_share") for name in SHARE_DIMENSION_NAMES})
         if args.dry_run:
             with tempfile.TemporaryDirectory() as td:
                 summary = build_frozen_corpus(replace(config, out_dir=Path(td)))
         else:
             summary = build_frozen_corpus(config)
+    except ShareCapRangeError as exc:
+        print_error(console, f"Invalid --max-{exc.dimension}-share", "Must be in (0, 1].")
+        return 1
     except (OSError, ValueError, TypeError) as exc:
         print_error(console, "Corpus build refused", str(exc))
         return 1

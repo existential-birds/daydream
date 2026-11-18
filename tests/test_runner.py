@@ -8,14 +8,12 @@ import subprocess
 import threading
 from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
-from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
 
 import anyio
 import pytest
-from rich.console import Console
 
 from daydream import git_ops, pr_review, runner
 from daydream.artifact_visibility import private_root_locations
@@ -47,6 +45,7 @@ from daydream.trajectory import (
     TrajectoryDocumentReference,
 )
 from daydream.workspace import AuditWorkspace, WorkContext
+from tests.conftest import capture_agent_console
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.dataset import read_records
 from tests.harness.git_helpers import bare_remote, commit as _commit, git as _git, init_repo as _init_repo
@@ -718,7 +717,7 @@ async def _drive_fix_cycle_failing(
     reviewer.review_claims = [{"title": _fix_item()["description"], "file": "main.py", "line": 1}]
     config.test_command = "false"
     # The backend script observes phases; mute only terminal output.
-    monkeypatch.setattr("daydream.agent.console", Console(file=StringIO()))
+    capture_agent_console(monkeypatch)
     monkeypatch.setattr("daydream.runner.console", type("C", (), {"print": lambda *a, **kw: None})())
     test_backend = ScriptedBackend(script=[*script, _BEYOND_SCRIPT], model="test-model-xyz")
     repair_backend = ScriptedBackend(

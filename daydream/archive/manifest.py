@@ -84,7 +84,7 @@ class Manifest:
     fix/test fields record effective backends only for executed phases.
 
     Missing metrics mean uncomputed or undefined, never an imputed zero.
-    ``location_in_hunk_rate`` scores the originally cited line before snapping;
+    ``location_in_hunk_rate`` scores each shipped finding's cited line;
     ``shipped_duplicate_pairs`` counts surviving near-duplicate findings.
 
     Fix failures and surviving untracked paths retain evidence of partial

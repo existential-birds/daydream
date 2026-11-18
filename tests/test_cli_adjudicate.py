@@ -67,9 +67,8 @@ def test_cli_complete_population_report_export_materialize(tmp_path: Path, capsy
     store = record_store(tmp_path / "records", ("unanswered", "ambiguous", "ambiguous", "unanswered", "missing"))
     assert command(store, "report") == 0
     initial_report = json.loads(capsys.readouterr().out.splitlines()[-1])
-    assert initial_report["outcome_coverage"] == {"total": 0, "adjudicated": 0}
+    assert initial_report["outcome_coverage"] == {"adjudicated": 0}
     assert initial_report["silver_task_only_count"] == 5
-    assert initial_report["admission_gate"]["passes_80pct"] is False
     store.append_observation(judgment(store))
     store.append_observation(judgment(store, "rejected", item_index=1))
     store.append_observation(judgment(store, item_index=2, role="model-suggested", author="model"))
@@ -77,14 +76,13 @@ def test_cli_complete_population_report_export_materialize(tmp_path: Path, capsy
     assert command(store, "build", "--state-dir", str(state)) == 0
     assert command(store, "report") == 0
     report = json.loads(capsys.readouterr().out.splitlines()[-1])
-    assert report["outcome_coverage"] == {"total": 2, "adjudicated": 2}
+    assert report["outcome_coverage"] == {"adjudicated": 2}
     assert report["silver_task_only_count"] == 3
     assert report["class_balance"] == {"accepted": 1, "rejected": 1}
     assert report["unresolved"] == 0
     assert report["inter_rater"] == {"items": 0, "agreeing": 0}
-    assert report["admission_gate"]["passes_80pct"] is True
     assert report["admission_gate"]["class_balance_ok"] is True
-    assert report["strata"] == [{"stack": "python", "profile": "pr_review", "count": 5}]
+    assert report["strata"] == [{"profile": "pr_review", "count": 5}]
     from daydream.training.adjudication.queue import build_queue
 
     sessions = sessions_from_snapshot(store.read_snapshot(snapshot_id(store)))
@@ -115,7 +113,7 @@ def test_cli_complete_population_report_export_materialize(tmp_path: Path, capsy
     automatic = {row["item_uid"]: row for row in before["observations"] if row["role"] == "automatic"}
     for row in records:
         assert row["session_id"] == row["trajectory_id"] == row["segment_id"] == "run-1"
-        assert row["profile"]["profile_name"] == "pr_review" and row["stack"] == "python"
+        assert row["profile"]["profile_name"] == "pr_review"
         assert row["evidence_digest"] == automatic[row["item_uid"]]["evidence_digest"]
         assert row["classifier_version"] == labeler_versions.REPLY_CLASSIFIER_VERSION
         assert row["schema_version"] == f"annotation-snapshot/{labeler_versions.ANNOTATION_SNAPSHOT_SCHEMA_VERSION}"
@@ -191,7 +189,7 @@ def test_cli_conflicting_raters_resolve_only_with_adjudicator(
     assert command(store, "report") == 0
     disputed_report = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert disputed_report["inter_rater"] == {"items": 1, "agreeing": 0}
-    assert disputed_report["outcome_coverage"] == {"adjudicated": 0, "total": 0}
+    assert disputed_report["outcome_coverage"] == {"adjudicated": 0}
     # Authority is independent of timestamp: an earlier explicit adjudicator wins over both
     # existing raters and a later rater appended after the resolution was persisted.
     store.append_observation(judgment(store, role="adjudicator", author="carol", observed_at="2026-10-05T10:30:00Z"))
@@ -205,7 +203,7 @@ def test_cli_conflicting_raters_resolve_only_with_adjudicator(
     assert command(store, "report") == 0
     report = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert report["inter_rater"] == {"items": 1, "agreeing": 1}
-    assert report["outcome_coverage"] == {"adjudicated": 1, "total": 1}
+    assert report["outcome_coverage"] == {"adjudicated": 1}
     row = sessions_from_snapshot(resolved)[0]["resolutions"][0]
     assert row["disposition"] == "accepted" and row["gold_eligible"]
     assert store.read_snapshot(conflicted.snapshot["snapshot_id"]).effective_judgment("run-1", "item:0") == effective

@@ -14,7 +14,7 @@ LABELER_POLICY_VERSION = "980-policy-r1"
 REPLY_CLASSIFIER_VERSION = "980-classifier-r1"
 ADJUDICATION_LABELER_VERSION = "984-adjudicate-r1"
 HUMAN_LABELER_VERSION = "1055-human-r1"
-ANNOTATION_SNAPSHOT_SCHEMA_VERSION = "1055-snapshot-r1"
+ANNOTATION_SNAPSHOT_SCHEMA_VERSION = "1055-snapshot-r2"
 
 
 def reply_evidence_digest(replies: list[dict[str, Any]]) -> str:

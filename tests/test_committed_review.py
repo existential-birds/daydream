@@ -1380,7 +1380,7 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     assert json.loads((operator_policy.output_dir / "review-summary.json").read_text()) == result.summary
     assert result.summary is not None and result.summary["counts"]["assignments"] == 0
     exported_value = json.loads((operator_policy.output_dir / "findings.json").read_text())
-    assert exported_value["schema_version"] == 5 and exported_value["findings"] == []
+    assert exported_value["schema_version"] == 7 and exported_value["findings"] == []
     assert exported_value["head_sha"] == envelope["provenance"]["head_sha"]
     assert exported_value["terminal_result"] == value["terminal_result"]
     trajectory = read_trajectory((operator_policy.output_dir / RUN_DOCUMENT_NAME))

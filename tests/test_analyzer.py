@@ -902,7 +902,7 @@ def test_location_and_duplication_propagate_corrupt_merged_items(tmp_path: Path)
 def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path,) -> None:
     """Analyze one persisted shipped population with independently countable pair/location output.
 
-    Mixed attribution and relocated citations must survive the same join; unrelated
+    Mixed attribution and cited lines must survive the same join; unrelated
     findings cannot hide a wrong per-item tier or fabricated UID in an aggregate count.
     """
     dd, deep = _deep_dirs(tmp_path)
@@ -915,12 +915,11 @@ def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path
         _item(1, line=205, description="Loader guard", uid="structure:3"),
         _item(
             2,
-            line=210,
-            location_cited_line=212,
+            line=212,
             description="Loader guards",
             **_provenance("python:1", "react:2"),
         ),
-        _item(3, line=4, description="Missing mutex", location_distrust=True, location_cited_line=4, **_provenance()),
+        _item(3, line=4, description="Missing mutex", **_provenance()),
         _item(4, file="other/untouched.py", line=205, description="ZIP checksum", uid="python:2"),
         _item(5, line=0, description="Loader guard", uid="structure:5"),
         _item(6, line="not-an-int", description=""),
@@ -937,9 +936,7 @@ def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path
         location["shipped_items"],
         location["scored_items"],
         location["unscorable_items"],
-        location["relocated_items"],
-        location["distrusted_items"],
-    ) == (7, 5, 2, 1, 1)
+    ) == (7, 5, 2)
     assert location["tiers"] == {"in_hunk": 1, "within_tolerance": 1, "beyond_tolerance": 2, "file_absent": 1}
     assert location["tier_rates"] == {
         "in_hunk": 0.2,
@@ -948,12 +945,12 @@ def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path
         "file_absent": 0.2,
     }
     assert location["in_hunk_rate"] == 0.2
-    assert [(row["id"], row["line"], row["cited_line"], row["tier"], row["distance"]) for row in location["items"]] == [
-        (1, 205, None, "in_hunk", 0),
-        (2, 210, 212, "within_tolerance", 2),
-        (3, 4, 4, "beyond_tolerance", 196),
-        (4, 205, None, "file_absent", None),
-        (5, 0, None, "beyond_tolerance", 200),
+    assert [(row["id"], row["line"], row["tier"], row["distance"]) for row in location["items"]] == [
+        (1, 205, "in_hunk", 0),
+        (2, 212, "within_tolerance", 2),
+        (3, 4, "beyond_tolerance", 196),
+        (4, 205, "file_absent", None),
+        (5, 0, "beyond_tolerance", 200),
     ]
     duplication = result["findings"]["shipped_duplication"]
     assert (

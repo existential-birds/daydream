@@ -32,8 +32,8 @@ from daydream.review_result import (
     validate_terminal_result,
 )
 
-FINDINGS_SCHEMA_VERSION = 4
-IMMUTABLE_FINDINGS_SCHEMA_VERSION = 5
+FINDINGS_SCHEMA_VERSION = 6
+IMMUTABLE_FINDINGS_SCHEMA_VERSION = 7
 
 MAX_ARTIFACT_BYTES = 1_048_576
 MAX_RAW_ARTIFACT_BYTES = MAX_ARTIFACT_BYTES + RUN_TARGET_DECISIONS_MAX_BYTES
@@ -49,8 +49,7 @@ _FINDING_PROPERTIES = {
     'fingerprint': {'type': 'string', 'pattern': '^[0-9a-f]{64}$'},
     **{name: {'type': 'string'} for name in ('path', 'title', 'body')},
     'line': {'type': ['integer', 'null']}, 'placement': {'enum': ['inline', 'file', 'body']},
-    **{name: {'type': ['string', 'null']} for name in ('severity', 'confidence', 'severity_before_demotion')},
-    **{name: {'type': 'boolean'} for name in ('location_distrust', 'severity_off_vocabulary')},
+    **{name: {'type': ['string', 'null']} for name in ('severity', 'confidence')},
 }
 FINDINGS_SCHEMA: dict[str, Any] = strict_object({
     'schema_version': {'const': FINDINGS_SCHEMA_VERSION}, 'repo': {'type': 'string'},
@@ -139,10 +138,8 @@ class FindingsValidationError(Exception):
 
 @dataclass
 class ArtifactFinding:
-    """Validated finding with placement, identity and approval-gate provenance.
+    """Validated finding with placement, identity and approval-gate severity.
 
-    Location and severity provenance preserve the current approval gate inputs.
-    severity_before_demotion preserves whether a demoted finding was blocking.
     Non-inline placements have no line; body remains raw until posting.
     """
 
@@ -154,9 +151,6 @@ class ArtifactFinding:
     body: str
     severity: str | None
     confidence: str | None
-    location_distrust: bool = False
-    severity_before_demotion: str | None = None
-    severity_off_vocabulary: bool = False
 
 
 @dataclass

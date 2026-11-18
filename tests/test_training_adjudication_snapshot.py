@@ -30,7 +30,7 @@ def _snapshot_session() -> dict[str, object]:
         "session_id": "s1",
         "trajectory_id": "s1-t",
         "segment_id": "s1-seg",
-        "resolutions": [{"fingerprint": "fp-1", "item_uid": "item:1", "profile_name": "pr_review", "stack": "python"}],
+        "resolutions": [{"fingerprint": "fp-1", "item_uid": "item:1", "profile_name": "pr_review"}],
     }
 
 

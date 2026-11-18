@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Daydream training-record (JSONL) schema v3",
+  "title": "Daydream training-record (JSONL) schema v4",
   "description": "Per-finding training records projected offline from immutable run and eligible observation snapshots.",
   "type": "object",
   "additionalProperties": false,
@@ -15,12 +15,11 @@
     "finding_fingerprint",
     "disposition",
     "profile",
-    "stack",
     "lineage"
   ],
   "properties": {
     "schema_version": {
-      "const": "3"
+      "const": "4"
     },
     "record_id": {
       "type": "string",
@@ -149,12 +148,6 @@
           "type": "object"
         }
       }
-    },
-    "stack": {
-      "type": [
-        "string",
-        "null"
-      ]
     },
     "outcome_label": {
       "type": [

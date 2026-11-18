@@ -4,6 +4,7 @@ ValueError rather than silently shrinking the reported population.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -15,7 +16,7 @@ from daydream.training.dispositions import DECISIVE_DISPOSITIONS
 
 __all__ = ["build_report"]
 
-_ADMISSION_GATE_VERSION = 1
+_ADMISSION_GATE_VERSION = 2
 
 
 def _required(item: Mapping[str, object], field: str) -> object:
@@ -36,30 +37,28 @@ def _human_dispositions(observations: Sequence[Mapping[str, object]]) -> list[st
 
 def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
     """Report coverage over decisive gold, posterior-eligible pr_review records, excluding
-    evidence_after_as_of. This shared scope keeps ineligible records from blocking the outcome gate;
+    evidence_after_as_of. This shared scope keeps ineligible records out of the outcome count;
     nondecisive records are counted separately.
 
-    Include accepted/rejected balance, unresolved human decisions, counts by stack/profile, and
+    Include accepted/rejected balance, unresolved human decisions, profile-sorted counts, and
     sorted after-as_of IDs. Inter-rater items count disagreements; agreeing counts decisive
-    adjudicator resolutions. The admission gate reports this outcome-bearing population and requires
-    both classes for class_balance_ok.
+    adjudicator resolutions. The admission gate requires both outcome-bearing classes for
+    class_balance_ok.
     """
-    adjudicated = 0
     silver_task_only = 0
     accepted = 0
     rejected = 0
     unresolved = 0
     inter_rater_items = 0
     inter_rater_agreeing = 0
-    strata: dict[tuple[str, str], int] = {}
+    strata: Counter[str] = Counter()
     evidence_after_as_of: list[str] = []
 
     for item in items:
         record_id = str(_required(item, "record_id"))
         disposition = str(_required(item, "disposition"))
-        stack = str(item.get("stack", ""))
         profile = str(item.get("profile", ""))
-        strata[(stack, profile)] = strata.get((stack, profile), 0) + 1
+        strata[profile] += 1
 
         raw_obs = item.get("observations")
         observations: Sequence[Mapping[str, object]] = list(raw_obs) if isinstance(raw_obs, Sequence) else []
@@ -78,7 +77,6 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
         )
         if decisive:
             if outcome_bearing:
-                adjudicated += 1
                 if not has_human_decision:
                     unresolved += 1
                 if disposition == "accepted":
@@ -98,19 +96,15 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
             ):
                 inter_rater_agreeing += 1
 
-    gate_passes = adjudicated > 0
     return {
-        "outcome_coverage": {"adjudicated": adjudicated, "total": adjudicated},
+        "outcome_coverage": {"adjudicated": accepted + rejected},
         "silver_task_only_count": silver_task_only,
         "class_balance": {"accepted": accepted, "rejected": rejected},
         "unresolved": unresolved,
         "inter_rater": {"items": inter_rater_items, "agreeing": inter_rater_agreeing},
-        "strata": {k: strata[k] for k in sorted(strata)},
+        "strata": [{"profile": key, "count": strata[key]} for key in sorted(strata)],
         "evidence_after_as_of": sorted(evidence_after_as_of),
         "admission_gate": {
-            "outcome_bearing_total": adjudicated,
-            "total": adjudicated,
-            "passes_80pct": gate_passes,
             "class_balance_ok": accepted > 0 and rejected > 0,
             "gate_version": _ADMISSION_GATE_VERSION,
         },

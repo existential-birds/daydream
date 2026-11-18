@@ -101,9 +101,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `pairs[].a_lens`/`b_lens`.
   - Earlier records, stores and archive indexes are refused with the existing messages and
     nothing is converted; use a fresh store, Hub destination or archive directory.
+- **Breaking (0.y.z):** Data paths with no producer, or that only repeated another field, found during
+  [#1920](https://github.com/existential-birds/daydream/pull/1920), are removed
+  ([#1921](https://github.com/existential-birds/daydream/pull/1921)):
+  - The unverified-location demotion is gone. Its producer was retired in
+    [#1834](https://github.com/existential-birds/daydream/issues/1834), so no finding carried
+    `location_cited_line` or `location_distrust`. `--findings-out` findings drop
+    `location_distrust`, `severity_before_demotion` and the redundant `severity_off_vocabulary`
+    (an unrecognized severity already withholds approval). Ordinary findings move to schema
+    version 6 and immutable-input findings to 7. Readers refuse earlier versions with the
+    existing "unsupported schema version" message.
+  - The analyzer's `evaluation.json` drops `distrusted_items`, `relocated_items` and each
+    location item's `cited_line` and `location_distrust`.
+  - The corpus `stack` dimension, which no producer filled after
+    [#1895](https://github.com/existential-birds/daydream/issues/1895), is removed along with
+    `daydream corpus build --max-stack-share`. Corpus records move to training-record schema
+    `"4"`, annotation queues to `daydream.annotation-queue.v3`, annotation exports to
+    `daydream.annotation-export.v3`, annotation snapshots to `annotation-snapshot/1055-snapshot-r2` and the
+    lineage `share_caps` block to version 2. Adjudication report strata are keyed by profile
+    only. Earlier queues and exports are refused with the existing messages and nothing is
+    converted; rebuild the corpus and re-export the queue.
+  - `daydream corpus adjudicate report` drops `outcome_coverage.total`,
+    `admission_gate.outcome_bearing_total`, `admission_gate.total` and the misnamed
+    `admission_gate.passes_80pct`, which all repeated `outcome_coverage.adjudicated`
+    ([#1927](https://github.com/existential-birds/daydream/issues/1927),
+    [#1929](https://github.com/existential-birds/daydream/issues/1929)). `admission_gate.gate_version`
+    is 2; read `outcome_coverage.adjudicated > 0` where `passes_80pct` was read.
+  - A merged item's `id` must be an integer display position
+    ([finding identity](docs/extensions.md#finding-identity)). The fix gate now checks
+    `merged-items.json` the same way review finalization does and stops before fixing when
+    an extension step left malformed items. The Verdict Join table no longer has an "Other"
+    row.
+- **Breaking (0.y.z):** Built-in phases and helpers expect canonical items as the fix gate
+  produces them, and some Python names are removed
+  ([#1921](https://github.com/existential-birds/daydream/pull/1921)):
+  - `daydream.phases.phase_fix`, `phase_fix_batched`, `phase_fix_parallel`,
+    `group_items_by_footprint` and `phase_fix_verify` no longer default a missing
+    `description`, drop non-string `related_files` entries, accept a missing integer `id`
+    or report a missing `item_uid` as `ValueError`. A malformed item raises `TypeError` or
+    `KeyError`; `phase_fix_parallel` records a missing `description` or a non-string
+    `related_files` entry as that group's failure, and raises `KeyError` for a missing
+    `item_uid` before any group starts
+    ([#1924](https://github.com/existential-birds/daydream/issues/1924)).
+  - `daydream.phases.phase_verify_recommendations(backend, work, items, *, deep_dir, strategy,
+    run_context)` takes the fix gate's validated items instead of a `merged_items_path` that
+    it re-read, so a later rewrite of `merged-items.json` can no longer crash verification or
+    change which findings it verifies. In the built-in flow its prompt lists findings in the gate's
+    severity order.
+  - `daydream.pr_review.extract_item_fields` and `ItemFields` are removed; use
+    `parsed_issues_from_items` ([#1922](https://github.com/existential-birds/daydream/issues/1922)).
+    `daydream.training.corpus_projection.provenance.extract_provenance` is now
+    `extract_profile` and returns only the profile mapping. `ParsedIssue` and
+    `daydream.findings.ArtifactFinding` drop `location_distrust`, `severity_before_demotion` and
+    `severity_off_vocabulary`, and `BuildFrozenCorpusConfig` drops `max_stack_share`.
 
 ### Fixed
 
+- A `merged-items.json` nested too deeply for the JSON parser no longer crashes the run.
+  Review finalization warns "Cannot validate terminal findings: RecursionError", as it
+  already did for other malformed merged items, and the fix gate stops at its preflight
+  ("merged items are malformed: RecursionError")
+  ([#1931](https://github.com/existential-birds/daydream/issues/1931)).
+- PR posting no longer crashes or treats damage as a clean review when `merged-items.json`
+  is too deeply nested, not UTF-8, not an object whose `items` is a list of objects, or holds
+  items without a file. A completed review warns that it could not read the file and skips
+  the post, so no approval follows. An unfinished review with a review summary, as the
+  built-in flow always supplies, now posts that outcome as a comment without findings, and
+  the comment says the findings could not be read. The same holds when review finalization
+  rejected items an extension step rewrote or deleted (for example an unconfined path):
+  such findings are no longer posted, and the comment no longer says the review did not
+  finish ([#1932](https://github.com/existential-birds/daydream/issues/1932)).
+- Run-data capture records a too deeply nested artifact as `malformed_json` instead of
+  losing the run record ("Run evidence could not be persisted (RecursionError)")
+  ([#1932](https://github.com/existential-birds/daydream/issues/1932)).
 - A Codex invocation that asks for no persisted session, as every committed-review
   invocation does, now runs with `--ephemeral`, so Codex writes no session rollout or
   thread rows for it under its home. Before, the Codex backend accepted

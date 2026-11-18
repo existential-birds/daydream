@@ -11,7 +11,6 @@ import pytest
 from rich.console import Console
 from rich.text import Text
 
-import daydream.agent as agent_mod
 from daydream.agent import run_agent
 from daydream.backends import (
     AgentEvent,
@@ -38,6 +37,7 @@ from daydream.ui.agent_stream import AgentDisplay
 from daydream.ui.panels import LiveToolPanelRegistry
 from daydream.ui.theme import _TASK_PROMPT_MAX_LINES
 from daydream.ui.tools import format_callback_progress
+from tests.conftest import capture_agent_console
 from tests.harness.backend import ScriptedBackend
 
 
@@ -223,10 +223,8 @@ async def test_normal_agent_transcript_preserves_overlapping_tools_tasks_and_tho
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Native sibling tool events keep their results and labels through a single panel lifetime."""
-    output = StringIO()
-    console = Console(file=output, force_terminal=True, no_color=False, width=120, color_system="truecolor",
-                      theme=NEON_THEME)
-    monkeypatch.setattr(agent_mod, "console", console)
+    console, output = capture_agent_console(monkeypatch, force_terminal=True, no_color=False, width=120,
+                                            color_system="truecolor", theme=NEON_THEME)
     events = [
         *[ThinkingEvent(text=f"thought {i} of the stream") for i in range(5)],
         TextEvent(text="I'll search for Python files in the project."),
@@ -271,10 +269,8 @@ async def test_quiet_agent_transcript_preserves_headers_redaction_and_error_owne
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Quiet delivery hides result bodies while its headers retain task identity and safe commands."""
-    output = StringIO()
-    console = Console(file=output, force_terminal=True, no_color=False, width=120, color_system="truecolor",
-                      theme=NEON_THEME)
-    monkeypatch.setattr(agent_mod, "console", console)
+    console, output = capture_agent_console(monkeypatch, force_terminal=True, no_color=False, width=120,
+                                            color_system="truecolor", theme=NEON_THEME)
     events = [
         ToolStartEvent(id="read", name="Read", input={"file_path": "/project/main.py"}),
         ToolResultEvent(id="read", output="def hello():\n    return 'world'", is_error=False),

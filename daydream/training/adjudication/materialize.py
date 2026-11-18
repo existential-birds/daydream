@@ -44,7 +44,7 @@ def run_materialize(store_dir: Path, snapshot_id: str, out_dir: Path, *, dry_run
         )
         atomic_write_bytes(
             out_dir / _MANIFEST_FILENAME,
-            (canonical_json({"schema_version": "daydream.annotation-export.v2", **summary}) + "\n").encode(),
+            (canonical_json({"schema_version": "daydream.annotation-export.v3", **summary}) + "\n").encode(),
             mode=0o600,
             fsync=True,
             dir_fsync=True,

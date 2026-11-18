@@ -20,6 +20,7 @@ from daydream.extensions import (
 )
 from daydream.git_ops import INHERIT_GITHUB_AUTH, GitError, GitHubAuth
 from daydream.pr_comment_renderer import render_run_info
+from daydream.review_reporting import UNREADABLE_FINDINGS_LINE
 from daydream.reviews.diagrams import (
     post_diagram_artifact as post_diagram_artifact,
     render_diagram_blocks_from_payload as render_diagram_blocks_from_payload,
@@ -39,7 +40,6 @@ from daydream.reviews.models import (
     ClassifiedReviewResult as ClassifiedReviewResult,
     FileCommentPayload as FileCommentPayload,
     InlineReviewComment as InlineReviewComment,
-    ItemFields as ItemFields,
     ParsedIssue as ParsedIssue,
     PostStatus as PostStatus,
     PRInfo as PRInfo,
@@ -80,6 +80,7 @@ async def post_review_to_pr_from_report(
     captured_pr: PRInfo | None = None,
     snapshot_diff: str | None = None,
     review_complete: bool = True,
+    findings_readable: bool = True,
     publication_dir: Path | None = None,
     run_context: RunContext | None = None,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
@@ -90,28 +91,42 @@ async def post_review_to_pr_from_report(
     branch discovery; lookup errors fail, while missing PRs return NO_PR.
     post skips interactive confirmation; approve_on_clean enables severity-gated approval."""
     run_context = resolve_run_context(run_context)
-    if not merged_items_path.exists():
+    if findings_readable and not merged_items_path.exists():
         return PostStatus.NOTHING_TO_POST
     try:
-        items = json.loads(merged_items_path.read_text()).get("items", [])
-    except (OSError, json.JSONDecodeError):
-        # A corrupt/partially-written merged-items.json must not crash the run
-        # with an unhandled JSONDecodeError; treat it like a missing file and
-        # skip the post cleanly (#400).
-        print_warning(
-            console,
-            f"Could not read {merged_items_path.name}; skipping PR post.",
-        )
-        return PostStatus.NOTHING_TO_POST
-    issues = parsed_issues_from_items(items)
-    if not issues and not approve_on_clean and not review_warnings and not (diagram_blocks and diagram_blocks.strip()):
+        payload = json.loads(merged_items_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        payload = None
+    items = payload.get("items") if isinstance(payload, dict) else None
+    issues = parsed_issues_from_items(items) if isinstance(items, list) and all(
+        isinstance(item, dict) for item in items) else []
+    if not findings_readable or not isinstance(items, list) or len(issues) != len(items):
+        # A corrupt, partially-written or misshapen merged-items.json must not crash
+        # the run, and an item the parser drops must not let a clean review approve
+        # over it (#400). Items that finalization sealed as an unusable projection, including
+        # a file a later step deleted, are never posted either. An incomplete review cannot
+        # approve, so its sealed outcome still posts as a findings-free COMMENT; otherwise skip
+        # the post cleanly.
+        problem = (f"Could not read {merged_items_path.name}" if findings_readable
+                   else "Merged items are unusable")
+        if review_complete or not review_summary:
+            print_warning(console, f"{problem}; skipping PR post.")
+            return PostStatus.NOTHING_TO_POST
+        print_warning(console, f"{problem}; posting the review outcome without findings.")
+        if UNREADABLE_FINDINGS_LINE not in review_summary:
+            # The summary cannot say so when finalization accepted items a later step damaged,
+            # or when it fell back without the terminal result.
+            review_summary += "\n\n" + UNREADABLE_FINDINGS_LINE
+        issues = []
+    elif (not issues and not approve_on_clean and not review_warnings
+          and not (diagram_blocks and diagram_blocks.strip())):
         # A complete pinned review answers its own earlier unfinished notice; _post still validates the target.
         notice = superseding_completion_notice(
             target_dir if publication_dir is None else publication_dir, captured_pr,
             author=run_context.github_identity.login, console=console, auth=auth,
         ) if review_complete and captured_pr is not None else None
         if notice is None:
-            print_info(console, "No parseable issues in review output; skipping PR post.")
+            print_info(console, "No findings in merged items; skipping PR post.")
             return PostStatus.NOTHING_TO_POST
         review_summary = notice
     return await _post(
@@ -135,86 +150,38 @@ async def post_review_to_pr_from_report(
     )
 
 
-def _severity_off_vocabulary(raw: dict[str, Any]) -> bool:
-    """Distinguish an asserted unknown severity from an omitted one for approval."""
-    value = raw.get("severity")
-    return (
-        isinstance(value, str)
-        and bool(value.strip())
-        and normalize_severity(value) is None
-    )
-
-
-def extract_item_fields(
-    raw: dict[str, Any],
-) -> ItemFields | None:
-    """Normalize one canonical finding; reject a missing or empty file path, keeping a Git name exact."""
-    path = raw.get("file")
-    if not isinstance(path, str) or not path:
-        return None
-    line = raw.get("line")
-    line_int = int(line) if isinstance(line, int) and not isinstance(line, bool) else None
-    description = str(raw.get("description", "")).strip()
-    rationale = str(raw.get("rationale", "")).strip()
-    severity = normalize_severity(raw.get("severity"))
-    confidence = str(raw.get("confidence", "")).strip().upper() or None
-    location_distrust = bool(raw.get("location_distrust"))
-    before = raw.get("severity_before_demotion")
-    severity_before_demotion = str(before).strip().lower() or None if before else None
-    return ItemFields(
-        path=path,
-        line_int=line_int,
-        description=description,
-        rationale=rationale,
-        severity=severity,
-        confidence=confidence,
-        location_distrust=location_distrust,
-        severity_before_demotion=severity_before_demotion,
-        severity_off_vocabulary=_severity_off_vocabulary(raw),
-    )
-
-
 def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
-    """Convert canonical items to postable findings with severity and provenance."""
+    """Convert canonical items to postable findings with severity, confidence and fingerprint.
+
+    Items without a nonempty file path are dropped; a Git name is kept exact."""
     out: list[ParsedIssue] = []
     for raw in items:
-        fields = extract_item_fields(raw)
-        if fields is None:
+        path = raw.get("file")
+        if not isinstance(path, str) or not path:
             continue
+        line = raw.get("line")
+        description = str(raw.get("description", "")).strip()
+        rationale = str(raw.get("rationale", "")).strip()
+        severity = normalize_severity(raw.get("severity"))
+        confidence = str(raw.get("confidence", "")).strip().upper() or None
         # Title is the description; rationale (when present and distinct)
         # becomes the body so the agent prompt has context.
         body_parts: list[str] = []
-        if fields.severity:
-            body_parts.append(f"**Severity:** {fields.severity}")
-        if fields.confidence:
-            body_parts.append(f"**Confidence:** {fields.confidence}")
-        if fields.location_distrust:
-            # First production reader of the location-distrust signal (issue
-            # #972 R2): the demotion is visible on the report, never silent.
-            if fields.severity_before_demotion:
-                body_parts.append(
-                    "**Location:** unverified citation "
-                    f"(severity demoted from {fields.severity_before_demotion})"
-                )
-            else:
-                body_parts.append("**Location:** unverified citation (severity demoted)")
-        if fields.rationale and fields.rationale != fields.description:
-            body_parts.append(fields.rationale)
-        body = "\n\n".join(body_parts)
+        if severity:
+            body_parts.append(f"**Severity:** {severity}")
+        if confidence:
+            body_parts.append(f"**Confidence:** {confidence}")
+        if rationale and rationale != description:
+            body_parts.append(rationale)
         out.append(
             ParsedIssue(
-                path=fields.path,
-                line=fields.line_int,
-                title=fields.description,
-                body=body,
-                confidence=fields.confidence,
-                severity=fields.severity,
-                fingerprint=compute_fingerprint(
-                    fields.path, fields.description, fields.rationale
-                ),
-                location_distrust=fields.location_distrust,
-                severity_before_demotion=fields.severity_before_demotion,
-                severity_off_vocabulary=fields.severity_off_vocabulary,
+                path=path,
+                line=int(line) if isinstance(line, int) and not isinstance(line, bool) else None,
+                title=description,
+                body="\n\n".join(body_parts),
+                confidence=confidence,
+                severity=severity,
+                fingerprint=compute_fingerprint(path, description, rationale),
             )
         )
     return out
@@ -558,11 +525,7 @@ def snap_to_hunk(
 ) -> int | None:
     """Preserve in-hunk lines; snap nearby lines to the nearest boundary within tolerance.
 
-    The pre-report location validator owns citation authority. This final placement
-    check uses the live diff so GitHub receives a valid changed line."""
-    # Shared two-sided boundary-distance primitive (same as the pre-report
-    # validator) so posting and the validator agree on what ``in hunk`` /
-    # ``near boundary`` means (issue #745).
+    This final placement check uses the live diff so GitHub receives a valid changed line."""
     from daydream.hunk_index import range_distance
 
     best: int | None = None
@@ -799,31 +762,16 @@ class GitHubReviewTransport:
         )
 
 
-# Severities that must never let an opted-in review post as an approval.
-# Fails closed: any string outside ``_NON_BLOCKING_SEVERITIES`` blocks. The
-# findings schema permits arbitrary strings, so unknown/off-vocabulary labels
+# The only severities that let an opted-in review post as an approval.
+# Fails closed: an absent severity or any string outside ``_NON_BLOCKING_SEVERITIES``
+# blocks. The findings schema permits arbitrary strings, so unknown labels
 # ("critical", "blocker", "major", ...) must conservatively block approval.
 _NON_BLOCKING_SEVERITIES = frozenset({"low"})
 
 
-def _severity_blocks_approval(severity: str | None) -> bool:
-    """Unknown severities block approval; low and omitted severities do not."""
-    return severity is not None and severity.lower() not in _NON_BLOCKING_SEVERITIES
-
-
-def _finding_blocks_approval(
-    severity: str | None,
-    location_distrust: bool,
-    severity_off_vocabulary: bool = False,
-    severity_before_demotion: str | None = None,
-) -> bool:
-    """Block on an absent or unknown severity, or a blocking severity before location demotion."""
-    return (
-        severity is None
-        or severity_off_vocabulary
-        or _severity_blocks_approval(severity)
-        or (location_distrust and _severity_blocks_approval(severity_before_demotion))
-    )
+def _finding_blocks_approval(severity: str | None) -> bool:
+    """Block on an absent or non-low severity."""
+    return severity is None or severity.lower() not in _NON_BLOCKING_SEVERITIES
 
 
 def _is_clean_review(classified: ClassifiedIssues, approve_on_clean: bool) -> bool:
@@ -831,12 +779,7 @@ def _is_clean_review(classified: ClassifiedIssues, approve_on_clean: bool) -> bo
     if not approve_on_clean:
         return False
     return not any(
-        _finding_blocks_approval(
-            issue.severity,
-            issue.location_distrust,
-            issue.severity_off_vocabulary,
-            issue.severity_before_demotion,
-        )
+        _finding_blocks_approval(issue.severity)
         for issue in classified.all_issues()
     )
 
@@ -1219,12 +1162,7 @@ def post_findings_from_artifact(
     # open high finding (#343 R2 F2b). Matched findings are never re-posted
     # as comments — only their severities count here.
     can_approve = approve_on_clean and artifact.analysis_complete and not review_warnings and not any(
-        _finding_blocks_approval(
-            finding.severity,
-            finding.location_distrust,
-            finding.severity_off_vocabulary,
-            finding.severity_before_demotion,
-        )
+        _finding_blocks_approval(finding.severity)
         for finding in artifact.findings
     )
 

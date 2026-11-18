@@ -30,7 +30,7 @@ from daydream.pr_review import (
     resolve_review_renderers,
 )
 from daydream.reconcile import PriorDiagramComment
-from daydream.review_reporting import render_github_review_context
+from daydream.review_reporting import UNREADABLE_FINDINGS_LINE, render_github_review_context
 from daydream.reviews.diagrams import post_diagram_comment_to_pr
 from daydream.reviews.rendering import (
     build_payload_for_event,
@@ -375,7 +375,8 @@ async def _post_payload_approves_when_clean_and_enabled_case(
 
 
 async def test_publication_decisions_follow_review_state(tmp_path: Path, pr: PRInfo) -> None:
-    """Approval, empty-report diagrams, failed diagram replacement and base-tip reads follow captured state."""
+    """Approval, unusable merged items, empty-report diagrams, failed diagram replacement and base-tip reads
+    follow captured state."""
     # An authorized plan snapshots its issues; later classification mutation cannot change the submission.
     mutable = pr_review.ClassifiedIssues(inline=[_inline()], inline_issues=[ParsedIssue(path="a.py", line=10,
                                          title="planned", body="b")], body_only=[ParsedIssue(path="b.py", line=None,
@@ -515,9 +516,55 @@ async def _post_review_from_report_empty_items_posts_diagram_case(
     with_diagram: bool,
 ) -> None:
     merged = tmp_path / "merged-items.json"
-    merged.write_text(json.dumps({"items": []}))
     blocks = "<details><summary><h3>Flowchart</h3></summary>\nX\n</details>"
     captured = _stub_post(monkeypatch, pr, _NO_ISSUES)
+    warnings: list[str] = []
+    monkeypatch.setattr(pr_review, "print_warning", lambda _c, message: warnings.append(message))
+    if with_diagram:
+        # Unreadable, misshapen or file-less items never approve over findings the reader would drop.
+        for body in ("[" * 100_000, b"\xff", "[]", '{"items": "x"}', '{"items": [1]}', "{}",
+                     '{"items": [{"id": 1, "description": "d", "rationale": "r", "severity": "high"}]}'):
+            merged.write_bytes(body if isinstance(body, bytes) else body.encode())
+            warnings.clear()
+            status = await pr_review.post_review_to_pr_from_report(
+                tmp_path, merged, console=_FakeConsole(),  # type: ignore[arg-type]
+                post=True, approve_on_clean=True, diagram_blocks=blocks,
+                renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO, review_summary="sealed outcome",
+            )
+            assert status == pr_review.PostStatus.NOTHING_TO_POST and not captured
+            assert warnings == ["Could not read merged-items.json; skipping PR post."]
+        # An incomplete review posts its sealed outcome as a findings-free COMMENT, never an approval or the
+        # items the reader kept; with no outcome to post it skips.
+        merged.write_text(json.dumps({"items": [{"file": "a.py", "line": 1, "description": "d", "severity": "low"},
+                                                {"description": "fileless"}]}))
+        seen: list[list[ParsedIssue]] = []
+
+        def classify(_t: Path, _p: PRInfo, issues: list[ParsedIssue], **_k: Any) -> pr_review.ClassifiedIssues:
+            seen.append(issues)
+            return _NO_ISSUES
+
+        monkeypatch.setattr(pr_review, "classify", classify)
+        # A projection finalization rejected still posts the outcome after an extension step removed the file; items
+        # damaged after finalization accepted them say so; a readable projection without the file skips silently.
+        for summary, readable in ((None, True), ("⚠️ **Review failed.**", True), ("⚠️ **Review failed.**", False),
+                                  ("⚠️ **Review failed.**", True)):
+            if not readable:
+                merged.unlink()
+            status = await pr_review.post_review_to_pr_from_report(
+                tmp_path, merged, console=_FakeConsole(),  # type: ignore[arg-type]
+                post=True, approve_on_clean=True, renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO,
+                review_complete=False, findings_readable=readable, review_summary=summary,
+            )
+            posted = summary is not None and (not readable or merged.exists())
+            assert status == (pr_review.PostStatus.POSTED if posted else pr_review.PostStatus.NOTHING_TO_POST)
+            plan = captured.pop("plan", None)
+            expected = f"{summary}\n\n{UNREADABLE_FINDINGS_LINE}"
+            assert (plan is None) if not posted else (
+                plan is not None and plan.event is pr_review.ReviewEvent.COMMENT and plan.review_summary == expected)
+        assert seen == [[], []]
+        assert warnings[-2:] == [f"{problem}; posting the review outcome without findings."
+                                 for problem in ("Could not read merged-items.json", "Merged items are unusable")]
+    merged.write_text(json.dumps({"items": []}))
 
     status = await pr_review.post_review_to_pr_from_report(
         tmp_path,

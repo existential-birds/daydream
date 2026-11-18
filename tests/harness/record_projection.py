@@ -17,7 +17,7 @@ AS_OF = "2026-10-05T00:00:00+00:00"
 
 def projection_run(
     run_id: str = "sess-a", *, dispositions: tuple[str, ...] = ("accepted", "rejected", "ambiguous"),
-    repo_slug: str | None = "owner/repo-a", stack: str = "python", profile: str = "deep-review",
+    repo_slug: str | None = "owner/repo-a", profile: str = "deep-review",
     siblings: int = 0, **overrides: Any,
 ) -> dict[str, Any]:
     items = [{"item_uid": f"item:{index}", "source_uids": [],
@@ -32,7 +32,7 @@ def projection_run(
         subtrajectories=tuple({"trajectory_id": child} for child in children) if trajectory_id == run_id else (),
     ) for trajectory_id in (run_id, *children)]
     provenance = {"profile": {"profile_schema_version": 2, "profile_name": profile,
-                              "profile_source_kind": "builtin", "profile_digest": "d" * 64}, "stack": stack}
+                              "profile_source_kind": "builtin", "profile_digest": "d" * 64}}
     sections = dict(provenance=provenance, original_task={"status": "available", "value": {
         "analyzed_revision": {"head_sha": "2" * 40, "merge_base_sha": "1" * 40,
                               "diff_key": f"diff-{run_id}", "pr_base_sha": None},

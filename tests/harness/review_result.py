@@ -27,8 +27,7 @@ def findings_artifact(
     findings: Iterable[dict[str, Any]] = (), *, kind: str = "review", **fields: Any,
 ) -> dict[str, Any]:
     artifact = {"schema_version": FINDINGS_SCHEMA_VERSION, "repo": "o/r", "pr_number": 7, "head_sha": "h" * 40,
-                "findings": [{"location_distrust": False, "severity_before_demotion": None,
-                              "severity_off_vocabulary": False, **finding} for finding in findings],
+                "findings": list(findings),
                 "kind": kind, "run_info": None, "review_warnings": [], "diagrams": None, **fields}
     if kind == "review":
         artifact.setdefault("terminal_result", terminal_result(head_sha=artifact["head_sha"]))
