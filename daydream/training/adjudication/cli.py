@@ -195,7 +195,6 @@ def handle_adjudicate(argv: list[str]) -> int:
                         print(item["record_id"])
             else:
                 report = build_report(enriched)
-                report["strata"] = [{"profile": key, "count": count} for key, count in report["strata"].items()]
                 print(json.dumps(report, sort_keys=True, default=str))
         return 0
     except (ValueError, OSError, KeyError, TypeError) as exc:

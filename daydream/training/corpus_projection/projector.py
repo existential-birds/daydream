@@ -11,7 +11,7 @@ from typing import Any, Mapping, cast
 
 from daydream.dataset import LocalRecordStore, evidence_document_view
 from daydream.json_utils import atomic_write_bytes, canonical_json
-from daydream.training.corpus_projection.provenance import extract_provenance
+from daydream.training.corpus_projection.provenance import extract_profile
 from daydream.training.corpus_projection.segments import segment
 from daydream.training.corpus_projection.selection import (
     Record,
@@ -89,8 +89,8 @@ def _refuse_posterior_evidence(
 
 
 def _profile_for(resolution: Mapping[str, Any], run: Mapping[str, Any]) -> dict[str, Any]:
-    profile: dict[str, Any] = extract_provenance(resolution)["profile"]
-    return profile if any(profile.values()) else extract_provenance(run)["profile"]
+    profile = extract_profile(resolution)
+    return profile if any(profile.values()) else extract_profile(run)
 
 
 def _max_valid_at(evidence: list[Record], base: str | None) -> str | None:
@@ -146,7 +146,6 @@ def project_findings(session: Mapping[str, object]) -> tuple[list[Record], list[
             tier = "silver"
         disposition = resolution.get("disposition")
         evidence = list(resolution.get("evidence") or [])
-        provenance = extract_provenance(resolution)
         item_uid = resolution.get("item_uid")
         if not isinstance(item_uid, str) or not item_uid:
             raise ValueError(f"project_findings: session {session_id!r} resolution missing host item_uid")
@@ -164,7 +163,7 @@ def project_findings(session: Mapping[str, object]) -> tuple[list[Record], list[
             "evidence": evidence,
             "reply_captures": resolution.get("reply_captures", []),
             "correction": resolution.get("correction"),
-            "profile": provenance["profile"],
+            "profile": extract_profile(resolution),
         }
         record["item_uid"] = item_uid
         records.append(record)
@@ -302,22 +301,14 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
     exclusions_by_reason["non-decisive-adjudication"] = len(adjudication)
 
     share_caps_report: dict[str, Any] | None = None
-    if config.max_repo_share is not None or config.max_profile_share is not None:
-        records, share_exclusions = _apply_share_caps(
-            records,
-            max_repo_share=config.max_repo_share,
-            max_profile_share=config.max_profile_share,
-        )
+    share_limits = {"repo": config.max_repo_share, "profile": config.max_profile_share}
+    if any(limit is not None for limit in share_limits.values()):
+        records, share_exclusions = _apply_share_caps(records, share_limits)
         for excl_key, excl_count in share_exclusions.items():
             exclusions_by_reason[f"share-cap:{excl_key}"] = (
                 exclusions_by_reason.get(f"share-cap:{excl_key}", 0) + excl_count
             )
-        share_caps_report = _share_caps_report(
-            records,
-            share_exclusions,
-            max_repo_share=config.max_repo_share,
-            max_profile_share=config.max_profile_share,
-        )
+        share_caps_report = _share_caps_report(records, share_exclusions, share_limits)
 
     # Aggregate only emitted evidence; capped-out records must not advance lineage valid_at.
     valid_at = _max_valid_at([cast(Record, rec["lineage"]) for rec in records], as_of)

@@ -26,22 +26,13 @@ def retain_group_limits(
     return kept, dict(excluded)
 
 
-_SHARE_DIMENSIONS: tuple[tuple[str, str, Callable[[Record], Any]], ...] = (
+_SHARE_DIMENSIONS: tuple[tuple[str, Callable[[Record], Any]], ...] = (
     # One dimension table consumed by both the share-cap selection stage and
-    # the report builder, so the three vocabulary uses (configured keys,
-    # applied keys, exclusion-key prefixes) can never drift apart: every
-    # consumer spells the repository dimension ``repo``, matching the
-    # ``max_repo_share`` flag.
-    (
-        "repo",
-        "max_repo_share",
-        lambda r: cast(dict[str, Any], r.get("lineage") or {}).get("repo_slug"),
-    ),
-    (
-        "profile",
-        "max_profile_share",
-        lambda r: cast(dict[str, Any], r.get("profile") or {}).get("profile_name"),
-    ),
+    # the report builder, so the vocabulary uses (limit keys, configured keys,
+    # applied keys, exclusion-key prefixes, ``max_<name>_share`` flags) can
+    # never drift apart.
+    ("repo", lambda r: cast(dict[str, Any], r.get("lineage") or {}).get("repo_slug")),
+    ("profile", lambda r: cast(dict[str, Any], r.get("profile") or {}).get("profile_name")),
 )
 
 
@@ -79,10 +70,7 @@ def _raise_share_caps_fail_closed(
 
 
 def _apply_share_caps(
-    records: list[Record],
-    *,
-    max_repo_share: float | None,
-    max_profile_share: float | None,
+    records: list[Record], limits: Mapping[str, float | None],
 ) -> tuple[list[Record], dict[str, int]]:
     """Keep lowest record ids until all configured output shares satisfy their caps.
 
@@ -91,15 +79,11 @@ def _apply_share_caps(
     None values form their own (none) bucket. Count each exclusion by dimension
     and value. An initially empty corpus stays empty, but trimming a nonempty
     population to zero raises ValueError. Input order never affects selection."""
-    limits = {
-        "repo": max_repo_share,
-        "profile": max_profile_share,
-    }
     dimensions: list[tuple[str, str, Callable[[Record], Any], float]] = []
-    for name, flag, getter in _SHARE_DIMENSIONS:
-        limit = limits[name]
+    for name, getter in _SHARE_DIMENSIONS:
+        limit = limits.get(name)
         if limit is not None:
-            dimensions.append((name, flag, getter, limit))
+            dimensions.append((name, f"max_{name}_share", getter, limit))
     exclusions: dict[str, int] = {}
     population = sorted(records, key=lambda r: str(r["record_id"]))
     if not population:
@@ -173,25 +157,19 @@ def _apply_share_caps(
 def _share_caps_report(
     records: list[Record],
     exclusions: dict[str, int],
-    *,
-    max_repo_share: float | None,
-    max_profile_share: float | None,
+    limits: Mapping[str, float | None],
 ) -> dict[str, Any]:
     """Report configured limits, final group counts/shares, and exclusions.
 
     Summary and lineage share this block and the selection dimension vocabulary."""
-    limits = {
-        "repo": max_repo_share,
-        "profile": max_profile_share,
-    }
     configured = {
-        name: limits[name]
-        for name, _flag, _getter in _SHARE_DIMENSIONS
-        if limits[name] is not None
+        name: limits.get(name)
+        for name, _getter in _SHARE_DIMENSIONS
+        if limits.get(name) is not None
     }
     applied: dict[str, dict[str, dict[str, float]]] = {}
     total = len(records)
-    for name, _flag, getter in _SHARE_DIMENSIONS:
+    for name, getter in _SHARE_DIMENSIONS:
         counts = Counter(map(getter, records))
         applied[name] = {
             str(value) if value is not None else "(none)": {

@@ -8,7 +8,7 @@ from typing import Any
 
 from daydream.training.adjudication.precedence import HUMAN_ROLES, reopen_on_digest_change
 from daydream.training.corpus_projection.projector import project_findings
-from daydream.training.corpus_projection.provenance import extract_provenance
+from daydream.training.corpus_projection.provenance import extract_profile
 from daydream.training.dispositions import (
     NON_DECISIVE_DISPOSITIONS as _NON_DECISIVE_DISPOSITIONS,
     is_decisive,
@@ -19,12 +19,12 @@ from daydream.training.record_identity import record_finding_id
 __all__ = ["build_queue", "_NON_DECISIVE_DISPOSITIONS"]
 
 
-def _profile_label(resolution: Mapping[str, object], provenance: Mapping[str, Any]) -> str | None:
-    """Read canonical profile_name or flat/nested profile through extract_provenance.
+def _profile_label(resolution: Mapping[str, object]) -> str | None:
+    """Read canonical profile_name or flat/nested profile through extract_profile.
 
     Absent labels remain absent; never stringify None or a profile dictionary.
     """
-    profile_name = provenance["profile"].get("profile_name")
+    profile_name = extract_profile(resolution).get("profile_name")
     if profile_name is not None:
         return str(profile_name)
     flat = resolution.get("profile")
@@ -102,7 +102,6 @@ def build_queue(
                     f"build_queue: adjudication entry fingerprint {fingerprint!r} not found "
                     f"in session {session_id!r} resolutions"
                 )
-            provenance = extract_provenance(resolution)
             fresh_digest = resolution.get("evidence_digest")
             if not isinstance(fresh_digest, str) or not fresh_digest:
                 raise ValueError(
@@ -122,7 +121,7 @@ def build_queue(
                 "session_id": session_id,
                 "trajectory_id": trajectory_id,
                 "segment_id": segment_id,
-                "profile": _profile_label(resolution, provenance),
+                "profile": _profile_label(resolution),
                 "status": "open",
                 "rubric_version": rubric_version,
                 "prior_disposition": None,

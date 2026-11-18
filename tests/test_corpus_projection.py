@@ -10,7 +10,7 @@ import pytest
 
 from daydream.dataset import LocalRecordStore, semantic_evidence_digest
 from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig, build_frozen_corpus
-from daydream.training.corpus_projection.provenance import extract_provenance
+from daydream.training.corpus_projection.provenance import extract_profile
 from daydream.training.corpus_projection.segments import segment
 from daydream.training.corpus_projection.tiers import GoldGateError, classify_tier
 from daydream.training.exclusion import EXCLUSION_PATH
@@ -198,10 +198,10 @@ def test_configuration_requires_matching_temporal_pin(tmp_path: Path) -> None:
 def test_cli_posterior_annotation_preserves_captured_native_profile(tmp_path: Path) -> None:
     # A record without legacy profile fields carries its native effective-configuration profile.
     native = {"schema_version": "1", "name": "strict", "source_kind": "builtin", "digest": "d" * 64}
-    assert extract_provenance({"effective_configuration": {"profile": native}})["profile"] == {
+    assert extract_profile({"effective_configuration": {"profile": native}}) == {
         f"profile_{name}": value for name, value in native.items()}
-    explicit = extract_provenance({"profile_name": "explicit", "effective_configuration": {"profile": native}})
-    assert explicit["profile"]["profile_name"] == "explicit"  # Recorded profile fields win over native fallback.
+    explicit = extract_profile({"profile_name": "explicit", "effective_configuration": {"profile": native}})
+    assert explicit["profile_name"] == "explicit"  # Recorded profile fields win over native fallback.
     store = LocalRecordStore(tmp_path / "records")
     run = projection_run(dispositions=("accepted",))
     store.commit_run(run)

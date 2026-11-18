@@ -4,6 +4,7 @@ ValueError rather than silently shrinking the reported population.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -39,7 +40,7 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
     evidence_after_as_of. This shared scope keeps ineligible records from blocking the outcome gate;
     nondecisive records are counted separately.
 
-    Include accepted/rejected balance, unresolved human decisions, counts by profile, and
+    Include accepted/rejected balance, unresolved human decisions, profile-sorted counts, and
     sorted after-as_of IDs. Inter-rater items count disagreements; agreeing counts decisive
     adjudicator resolutions. The admission gate reports this outcome-bearing population and requires
     both classes for class_balance_ok.
@@ -51,14 +52,14 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
     unresolved = 0
     inter_rater_items = 0
     inter_rater_agreeing = 0
-    strata: dict[str, int] = {}
+    strata: Counter[str] = Counter()
     evidence_after_as_of: list[str] = []
 
     for item in items:
         record_id = str(_required(item, "record_id"))
         disposition = str(_required(item, "disposition"))
         profile = str(item.get("profile", ""))
-        strata[profile] = strata.get(profile, 0) + 1
+        strata[profile] += 1
 
         raw_obs = item.get("observations")
         observations: Sequence[Mapping[str, object]] = list(raw_obs) if isinstance(raw_obs, Sequence) else []
@@ -104,7 +105,7 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
         "class_balance": {"accepted": accepted, "rejected": rejected},
         "unresolved": unresolved,
         "inter_rater": {"items": inter_rater_items, "agreeing": inter_rater_agreeing},
-        "strata": {k: strata[k] for k in sorted(strata)},
+        "strata": [{"profile": key, "count": strata[key]} for key in sorted(strata)],
         "evidence_after_as_of": sorted(evidence_after_as_of),
         "admission_gate": {
             "outcome_bearing_total": adjudicated,

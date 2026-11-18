@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from daydream.training._immutable_json import thaw_json
-from daydream.training.corpus_projection.provenance import extract_provenance
+from daydream.training.corpus_projection.provenance import extract_profile
 from daydream.training.dispositions import DECISIVE_DISPOSITIONS, NON_DECISIVE_DISPOSITIONS
 from daydream.training.labeler_versions import (
     ADJUDICATION_LABELER_VERSION,
@@ -74,7 +74,6 @@ def build_canonical_record(
             f"build_canonical_record: session {session_id!r} has {len(rows)} resolution rows "
             f"for fingerprint {fingerprint!r}; expected exactly 1"
         )
-    provenance = extract_provenance(rows[0])
 
     record: dict[str, Any] = {
         "record_id": record_finding_id(session_id, trajectory_id, segment_id, rows[0]["item_uid"]),
@@ -87,7 +86,7 @@ def build_canonical_record(
         "session_id": session_id,
         "trajectory_id": trajectory_id,
         "segment_id": segment_id,
-        "profile": provenance["profile"],
+        "profile": extract_profile(rows[0]),
         "rubric_version": ADJUDICATION_LABELER_VERSION,
         "classifier_version": REPLY_CLASSIFIER_VERSION,
         "labeler_version": HUMAN_LABELER_VERSION,

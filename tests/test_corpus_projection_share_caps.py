@@ -1,7 +1,6 @@
 """Tests for the projection share-cap stage and its build wiring."""
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -12,27 +11,12 @@ from tests.harness.scripts import cli_main
 from tests.test_corpus_projection import _read_jsonl
 
 
-def _mk_record(rid: str, repo: str, profile: str | None) -> dict[str, Any]:
-    return {"record_id": rid, "tier": "silver", "profile": {"profile_name": profile},
-        "lineage": {"repo_slug": repo, "split": "train"},
-    }
-
-
-class TestApplyShareCaps:
-
-
-    def test_empty_population_with_configured_caps_stays_empty(self) -> None:
-        # Issue #6: a zero-record build (no decisive findings) previously completed
-        # with an empty corpus; configuring a share cap must not turn it into a hard failure.
-        kept, exclusions = _apply_share_caps([], max_repo_share=0.5, max_profile_share=0.5)
-        assert kept == []
-        assert exclusions == {}
-
-def _store_with_caps_population(tmp_path: Path) -> Any:
-    store = seed_projection_store(tmp_path, dispositions=("accepted", "accepted", "rejected"))
-    add_projection_run(store, run_id="sess-b", dispositions=("accepted", "accepted"),
-                       profile="quick-review", repo_slug="owner/repo-b")
-    return store
+def test_empty_population_with_configured_caps_stays_empty() -> None:
+    # Issue #6: a zero-record build (no decisive findings) previously completed
+    # with an empty corpus; configuring a share cap must not turn it into a hard failure.
+    kept, exclusions = _apply_share_caps([], {"repo": 0.5, "profile": 0.5})
+    assert kept == []
+    assert exclusions == {}
 
 
 def test_real_cli_applies_caps_and_pins_matching_report(
@@ -78,12 +62,10 @@ def test_real_cli_applies_caps_and_pins_matching_report(
 
 
 def test_cli_refuses_invalid_share_before_creating_output(tmp_path: Path) -> None:
-    dimension = "profile"
-    value = "1.5"
-    store = _store_with_caps_population(tmp_path)
+    store = seed_projection_store(tmp_path)
     config = projection_config(store, tmp_path)
     assert cli_main(["corpus", "build", "--store", str(store.root), "--snapshot-id", config.snapshot_id,
-                     "--out", str(config.out_dir / "corpus.jsonl"), f"--max-{dimension}-share", value]) == 1
+                     "--out", str(config.out_dir / "corpus.jsonl"), "--max-profile-share", "1.5"]) == 1
     assert not config.out_dir.exists()
 
 
