@@ -132,6 +132,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `merged-items.json` the same way review finalization does and stops before fixing when
     an extension step left malformed items. The Verdict Join table no longer has an "Other"
     row.
+  - Built-in fix phases called directly from an extension (`daydream.phases.phase_fix`,
+    `phase_fix_batched`, `phase_fix_parallel`) no longer silently drop non-string
+    `related_files` entries or report a missing `item_uid` as `ValueError`. Pass canonical
+    items as the fix gate produces them: a malformed item now raises `TypeError` or `KeyError`
+    ([#1924](https://github.com/existential-birds/daydream/issues/1924)).
 
 ### Fixed
 
