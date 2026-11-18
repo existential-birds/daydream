@@ -121,6 +121,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     lineage `share_caps` block to version 2. Adjudication report strata are keyed by profile
     only. Earlier queues and exports are refused with the existing messages and nothing is
     converted; rebuild the corpus and re-export the queue.
+  - `daydream corpus adjudicate report` drops `outcome_coverage.total`,
+    `admission_gate.outcome_bearing_total`, `admission_gate.total` and the misnamed
+    `admission_gate.passes_80pct`, which all repeated `outcome_coverage.adjudicated`
+    ([#1927](https://github.com/existential-birds/daydream/issues/1927),
+    [#1929](https://github.com/existential-birds/daydream/issues/1929)). `admission_gate.gate_version`
+    is 2; read `outcome_coverage.adjudicated > 0` where `passes_80pct` was read.
   - A merged item's `id` must be an integer display position
     ([finding identity](docs/extensions.md#finding-identity)). The fix gate now checks
     `merged-items.json` the same way review finalization does and stops before fixing when
