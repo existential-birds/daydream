@@ -101,6 +101,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `pairs[].a_lens`/`b_lens`.
   - Earlier records, stores and archive indexes are refused with the existing messages and
     nothing is converted; use a fresh store, Hub destination or archive directory.
+- **Breaking (0.y.z):** Data paths with no producer are removed
+  ([#1920](https://github.com/existential-birds/daydream/pull/1920)):
+  - The unverified-location demotion is gone. Its producer was retired in
+    [#1834](https://github.com/existential-birds/daydream/issues/1834), so no finding carried
+    `location_cited_line` or `location_distrust`. `--findings-out` findings drop
+    `location_distrust` and `severity_before_demotion`. Ordinary findings move to schema
+    version 6 and immutable-input findings to 7. Readers refuse earlier versions with the
+    existing "unsupported schema version" message.
+  - The analyzer's `evaluation.json` drops `distrusted_items`, `relocated_items` and each
+    location item's `cited_line` and `location_distrust`.
+  - The corpus `stack` dimension, which no producer filled after
+    [#1895](https://github.com/existential-birds/daydream/issues/1895), is removed along with
+    `daydream corpus build --max-stack-share`. Corpus records move to training-record schema
+    `"4"`, annotation queues to `daydream.annotation-queue.v3`, annotation exports to
+    `daydream.annotation-export.v3`, annotation snapshots to `1055-snapshot-r2` and the
+    lineage `share_caps` block to version 2. Adjudication report strata are keyed by profile
+    only. Earlier queues and exports are refused with the existing messages and nothing is
+    converted; rebuild the corpus and re-export the queue.
+  - A merged item's `id` must be an integer display position
+    ([finding identity](docs/extensions.md#finding-identity)). The fix gate now checks
+    `merged-items.json` the same way review finalization does and stops before fixing when
+    an extension step left malformed items. The Verdict Join table no longer has an "Other"
+    row.
 
 ### Fixed
 

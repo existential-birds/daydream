@@ -123,7 +123,6 @@ def build_queue(
                 "trajectory_id": trajectory_id,
                 "segment_id": segment_id,
                 "profile": _profile_label(resolution, provenance),
-                "stack": provenance["stack"],
                 "status": "open",
                 "rubric_version": rubric_version,
                 "prior_disposition": None,

@@ -7,11 +7,13 @@ import sys
 import tempfile
 from collections.abc import Callable, Iterator
 from functools import wraps
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from rich.console import Console
 
 from daydream.artifacts import ownership as artifact_ownership
 from daydream.extensions import EXTENSION_API_VERSION
@@ -291,6 +293,19 @@ def install_backend(monkeypatch: pytest.MonkeyPatch) -> Callable[[object], objec
         return backend
 
     return _install
+
+
+def capture_agent_console(monkeypatch: pytest.MonkeyPatch, **options: Any) -> tuple[Console, StringIO]:
+    """Point the shared agent console at a buffer for this test only.
+
+    Modules bind ``daydream.agent.console`` when imported, some lazily inside ``run_agent``,
+    so replacing the object would leave them holding a test's buffer; configure it in place."""
+    import daydream.agent as agent_mod
+
+    output = StringIO()
+    for name, value in vars(Console(file=output, **options)).items():
+        monkeypatch.setattr(agent_mod.console, name, value)
+    return agent_mod.console, output
 
 
 def silence_module_console(monkeypatch: pytest.MonkeyPatch, module: str, *, keep: tuple[str, ...] = ()) -> None:

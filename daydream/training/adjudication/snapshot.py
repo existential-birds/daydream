@@ -88,7 +88,6 @@ def build_canonical_record(
         "trajectory_id": trajectory_id,
         "segment_id": segment_id,
         "profile": provenance["profile"],
-        "stack": provenance["stack"],
         "rubric_version": ADJUDICATION_LABELER_VERSION,
         "classifier_version": REPLY_CLASSIFIER_VERSION,
         "labeler_version": HUMAN_LABELER_VERSION,

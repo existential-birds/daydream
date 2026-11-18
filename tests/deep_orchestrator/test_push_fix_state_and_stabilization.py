@@ -82,15 +82,15 @@ def test_remote_target_rejects_untrusted_identity_combinations(
     with pytest.raises(GitError):
         _resolve_remote_ci_target(ctx, PushReceipt("origin", "feature", sha, pushed_repository))
 
-async def test_fix_cycle_malformed_related_stops_before_backend_and_clears_stale_test(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("malformed", [{"related_files": ["../outside.py"]}, {"id": True}])
+async def test_fix_cycle_malformed_item_stops_before_backend_and_clears_stale_test(
+    tmp_path: Path, malformed: dict[str, Any]
 ) -> None:
-    """A fix preflight cannot inherit green evidence when policy parsing fails."""
+    """A fix preflight cannot inherit green evidence when policy parsing or the item schema fails."""
 
-    repo = _base_repo(tmp_path, "malformed-related")
+    repo = _base_repo(tmp_path, "malformed-item")
     (repo / "a.py").write_text("A = 2\n")
-    item = _merge_item(1, "a.py", "high")
-    item["related_files"] = ["../outside.py"]
+    item = {**_merge_item(1, "a.py", "high"), **malformed}
     ctx = _direct_fix_context(repo, [item], changed_files={"a.py"})
     ctx.run_context = RunContext(InteractionPolicy(assume="yes"))
     stale = ctx.data["dd"] / "test-verdict.json"

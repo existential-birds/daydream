@@ -84,7 +84,7 @@ def test_cli_complete_population_report_export_materialize(tmp_path: Path, capsy
     assert report["inter_rater"] == {"items": 0, "agreeing": 0}
     assert report["admission_gate"]["passes_80pct"] is True
     assert report["admission_gate"]["class_balance_ok"] is True
-    assert report["strata"] == [{"stack": "python", "profile": "pr_review", "count": 5}]
+    assert report["strata"] == [{"profile": "pr_review", "count": 5}]
     from daydream.training.adjudication.queue import build_queue
 
     sessions = sessions_from_snapshot(store.read_snapshot(snapshot_id(store)))
@@ -115,7 +115,7 @@ def test_cli_complete_population_report_export_materialize(tmp_path: Path, capsy
     automatic = {row["item_uid"]: row for row in before["observations"] if row["role"] == "automatic"}
     for row in records:
         assert row["session_id"] == row["trajectory_id"] == row["segment_id"] == "run-1"
-        assert row["profile"]["profile_name"] == "pr_review" and row["stack"] == "python"
+        assert row["profile"]["profile_name"] == "pr_review"
         assert row["evidence_digest"] == automatic[row["item_uid"]]["evidence_digest"]
         assert row["classifier_version"] == labeler_versions.REPLY_CLASSIFIER_VERSION
         assert row["schema_version"] == f"annotation-snapshot/{labeler_versions.ANNOTATION_SNAPSHOT_SCHEMA_VERSION}"

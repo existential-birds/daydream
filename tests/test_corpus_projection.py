@@ -67,7 +67,7 @@ def test_duplicate_sibling_keys_raise() -> None:
         segment(traj)
 
 
-# Task 6: profile + stack provenance
+# Task 6: profile provenance
 
 
 def _cli_args(config: BuildFrozenCorpusConfig) -> list[str]:
@@ -90,10 +90,6 @@ def test_cli_build_records_keeps_finding_population_and_lineage(tmp_path: Path) 
         store, run_id="ssh-source", dispositions=("accepted",), repo_slug="git@github.com:OWNER/Repo.git"
     )
     add_projection_run(store, run_id="git-suffix", dispositions=("accepted",), repo_slug="OWNER/Repo.git")
-    unclaimed = projection_run("unknown-stack", dispositions=("accepted",))
-    unclaimed["provenance"].pop("stack")
-    store.commit_run(unclaimed)
-    append_projection_evidence(store, unclaimed, dispositions=("accepted",))
     store.commit_run(projection_run("missing-judgments"))
     semantic, capture = reply_evidence("9", "Needs investigation.\n")
     store.append_observation(
@@ -112,14 +108,13 @@ def test_cli_build_records_keeps_finding_population_and_lineage(tmp_path: Path) 
     config = projection_config(store, tmp_path)
     assert cli_main(_cli_args(config)) == 0
     rows = _read_jsonl(config.out_dir / "corpus.jsonl")
-    assert len(rows) == 7 and len({row["record_id"] for row in rows}) == 7
+    assert len(rows) == 6 and len({row["record_id"] for row in rows}) == 6
     assert {row["session_id"]: row["lineage"]["repo_slug"] for row in rows} == {
         "sess-a": "owner/repo-a",
         "mixed-case": "OWNER/Repo",
         "https-source": "OWNER/Repo",
         "ssh-source": "OWNER/Repo",
         "git-suffix": "OWNER/Repo",
-        "unknown-stack": "owner/repo-a",
     }
     assert all(row["task_identity"]["repo_slug"] == row["lineage"]["repo_slug"] for row in rows)
     base_rows = [row for row in rows if row["session_id"] == "sess-a"]
@@ -141,7 +136,6 @@ def test_cli_build_records_keeps_finding_population_and_lineage(tmp_path: Path) 
         assert row["lineage"]["snapshot_id"] == config.snapshot_id
         assert row["lineage"]["source_identity_version"] == "record-snapshot-v2"
         assert row["profile"]["profile_name"] == "deep-review"
-        assert row["stack"] == (None if row["session_id"] == "unknown-stack" else "python")
     report = json.loads((config.out_dir / "adjudication-report.json").read_text())
     assert {(entry["session_id"], entry["item_uid"]): entry["disposition"] for entry in report} == {
         ("sess-a", "item:2"): "ambiguous",
@@ -156,7 +150,7 @@ def test_cli_build_records_keeps_finding_population_and_lineage(tmp_path: Path) 
     assert lineage["exclusions_by_reason"] == {"non-decisive-adjudication": 4}
     assert lineage["exclusion_list_digest"] == hashlib.sha256(EXCLUSION_PATH.read_bytes()).hexdigest()
     assert lineage["snapshot"]["snapshot_id"] == config.snapshot_id
-    assert len(lineage["content_digests"]) == 16  # seven captured runs and nine observations
+    assert len(lineage["content_digests"]) == 14  # six captured runs and eight observations
     assert (config.out_dir / "SHA256SUMS").is_file() and (config.out_dir / "_SUCCESS").is_file()
 
 

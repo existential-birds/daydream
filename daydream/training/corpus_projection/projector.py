@@ -49,7 +49,6 @@ class BuildFrozenCorpusConfig:
     holdout_rate: float = 0.1
     val_rate: float = 0.1
     salt: str = "daydream-projection-salt"
-    max_stack_share: float | None = None
     max_repo_share: float | None = None
     max_profile_share: float | None = None
 
@@ -60,7 +59,7 @@ class BuildFrozenCorpusConfig:
         store_root = self.store_dir.expanduser().resolve()
         if output_root.is_relative_to(store_root) or store_root.is_relative_to(output_root):
             raise ValueError("corpus output overlaps the record store namespace")
-        for name in ("max_stack_share", "max_repo_share", "max_profile_share"):
+        for name in ("max_repo_share", "max_profile_share"):
             share = getattr(self, name)
             if share is not None and not 0 < share <= 1:
                 raise ValueError(f"{name} must be in (0.0, 1.0], got {share}")
@@ -89,14 +88,9 @@ def _refuse_posterior_evidence(
             raise ValueError(f"session {session_id!r} finding {fingerprint!r}: refusing posterior outcome evidence")
 
 
-def _provenance_for(resolution: Mapping[str, Any], run: Mapping[str, Any]) -> dict[str, Any]:
-    prov = extract_provenance(resolution)
-    captured = extract_provenance(run)
-    if not any(prov["profile"].values()):
-        prov["profile"] = captured["profile"]
-    if prov["stack"] is None:
-        prov["stack"] = captured["stack"]
-    return prov
+def _profile_for(resolution: Mapping[str, Any], run: Mapping[str, Any]) -> dict[str, Any]:
+    profile: dict[str, Any] = extract_provenance(resolution)["profile"]
+    return profile if any(profile.values()) else extract_provenance(run)["profile"]
 
 
 def _max_valid_at(evidence: list[Record], base: str | None) -> str | None:
@@ -171,7 +165,6 @@ def project_findings(session: Mapping[str, object]) -> tuple[list[Record], list[
             "reply_captures": resolution.get("reply_captures", []),
             "correction": resolution.get("correction"),
             "profile": provenance["profile"],
-            "stack": provenance["stack"],
         }
         record["item_uid"] = item_uid
         records.append(record)
@@ -264,8 +257,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                 continue
             evidence = cast(list[Record], rec["evidence"])
             _refuse_posterior_evidence(run_id, fingerprint, evidence, as_of)
-            prov = _provenance_for(resolution, run["provenance"])
-            rec["profile"], rec["stack"] = prov["profile"], prov["stack"]
+            rec["profile"] = _profile_for(resolution, run["provenance"])
             rec["lineage"] = {
                 "hub_commit": hub_commit, "snapshot_id": config.snapshot_id,
                 "source_identity_version": SOURCE_IDENTITY_VERSION,
@@ -299,7 +291,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                 task_identity.update(diff_digest=diff_digest, diff_ref=diff_ref)
                 cast(dict[str, Any], rec["lineage"]).update(diff_digest=diff_digest, diff_ref=diff_ref)
             rec["task_identity"] = task_identity
-            rec["schema_version"] = "3"
+            rec["schema_version"] = "4"
             if row.get("annotation") is not None:
                 rec["annotation"] = row["annotation"]
             records.append(rec)
@@ -310,14 +302,9 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
     exclusions_by_reason["non-decisive-adjudication"] = len(adjudication)
 
     share_caps_report: dict[str, Any] | None = None
-    if (
-        config.max_stack_share is not None
-        or config.max_repo_share is not None
-        or config.max_profile_share is not None
-    ):
+    if config.max_repo_share is not None or config.max_profile_share is not None:
         records, share_exclusions = _apply_share_caps(
             records,
-            max_stack_share=config.max_stack_share,
             max_repo_share=config.max_repo_share,
             max_profile_share=config.max_profile_share,
         )
@@ -328,7 +315,6 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         share_caps_report = _share_caps_report(
             records,
             share_exclusions,
-            max_stack_share=config.max_stack_share,
             max_repo_share=config.max_repo_share,
             max_profile_share=config.max_profile_share,
         )

@@ -279,13 +279,6 @@ def _int_or_none(value: Any) -> int | None:
     return value
 
 
-def _cited_line(record: dict[str, Any]) -> Any:
-    """Read the original citation, before the location validator snapped or demoted it."""
-    if "location_cited_line" in record:
-        return record["location_cited_line"]
-    return record.get("line")
-
-
 def _location_tier(ranges: list[tuple[int, int]] | None, line: int) -> tuple[str, int | None]:
     """Classify distance from changed lines using the shared posting tolerance.
 
@@ -305,7 +298,7 @@ def _location_tier(ranges: list[tuple[int, int]] | None, line: int) -> tuple[str
 
 
 def analyze_location(daydream_dir: Path) -> dict[str, Any]:
-    """Score original citations in the shipped review set against the run's hunks.
+    """Score cited lines in the shipped review set against the run's hunks.
 
     Missing/noninteger/bool lines and non-dict items are unscorable. Without hunks, nothing is scored.
     Rates over empty populations are None, never evidence of perfect accuracy.
@@ -318,25 +311,13 @@ def analyze_location(daydream_dir: Path) -> dict[str, Any]:
     tiers = dict.fromkeys(_LOCATION_TIERS, 0)
     detail: list[dict[str, Any]] = []
     unscorable_items = 0
-    distrusted_items = 0
-    relocated_items = 0
     scored_items = 0
 
     for item in items or []:
         if not isinstance(item, dict):
             unscorable_items += 1
             continue
-        if item.get("location_distrust") is True:
-            distrusted_items += 1
-        elif "location_cited_line" in item:
-            # ``location_cited_line`` is stamped on both the snap (relocate)
-            # and the demote branch of ``location_validator.validate_records``
-            # (its own docstring: the key means "relocated OR distrusted").
-            # Demoted items are already counted above, so only count this as
-            # a relocation when it was NOT a demotion (issue #1106 R2).
-            relocated_items += 1
-
-        line = _int_or_none(_cited_line(item))
+        line = _int_or_none(item.get("line"))
         if line is None:
             unscorable_items += 1
             continue
@@ -352,10 +333,8 @@ def analyze_location(daydream_dir: Path) -> dict[str, Any]:
                 "id": item.get("id"),
                 "file": cited_file,
                 "line": item.get("line"),
-                "cited_line": item.get("location_cited_line"),
                 "tier": tier,
                 "distance": distance,
-                "location_distrust": item.get("location_distrust") is True,
             })
 
     tier_rates = (
@@ -373,8 +352,6 @@ def analyze_location(daydream_dir: Path) -> dict[str, Any]:
         "in_hunk_rate": (
             round(tiers["in_hunk"] / scored_items, 4) if scored_items > 0 else None
         ),
-        "distrusted_items": distrusted_items,
-        "relocated_items": relocated_items,
         "items": detail,
     }
 

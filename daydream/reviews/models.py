@@ -26,7 +26,6 @@ class ReviewEvent(StrEnum):
 class ParsedIssue:
     """A finding with a potentially stale line hint and stable cross-run fingerprint.
 
-    Location demotion retains the original severity for the approval gate.
     Off-vocabulary severity is tracked separately from an omitted severity."""
 
     path: str
@@ -36,8 +35,6 @@ class ParsedIssue:
     confidence: str | None = None
     severity: str | None = None
     fingerprint: str | None = None
-    location_distrust: bool = False
-    severity_before_demotion: str | None = None
     severity_off_vocabulary: bool = False
 
 
@@ -126,8 +123,6 @@ class ItemFields:
     rationale: str
     severity: str | None
     confidence: str | None
-    location_distrust: bool = False
-    severity_before_demotion: str | None = None
     severity_off_vocabulary: bool = False
 
 

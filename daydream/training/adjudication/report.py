@@ -39,7 +39,7 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
     evidence_after_as_of. This shared scope keeps ineligible records from blocking the outcome gate;
     nondecisive records are counted separately.
 
-    Include accepted/rejected balance, unresolved human decisions, counts by stack/profile, and
+    Include accepted/rejected balance, unresolved human decisions, counts by profile, and
     sorted after-as_of IDs. Inter-rater items count disagreements; agreeing counts decisive
     adjudicator resolutions. The admission gate reports this outcome-bearing population and requires
     both classes for class_balance_ok.
@@ -51,15 +51,14 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
     unresolved = 0
     inter_rater_items = 0
     inter_rater_agreeing = 0
-    strata: dict[tuple[str, str], int] = {}
+    strata: dict[str, int] = {}
     evidence_after_as_of: list[str] = []
 
     for item in items:
         record_id = str(_required(item, "record_id"))
         disposition = str(_required(item, "disposition"))
-        stack = str(item.get("stack", ""))
         profile = str(item.get("profile", ""))
-        strata[(stack, profile)] = strata.get((stack, profile), 0) + 1
+        strata[profile] = strata.get(profile, 0) + 1
 
         raw_obs = item.get("observations")
         observations: Sequence[Mapping[str, object]] = list(raw_obs) if isinstance(raw_obs, Sequence) else []

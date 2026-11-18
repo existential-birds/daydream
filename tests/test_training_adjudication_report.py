@@ -11,7 +11,6 @@ def test_report_separates_outcome_bearing_from_task_only_and_flags_as_of() -> No
             "record_id": "r1",
             "disposition": "accepted",
             "profile": "pr_review",
-            "stack": "python",
             "tier": "gold",
             "posterior_eligible": True,
             "observations": [],
@@ -21,7 +20,6 @@ def test_report_separates_outcome_bearing_from_task_only_and_flags_as_of() -> No
             "record_id": "r2",
             "disposition": "rejected",
             "profile": "local_branch",
-            "stack": "rust",
             "tier": "task-only",
             "posterior_eligible": False,
             "observations": [],
@@ -31,7 +29,6 @@ def test_report_separates_outcome_bearing_from_task_only_and_flags_as_of() -> No
             "record_id": "r3",
             "disposition": "accepted",
             "profile": "pr_review",
-            "stack": "python",
             "tier": "gold",
             "posterior_eligible": False,
             "observations": [],
@@ -53,6 +50,6 @@ def test_report_separates_outcome_bearing_from_task_only_and_flags_as_of() -> No
 
 def test_missing_required_field_raises_value_error() -> None:
     with pytest.raises(ValueError, match="record_id"):
-        build_report([{"disposition": "accepted", "profile": "pr_review", "stack": "python"}])
+        build_report([{"disposition": "accepted", "profile": "pr_review"}])
     with pytest.raises(ValueError, match="disposition"):
-        build_report([{"record_id": "a" * 64, "profile": "pr_review", "stack": "python"}])
+        build_report([{"record_id": "a" * 64, "profile": "pr_review"}])

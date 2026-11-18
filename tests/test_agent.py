@@ -3,12 +3,10 @@
 import os
 from collections.abc import Callable
 from dataclasses import replace as dataclass_replace
-from io import StringIO
 from pathlib import Path
 from typing import Any
 
 import pytest
-from rich.console import Console
 
 from daydream import prompt_budget
 from daydream.agent import (
@@ -32,6 +30,7 @@ from daydream.prompt_budget import (
     select_advisory_inputs,
 )
 from daydream.trajectory import DaydreamPhase
+from tests.conftest import capture_agent_console
 from tests.harness.backend import ScriptedBackend
 
 
@@ -243,8 +242,7 @@ class ExplodingStrError(RuntimeError):
 async def test_hostile_supervisor_str_surfaces_as_scrubbed_extension_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    output = StringIO()
-    monkeypatch.setattr("daydream.agent.console", Console(file=output, force_terminal=False))
+    _, output = capture_agent_console(monkeypatch, force_terminal=False)
     def hostile_supervisor(
         tool_name: str, tool_input: dict[str, Any], *, phase: DaydreamPhase
     ) -> ToolDecision:

@@ -26,7 +26,6 @@ EXPORT_KEYS = (
     "correction",
     "exclusion_reason",
     "profile",
-    "stack",
     "session_id",
     "trajectory_id",
     "segment_id",

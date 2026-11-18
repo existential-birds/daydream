@@ -32,7 +32,6 @@ _SHARE_DIMENSIONS: tuple[tuple[str, str, Callable[[Record], Any]], ...] = (
     # applied keys, exclusion-key prefixes) can never drift apart: every
     # consumer spells the repository dimension ``repo``, matching the
     # ``max_repo_share`` flag.
-    ("stack", "max_stack_share", lambda r: r.get("stack")),
     (
         "repo",
         "max_repo_share",
@@ -82,19 +81,17 @@ def _raise_share_caps_fail_closed(
 def _apply_share_caps(
     records: list[Record],
     *,
-    max_stack_share: float | None,
     max_repo_share: float | None,
     max_profile_share: float | None,
 ) -> tuple[list[Record], dict[str, int]]:
     """Keep lowest record ids until all configured output shares satisfy their caps.
 
-    Apply stack, repo, then profile, repeating the sequence to a fixed point:
+    Apply repo, then profile, repeating the sequence to a fixed point:
     correlated dimensions can make an earlier cap exceed its limit again.
     None values form their own (none) bucket. Count each exclusion by dimension
     and value. An initially empty corpus stays empty, but trimming a nonempty
     population to zero raises ValueError. Input order never affects selection."""
     limits = {
-        "stack": max_stack_share,
         "repo": max_repo_share,
         "profile": max_profile_share,
     }
@@ -177,7 +174,6 @@ def _share_caps_report(
     records: list[Record],
     exclusions: dict[str, int],
     *,
-    max_stack_share: float | None,
     max_repo_share: float | None,
     max_profile_share: float | None,
 ) -> dict[str, Any]:
@@ -185,7 +181,6 @@ def _share_caps_report(
 
     Summary and lineage share this block and the selection dimension vocabulary."""
     limits = {
-        "stack": max_stack_share,
         "repo": max_repo_share,
         "profile": max_profile_share,
     }
@@ -208,7 +203,7 @@ def _share_caps_report(
             )
         }
     return {
-        "version": 1,
+        "version": 2,
         "configured": configured,
         "applied": applied,
         "exclusions": dict(sorted(exclusions.items())),

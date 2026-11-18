@@ -93,7 +93,7 @@ def test_build_write_load_preserves_the_diagram_contract(tmp_path: Path, git_rep
     path = tmp_path / "findings.json"
     write_findings_artifact(path, artifact)
     loaded = _load(path, head_sha=head)
-    assert json.loads(path.read_text())["schema_version"] == loaded.schema_version == 4
+    assert json.loads(path.read_text())["schema_version"] == loaded.schema_version == 6
     assert loaded.kind == "diagram" and loaded.diagrams == payload
     assert loaded.findings == [] and not loaded.analysis_complete
 

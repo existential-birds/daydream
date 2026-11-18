@@ -106,7 +106,7 @@ async def phase_verify_recommendations(
 
 def _asked_verdicts(fresh_verdicts: list[dict[str, Any]], items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep only the verdicts for the findings this turn was asked to verify."""
-    asked = {item_id for item in items if isinstance(item_id := item.get("id"), int) and not isinstance(item_id, bool)}
+    asked = {item["id"] for item in items}
     return [verdict for verdict in fresh_verdicts if verdict.get("issue_id") in asked]
 
 

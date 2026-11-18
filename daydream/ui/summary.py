@@ -69,17 +69,10 @@ def format_verdict_join(items: list[dict[str, Any]]) -> Table:
     """Show each item's verdict category and id, the flagged verdicts, and the total.
 
     Matched always appears; other empty categories are omitted."""
-    matched: list[Any] = []
-    unmatched: list[Any] = []
-    other: list[Any] = []
+    matched: list[int] = []
+    unmatched: list[int] = []
     for item in items:
-        item_id = item.get("id")
-        if item.get("verifier_verdict") is not None:
-            matched.append(item_id)
-        elif isinstance(item_id, int) and not isinstance(item_id, bool):
-            unmatched.append(item_id)
-        else:
-            other.append(item_id)
+        (matched if item.get("verifier_verdict") is not None else unmatched).append(item["id"])
     contradicts = sum(1 for item in items if item.get("verifier_verdict") == "contradicts")
     uncertain = sum(1 for item in items if item.get("verifier_verdict") == "uncertain")
     table = Table(
@@ -97,7 +90,6 @@ def format_verdict_join(items: list[dict[str, Any]]) -> Table:
     categories = (
         ("Matched", matched),
         ("Unmatched", unmatched),
-        ("Other", other),
     )
     for label, values in categories:
         if values or label == "Matched":

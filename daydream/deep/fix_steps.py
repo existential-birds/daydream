@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
+
+import jsonschema
 
 from daydream import git_ops
 from daydream.agent import console
@@ -23,6 +24,7 @@ from daydream.deep.fix_state import EvidenceKey, FixCycleState
 from daydream.deep.quality_gate import QualityGateThresholds, _evaluate_quality_gate, capture_quality
 from daydream.deep.records import stamp_item_uids
 from daydream.deep.repair_coordinator import continue_repair_job, repair_job_id
+from daydream.deep.review_terminal import load_canonical_items
 from daydream.deep.scope_issues import (
     _resolve_changed_files,
 )
@@ -89,10 +91,7 @@ def _attach_verdicts(items: list[dict[str, Any]], payload: dict[str, Any]) -> li
             "unverified_assumptions": assumptions if isinstance(assumptions, list) else [],
         }
     for item in items:
-        item_id = item.get("id")
-        if not isinstance(item_id, int):
-            continue
-        match = verdict_lookup.get(item_id)
+        match = verdict_lookup.get(item["id"])
         if match is not None:
             item["verifier_verdict"] = match["verdict"]
             item["evidence"] = match["evidence"]
@@ -166,11 +165,15 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         print_error(console, "Fix preflight failed", str(exc))
         return Stop(1)
 
-    # Read canonical merged items directly (validated above). Replaces an LLM
-    # re-parse of the markdown, which silently dropped structural findings; here
-    # they are ordinary tagged items that reach phase_fix like any other.
-    items_file: Path = deep_state.items_file
-    items: list[dict[str, Any]] = json.loads(items_file.read_text())["items"]
+    # Read canonical merged items directly; extension steps may have rewritten
+    # them since review finalization, so refuse any malformed record. Replaces an
+    # LLM re-parse of the markdown, which silently dropped structural findings;
+    # here they are ordinary tagged items that reach phase_fix like any other.
+    try:
+        items = load_canonical_items(ctx.work.repo, deep_state.items_file)
+    except (OSError, ValueError, AttributeError, jsonschema.ValidationError) as exc:
+        print_error(console, "Fix preflight failed", f"merged items are malformed: {type(exc).__name__}")
+        return Stop(1)
     # Normalize legal ./ prefixes once to match Git-derived footprint paths.
     for _item in items:
         _file = _item.get("file")

@@ -96,7 +96,6 @@ def build_export_entries(
             "correction": item["correction"],
             "exclusion_reason": None,
             "profile": profile,
-            "stack": item["stack"],
             "session_id": item["session_id"],
             "trajectory_id": item["trajectory_id"],
             "segment_id": item["segment_id"],

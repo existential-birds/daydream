@@ -158,9 +158,6 @@ def extract_item_fields(
     rationale = str(raw.get("rationale", "")).strip()
     severity = normalize_severity(raw.get("severity"))
     confidence = str(raw.get("confidence", "")).strip().upper() or None
-    location_distrust = bool(raw.get("location_distrust"))
-    before = raw.get("severity_before_demotion")
-    severity_before_demotion = str(before).strip().lower() or None if before else None
     return ItemFields(
         path=path,
         line_int=line_int,
@@ -168,8 +165,6 @@ def extract_item_fields(
         rationale=rationale,
         severity=severity,
         confidence=confidence,
-        location_distrust=location_distrust,
-        severity_before_demotion=severity_before_demotion,
         severity_off_vocabulary=_severity_off_vocabulary(raw),
     )
 
@@ -188,16 +183,6 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
             body_parts.append(f"**Severity:** {fields.severity}")
         if fields.confidence:
             body_parts.append(f"**Confidence:** {fields.confidence}")
-        if fields.location_distrust:
-            # First production reader of the location-distrust signal (issue
-            # #972 R2): the demotion is visible on the report, never silent.
-            if fields.severity_before_demotion:
-                body_parts.append(
-                    "**Location:** unverified citation "
-                    f"(severity demoted from {fields.severity_before_demotion})"
-                )
-            else:
-                body_parts.append("**Location:** unverified citation (severity demoted)")
         if fields.rationale and fields.rationale != fields.description:
             body_parts.append(fields.rationale)
         body = "\n\n".join(body_parts)
@@ -212,8 +197,6 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
                 fingerprint=compute_fingerprint(
                     fields.path, fields.description, fields.rationale
                 ),
-                location_distrust=fields.location_distrust,
-                severity_before_demotion=fields.severity_before_demotion,
                 severity_off_vocabulary=fields.severity_off_vocabulary,
             )
         )
@@ -811,19 +794,9 @@ def _severity_blocks_approval(severity: str | None) -> bool:
     return severity is not None and severity.lower() not in _NON_BLOCKING_SEVERITIES
 
 
-def _finding_blocks_approval(
-    severity: str | None,
-    location_distrust: bool,
-    severity_off_vocabulary: bool = False,
-    severity_before_demotion: str | None = None,
-) -> bool:
-    """Block on an absent or unknown severity, or a blocking severity before location demotion."""
-    return (
-        severity is None
-        or severity_off_vocabulary
-        or _severity_blocks_approval(severity)
-        or (location_distrust and _severity_blocks_approval(severity_before_demotion))
-    )
+def _finding_blocks_approval(severity: str | None, severity_off_vocabulary: bool = False) -> bool:
+    """Block on an absent, off-vocabulary or blocking severity."""
+    return severity is None or severity_off_vocabulary or _severity_blocks_approval(severity)
 
 
 def _is_clean_review(classified: ClassifiedIssues, approve_on_clean: bool) -> bool:
@@ -831,12 +804,7 @@ def _is_clean_review(classified: ClassifiedIssues, approve_on_clean: bool) -> bo
     if not approve_on_clean:
         return False
     return not any(
-        _finding_blocks_approval(
-            issue.severity,
-            issue.location_distrust,
-            issue.severity_off_vocabulary,
-            issue.severity_before_demotion,
-        )
+        _finding_blocks_approval(issue.severity, issue.severity_off_vocabulary)
         for issue in classified.all_issues()
     )
 
@@ -1219,12 +1187,7 @@ def post_findings_from_artifact(
     # open high finding (#343 R2 F2b). Matched findings are never re-posted
     # as comments — only their severities count here.
     can_approve = approve_on_clean and artifact.analysis_complete and not review_warnings and not any(
-        _finding_blocks_approval(
-            finding.severity,
-            finding.location_distrust,
-            finding.severity_off_vocabulary,
-            finding.severity_before_demotion,
-        )
+        _finding_blocks_approval(finding.severity, finding.severity_off_vocabulary)
         for finding in artifact.findings
     )
 
