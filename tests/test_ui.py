@@ -33,7 +33,6 @@ from daydream.ui import (
     print_dim,
     print_error,
     print_success,
-    print_verification_summary,
     render_exploration_summary,
 )
 from daydream.ui.agent_stream import AgentDisplay
@@ -58,11 +57,6 @@ def _ask(console: Console, message: str, default: str = "n") -> str:
 def test_summaries_stay_quiet_and_choice_returns_the_typed_value(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    path = tmp_path / "recommendation-verdicts.json"
-    path.write_text(json.dumps({"verdicts": []}))
-    out = _capture_console(lambda c: print_verification_summary(c, path))
-    assert "Recommendation verification: 0 findings" in out
-
     console = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     console.print(render_exploration_summary(ExplorationContext()))
     out = console.export_text()

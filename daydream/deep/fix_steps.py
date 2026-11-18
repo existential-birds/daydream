@@ -70,7 +70,6 @@ from daydream.ui import (
     print_error,
     print_fix_complete,
     print_success,
-    print_verification_summary,
     print_warning,
 )
 
@@ -244,7 +243,7 @@ async def _step_verify(ctx: FlowContext) -> None:
     # Accepted fix gates verify recommendations; declined gates
     # produce neither a verifier call nor its artifact.
     async with phase_scope(DaydreamPhase.VERIFY):
-        verdicts_file, verdicts_payload = await phase_verify_recommendations(
+        verdicts_payload = await phase_verify_recommendations(
             ctx.backend_for("verify"),
             ctx.work,
             merged_items_path=deep_state.items_file,
@@ -252,37 +251,11 @@ async def _step_verify(ctx: FlowContext) -> None:
             strategy=ctx.strategy("verification"),
             run_context=ctx.run_context,
         )
-    print_verification_summary(console, verdicts_file)
 
     # Attach verifier verdicts to items by `id` (advisory; phase_fix reads them).
     items = _attach_verdicts(items, verdicts_payload)
     deep_state.items = items
-    matched_ids, unmatched_ids, other_ids = _verdict_buckets(items)
-    console.print(
-        format_verdict_join(
-            matched=matched_ids,
-            unmatched=unmatched_ids,
-            other=other_ids,
-        )
-    )
-
-
-def _verdict_buckets(
-    items: list[dict[str, Any]],
-) -> tuple[list[int | None], list[int | None], list[int | None]]:
-    """Partition every canonical item into matched, unmatched or other."""
-    matched: list[int | None] = []
-    unmatched: list[int | None] = []
-    other: list[int | None] = []
-    for item in items:
-        item_id = item.get("id")
-        if item.get("verifier_verdict") is not None:
-            matched.append(item_id)
-        elif isinstance(item_id, int) and not isinstance(item_id, bool):
-            unmatched.append(item_id)
-        else:
-            other.append(item_id)
-    return matched, unmatched, other
+    console.print(format_verdict_join(items))
 
 
 MAX_POST_TEST_STABILIZATION_PASSES = 2

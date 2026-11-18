@@ -1,12 +1,10 @@
 """Summary, table, and deep-review status components.
 
-Fix-progress indicators, the verdict-join table, the exploration-context
-summary and the verification summary.
+Fix-progress indicators, the verdict-join table and the exploration-context
+summary.
 """
 
-import json
-from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from rich import box
 from rich.console import Console, Group
@@ -14,7 +12,6 @@ from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
-from daydream.ui.messages import print_dim
 from daydream.ui.theme import (
     NEON_COLORS,
     STYLE_BOLD_CYAN,
@@ -68,15 +65,23 @@ def print_fix_complete(
     console.print(text)
 
 
-def format_verdict_join(
-    *,
-    matched: list[int | None],
-    unmatched: list[int | None],
-    other: list[int | None],
-) -> Table:
-    """Show verdict categories and ids, plus their total.
+def format_verdict_join(items: list[dict[str, Any]]) -> Table:
+    """Show each item's verdict category and id, the flagged verdicts, and the total.
 
     Matched always appears; other empty categories are omitted."""
+    matched: list[Any] = []
+    unmatched: list[Any] = []
+    other: list[Any] = []
+    for item in items:
+        item_id = item.get("id")
+        if item.get("verifier_verdict") is not None:
+            matched.append(item_id)
+        elif isinstance(item_id, int) and not isinstance(item_id, bool):
+            unmatched.append(item_id)
+        else:
+            other.append(item_id)
+    contradicts = sum(1 for item in items if item.get("verifier_verdict") == "contradicts")
+    uncertain = sum(1 for item in items if item.get("verifier_verdict") == "uncertain")
     table = Table(
         title="Verdict Join",
         title_style=STYLE_BOLD_GREEN,
@@ -97,6 +102,8 @@ def format_verdict_join(
     for label, values in categories:
         if values or label == "Matched":
             table.add_row(label, str(len(values)), ", ".join(str(value) for value in values))
+    if contradicts or uncertain:
+        table.add_row("Flagged", str(contradicts + uncertain), f"{contradicts} contradicts, {uncertain} uncertain")
     table.add_row("Total", str(sum(len(values) for _, values in categories)), "")
 
     return table
@@ -167,24 +174,3 @@ def render_exploration_summary(ctx: "ExplorationContext") -> "Group | Text":
         _add_items("Project Guidelines", list(ctx.guidelines))
 
     return Group(Text(""), table)
-
-
-def print_verification_summary(console: Console, verdicts_path: Path) -> None:
-    """Summarize verifier flags.
-
-    Missing or malformed artifacts produce no output and cannot block fixing."""
-    try:
-        data = json.loads(verdicts_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return
-    verdicts = data.get("verdicts") if isinstance(data, dict) else None
-    if not isinstance(verdicts, list):
-        return
-    contradicts = sum(1 for v in verdicts if isinstance(v, dict) and v.get("verdict") == "contradicts")
-    uncertain = sum(1 for v in verdicts if isinstance(v, dict) and v.get("verdict") == "uncertain")
-    flagged = contradicts + uncertain
-    print_dim(
-        console,
-        f"Recommendation verification: {len(verdicts)} findings · {flagged} flagged "
-        f"({contradicts} contradicts, {uncertain} uncertain)",
-    )

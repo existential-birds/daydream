@@ -79,7 +79,7 @@ async def phase_verify_recommendations(
     deep_dir: Path,
     strategy: str | None = None,
     run_context: RunContext | None = None,
-) -> tuple[Path, dict[str, Any]]:
+) -> dict[str, Any]:
     """Classify every canonical item and persist the verdicts the verifier returns for them."""
     run_context = resolve_run_context(run_context)
     output_path = DeepArtifact.VERDICTS.at(deep_dir)
@@ -101,7 +101,7 @@ async def phase_verify_recommendations(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2))
-    return output_path, payload
+    return payload
 
 
 def _asked_verdicts(fresh_verdicts: list[dict[str, Any]], items: list[dict[str, Any]]) -> list[dict[str, Any]]:

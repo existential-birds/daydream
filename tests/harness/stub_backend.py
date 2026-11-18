@@ -332,7 +332,6 @@ def silence(monkeypatch: pytest.MonkeyPatch, *, prompts: bool = True) -> None:
     ``prompts=False`` leaves the real interaction gateway input in place, for
     tests that drive a genuine gate.
     """
-    monkeypatch.setattr("daydream.deep.fix_steps.print_verification_summary", lambda *a, **kw: None)
     if prompts:
         def answer(_console: Any, message: str, default: str = "") -> str:
             return "n"
