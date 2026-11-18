@@ -101,20 +101,28 @@ async def post_review_to_pr_from_report(
     if not isinstance(items, list) or len(issues) != len(items):
         # A corrupt, partially-written or misshapen merged-items.json must not crash
         # the run, and an item the parser drops must not let a clean review approve
-        # over it; skip the post cleanly (#400).
+        # over it (#400). An incomplete review cannot approve, so its sealed outcome
+        # still posts as a findings-free COMMENT; otherwise skip the post cleanly.
+        if review_complete or not review_summary:
+            print_warning(
+                console,
+                f"Could not read {merged_items_path.name}; skipping PR post.",
+            )
+            return PostStatus.NOTHING_TO_POST
         print_warning(
             console,
-            f"Could not read {merged_items_path.name}; skipping PR post.",
+            f"Could not read {merged_items_path.name}; posting the review outcome without findings.",
         )
-        return PostStatus.NOTHING_TO_POST
-    if not issues and not approve_on_clean and not review_warnings and not (diagram_blocks and diagram_blocks.strip()):
+        issues = []
+    elif (not issues and not approve_on_clean and not review_warnings
+          and not (diagram_blocks and diagram_blocks.strip())):
         # A complete pinned review answers its own earlier unfinished notice; _post still validates the target.
         notice = superseding_completion_notice(
             target_dir if publication_dir is None else publication_dir, captured_pr,
             author=run_context.github_identity.login, console=console, auth=auth,
         ) if review_complete and captured_pr is not None else None
         if notice is None:
-            print_info(console, "No parseable issues in review output; skipping PR post.")
+            print_info(console, "No findings in merged items; skipping PR post.")
             return PostStatus.NOTHING_TO_POST
         review_summary = notice
     return await _post(

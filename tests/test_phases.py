@@ -714,7 +714,8 @@ async def test_bound_phase_fix_transports_only_named_private_inputs(
 async def test_fix_entrypoints_reject_invalid_finding_file_refs(
     git_repo: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every fix entry point rejects unconfined or missing files; turn wall cuts follow the group budget.
+    """Every fix entry point rejects unconfined or missing files; turn wall cuts follow the group budget;
+    an unrestorable group reports its final restore failure.
 
     Batched cases put the bad reference second to exercise the entire preflight loop.
     """

@@ -375,7 +375,8 @@ async def _post_payload_approves_when_clean_and_enabled_case(
 
 
 async def test_publication_decisions_follow_review_state(tmp_path: Path, pr: PRInfo) -> None:
-    """Approval, empty-report diagrams, failed diagram replacement and base-tip reads follow captured state."""
+    """Approval, unusable merged items, empty-report diagrams, failed diagram replacement and base-tip reads
+    follow captured state."""
     # An authorized plan snapshots its issues; later classification mutation cannot change the submission.
     mutable = pr_review.ClassifiedIssues(inline=[_inline()], inline_issues=[ParsedIssue(path="a.py", line=10,
                                          title="planned", body="b")], body_only=[ParsedIssue(path="b.py", line=None,
@@ -519,18 +520,30 @@ async def _post_review_from_report_empty_items_posts_diagram_case(
     captured = _stub_post(monkeypatch, pr, _NO_ISSUES)
     warnings: list[str] = []
     monkeypatch.setattr(pr_review, "print_warning", lambda _c, message: warnings.append(message))
-    # Unreadable, misshapen or file-less items never approve over findings the reader would drop.
-    for body in ("[" * 100_000, b"\xff", "[]", '{"items": "x"}', '{"items": [1]}', "{}",
-                 '{"items": [{"id": 1, "description": "d", "rationale": "r", "severity": "high"}]}'):
-        merged.write_bytes(body if isinstance(body, bytes) else body.encode())
-        warnings.clear()
+    if with_diagram:
+        # Unreadable, misshapen or file-less items never approve over findings the reader would drop.
+        for body in ("[" * 100_000, b"\xff", "[]", '{"items": "x"}', '{"items": [1]}', "{}",
+                     '{"items": [{"id": 1, "description": "d", "rationale": "r", "severity": "high"}]}'):
+            merged.write_bytes(body if isinstance(body, bytes) else body.encode())
+            warnings.clear()
+            status = await pr_review.post_review_to_pr_from_report(
+                tmp_path, merged, console=_FakeConsole(),  # type: ignore[arg-type]
+                post=True, approve_on_clean=True, diagram_blocks=blocks,
+                renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO,
+            )
+            assert status == pr_review.PostStatus.NOTHING_TO_POST and not captured
+            assert warnings == ["Could not read merged-items.json; skipping PR post."]
+        # An incomplete review still posts its sealed outcome as a findings-free COMMENT.
         status = await pr_review.post_review_to_pr_from_report(
             tmp_path, merged, console=_FakeConsole(),  # type: ignore[arg-type]
-            post=True, approve_on_clean=True, diagram_blocks=blocks if with_diagram else None,
-            renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO,
+            post=True, renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO, review_complete=False,
+            review_summary="The findings could not be read after the review; the sealed result keeps them.",
         )
-        assert status == pr_review.PostStatus.NOTHING_TO_POST and not captured
-        assert warnings == ["Could not read merged-items.json; skipping PR post."]
+        assert status == pr_review.PostStatus.POSTED
+        plan = captured["plan"]
+        assert plan.event is pr_review.ReviewEvent.COMMENT and not plan.inline and not plan.file_level
+        assert "could not be read after the review" in (plan.review_summary or "")
+        captured.clear()
     merged.write_text(json.dumps({"items": []}))
 
     status = await pr_review.post_review_to_pr_from_report(

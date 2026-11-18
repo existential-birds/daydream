@@ -108,6 +108,7 @@ async def test_terminal_failure_retains_owned_trace_and_partial_evidence(
 
     def with_malformed_evidence(ctx: Any, *args: Any, **kwargs: Any) -> int:
         (ctx.data["dd"] / "fix-failures.json").write_text(too_deep)
+        (ctx.data["dd"] / "fix-outcomes.json").write_text("{malformed")
         status = finalize(ctx, *args, **kwargs)
         # An extension step then leaves a finding without a file; capture names the shape failure.
         (ctx.data["dd"] / "merged-items.json").write_text(json.dumps({"items": [fileless]}))
@@ -129,6 +130,8 @@ async def test_terminal_failure_retains_owned_trace_and_partial_evidence(
     assert raw["original_task"]["status"] == "available"
     assert raw["provenance"]["collection_diagnostics"]["fix-failures.json"] == {
         "status": "failed", "reason": "malformed_json", "raw_text": too_deep}
+    assert raw["provenance"]["collection_diagnostics"]["fix-outcomes.json"] == {
+        "status": "failed", "reason": "malformed_json", "raw_text": "{malformed"}
     assert raw["provenance"]["collection_diagnostics"]["merged-items.json"] == {
         "status": "failed", "reason": "malformed_shape", "raw_json": {"items": [fileless]}}
     # A version 5 record names no routing or per-stack setting of the replaced reviewer.
