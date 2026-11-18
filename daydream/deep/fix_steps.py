@@ -176,9 +176,7 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         return Stop(1)
     # Normalize legal ./ prefixes once to match Git-derived footprint paths.
     for _item in items:
-        _file = _item.get("file")
-        if isinstance(_file, str):
-            _item["file"] = strip_dot_slash(_file)
+        _item["file"] = strip_dot_slash(_item["file"])
     stamp_item_uids(items)
     if not items:
         print_success(console, "No actionable items -- done.")
@@ -277,23 +275,20 @@ def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> 
     if iteration in (None, 1) or not outcomes:
         initial_dispatch = [dict(i) for i in canonical]
         for item in initial_dispatch:
-            uid = item.get("item_uid")
-            target = item.get("file")
-            if isinstance(uid, str) and isinstance(target, str):
-                state.last_fix_target_by_uid[uid] = target
+            state.last_fix_target_by_uid[item["item_uid"]] = item["file"]
         return initial_dispatch
     round_number = iteration if isinstance(iteration, int) else 1
     dispatched: list[dict[str, Any]] = []
     for item in canonical:
-        uid = item.get("item_uid")
-        outcome = outcomes.get(uid) if isinstance(uid, str) else None
+        uid = item["item_uid"]
+        outcome = outcomes.get(uid)
         if not outcome or outcome.get("verdict") not in ACTIONABLE_VERDICTS:
             continue
         copy = dict(item)
         if outcome.get("verdict") in RETARGETABLE_VERDICTS:
             accepted = state.footprint.accept_retarget(
                 ctx.work.repo,
-                str(uid),
+                uid,
                 outcome.get("path"),
                 phase="fix",
                 round_number=round_number,
@@ -303,9 +298,7 @@ def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> 
                 copy["fix_verify_path"] = accepted
         copy["fix_verify_verdict"] = outcome.get("verdict")
         copy["fix_verify_reason"] = outcome.get("reason") or ""
-        target = copy.get("file")
-        if isinstance(uid, str) and isinstance(target, str):
-            state.last_fix_target_by_uid[uid] = target
+        state.last_fix_target_by_uid[uid] = copy["file"]
         dispatched.append(copy)
     return dispatched
 
@@ -482,11 +475,7 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
             code_workspace=ctx.work.repo,
             dd=deep_state.dd,
             candidates={path for path in snapshot.paths if path.endswith(".py")}
-            | {
-                str(item["file"])
-                for item in deep_state.items
-                if isinstance(item.get("file"), str) and str(item["file"]).endswith(".py")
-            },
+            | {item["file"] for item in deep_state.items if item["file"].endswith(".py")},
             before=quality_before,
             before_unavailable_reason=quality_unavailable,
             iteration=deep_state.iteration,
@@ -517,11 +506,7 @@ async def verify_retained_tree(
             round_number=pass_number,
             run_context=ctx.run_context,
         )
-    by_id = {
-        item.get("id"): item
-        for item in items
-        if isinstance(item.get("id"), int) and isinstance(item.get("item_uid"), str)
-    }
+    by_id = {item["id"]: item for item in items}
     state = DeepState(ctx.data).fix_cycle_state
     outcomes: dict[str, dict[str, Any]] = {}
     for verdict in verdicts:
@@ -621,11 +606,7 @@ def _render_fix_outcome_summary(
     """
     if not outcomes:
         return
-    numbering_by_uid = {
-        item["item_uid"]: num
-        for num, item in enumerate(items, start=1)
-        if isinstance(item.get("item_uid"), str)
-    }
+    numbering_by_uid = {item["item_uid"]: num for num, item in enumerate(items, start=1)}
     total = len(items)
     for outcome_key, verdict in outcomes.items():
         num = numbering_by_uid.get(outcome_key)

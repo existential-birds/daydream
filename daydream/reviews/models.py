@@ -35,7 +35,6 @@ class ParsedIssue:
     confidence: str | None = None
     severity: str | None = None
     fingerprint: str | None = None
-    severity_off_vocabulary: bool = False
 
 
 @dataclass(frozen=True)
@@ -123,7 +122,6 @@ class ItemFields:
     rationale: str
     severity: str | None
     confidence: str | None
-    severity_off_vocabulary: bool = False
 
 
 @dataclass

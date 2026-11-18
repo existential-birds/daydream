@@ -81,10 +81,13 @@ async def phase_verify_recommendations(
     run_context: RunContext | None = None,
 ) -> dict[str, Any]:
     """Classify every canonical item and persist the verdicts the verifier returns for them."""
+    from daydream.deep.review_terminal import load_canonical_items  # review_terminal imports phases
+
     run_context = resolve_run_context(run_context)
     output_path = DeepArtifact.VERDICTS.at(deep_dir)
 
-    items: list[dict[str, Any]] = json.loads(merged_items_path.read_text()).get("items", [])
+    # Validate again: an extension step may have rewritten the items since the fix gate.
+    items = load_canonical_items(work.repo, merged_items_path)
     prompt = get_registry().prompt("verify")(
         strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["verification"].content,
         items=items,
@@ -181,11 +184,10 @@ async def phase_fix_verify(
     # get the honest non-fixed terminal, never a silent drop.
     verdicts: list[dict[str, Any]] = []
     for item in items:
-        issue_id = item.get("id")
-        entry = by_id.get(issue_id) if isinstance(issue_id, int) else None
+        entry = by_id.get(item["id"])
         if entry is None:
             entry = {
-                "issue_id": issue_id,
+                "issue_id": item["id"],
                 "verdict": "unresolved",
                 "reason": "no verifier verdict",
             }

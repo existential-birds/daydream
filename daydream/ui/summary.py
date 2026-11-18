@@ -66,9 +66,9 @@ def print_fix_complete(
 
 
 def format_verdict_join(items: list[dict[str, Any]]) -> Table:
-    """Show each item's verdict category and id, the flagged verdicts, and the total.
+    """Show matched and unmatched item ids, the flagged verdicts, and the total.
 
-    Matched always appears; other empty categories are omitted."""
+    Matched always appears; an empty Unmatched row is omitted."""
     matched: list[int] = []
     unmatched: list[int] = []
     for item in items:
@@ -87,16 +87,12 @@ def format_verdict_join(items: list[dict[str, Any]]) -> Table:
     table.add_column("Count", style=STYLE_FG)
     table.add_column("IDs", style=STYLE_DIM)
 
-    categories = (
-        ("Matched", matched),
-        ("Unmatched", unmatched),
-    )
-    for label, values in categories:
-        if values or label == "Matched":
-            table.add_row(label, str(len(values)), ", ".join(str(value) for value in values))
+    table.add_row("Matched", str(len(matched)), ", ".join(map(str, matched)))
+    if unmatched:
+        table.add_row("Unmatched", str(len(unmatched)), ", ".join(map(str, unmatched)))
     if contradicts or uncertain:
         table.add_row("Flagged", str(contradicts + uncertain), f"{contradicts} contradicts, {uncertain} uncertain")
-    table.add_row("Total", str(sum(len(values) for _, values in categories)), "")
+    table.add_row("Total", str(len(items)), "")
 
     return table
 

@@ -106,7 +106,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The unverified-location demotion is gone. Its producer was retired in
     [#1834](https://github.com/existential-birds/daydream/issues/1834), so no finding carried
     `location_cited_line` or `location_distrust`. `--findings-out` findings drop
-    `location_distrust` and `severity_before_demotion`. Ordinary findings move to schema
+    `location_distrust`, `severity_before_demotion` and the redundant `severity_off_vocabulary`
+    (an unrecognized severity already withholds approval). Ordinary findings move to schema
     version 6 and immutable-input findings to 7. Readers refuse earlier versions with the
     existing "unsupported schema version" message.
   - The analyzer's `evaluation.json` drops `distrusted_items`, `relocated_items` and each

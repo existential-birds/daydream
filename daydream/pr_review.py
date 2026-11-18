@@ -135,16 +135,6 @@ async def post_review_to_pr_from_report(
     )
 
 
-def _severity_off_vocabulary(raw: dict[str, Any]) -> bool:
-    """Distinguish an asserted unknown severity from an omitted one for approval."""
-    value = raw.get("severity")
-    return (
-        isinstance(value, str)
-        and bool(value.strip())
-        and normalize_severity(value) is None
-    )
-
-
 def extract_item_fields(
     raw: dict[str, Any],
 ) -> ItemFields | None:
@@ -165,7 +155,6 @@ def extract_item_fields(
         rationale=rationale,
         severity=severity,
         confidence=confidence,
-        severity_off_vocabulary=_severity_off_vocabulary(raw),
     )
 
 
@@ -197,7 +186,6 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
                 fingerprint=compute_fingerprint(
                     fields.path, fields.description, fields.rationale
                 ),
-                severity_off_vocabulary=fields.severity_off_vocabulary,
             )
         )
     return out
@@ -541,11 +529,7 @@ def snap_to_hunk(
 ) -> int | None:
     """Preserve in-hunk lines; snap nearby lines to the nearest boundary within tolerance.
 
-    The pre-report location validator owns citation authority. This final placement
-    check uses the live diff so GitHub receives a valid changed line."""
-    # Shared two-sided boundary-distance primitive (same as the pre-report
-    # validator) so posting and the validator agree on what ``in hunk`` /
-    # ``near boundary`` means (issue #745).
+    This final placement check uses the live diff so GitHub receives a valid changed line."""
     from daydream.hunk_index import range_distance
 
     best: int | None = None
@@ -782,21 +766,16 @@ class GitHubReviewTransport:
         )
 
 
-# Severities that must never let an opted-in review post as an approval.
-# Fails closed: any string outside ``_NON_BLOCKING_SEVERITIES`` blocks. The
-# findings schema permits arbitrary strings, so unknown/off-vocabulary labels
+# The only severities that let an opted-in review post as an approval.
+# Fails closed: an absent severity or any string outside ``_NON_BLOCKING_SEVERITIES``
+# blocks. The findings schema permits arbitrary strings, so unknown labels
 # ("critical", "blocker", "major", ...) must conservatively block approval.
 _NON_BLOCKING_SEVERITIES = frozenset({"low"})
 
 
-def _severity_blocks_approval(severity: str | None) -> bool:
-    """Unknown severities block approval; low and omitted severities do not."""
-    return severity is not None and severity.lower() not in _NON_BLOCKING_SEVERITIES
-
-
-def _finding_blocks_approval(severity: str | None, severity_off_vocabulary: bool = False) -> bool:
-    """Block on an absent, off-vocabulary or blocking severity."""
-    return severity is None or severity_off_vocabulary or _severity_blocks_approval(severity)
+def _finding_blocks_approval(severity: str | None) -> bool:
+    """Block on an absent or non-low severity."""
+    return severity is None or severity.lower() not in _NON_BLOCKING_SEVERITIES
 
 
 def _is_clean_review(classified: ClassifiedIssues, approve_on_clean: bool) -> bool:
@@ -804,7 +783,7 @@ def _is_clean_review(classified: ClassifiedIssues, approve_on_clean: bool) -> bo
     if not approve_on_clean:
         return False
     return not any(
-        _finding_blocks_approval(issue.severity, issue.severity_off_vocabulary)
+        _finding_blocks_approval(issue.severity)
         for issue in classified.all_issues()
     )
 
@@ -1187,7 +1166,7 @@ def post_findings_from_artifact(
     # open high finding (#343 R2 F2b). Matched findings are never re-posted
     # as comments — only their severities count here.
     can_approve = approve_on_clean and artifact.analysis_complete and not review_warnings and not any(
-        _finding_blocks_approval(finding.severity, finding.severity_off_vocabulary)
+        _finding_blocks_approval(finding.severity)
         for finding in artifact.findings
     )
 

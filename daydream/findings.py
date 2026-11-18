@@ -50,7 +50,6 @@ _FINDING_PROPERTIES = {
     **{name: {'type': 'string'} for name in ('path', 'title', 'body')},
     'line': {'type': ['integer', 'null']}, 'placement': {'enum': ['inline', 'file', 'body']},
     **{name: {'type': ['string', 'null']} for name in ('severity', 'confidence')},
-    'severity_off_vocabulary': {'type': 'boolean'},
 }
 FINDINGS_SCHEMA: dict[str, Any] = strict_object({
     'schema_version': {'const': FINDINGS_SCHEMA_VERSION}, 'repo': {'type': 'string'},
@@ -139,9 +138,8 @@ class FindingsValidationError(Exception):
 
 @dataclass
 class ArtifactFinding:
-    """Validated finding with placement, identity and approval-gate provenance.
+    """Validated finding with placement, identity and approval-gate severity.
 
-    Severity provenance preserves the current approval gate inputs.
     Non-inline placements have no line; body remains raw until posting.
     """
 
@@ -153,7 +151,6 @@ class ArtifactFinding:
     body: str
     severity: str | None
     confidence: str | None
-    severity_off_vocabulary: bool = False
 
 
 @dataclass

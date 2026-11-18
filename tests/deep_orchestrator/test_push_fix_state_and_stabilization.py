@@ -82,14 +82,16 @@ def test_remote_target_rejects_untrusted_identity_combinations(
     with pytest.raises(GitError):
         _resolve_remote_ci_target(ctx, PushReceipt("origin", "feature", sha, pushed_repository))
 
-@pytest.mark.parametrize("malformed", [{"related_files": ["../outside.py"]}, {"id": True}])
+@pytest.mark.parametrize("malformed", [{"file": "link.py"}, {"id": True}])
 async def test_fix_cycle_malformed_item_stops_before_backend_and_clears_stale_test(
     tmp_path: Path, malformed: dict[str, Any]
 ) -> None:
-    """A fix preflight cannot inherit green evidence when policy parsing or the item schema fails."""
+    """A fix preflight cannot inherit green evidence when the footprint refuses a leaf symlink or the schema fails."""
 
     repo = _base_repo(tmp_path, "malformed-item")
     (repo / "a.py").write_text("A = 2\n")
+    if malformed.get("file") == "link.py":
+        (repo / "link.py").symlink_to("a.py")
     item = {**_merge_item(1, "a.py", "high"), **malformed}
     ctx = _direct_fix_context(repo, [item], changed_files={"a.py"})
     ctx.run_context = RunContext(InteractionPolicy(assume="yes"))

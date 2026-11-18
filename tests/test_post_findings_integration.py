@@ -402,23 +402,23 @@ def test_post_findings_repo_config_cannot_approve(fake_gh: FakeGh, tmp_path: Pat
     assert len(posts) == 1
     assert posts[0].payload["event"] == "COMMENT"
 
-@pytest.mark.parametrize("schema_version", [6, 7])
+@pytest.mark.parametrize("immutable", [False, True], ids=["mutable", "immutable"])
 def test_post_findings_matched_blocking_finding_prevents_approval(
-    fake_gh: FakeGh, tmp_path: Path, schema_version: int,
+    fake_gh: FakeGh, tmp_path: Path, immutable: bool,
 ) -> None:
     """Deduplication must retain blockers without reposting the matched findings."""
     retained = _inline_finding("Retained concern", severity="medium")
-    if schema_version == 7:
+    if immutable:
         retained["severity"] = None
     findings = [retained,
         _finding("b" * 64, path="b.py", line=5, placement="inline", title="New nit", severity="low"),
     ]
     artifact = tmp_path / "f.json"
-    data = immutable_findings_artifact(findings) if schema_version == 7 else findings_artifact(findings)
+    data = immutable_findings_artifact(findings) if immutable else findings_artifact(findings)
     write_findings_artifact(artifact, data)
-    argv = _post_argv(artifact, head_sha="a" * 40 if schema_version == 7 else None,
-                      base_sha="b" * 40 if schema_version == 7 else None,
-                      comparison_sha="c" * 40 if schema_version == 7 else None)
+    argv = _post_argv(artifact, head_sha="a" * 40 if immutable else None,
+                      base_sha="b" * 40 if immutable else None,
+                      comparison_sha="c" * 40 if immutable else None)
     argv += ["--approve-on-clean", "--bot-login", "daydream"]
     fake_gh.serve_prior_threads(fingerprints=["a" * 64], viewer_did_author=True)
     assert cli_main(argv) == 0
