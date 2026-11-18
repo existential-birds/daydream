@@ -54,9 +54,7 @@ def _ask(console: Console, message: str, default: str = "n") -> str:
     return resolve_run_context().choice(message, default=default, safe_default=default, console=console)
 
 
-def test_summaries_stay_quiet_and_choice_returns_the_typed_value(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_summaries_stay_quiet_and_choice_returns_the_typed_value(monkeypatch: pytest.MonkeyPatch) -> None:
     console = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     console.print(render_exploration_summary(ExplorationContext()))
     out = console.export_text()

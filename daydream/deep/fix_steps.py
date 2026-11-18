@@ -82,11 +82,8 @@ def _attach_verdicts(items: list[dict[str, Any]], payload: dict[str, Any]) -> li
     """
     verdict_lookup: dict[int, dict[str, Any]] = {}
     for entry in payload["verdicts"]:
-        issue_id = entry.get("issue_id")
-        if not isinstance(issue_id, int):
-            continue
         assumptions = entry.get("unverified_assumptions")
-        verdict_lookup[issue_id] = {
+        verdict_lookup[entry["issue_id"]] = {
             "verdict": entry.get("verdict", ""),
             "evidence": entry.get("evidence", ""),
             "unverified_assumptions": assumptions if isinstance(assumptions, list) else [],
