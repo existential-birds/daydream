@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read-only, standard-library inspection of Daydream captures and local evidence documents.
 
-Inputs are capture JSONL (``daydream.run.v4`` records) or one standalone evidence
+Inputs are capture JSONL (``daydream.run.v5`` records) or one standalone evidence
 document (``evidence.otlp.jsonl`` or ``forks/*.otlp.jsonl``). Each embedded document is
 verified against its sha256 and reduced to its view (see evidence.py). All pointers are
 RFC 6901 paths within the selected record with documents replaced by their views:
@@ -91,7 +91,7 @@ def load(path, run_id=None, line=None):
     if len(selected) != 1:
         raise ValueError(f"{path}: found {len(selected)} matching records; select one with --run-id or --line")
     line, record = selected[0]
-    if record.get("schema_version") != "daydream.run.v4":
+    if record.get("schema_version") != "daydream.run.v5":
         raise ValueError(f"{path}:{line}: unsupported schema {record.get('schema_version')!r}")
     record = with_views(record)
     bundle = unwrap(record.get("trajectories")) or {}

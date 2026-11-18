@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fixture_evidence import evidence_bytes, v4_record
+from fixture_evidence import evidence_bytes, v5_record
 
 SCRIPT = Path(__file__).with_name("trace.py")
 
@@ -43,14 +43,14 @@ class TraceCliTests(unittest.TestCase):
                 "final_metrics": {"total_cost_usd": 5, "extra": {
                     "daydream_metric_scope": "whole_run_including_forks"}}}
         child = {"trajectory_id": "child", "steps": [steps[0]], "final_metrics": {"total_cost_usd": 3}}
-        self.record = {"schema_version": "daydream.run.v4", "run_id": "run", "outcome": "success",
+        self.record = {"schema_version": "daydream.run.v5", "run_id": "run", "outcome": "success",
                        "trajectories": {"status": "available", "value": {
                            "root_trajectory_id": "root", "documents": [child, root]}},
                        "completeness": {"trajectory": "complete"}}
-        self.path.write_text("\n" + json.dumps(v4_record(self.record)) + "\n")
+        self.path.write_text("\n" + json.dumps(v5_record(self.record)) + "\n")
 
     def save(self, *records, suffix=""):
-        self.path.write_text("\n".join(json.dumps(v4_record(record)) for record in records) + suffix)
+        self.path.write_text("\n".join(json.dumps(v5_record(record)) for record in records) + suffix)
 
     def cli(self, command, *args, ok=True):
         result = subprocess.run([sys.executable, str(SCRIPT), command, str(self.path), *args],
@@ -204,7 +204,7 @@ class TraceCliTests(unittest.TestCase):
 
     def test_physical_line_selects_duplicate_ids_without_accepting_wrong_or_invalid_records(self):
         # Cohorts deduplicate identical IDs; run-id selection alone remains ambiguous.
-        encoded = json.dumps(v4_record(self.record))
+        encoded = json.dumps(v5_record(self.record))
         self.path.write_text("\n" + encoded + "\n" + encoded + "\n")
         self.assertIn("select", self.cli("summary", "--run-id", "run", ok=False).lower())
         selected = self.cli("summary", "--run-id", "run", "--line", "3")
@@ -221,7 +221,7 @@ class TraceCliTests(unittest.TestCase):
 
     def test_standalone_evidence_and_unavailable_trajectories_are_distinguished(self):
         # Embedded evidence is read only when its lines still match their recorded digest.
-        tampered = v4_record(self.record)
+        tampered = v5_record(self.record)
         document = tampered["trajectories"]["value"]["documents"][1]
         document["otlp_jsonl"] = document["otlp_jsonl"].replace("/repo", "/forged")
         self.path.write_text(json.dumps(tampered))

@@ -81,8 +81,8 @@ def collect_verification(
                     if path.name in verification_names and (payload := read_json(path)) is not None}
     if verification:
         verification["item_associations"] = [
-            {key: item[key] for key in ("id", "item_uid", "uid", "source_uids", "verify_decision",
-                                       "verifier_verdict", "verifier_reason", "unverified_assumptions") if key in item}
+            {key: item[key] for key in ("id", "item_uid", "uid", "source_uids",
+                                       "verifier_verdict", "unverified_assumptions") if key in item}
             for item in canonical_items
         ]
     return verification
@@ -180,7 +180,7 @@ def capture_run_record(
                                    trajectory_id=document.trajectory_id, session_id=artifacts.session_id)
         for document in selected.documents
     )
-    LocalRecordStore(store_path).commit_run({"schema_version": "daydream.run.v4",
+    LocalRecordStore(store_path).commit_run({"schema_version": "daydream.run.v5",
         "run_id": artifacts.session_id, "captured_at": selected.cutoff_at if selected else now_iso_utc(),
         "trace_id": current_run_trace_id(),
         "outcome": outcome, "original_task": evidence(original_task, absent="unavailable"),
@@ -193,9 +193,8 @@ def capture_run_record(
         } if patch is not None else None),
         "trajectories": evidence({"root_trajectory_id": selected.root_trajectory_id,
             "status": selected.status, "cutoff_at": selected.cutoff_at} if selected is not None else None),
-        # ``claims`` and ``derivation`` are record keys of earlier builds; this reviewer writes neither.
-        "findings": evidence({"claims": [], "items": canonical_items, "derivation": {},
-            "terminal_coverage": coverage} if merged is not None or coverage is not None else None,
+        "findings": evidence({"items": canonical_items, "terminal_coverage": coverage}
+            if merged is not None or coverage is not None else None,
             failed="merged-items.json" in acquisition_failures),
         "verification": evidence(verification or None, failed="recommendation-verdicts.json" in acquisition_failures),
         "provenance": provenance,

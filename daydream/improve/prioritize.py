@@ -320,8 +320,7 @@ def _merge_work_package(findings: list[dict[str, Any]]) -> dict[str, Any]:
     )
     # Unified fallback policy (issue #972 R3.1): when no member carries a
     # known severity the axis is omitted entirely — no conservative "HIGH"
-    # default is fabricated for severity (the one permitted "high" default is
-    # the structural-lens setdefault in phases.py).
+    # default is fabricated for severity.
     severity_values = [
         axis
         for member in members

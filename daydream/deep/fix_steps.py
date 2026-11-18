@@ -21,7 +21,7 @@ from daydream.deep import fix_state
 from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.fix_state import EvidenceKey, FixCycleState
 from daydream.deep.quality_gate import QualityGateThresholds, _evaluate_quality_gate, capture_quality
-from daydream.deep.records import item_uid, stamp_item_uids
+from daydream.deep.records import stamp_item_uids
 from daydream.deep.repair_coordinator import continue_repair_job, repair_job_id
 from daydream.deep.scope_issues import (
     _resolve_changed_files,
@@ -260,13 +260,11 @@ async def _step_verify(ctx: FlowContext) -> None:
     # Attach verifier verdicts to items by `id` (advisory; phase_fix reads them).
     items = _attach_verdicts(items, verdicts_payload)
     deep_state.items = items
-    matched_ids, unmatched_ids, skipped_ids, other_ids = _verdict_buckets(items, verdicts_payload)
-    # Persisted selection decisions identify skips, so coverage accounting includes every fix-loop item.
+    matched_ids, unmatched_ids, other_ids = _verdict_buckets(items)
     console.print(
         format_verdict_join(
             matched=matched_ids,
             unmatched=unmatched_ids,
-            skipped=skipped_ids,
             other=other_ids,
             total=len(items),
         )
@@ -274,48 +272,21 @@ async def _step_verify(ctx: FlowContext) -> None:
 
 
 def _verdict_buckets(
-    items: list[dict[str, Any]], payload: object
-) -> tuple[list[int | None], list[int | None], list[int | None], list[int | None]]:
-    """Partition every canonical item into matched, unmatched, skipped or other.
-
-    Checked persisted selection decisions own the skips.
-    """
-    decisions_by_uid = _selection_decisions(payload)
+    items: list[dict[str, Any]],
+) -> tuple[list[int | None], list[int | None], list[int | None]]:
+    """Partition every canonical item into matched, unmatched or other."""
     matched: list[int | None] = []
     unmatched: list[int | None] = []
-    skipped: list[int | None] = []
     other: list[int | None] = []
     for item in items:
         item_id = item.get("id")
-        verdict = item.get("verifier_verdict")
-        uid = item_uid(item)
-        if uid not in decisions_by_uid:
-            raise ValueError(f"Verifier selection omits canonical item {uid!r}")
-        if decisions_by_uid[uid]["selected"] is False:
-            skipped.append(item_id)
-        elif verdict is not None:
+        if item.get("verifier_verdict") is not None:
             matched.append(item_id)
         elif isinstance(item_id, int) and not isinstance(item_id, bool):
             unmatched.append(item_id)
         else:
             other.append(item_id)
-    return matched, unmatched, skipped, other
-
-
-def _selection_decisions(payload: object) -> dict[str, dict[str, Any]]:
-    """Require current verifier selection decisions keyed by unique durable UID."""
-    block = payload.get("selection") if isinstance(payload, dict) else None
-    decisions = block.get("decisions") if isinstance(block, dict) else None
-    if not isinstance(decisions, list):
-        raise ValueError("Verifier artifact requires selection decisions")
-    out: dict[str, dict[str, Any]] = {}
-    for decision in decisions:
-        if (not isinstance(decision, dict) or not isinstance(decision.get("item_uid"), str)
-                or not decision["item_uid"] or decision["item_uid"] in out
-                or type(decision.get("selected")) is not bool or not isinstance(decision.get("reason_code"), str)):
-            raise ValueError("Verifier artifact contains malformed or duplicate selection decisions")
-        out[decision["item_uid"]] = decision
-    return out
+    return matched, unmatched, other
 
 
 MAX_POST_TEST_STABILIZATION_PASSES = 2

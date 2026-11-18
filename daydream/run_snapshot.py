@@ -46,14 +46,12 @@ class RunProfileIdentity:
 class ManifestRunIdentity:
     """Effective non-recorder identity serialized in a run manifest."""
 
-    model: str | None
     backend: str
     review_backend: str | None
     review_model: str | None
     fix_backend: str | None
     test_backend: str | None
     review_only: bool
-    deep: bool
     profile: RunProfileIdentity | None
     phases: RunPhaseCapabilities
 

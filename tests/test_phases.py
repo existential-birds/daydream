@@ -1438,3 +1438,18 @@ async def test_reuse_decision_or_named_mismatch_is_reported_and_persisted(
     assert gate["result"] == "identity-mismatch"
     assert gate["mismatched_components"] == ["tree_key"]
     assert any("tree_key" in line for line in reported), reported
+
+
+def test_fresh_verdicts_bind_only_to_the_findings_asked_about() -> None:
+    """Verdicts for findings the verifier was not shown are dropped before they reach a finding."""
+    from daydream.deep.fix_steps import _attach_verdicts
+    from daydream.phases.verify import _asked_verdicts
+    findings: list[dict[str, Any]] = [{"item_uid": f"item:{n}", "id": i} for n, i in ((1, 9), (2, 2), (3, 3))]
+    shown = {"issue_id": 2, "verdict": "uncertain", "evidence": "shown"}
+    stray = [{"issue_id": n, "verdict": "contradicts", "evidence": "stray"} for n in (3, 99, "2")]
+    verdicts = _asked_verdicts([shown, *stray], findings[:2])
+    assert verdicts == [shown]
+    assert _attach_verdicts(findings, {"verdicts": verdicts}) == [
+        findings[0],
+        {**findings[1], "verifier_verdict": "uncertain", "evidence": "shown", "unverified_assumptions": []},
+        findings[2]]

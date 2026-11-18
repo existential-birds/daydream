@@ -61,7 +61,6 @@ def test_summaries_stay_quiet_and_choice_returns_the_typed_value(
     path = tmp_path / "recommendation-verdicts.json"
     path.write_text(json.dumps({"verdicts": []}))
     out = _capture_console(lambda c: print_verification_summary(c, path))
-    assert "selected" not in out
     assert "Recommendation verification: 0 findings" in out
 
     console = Console(file=StringIO(), record=True, force_terminal=True, width=100)

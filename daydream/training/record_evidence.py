@@ -157,24 +157,12 @@ def sessions_from_snapshot(records: SnapshotRecords, *, overlay_judgments: bool 
                 disposition = "ambiguous"
             if disposition == "unknown":
                 disposition = "ambiguous"
-            source = next(
-                (
-                    {"stack": stack["stack"], **c}
-                    for stack in finding_payload.get("claims", [])
-                    for c in (
-                        stack["records"].get("issues", []) if isinstance(stack["records"], dict) else stack["records"]
-                    )
-                    if c.get("uid") in item["source_uids"]
-                ),
-                {},
-            )
             content_history = [o for o in history if o["evidence_digest"] == digest]
             raw_digest = raw.get("evidence_digest") or reply_evidence_digest(raw.get("evidence") or [])
             if latest_harvest and raw and raw_digest == digest:
                 content_history.append({**latest_harvest, **raw})
             resolution = {
                 **run.get("provenance", {}),
-                **source,
                 **raw,
                 "item_uid": item["item_uid"],
                 "fingerprint": item["fingerprint"],

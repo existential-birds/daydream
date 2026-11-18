@@ -321,14 +321,12 @@ def capture_manifest_run_identity(
             review_model = _configured_pi_model(cwd, execution_input=execution_input) or DEFAULT_PI_MODEL
     profile = config.review_profile
     return ManifestRunIdentity(
-        model=None,
         backend=_default_backend_name(config),
         review_backend=review_backend,
         review_model=review_model,
         fix_backend=resolved_backend_name(config, "fix") if phases.fix else None,
         test_backend=resolved_backend_name(config, "test") if phases.test else None,
         review_only=flow_kind is DaydreamRunFlow.TTT and config.output_mode == "review",
-        deep=True,
         profile=None if profile is None else RunProfileIdentity(
             schema_version=profile.profile.schema_version,
             name=profile.name,

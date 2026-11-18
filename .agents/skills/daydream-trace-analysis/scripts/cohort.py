@@ -92,8 +92,8 @@ def context(record):
 
 
 def run_row(record, source, line):
-    if not isinstance(record, dict) or record.get("schema_version") != "daydream.run.v4":
-        raise ValueError("expected a daydream.run.v4 capture object")
+    if not isinstance(record, dict) or record.get("schema_version") != "daydream.run.v5":
+        raise ValueError("expected a daydream.run.v5 capture object")
     if not isinstance(record.get("run_id"), str) or not record["run_id"]:
         raise ValueError("capture requires a nonempty run_id")
     captured_at = record.get("captured_at")

@@ -307,8 +307,7 @@ def _location_tier(ranges: list[tuple[int, int]] | None, line: int) -> tuple[str
 def analyze_location(daydream_dir: Path) -> dict[str, Any]:
     """Score original citations in the shipped review set against the run's hunks.
 
-    Structural line-zero anchors are whole-file exemptions. Missing/noninteger/bool
-    lines and non-dict items are unscorable. Without hunks, nothing is scored.
+    Missing/noninteger/bool lines and non-dict items are unscorable. Without hunks, nothing is scored.
     Rates over empty populations are None, never evidence of perfect accuracy.
     Only per-item detail is capped; counters/rates cover all shipped items.
     """
@@ -318,7 +317,6 @@ def analyze_location(daydream_dir: Path) -> dict[str, Any]:
 
     tiers = dict.fromkeys(_LOCATION_TIERS, 0)
     detail: list[dict[str, Any]] = []
-    whole_file_anchors = 0
     unscorable_items = 0
     distrusted_items = 0
     relocated_items = 0
@@ -338,12 +336,7 @@ def analyze_location(daydream_dir: Path) -> dict[str, Any]:
             # a relocation when it was NOT a demotion (issue #1106 R2).
             relocated_items += 1
 
-        lens = item.get("lens")
-        cited = _cited_line(item)
-        if lens == "structural" and cited == 0:
-            whole_file_anchors += 1
-            continue
-        line = _int_or_none(cited)
+        line = _int_or_none(_cited_line(item))
         if line is None:
             unscorable_items += 1
             continue
@@ -360,7 +353,6 @@ def analyze_location(daydream_dir: Path) -> dict[str, Any]:
                 "file": cited_file,
                 "line": item.get("line"),
                 "cited_line": item.get("location_cited_line"),
-                "lens": lens,
                 "tier": tier,
                 "distance": distance,
                 "location_distrust": item.get("location_distrust") is True,
@@ -375,7 +367,6 @@ def analyze_location(daydream_dir: Path) -> dict[str, Any]:
         "hunk_source": hunk_source,
         "shipped_items": len(items or []),
         "scored_items": scored_items,
-        "whole_file_anchors": whole_file_anchors,
         "unscorable_items": unscorable_items,
         "tiers": tiers,
         "tier_rates": tier_rates,
@@ -389,7 +380,7 @@ def analyze_location(daydream_dir: Path) -> dict[str, Any]:
 
 
 def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
-    """Measure duplicate findings that survived merge, including structural/language pairs.
+    """Measure duplicate findings that survived merge.
 
     Compare descriptions across files and report the full similarity distribution,
     not only threshold crossings. Provenance lists retain every source uid; empty
@@ -429,18 +420,16 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
         return records[int(source_index)]
 
     def _pair_row(pair: Any) -> dict[str, Any]:
-        """Attach shipped-item provenance and lens to a reported duplicate pair."""
+        """Attach shipped-item provenance to a reported duplicate pair."""
         item_a = _item_at(pair.record_a_source)
         item_b = _item_at(pair.record_b_source)
         return {
             "a_id": pair.record_a_id,
             "a_source_uids": item_source_uids(item_a),
             "a_file": pair.record_a_file,
-            "a_lens": str(item_a.get("lens", "")),
             "b_id": pair.record_b_id,
             "b_source_uids": item_source_uids(item_b),
             "b_file": pair.record_b_file,
-            "b_lens": str(item_b.get("lens", "")),
             "similarity": round(pair.similarity, 4),
             "same_file": _same_file(pair),
         }

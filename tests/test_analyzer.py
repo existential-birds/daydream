@@ -701,7 +701,6 @@ def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
         for i in range(4)
     ]
     shipped += [_item(4 + i, file="b.py", line=i + 1, description=f"med-{i}") for i in range(4)]
-    shipped[4]["lens"] = shipped[5]["lens"] = "wonder"
     seed_merged_items(deep, shipped)
     (deep / "stack-python-records.json").write_text(json.dumps({"issues": [{"id": 0, "confidence": "HIGH"}]}))
     (deep / "alternatives.json").write_text(json.dumps([{"id": 0}]))
@@ -866,12 +865,12 @@ def _provenance(*uids: str) -> dict[str, Any]:
 
 
 def _item(
-    item_id: int, *, file: str = "svc/loader.py", line: Any = 88, description: str = WORKED_A, lens: str = "per-stack",
+    item_id: int, *, file: str = "svc/loader.py", line: Any = 88, description: str = WORKED_A,
     **extra: Any,
 ) -> dict[str, Any]:
     """A shipped ``merged-items.json`` item in the canonical shape."""
     item: dict[str, Any] = {
-        "id": item_id, "file": file, "line": line, "lens": lens, "severity": "medium", "confidence": "MEDIUM",
+        "id": item_id, "file": file, "line": line, "severity": "medium", "confidence": "MEDIUM",
         "description": description, "rationale": f"see {file}", "evidence": f"{file}:{line}",
     }
     item.update(extra)
@@ -903,7 +902,7 @@ def test_location_and_duplication_propagate_corrupt_merged_items(tmp_path: Path)
 def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path,) -> None:
     """Analyze one persisted shipped population with independently countable pair/location output.
 
-    Mixed attribution, exemptions and relocated citations must survive the same join; unrelated
+    Mixed attribution and relocated citations must survive the same join; unrelated
     findings cannot hide a wrong per-item tier or fabricated UID in an aggregate count.
     """
     dd, deep = _deep_dirs(tmp_path)
@@ -913,18 +912,17 @@ def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path
         "added_total": 1, "removed_total": 1,
     }}))
     items = [
-        _item(1, line=205, description="Loader guard", lens="structural", uid="structure:3"),
+        _item(1, line=205, description="Loader guard", uid="structure:3"),
         _item(
             2,
             line=210,
             location_cited_line=212,
             description="Loader guards",
-            lens="cross-stack",
             **_provenance("python:1", "react:2"),
         ),
         _item(3, line=4, description="Missing mutex", location_distrust=True, location_cited_line=4, **_provenance()),
         _item(4, file="other/untouched.py", line=205, description="ZIP checksum", uid="python:2"),
-        _item(5, line=0, description="Loader guard", lens="structural", uid="structure:5"),
+        _item(5, line=0, description="Loader guard", uid="structure:5"),
         _item(6, line="not-an-int", description=""),
         _item(7, line=True, description=""),
     ]
@@ -938,24 +936,24 @@ def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path
     assert (
         location["shipped_items"],
         location["scored_items"],
-        location["whole_file_anchors"],
         location["unscorable_items"],
         location["relocated_items"],
         location["distrusted_items"],
-    ) == (7, 4, 1, 2, 1, 1)
-    assert location["tiers"] == {"in_hunk": 1, "within_tolerance": 1, "beyond_tolerance": 1, "file_absent": 1}
+    ) == (7, 5, 2, 1, 1)
+    assert location["tiers"] == {"in_hunk": 1, "within_tolerance": 1, "beyond_tolerance": 2, "file_absent": 1}
     assert location["tier_rates"] == {
-        "in_hunk": 0.25,
-        "within_tolerance": 0.25,
-        "beyond_tolerance": 0.25,
-        "file_absent": 0.25,
+        "in_hunk": 0.2,
+        "within_tolerance": 0.2,
+        "beyond_tolerance": 0.4,
+        "file_absent": 0.2,
     }
-    assert location["in_hunk_rate"] == 0.25
+    assert location["in_hunk_rate"] == 0.2
     assert [(row["id"], row["line"], row["cited_line"], row["tier"], row["distance"]) for row in location["items"]] == [
         (1, 205, None, "in_hunk", 0),
         (2, 210, 212, "within_tolerance", 2),
         (3, 4, 4, "beyond_tolerance", 196),
         (4, 205, None, "file_absent", None),
+        (5, 0, None, "beyond_tolerance", 200),
     ]
     duplication = result["findings"]["shipped_duplication"]
     assert (
@@ -981,8 +979,6 @@ def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path
         ("4", "5", 0.0),
     ]
     sources = {"1": ["structure:3"], "2": ["python:1", "react:2"], "3": [], "4": ["python:2"], "5": ["structure:5"]}
-    lenses = {"1": "structural", "2": "cross-stack", "3": "per-stack", "4": "per-stack", "5": "structural"}
     for row in duplication["pairs"]:
         assert row["a_source_uids"] == sources[row["a_id"]] and row["b_source_uids"] == sources[row["b_id"]]
-        assert (row["a_lens"], row["b_lens"]) == (lenses[row["a_id"]], lenses[row["b_id"]])
         assert row["same_file"] == ("4" not in (row["a_id"], row["b_id"]))

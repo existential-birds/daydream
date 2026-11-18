@@ -10,10 +10,6 @@ from daydream.backends import (
 )
 from daydream.check_claims import substantiate_check_claims
 from daydream.deep.artifacts import DeepArtifact
-from daydream.deep.verify_selection import (
-    SelectionDecision,
-    select_items,
-)
 from daydream.extensions import get_registry
 from daydream.phases.inputs import _recipe_for_work, append_extended_facts
 from daydream.phases.schemas import (
@@ -84,32 +80,14 @@ async def phase_verify_recommendations(
     strategy: str | None = None,
     run_context: RunContext | None = None,
 ) -> tuple[Path, dict[str, Any]]:
-    """Classify every canonical item and persist its selection decision beside verdicts.
-
-    Every item reaches the prompt; an empty selection still writes an artifact
-    without a backend call.
-    """
+    """Classify every canonical item and persist the verdicts the verifier returns for them."""
     run_context = resolve_run_context(run_context)
     output_path = DeepArtifact.VERDICTS.at(deep_dir)
 
     items: list[dict[str, Any]] = json.loads(merged_items_path.read_text()).get("items", [])
-    decisions = select_items(items)
-    selection_block: dict[str, Any] = {
-        "decisions": [decision.as_dict() for decision in decisions],
-        "selected": sum(1 for decision in decisions if decision.selected),
-    }
-    pending_items = [item for item, decision in zip(items, decisions, strict=True) if decision.selected]
-
-    if not pending_items:
-        # Nothing to verify: the artifact is still schema-valid and still written (MH11/MH14).
-        payload: dict[str, Any] = {"verdicts": [], "selection": selection_block}
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(payload, indent=2))
-        return output_path, payload
-
     prompt = get_registry().prompt("verify")(
         strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["verification"].content,
-        items=pending_items,
+        items=items,
         cwd=work.repo,
         output_path=output_path,
     )
@@ -119,17 +97,16 @@ async def phase_verify_recommendations(
         backend, work, prompt, RECOMMENDATION_VERDICTS_SCHEMA, run_context,
     )
     payload = _coerce_verdicts_payload(candidate)
-    payload["verdicts"] = _asked_verdicts(payload["verdicts"], decisions)
-    payload["selection"] = selection_block
+    payload["verdicts"] = _asked_verdicts(payload["verdicts"], items)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2))
     return output_path, payload
 
 
-def _asked_verdicts(fresh_verdicts: list[dict[str, Any]], decisions: list[SelectionDecision]) -> list[dict[str, Any]]:
+def _asked_verdicts(fresh_verdicts: list[dict[str, Any]], items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep only the verdicts for the findings this turn was asked to verify."""
-    asked = {decision.item_id for decision in decisions if decision.selected and decision.item_id is not None}
+    asked = {item_id for item in items if isinstance(item_id := item.get("id"), int) and not isinstance(item_id, bool)}
     return [verdict for verdict in fresh_verdicts if verdict.get("issue_id") in asked]
 
 

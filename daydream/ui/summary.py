@@ -72,14 +72,12 @@ def format_verdict_join(
     *,
     matched: list[int | None],
     unmatched: list[int | None],
-    skipped: list[int | None],
     other: list[int | None],
     total: int,
 ) -> Table:
     """Show verdict categories and ids, plus an independently computed total.
 
-    Matched always appears; other empty categories are omitted.
-    Skipped findings were not selected, whereas unmatched findings lack verdicts."""
+    Matched always appears; other empty categories are omitted."""
     table = Table(
         title="Verdict Join",
         title_style=STYLE_BOLD_GREEN,
@@ -95,7 +93,6 @@ def format_verdict_join(
     categories = (
         ("Matched", matched),
         ("Unmatched", unmatched),
-        ("Skipped", skipped),
         ("Other", other),
     )
     computed_total = sum(len(values) for _, values in categories)
@@ -176,7 +173,7 @@ def render_exploration_summary(ctx: "ExplorationContext") -> "Group | Text":
 
 
 def print_verification_summary(console: Console, verdicts_path: Path) -> None:
-    """Summarize verifier flags and optional selected/skipped counts.
+    """Summarize verifier flags.
 
     Missing or malformed artifacts produce no output and cannot block fixing."""
     try:
@@ -189,19 +186,8 @@ def print_verification_summary(console: Console, verdicts_path: Path) -> None:
     contradicts = sum(1 for v in verdicts if isinstance(v, dict) and v.get("verdict") == "contradicts")
     uncertain = sum(1 for v in verdicts if isinstance(v, dict) and v.get("verdict") == "uncertain")
     flagged = contradicts + uncertain
-    selection = data.get("selection") if isinstance(data, dict) else None
-    selected = selection.get("selected") if isinstance(selection, dict) else None
-    skipped = selection.get("skipped") if isinstance(selection, dict) else None
-    suffix = ""
-    if _is_count(selected) and _is_count(skipped):
-        suffix = f" · {selected} selected / {skipped} skipped"
     print_dim(
         console,
         f"Recommendation verification: {len(verdicts)} findings · {flagged} flagged "
-        f"({contradicts} contradicts, {uncertain} uncertain){suffix}",
+        f"({contradicts} contradicts, {uncertain} uncertain)",
     )
-
-
-def _is_count(value: object) -> bool:
-    """Whether *value* is a real integer count (``bool`` is not)."""
-    return isinstance(value, int) and not isinstance(value, bool)

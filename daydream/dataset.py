@@ -64,12 +64,12 @@ def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
     return {"anyOf": [schema, {"type": "null"}]}
 
 
+_RUN_VERSION = "daydream.run.v5"
 _STRING = {"type": "string"}
 _ID = {"type": "string", "minLength": 1}
 _SHA = {"type": "string", "pattern": "^[a-f0-9]{64}$"}
 _BOOL = {"type": "boolean"}
 _MAP = {"type": "object"}
-_CLAIM = _object(extra=True, uid=_ID)
 _ITEM = _object(extra=True, item_uid=_ID, source_uids=_array(_ID), fingerprint=_SHA)
 _RUN_PAYLOADS = {
     "original_task": _object(optional=("source_diff_sha256", "redaction"),
@@ -86,9 +86,7 @@ _RUN_PAYLOADS = {
         patch=_STRING, sha256=_SHA, source_sha256=_nullable(_SHA), capture=_nullable(_MAP)),
     "trajectories": _object(documents={**_array(_MAP), "minItems": 1}, root_trajectory_id=_ID,
                             status={"enum": ["complete", "partial"]}, cutoff_at=_STRING),
-    "findings": _object(claims=_array(_object(stack=_ID, records={"anyOf": [
-        _object(extra=True, issues=_array(_CLAIM)), _array(_CLAIM)]})),
-        items=_array(_ITEM), derivation=_MAP, terminal_coverage=_nullable(_MAP)),
+    "findings": _object(items=_array(_ITEM), terminal_coverage=_nullable(_MAP)),
     "verification": {**_object(extra=True, item_associations=_array(_MAP)), "minProperties": 2},
 }
 _AVAILABILITY = {"enum": ["available", "unavailable", "unproduced", "withheld", "failed"]}
@@ -96,7 +94,7 @@ _EVIDENCE = _object(optional=("value", "reason"), status=_AVAILABILITY, value={}
 _EVIDENCE["if"] = {"properties": {"status": {"const": "available"}}}
 _EVIDENCE["then"] = {"required": ["value"], "properties": {"value": {"not": {"type": "null"}}}}
 _EVIDENCE["else"] = {"properties": {"value": {"type": "null"}}}
-_RUN_SCHEMA = _object(schema_version={"const": "daydream.run.v4"}, run_id=_ID, captured_at=_STRING,
+_RUN_SCHEMA = _object(schema_version={"const": _RUN_VERSION}, run_id=_ID, captured_at=_STRING,
     outcome={"enum": ["success", "failed", "interrupted"]}, provenance=_MAP, completeness=_MAP,
     trace_id=_nullable(_STRING))
 _RUN_SCHEMA["properties"].update({name: {"allOf": [_EVIDENCE, {
@@ -139,7 +137,7 @@ _SNAPSHOT_SCHEMA = _object(schema_version={"const": "daydream.snapshot.v2"}, sna
     observed_before=_STRING, valid_before=_nullable(_STRING), runs=_array(_MEMBER), observations=_array(_MEMBER),
     source=_nullable(_object(repository=_ID, revision={"type": "string", "pattern": "^[a-f0-9]{40}$"},
                              manifest_sha256=_nullable(_SHA))))
-_VALIDATORS = {"daydream.run.v4": Draft202012Validator(_RUN_SCHEMA),
+_VALIDATORS = {_RUN_VERSION: Draft202012Validator(_RUN_SCHEMA),
                "daydream.observation.v4": Draft202012Validator(_OBSERVATION_SCHEMA),
                "daydream.snapshot.v2": Draft202012Validator(_SNAPSHOT_SCHEMA)}
 
@@ -162,14 +160,14 @@ def _invalid(name: str) -> Iterator[None]:
 
 def _parse(raw: Mapping[str, Any] | str | bytes, version: str) -> Record:
     name = "ObservationRecord" if version.startswith("daydream.observation.") else (
-        "RunRecord" if version == "daydream.run.v4" else "Snapshot")
+        "RunRecord" if version == _RUN_VERSION else "Snapshot")
     with _invalid(name):
         value = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
         if not isinstance(value, dict) or value.get("schema_version") != version or version not in _VALIDATORS:
             raise ValueError("schema_version")
         _JSON.validate_python(value)
         evidence_default = {"status": "unproduced", "value": None, "reason": None}
-        if version == "daydream.run.v4":
+        if version == _RUN_VERSION:
             value = {"provenance": {}, "completeness": {}, "trace_id": None, **value}
             for field in _RUN_PAYLOADS:
                 value[field] = {**evidence_default, **value.get(field, {})}
@@ -179,7 +177,7 @@ def _parse(raw: Mapping[str, Any] | str | bytes, version: str) -> Record:
             _timestamp(value["observed_at"])
         if not _VALIDATORS[version].is_valid(value):
             raise ValueError("record")
-        if version == "daydream.run.v4":
+        if version == _RUN_VERSION:
             _validate_run_evidence(value)
         elif version.startswith("daydream.observation."):
             _validate_observation(value)
@@ -217,7 +215,7 @@ def _run_envelope(
                 value["trajectories"] = {**section, "value": {**payload, "documents": [{}]}}
         elif documents is not None:
             raise ValueError("record")
-    envelope = _parse(value, "daydream.run.v4")
+    envelope = _parse(value, _RUN_VERSION)
     if documents is not None:
         envelope["trajectories"]["value"]["documents"] = f"documents-{uuid4().hex}"
     return envelope, documents
@@ -362,10 +360,8 @@ def _validate_run_evidence(run: Record) -> None:
     items: set[str] = set()
     if run["findings"]["status"] == "available":
         findings = run["findings"]["value"]
-        claims = [claim["uid"] for stack in findings["claims"] for claim in (
-            stack["records"]["issues"] if isinstance(stack["records"], dict) else stack["records"])]
         items = {item["item_uid"] for item in findings["items"]}
-        if len(set(claims)) != len(claims) or len(items) != len(findings["items"]):
+        if len(items) != len(findings["items"]):
             raise ValueError("findings contain duplicate identities")
         if any(len(set(item["source_uids"])) != len(item["source_uids"]) for item in findings["items"]):
             raise ValueError("finding source_uids contain duplicate identities")

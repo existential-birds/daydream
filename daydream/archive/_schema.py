@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import NamedTuple
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 class RunColumn(NamedTuple):
     """SQL column of the local diagnostic run index."""
@@ -27,14 +27,12 @@ RUNS_COLUMNS: tuple[RunColumn, ...] = (
     RunColumn("daydream_dirty", "INTEGER"),
     RunColumn("daydream_container_digest", "TEXT"),
     RunColumn("run_flow", "TEXT NOT NULL"),
-    RunColumn("model", "TEXT"),
     RunColumn("backend", "TEXT NOT NULL DEFAULT 'claude'"),
     RunColumn("review_backend", "TEXT"),
     RunColumn("review_model", "TEXT"),
     RunColumn("fix_backend", "TEXT"),
     RunColumn("test_backend", "TEXT"),
     RunColumn("review_only", "INTEGER NOT NULL DEFAULT 0"),
-    RunColumn("deep", "INTEGER NOT NULL DEFAULT 0"),
     RunColumn("remote_url", "TEXT"),
     RunColumn("repo_slug", "TEXT"),
     RunColumn("source_path", "TEXT"),

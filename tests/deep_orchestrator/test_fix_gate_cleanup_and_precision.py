@@ -8,7 +8,6 @@ from typing import Any
 import pytest
 
 from daydream.config import REVIEW_OUTPUT_FILE
-from daydream.deep import fix_steps
 from daydream.git_ops import GitTimeoutError
 from tests.test_deep_orchestrator import (
     _force_interactive,
@@ -87,11 +86,3 @@ async def test_deep_run_reports_persistent_git_timeout_distinctly(
     titles = [t for t, _ in errors]
     assert "Git Timeout" in titles, f"expected a distinct Git Timeout error, got {errors!r}"
     assert "Git Error" not in titles, f"a timeout was misreported as the generic base-branch error: {errors!r}"
-
-def test_verdict_buckets_reject_unchecked_or_missing_selection() -> None:
-    cases: tuple[Any, ...] = (None, [], [{}], [{"item_uid": "item:4", "selected": 1, "reason_code": "selected"}],
-                              [{"item_uid": "item:4", "selected": True, "reason_code": "selected"}] * 2)
-    for decisions in cases:
-        payload = {"selection": {"decisions": decisions}}
-        with pytest.raises(ValueError):
-            fix_steps._verdict_buckets([{"id": 4, "item_uid": "item:4"}], payload)

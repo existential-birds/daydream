@@ -166,8 +166,8 @@ def _strict_archive(*, target: Path, session_id: str, config: Any, write_snapsho
 def _manifest_identity(**overrides: Any) -> ManifestRunIdentity:
     """Build the public, already-resolved identity supplied by the runner."""
     identity = ManifestRunIdentity(
-        model=None, backend="claude", review_backend="claude", review_model="sonnet", fix_backend="claude",
-        test_backend="claude", review_only=False, deep=True, profile=None,
+        backend="claude", review_backend="claude", review_model="sonnet", fix_backend="claude",
+        test_backend="claude", review_only=False, profile=None,
         phases=RunPhaseCapabilities(merge=True, fix=True, test=True, push=True, remote_ci=True,),
     )
     return replace(identity, **overrides)

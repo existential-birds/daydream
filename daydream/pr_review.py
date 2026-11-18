@@ -84,7 +84,7 @@ async def post_review_to_pr_from_report(
     run_context: RunContext | None = None,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> PostStatus:
-    """Post canonical findings from every lens, including structural findings.
+    """Post canonical findings.
 
     Callers supply captured run-info and renderers. An explicit pr_number disables
     branch discovery; lookup errors fail, while missing PRs return NO_PR.
@@ -175,7 +175,7 @@ def extract_item_fields(
 
 
 def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
-    """Convert all canonical lenses to postable findings with severity and provenance."""
+    """Convert canonical items to postable findings with severity and provenance."""
     out: list[ParsedIssue] = []
     for raw in items:
         fields = extract_item_fields(raw)

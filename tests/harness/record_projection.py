@@ -42,8 +42,7 @@ def projection_run(
         "dirty_tracked": False, "untracked_files_included": False}},
         trajectories={"status": "available", "value": {"documents": documents, "root_trajectory_id": run_id,
                                                         "status": "complete", "cutoff_at": CAPTURED_AT}},
-        findings={"status": "available", "value": {"claims": [], "items": items,
-                                                   "derivation": {}, "terminal_coverage": None}})
+        findings={"status": "available", "value": {"items": items, "terminal_coverage": None}})
     return run_record(run_id, **{**sections, **overrides})
 
 

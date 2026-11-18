@@ -682,11 +682,8 @@ def _fix_item(item_id: int = 1, *, severity: str = "medium") -> dict[str, Any]:
         "evidence": "main.py:1", "source_uids": [f"python:{item_id}"], "related_files": None,
     }
 
-async def _stub_verify(*_a: Any, **kwargs: Any) -> tuple[Path, dict[str, Any]]:
-    items = json.loads(kwargs["merged_items_path"].read_text())["items"]
-    return Path("/nonexistent"), {"verdicts": [], "selection": {"decisions": [
-        {"item_uid": item["item_uid"], "selected": True, "reason_code": "verify_all"} for item in items
-    ]}}
+async def _stub_verify(*_a: Any, **_kw: Any) -> tuple[Path, dict[str, Any]]:
+    return Path("/nonexistent"), {"verdicts": []}
 
 async def _stub_fix_verify(
     _backend: Any, _work: Any, items: list[dict[str, Any]], *_args: Any, **_kwargs: Any,
@@ -837,4 +834,4 @@ def test_manifest_identity_preserves_mode_capabilities(tmp_path: Path, flow: Day
     assert identity.phases.remote_ci is runs_test
     # The labels follow the mode that ran.
     review = capture_manifest_run_identity(RunConfig(), DaydreamRunFlow.TTT, build_registry(), tmp_path)
-    assert (review.deep, review.review_only) == (True, True)
+    assert review.review_only is True

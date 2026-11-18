@@ -61,18 +61,18 @@ def evidence_bytes(view, session_id, *, sealed=True):
     return raw
 
 
-def v4_document(view, session_id):
-    """One ``daydream.run.v4`` embedded document: exact lines plus their digest."""
+def v5_document(view, session_id):
+    """One ``daydream.run.v5`` embedded document: exact lines plus their digest."""
     raw = evidence_bytes(view, session_id)
     return {"trajectory_id": view["trajectory_id"], "session_id": view.get("session_id", session_id),
             "sha256": hashlib.sha256(raw).hexdigest(), "otlp_jsonl": raw.decode("ascii")}
 
 
-def v4_record(record):
+def v5_record(record):
     """Encode a test record whose documents are written as views into a real v4 record."""
     section = record.get("trajectories") or {}
     value = section.get("value") if isinstance(section, dict) else None
     if not isinstance(value, dict) or "documents" not in value:
         return record
-    documents = [v4_document(view, record["run_id"]) for view in value["documents"]]
+    documents = [v5_document(view, record["run_id"]) for view in value["documents"]]
     return {**record, "trajectories": {**section, "value": {**value, "documents": documents}}}
