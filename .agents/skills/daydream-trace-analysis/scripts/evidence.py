@@ -144,7 +144,7 @@ def reduce(raw):
 
 
 def embedded(document):
-    """Verify one v4 record document against its digest and identity; return (view, problem)."""
+    """Verify one record document against its digest and identity; return (view, problem)."""
     if not isinstance(document, dict) or set(document) != {"trajectory_id", "session_id", "sha256", "otlp_jsonl"}:
         raise ValueError("evidence document fields are malformed")
     raw = document["otlp_jsonl"].encode("utf-8")
@@ -157,7 +157,7 @@ def embedded(document):
 
 
 def with_views(record):
-    """Copy a v4 record, replacing each document's raw lines by its verified ``view``.
+    """Copy a record, replacing each document's raw lines by its verified ``view``.
 
     Pointers into embedded evidence address this copy:
     ``/trajectories/value/documents/<i>/view/steps/<n>/...``. Raw ``otlp_jsonl`` text is

@@ -66,9 +66,7 @@ def retain_original_task(
     }
 
 
-def collect_verification(
-    deep: Path, read_json: Callable[[Path], Any], canonical_items: list[dict[str, Any]],
-) -> dict[str, Any]:
+def collect_verification(deep: Path, read_json: Callable[[Path], Any]) -> dict[str, Any]:
     """Read existing verification artifacts; callers own acquisition diagnostics.
 
     This never executes checks or refreshes remote CI. Model verdicts remain raw
@@ -77,15 +75,8 @@ def collect_verification(
     verification_names = {"recommendation-verdicts.json", "fix-outcomes.json", "fix-failures.json",
                           "fix-quality-gate.json", "test-verdict.json", "recommended-capture.json",
                           "fix-footprint.json", "push-verdict.json", "remote-ci-verdict.json"}
-    verification = {path.name: payload for path in sorted(deep.glob("*.json"))
-                    if path.name in verification_names and (payload := read_json(path)) is not None}
-    if verification:
-        verification["item_associations"] = [
-            {key: item[key] for key in ("id", "item_uid", "uid", "source_uids",
-                                       "verifier_verdict", "unverified_assumptions") if key in item}
-            for item in canonical_items
-        ]
-    return verification
+    return {path.name: payload for path in sorted(deep.glob("*.json"))
+            if path.name in verification_names and (payload := read_json(path)) is not None}
 
 
 def capture_run_record(
@@ -97,7 +88,7 @@ def capture_run_record(
     """Commit one raw run, without archive reconstruction or trace readback.
 
     Evidence documents stream into the store one checked read at a time, as their exact OTLP/JSON lines."""
-    from daydream.dataset import LocalRecordStore, portable_evidence_document
+    from daydream.dataset import RUN_SCHEMA_VERSION, LocalRecordStore, portable_evidence_document
 
     store_path = config.dataset_store_path or Path.home() / ".daydream" / "dataset"
     resolved_store = store_path.resolve()
@@ -145,7 +136,7 @@ def capture_run_record(
         )})
     coverage_path = deep / "review-coverage.json"
     coverage = read_json(coverage_path) if review_sources and coverage_path.is_file() else None
-    verification = collect_verification(deep, read_json, canonical_items) if review_sources else {}
+    verification = collect_verification(deep, read_json) if review_sources else {}
     patch_path = root / "recommended.patch"
     patch = patch_path.read_text(encoding="utf-8") if review_sources and patch_path.is_file() else None
     from daydream.artifact_visibility import ArtifactVisibilityError
@@ -180,7 +171,7 @@ def capture_run_record(
                                    trajectory_id=document.trajectory_id, session_id=artifacts.session_id)
         for document in selected.documents
     )
-    LocalRecordStore(store_path).commit_run({"schema_version": "daydream.run.v5",
+    LocalRecordStore(store_path).commit_run({"schema_version": RUN_SCHEMA_VERSION,
         "run_id": artifacts.session_id, "captured_at": selected.cutoff_at if selected else now_iso_utc(),
         "trace_id": current_run_trace_id(),
         "outcome": outcome, "original_task": evidence(original_task, absent="unavailable"),

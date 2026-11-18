@@ -73,9 +73,8 @@ def format_verdict_join(
     matched: list[int | None],
     unmatched: list[int | None],
     other: list[int | None],
-    total: int,
 ) -> Table:
-    """Show verdict categories and ids, plus an independently computed total.
+    """Show verdict categories and ids, plus their total.
 
     Matched always appears; other empty categories are omitted."""
     table = Table(
@@ -95,12 +94,10 @@ def format_verdict_join(
         ("Unmatched", unmatched),
         ("Other", other),
     )
-    computed_total = sum(len(values) for _, values in categories)
     for label, values in categories:
         if values or label == "Matched":
             table.add_row(label, str(len(values)), ", ".join(str(value) for value in values))
-    mismatch = f"  [expected {total}]" if computed_total != total else ""
-    table.add_row("Total", str(computed_total) + mismatch, "")
+    table.add_row("Total", str(sum(len(values) for _, values in categories)), "")
 
     return table
 

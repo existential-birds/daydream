@@ -2,7 +2,7 @@
 
 Existing recorder tests do not exercise this offline consumer. These cases protect
 evidence identity, accounting, and bounded retrieval against realistic transcript traps,
-written as real v4 records whose documents are encoded evidence lines.
+written as real records whose documents are encoded evidence lines.
 """
 
 import json

@@ -81,11 +81,8 @@ def _attach_verdicts(items: list[dict[str, Any]], payload: dict[str, Any]) -> li
     Normalization must make item ids unique. Unmatched items remain unchanged;
     return the same list.
     """
-    payload = payload if isinstance(payload, dict) else {"verdicts": []}
     verdict_lookup: dict[int, dict[str, Any]] = {}
-    for entry in payload.get("verdicts", []) or []:
-        if not isinstance(entry, dict):
-            continue
+    for entry in payload["verdicts"]:
         issue_id = entry.get("issue_id")
         if not isinstance(issue_id, int):
             continue
@@ -266,7 +263,6 @@ async def _step_verify(ctx: FlowContext) -> None:
             matched=matched_ids,
             unmatched=unmatched_ids,
             other=other_ids,
-            total=len(items),
         )
     )
 

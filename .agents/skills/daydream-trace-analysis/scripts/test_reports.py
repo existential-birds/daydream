@@ -26,7 +26,7 @@ class ReportCliTests(unittest.TestCase):
         self.source = self.root / "capture.jsonl"
         self.records = [{"schema_version": "daydream.run.v5", "run_id": f"run-{i}",
                          "outcome": "success", "completeness": {},
-                         "provenance": {"effective_configuration": {"model": "other" if i == 4 else "same"}},
+                         "provenance": {"effective_configuration": {"backend": "other" if i == 4 else "same"}},
                          "original_task": {"status": "available", "value": "repeated search; later recovered"}}
                         for i in range(1, 6)]
         self.source.write_text("\n" + "\n".join(json.dumps(row) for row in self.records) + "\n")
