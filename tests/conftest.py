@@ -58,6 +58,26 @@ def _fsync_without_durability(fd: Any) -> None:
 # Fsync is a large share of a real-path run. Fault tests patch over this seam.
 os.fsync = _fsync_without_durability
 
+
+@pytest.hookimpl(wrapper=True)
+def pytest_sessionstart(session: pytest.Session) -> Iterator[None]:
+    """Drop package attributes naming submodules that coverage imported and then unloaded.
+
+    A dotted ``--cov`` source (``daydream.ui.summary``) makes coverage import its parent
+    package and then remove it from ``sys.modules``. In an xdist worker coverage starts
+    here, after this conftest imported ``daydream``, so ``daydream.ui`` survives as a
+    stale attribute: ``from daydream import ui`` would bind it while ``patch()`` targets
+    the reimported module. Without the attribute, later imports bind the live module."""
+    yield
+    for name, package in list(sys.modules.items()):
+        if package is None or not (name == "daydream" or name.startswith("daydream.")):
+            continue
+        for attr, value in list(vars(package).items()):
+            child = f"{name}.{attr}"
+            if getattr(value, "__name__", None) == child and sys.modules.get(child) is not value:
+                delattr(package, attr)
+
+
 # Real-Git fixtures share tests.harness.git_helpers.
 
 
