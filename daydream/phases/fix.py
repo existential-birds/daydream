@@ -75,10 +75,7 @@ def group_items_by_footprint(
 
     file_to_indices: dict[str, list[int]] = {}
     for i, item in enumerate(items):
-        item_uid = item.get("item_uid")
-        if not isinstance(item_uid, str) or not item_uid:
-            raise ValueError("fix grouping requires item_uid")
-        for f in footprint.item_paths(item_uid):
+        for f in footprint.item_paths(item["item_uid"]):
             for j in file_to_indices.setdefault(f, []):
                 union(i, j)
             file_to_indices[f].append(i)
@@ -96,8 +93,7 @@ def group_items_by_footprint(
     result: list[tuple[str, list[dict[str, Any]]]] = []
     for root in sorted(first_seen, key=lambda rt: first_seen[rt]):
         grp = grouped[root]
-        key = grp[0].get("file") or "<no-file>"
-        result.append((key, grp))
+        result.append((grp[0]["file"], grp))
     return result
 
 
@@ -212,11 +208,6 @@ def _item_evidence(item: dict[str, Any]) -> str:
     return str(item.get("evidence", "") or "")
 
 
-def _item_related_files(item: dict[str, Any]) -> list[str]:
-    """Return usable sibling paths for the fix prompt, ignoring malformed entries."""
-    return [f for f in (item.get("related_files") or []) if isinstance(f, str)]
-
-
 def _repo_relative_path(repo: Path, value: str) -> str:
     """Normalize absolute and relative file references to a common repository-relative form.
 
@@ -258,8 +249,6 @@ def _build_test_map_hints(
         return ""
     hints = []
     for item in items:
-        if not isinstance(item.get("file"), str):
-            continue
         source_file = test_map.get(_repo_relative_path(repo, item["file"]))
         if source_file is None:
             continue
@@ -388,7 +377,7 @@ def _finding_prompt(repo: Path, item: dict[str, Any], *, number: int | None = No
     description = item.get("description", "No description")
     file_ref = _resolve_finding_file_ref(repo, item.get("file"))
     line = item.get("line")
-    related = _item_related_files(item)
+    related = item.get("related_files") or []
     evidence = _item_evidence(item)
     if number is None:
         related_line = f"\nRelated files: {', '.join(related)}" if related else ""

@@ -7,8 +7,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
-import jsonschema
-
 from daydream import git_ops
 from daydream.agent import console
 from daydream.artifact_visibility import artifact_dir_for, review_output_path_for
@@ -24,7 +22,7 @@ from daydream.deep.fix_state import EvidenceKey, FixCycleState
 from daydream.deep.quality_gate import QualityGateThresholds, _evaluate_quality_gate, capture_quality
 from daydream.deep.records import stamp_item_uids
 from daydream.deep.repair_coordinator import continue_repair_job, repair_job_id
-from daydream.deep.review_terminal import load_canonical_items
+from daydream.deep.review_terminal import CANONICAL_ITEMS_ERRORS, load_canonical_items
 from daydream.deep.scope_issues import (
     _resolve_changed_files,
 )
@@ -171,7 +169,7 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     # here they are ordinary tagged items that reach phase_fix like any other.
     try:
         items = load_canonical_items(ctx.work.repo, deep_state.items_file)
-    except (OSError, ValueError, AttributeError, jsonschema.ValidationError) as exc:
+    except CANONICAL_ITEMS_ERRORS as exc:
         print_error(console, "Fix preflight failed", f"merged items are malformed: {type(exc).__name__}")
         return Stop(1)
     # Normalize legal ./ prefixes once to match Git-derived footprint paths.

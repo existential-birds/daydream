@@ -17,7 +17,7 @@ from daydream.archive.provenance import capture_executable_provenance
 from daydream.deep.diff import _diff_changed_files
 from daydream.deep.records import item_source_uids
 from daydream.observability.runtime import current_run_trace_id
-from daydream.pr_review import compute_fingerprint, extract_item_fields, parsed_issues_from_items
+from daydream.pr_review import parsed_issues_from_items
 from daydream.timeutil import now_iso_utc
 
 if TYPE_CHECKING:
@@ -123,17 +123,14 @@ def capture_run_record(
     items = items if isinstance(items, list) else []
     canonical_items = []
     for item in items:
-        fields = extract_item_fields(item) if isinstance(item, dict) else None
-        if fields is None or not isinstance(item.get("item_uid"), str) or not item["item_uid"]:
+        parsed = parsed_issues_from_items([item]) if isinstance(item, dict) else []
+        if not parsed or not isinstance(item.get("item_uid"), str) or not item["item_uid"]:
             acquisition_failures[merged_path.name] = {
                 "status": "failed", "reason": "malformed_shape", "raw_json": merged,
             }
             continue
-        parsed_finding = parsed_issues_from_items([item])[0]
-        canonical_items.append({**item, "body": parsed_finding.body,
-                                "source_uids": item_source_uids(item), "fingerprint": compute_fingerprint(
-            fields.path, fields.description, fields.rationale,
-        )})
+        canonical_items.append({**item, "body": parsed[0].body, "source_uids": item_source_uids(item),
+                                "fingerprint": parsed[0].fingerprint})
     coverage_path = deep / "review-coverage.json"
     coverage = read_json(coverage_path) if review_sources and coverage_path.is_file() else None
     verification = collect_verification(deep, read_json) if review_sources else {}

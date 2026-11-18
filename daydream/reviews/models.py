@@ -110,18 +110,6 @@ class PRInfo:
     pr_base_sha: str | None = None
 
 
-@dataclass(frozen=True)
-class ItemFields:
-    """Normalized canonical finding fields, before comment rendering."""
-
-    path: str
-    line_int: int | None
-    description: str
-    rationale: str
-    severity: str | None
-    confidence: str | None
-
-
 @dataclass
 class ClassifiedIssues:
     inline: list[InlineReviewComment] = field(default_factory=list)

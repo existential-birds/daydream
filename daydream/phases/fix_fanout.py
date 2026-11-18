@@ -251,9 +251,8 @@ async def phase_fix_parallel(
                                 grp_items = [item for item, _ in grp]
                                 grp_nums = [num for _, num in grp]
                                 edit_scope = footprint.group_paths(grp_items)
-                                is_real_batch = len(grp_items) > 1 and fkey != "<no-file>"
-                                if not is_real_batch:
-                                    # Single/no-file groups dispatch directly without a batched fallback.
+                                if len(grp_items) == 1:
+                                    # Single-item groups dispatch directly without a batched fallback.
                                     await _fix_group_serially(fkey, grp, budget, edit_scope, group_work, group_snapshot)
                                 else:
                                     # Check before batch dispatch so zero/tiny budgets skip the call.

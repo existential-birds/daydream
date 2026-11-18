@@ -39,7 +39,6 @@ from daydream.reviews.models import (
     ClassifiedReviewResult as ClassifiedReviewResult,
     FileCommentPayload as FileCommentPayload,
     InlineReviewComment as InlineReviewComment,
-    ItemFields as ItemFields,
     ParsedIssue as ParsedIssue,
     PostStatus as PostStatus,
     PRInfo as PRInfo,
@@ -135,57 +134,38 @@ async def post_review_to_pr_from_report(
     )
 
 
-def extract_item_fields(
-    raw: dict[str, Any],
-) -> ItemFields | None:
-    """Normalize one canonical finding; reject a missing or empty file path, keeping a Git name exact."""
-    path = raw.get("file")
-    if not isinstance(path, str) or not path:
-        return None
-    line = raw.get("line")
-    line_int = int(line) if isinstance(line, int) and not isinstance(line, bool) else None
-    description = str(raw.get("description", "")).strip()
-    rationale = str(raw.get("rationale", "")).strip()
-    severity = normalize_severity(raw.get("severity"))
-    confidence = str(raw.get("confidence", "")).strip().upper() or None
-    return ItemFields(
-        path=path,
-        line_int=line_int,
-        description=description,
-        rationale=rationale,
-        severity=severity,
-        confidence=confidence,
-    )
-
-
 def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
-    """Convert canonical items to postable findings with severity and provenance."""
+    """Convert canonical items to postable findings with severity and provenance.
+
+    Items without a nonempty file path are dropped; a Git name is kept exact."""
     out: list[ParsedIssue] = []
     for raw in items:
-        fields = extract_item_fields(raw)
-        if fields is None:
+        path = raw.get("file")
+        if not isinstance(path, str) or not path:
             continue
+        line = raw.get("line")
+        description = str(raw.get("description", "")).strip()
+        rationale = str(raw.get("rationale", "")).strip()
+        severity = normalize_severity(raw.get("severity"))
+        confidence = str(raw.get("confidence", "")).strip().upper() or None
         # Title is the description; rationale (when present and distinct)
         # becomes the body so the agent prompt has context.
         body_parts: list[str] = []
-        if fields.severity:
-            body_parts.append(f"**Severity:** {fields.severity}")
-        if fields.confidence:
-            body_parts.append(f"**Confidence:** {fields.confidence}")
-        if fields.rationale and fields.rationale != fields.description:
-            body_parts.append(fields.rationale)
-        body = "\n\n".join(body_parts)
+        if severity:
+            body_parts.append(f"**Severity:** {severity}")
+        if confidence:
+            body_parts.append(f"**Confidence:** {confidence}")
+        if rationale and rationale != description:
+            body_parts.append(rationale)
         out.append(
             ParsedIssue(
-                path=fields.path,
-                line=fields.line_int,
-                title=fields.description,
-                body=body,
-                confidence=fields.confidence,
-                severity=fields.severity,
-                fingerprint=compute_fingerprint(
-                    fields.path, fields.description, fields.rationale
-                ),
+                path=path,
+                line=int(line) if isinstance(line, int) and not isinstance(line, bool) else None,
+                title=description,
+                body="\n\n".join(body_parts),
+                confidence=confidence,
+                severity=severity,
+                fingerprint=compute_fingerprint(path, description, rationale),
             )
         )
     return out

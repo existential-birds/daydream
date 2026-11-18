@@ -163,13 +163,7 @@ class AuthorizedFixFootprint:
 
     def group_paths(self, items: list[dict[str, Any]]) -> frozenset[str]:
         """Return the exact transitive union for a dispatched item group."""
-        paths: set[str] = set()
-        for item in items:
-            uid = item.get("item_uid")
-            if not isinstance(uid, str):
-                raise ValueError("fix footprint requires item_uid")
-            paths.update(self.item_paths(uid))
-        return frozenset(paths)
+        return frozenset(path for item in items for path in self.item_paths(item["item_uid"]))
 
     def accept_retarget(
         self,
