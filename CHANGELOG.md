@@ -101,7 +101,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `pairs[].a_lens`/`b_lens`.
   - Earlier records, stores and archive indexes are refused with the existing messages and
     nothing is converted; use a fresh store, Hub destination or archive directory.
-- **Breaking (0.y.z):** Data paths with no producer, found during
+- **Breaking (0.y.z):** Data paths with no producer, or that only repeated another field, found during
   [#1920](https://github.com/existential-birds/daydream/pull/1920), are removed
   ([#1921](https://github.com/existential-birds/daydream/pull/1921)):
   - The unverified-location demotion is gone. Its producer was retired in
@@ -139,6 +139,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Review finalization warns "Cannot validate terminal findings: RecursionError" and the fix
   gate stops at its preflight, as they already did for other malformed merged items
   ([#1931](https://github.com/existential-birds/daydream/issues/1931)).
+- PR posting and run-data capture no longer crash on a malformed `merged-items.json`
+  (too deeply nested, not UTF-8, or not a JSON object). Posting finds no parseable issues
+  and capture records the acquisition failure, as for other bad files
+  ([#1932](https://github.com/existential-birds/daydream/issues/1932)).
 - A Codex invocation that asks for no persisted session, as every committed-review
   invocation does, now runs with `--ephemeral`, so Codex writes no session rollout or
   thread rows for it under its home. Before, the Codex backend accepted
