@@ -139,27 +139,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `group_items_by_footprint` and `phase_fix_verify` no longer default a missing
     `description`, drop non-string `related_files` entries, accept a missing integer `id`
     or report a missing `item_uid` as `ValueError`. A malformed item raises `TypeError` or
-    `KeyError`, which `phase_fix_parallel` records as that group's failure
+    `KeyError`; `phase_fix_parallel` records a missing `description` or a non-string
+    `related_files` entry as that group's failure, and raises `KeyError` for a missing
+    `item_uid` before any group starts
     ([#1924](https://github.com/existential-birds/daydream/issues/1924)).
   - `daydream.phases.phase_verify_recommendations(backend, work, items, *, deep_dir, strategy,
     run_context)` takes the fix gate's validated items instead of a `merged_items_path` that
     it re-read, so a later rewrite of `merged-items.json` can no longer crash verification or
-    change which findings it verifies. Its prompt lists findings in severity order.
+    change which findings it verifies. In the built-in flow its prompt lists findings in the gate's
+    severity order.
   - `daydream.pr_review.extract_item_fields` and `ItemFields` are removed; use
     `parsed_issues_from_items` ([#1922](https://github.com/existential-birds/daydream/issues/1922)).
     `daydream.training.corpus_projection.provenance.extract_provenance` is now
-    `extract_profile` and returns only the profile mapping.
+    `extract_profile` and returns only the profile mapping. `ParsedIssue` and
+    `daydream.findings.ArtifactFinding` drop `location_distrust`, `severity_before_demotion` and
+    `severity_off_vocabulary`, and `BuildFrozenCorpusConfig` drops `max_stack_share`.
 
 ### Fixed
 
 - A `merged-items.json` nested too deeply for the JSON parser no longer crashes the run.
-  Review finalization warns "Cannot validate terminal findings: RecursionError" and the fix
-  gate stops at its preflight, as they already did for other malformed merged items
+  Review finalization warns "Cannot validate terminal findings: RecursionError", as it
+  already did for other malformed merged items, and the fix gate stops at its preflight
+  ("merged items are malformed: RecursionError")
   ([#1931](https://github.com/existential-birds/daydream/issues/1931)).
 - PR posting no longer crashes or treats damage as a clean review when `merged-items.json`
   is too deeply nested, not UTF-8, not an object with an `items` list, or holds items
-  without a file. It warns that it could not read the file and skips the post, so no
-  approval follows ([#1932](https://github.com/existential-birds/daydream/issues/1932)).
+  without a file. A completed review warns that it could not read the file and skips the
+  post, so no approval follows; an unfinished review still posts its outcome as a comment,
+  without findings ([#1932](https://github.com/existential-birds/daydream/issues/1932)).
 - Run-data capture records a too deeply nested artifact as `malformed_json` instead of
   losing the run record ("Run evidence could not be persisted (RecursionError)")
   ([#1932](https://github.com/existential-birds/daydream/issues/1932)).
