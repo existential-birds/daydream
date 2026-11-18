@@ -74,20 +74,16 @@ async def _run_verifier(
 async def phase_verify_recommendations(
     backend: Backend,
     work: WorkContext,
+    items: list[dict[str, Any]],
     *,
-    merged_items_path: Path,
     deep_dir: Path,
     strategy: str | None = None,
     run_context: RunContext | None = None,
 ) -> dict[str, Any]:
-    """Classify every canonical item and persist the verdicts the verifier returns for them."""
-    from daydream.deep.review_terminal import load_canonical_items  # review_terminal imports phases
-
+    """Classify the gate-validated canonical items and persist the verdicts returned for them."""
     run_context = resolve_run_context(run_context)
     output_path = DeepArtifact.VERDICTS.at(deep_dir)
 
-    # Validate again: an extension step may have rewritten the items since the fix gate.
-    items = load_canonical_items(work.repo, merged_items_path)
     prompt = get_registry().prompt("verify")(
         strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["verification"].content,
         items=items,

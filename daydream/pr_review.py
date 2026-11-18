@@ -92,11 +92,13 @@ async def post_review_to_pr_from_report(
     if not merged_items_path.exists():
         return PostStatus.NOTHING_TO_POST
     try:
-        items = json.loads(merged_items_path.read_text()).get("items", [])
-    except (OSError, json.JSONDecodeError):
-        # A corrupt/partially-written merged-items.json must not crash the run
-        # with an unhandled JSONDecodeError; treat it like a missing file and
-        # skip the post cleanly (#400).
+        payload = json.loads(merged_items_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        payload = None
+    items = payload.get("items", []) if isinstance(payload, dict) else None
+    if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+        # A corrupt, partially-written or misshapen merged-items.json must not crash
+        # the run; treat it like a missing file and skip the post cleanly (#400).
         print_warning(
             console,
             f"Could not read {merged_items_path.name}; skipping PR post.",

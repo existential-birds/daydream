@@ -164,9 +164,7 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         return Stop(1)
 
     # Read canonical merged items directly; extension steps may have rewritten
-    # them since review finalization, so refuse any malformed record. Replaces an
-    # LLM re-parse of the markdown, which silently dropped structural findings;
-    # here they are ordinary tagged items that reach phase_fix like any other.
+    # them since review finalization, so refuse any malformed record.
     try:
         items = load_canonical_items(ctx.work.repo, deep_state.items_file)
     except CANONICAL_ITEMS_ERRORS as exc:
@@ -242,7 +240,7 @@ async def _step_verify(ctx: FlowContext) -> None:
         verdicts_payload = await phase_verify_recommendations(
             ctx.backend_for("verify"),
             ctx.work,
-            merged_items_path=deep_state.items_file,
+            items,
             deep_dir=dd,
             strategy=ctx.strategy("verification"),
             run_context=ctx.run_context,

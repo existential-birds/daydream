@@ -110,7 +110,7 @@ def capture_run_record(
             return None
         try:
             return json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):
             acquisition_failures[path.name] = {"status": "failed", "reason": "malformed_json", "raw_text": text}
             return None
 

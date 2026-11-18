@@ -408,7 +408,7 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         if path.name != 'merged-items.json' or fault not in ('projection', 'unconfined-path', 'retired-lens'):
             return text
         if fault == 'projection':
-            return '{"items": "invalid"}'
+            return '[' * 100_000
         # An extension step rewrote the items onto paths outside the repository, or onto a retired lens.
         payload = json.loads(text)
         for item in payload['items']:

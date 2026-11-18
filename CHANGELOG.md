@@ -137,6 +137,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `related_files` entries or report a missing `item_uid` as `ValueError`. Pass canonical
     items as the fix gate produces them: a malformed item now raises `TypeError` or `KeyError`
     ([#1924](https://github.com/existential-birds/daydream/issues/1924)).
+  - `daydream.phases.phase_verify_recommendations(backend, work, items, *, deep_dir, strategy,
+    run_context)` takes the fix gate's validated items instead of a `merged_items_path` that
+    it re-read, so a later rewrite of `merged-items.json` can no longer crash verification or
+    change which findings it verifies.
 
 ### Fixed
 
@@ -145,8 +149,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gate stops at its preflight, as they already did for other malformed merged items
   ([#1931](https://github.com/existential-birds/daydream/issues/1931)).
 - PR posting and run-data capture no longer crash on a malformed `merged-items.json`
-  (too deeply nested, not UTF-8, or not a JSON object). Posting finds no parseable issues
-  and capture records the acquisition failure, as for other bad files
+  (too deeply nested, not UTF-8, or not an object of item objects). Posting warns that it
+  could not read the file and skips the post, and capture records `malformed_json`, as for
+  other unreadable files
   ([#1932](https://github.com/existential-birds/daydream/issues/1932)).
 - A Codex invocation that asks for no persisted session, as every committed-review
   invocation does, now runs with `--ephemeral`, so Codex writes no session rollout or

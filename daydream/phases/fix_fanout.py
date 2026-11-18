@@ -247,10 +247,10 @@ async def phase_fix_parallel(
                                 max_wall_seconds=group_max_wall_s,
                                 max_serial_items=group_max_serial_items,
                             )
+                            grp_items = [item for item, _ in grp]
+                            grp_nums = [num for _, num in grp]
+                            edit_scope = footprint.group_paths(grp_items)
                             try:
-                                grp_items = [item for item, _ in grp]
-                                grp_nums = [num for _, num in grp]
-                                edit_scope = footprint.group_paths(grp_items)
                                 if len(grp_items) == 1:
                                     # Single-item groups dispatch directly without a batched fallback.
                                     await _fix_group_serially(fkey, grp, budget, edit_scope, group_work, group_snapshot)
@@ -289,18 +289,9 @@ async def phase_fix_parallel(
                                 successful_groups.discard(fkey)
                                 failure: BaseException = e
                                 try:
-                                    grp_items = [item for item, _ in grp]
-                                    isolation.audit_group(group_work.repo, group_snapshot)
-                                    git_ops.restore_group_worktree_from_snapshot(
-                                        group_work.repo,
-                                        group_snapshot,
-                                        footprint.group_paths(grp_items),
-                                    )
-                                except Exception as restore_err:  # noqa: BLE001
-                                    failure = RuntimeError(
-                                        "failed to restore the complete failed fix group"
-                                    )
-                                    failure.__cause__ = restore_err
+                                    _restore_group_or_raise("after it failed", edit_scope, group_work, group_snapshot)
+                                except RuntimeError as restore_failure:
+                                    failure = restore_failure
                                 reason = f"{type(failure).__name__}: {failure}"
                                 async with _failures_lock:
                                     failures[fkey] = reason

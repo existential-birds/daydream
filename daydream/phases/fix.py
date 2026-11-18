@@ -322,9 +322,7 @@ def _resolve_finding_file_ref(repo: Path, value: object) -> str:
     Preserve missing confined paths as relative strings. Reject absent/non-string,
     absolute, traversal, lexical, and symlink escapes with UnconfinedFindingError.
     """
-    if not isinstance(value, str):
-        raise UnconfinedFindingError("Finding file must be a confined repository-relative path")
-    if not git_observed_path_is_confined(repo, value):
+    if not isinstance(value, str) or not git_observed_path_is_confined(repo, value):
         raise UnconfinedFindingError("Finding file must be a confined repository-relative path")
     candidate = repo / value
     if candidate.is_file():
@@ -374,7 +372,7 @@ class FixOptions(TypedDict, total=False):
 
 def _finding_prompt(repo: Path, item: dict[str, Any], *, number: int | None = None) -> str:
     """Render shared finding fields using the single- or grouped-prompt layout."""
-    description = item.get("description", "No description")
+    description = item["description"]
     file_ref = _resolve_finding_file_ref(repo, item.get("file"))
     line = item.get("line")
     related = item.get("related_files") or []
@@ -414,7 +412,7 @@ async def _fix_findings(
     async with lock:
         agent.console.print()
         for number, item in zip(item_nums, items):
-            ui.print_fix_progress(agent.console, number, total, item.get("description", "No description"))
+            ui.print_fix_progress(agent.console, number, total, item["description"])
 
     if count == 1:
         prompt = f"Fix this issue:\n{_finding_prompt(work.repo, items[0])}\n\nMake the minimal change needed. "
@@ -472,8 +470,5 @@ async def phase_fix_batched(
     backend: Backend, work: WorkContext, items: list[dict[str, Any]], item_nums: list[int], total: int,
     **options: Unpack[FixOptions],
 ) -> None:
-    """Fix a footprint group with scaled budgets; singleton groups use phase_fix."""
-    if len(items) == 1:
-        await phase_fix(backend, work, items[0], item_nums[0], total, **options)
-    else:
-        await _fix_findings(backend, work, items, item_nums, total, **options)
+    """Fix a footprint group in one turn whose wall allowance scales with the group size."""
+    await _fix_findings(backend, work, items, item_nums, total, **options)
