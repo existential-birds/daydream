@@ -135,6 +135,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A `merged-items.json` nested too deeply for the JSON parser no longer crashes the run.
+  Review finalization warns "Cannot validate terminal findings: RecursionError" and the fix
+  gate stops at its preflight, as they already did for other malformed merged items
+  ([#1931](https://github.com/existential-birds/daydream/issues/1931)).
 - A Codex invocation that asks for no persisted session, as every committed-review
   invocation does, now runs with `--ephemeral`, so Codex writes no session rollout or
   thread rows for it under its home. Before, the Codex backend accepted

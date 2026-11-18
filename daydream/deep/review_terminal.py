@@ -34,8 +34,9 @@ _CANONICAL_ITEMS_SCHEMA["properties"]["items"]["items"].update(
     additionalProperties=True, required=["id", "description", "file", "line", "rationale"])
 _CANONICAL_ITEMS_SCHEMA["properties"]["items"]["items"]["properties"].update(
     line={"type": ["integer", "null"]}, confidence={"enum": ["HIGH", "MEDIUM", "LOW"]})
-# What load_canonical_items raises for unreadable, undecodable, unconfined or schema-invalid items.
-CANONICAL_ITEMS_ERRORS = (OSError, ValueError, jsonschema.ValidationError)
+# What load_canonical_items raises for unreadable, undecodable, too deeply nested, unconfined or
+# schema-invalid items.
+CANONICAL_ITEMS_ERRORS = (OSError, ValueError, RecursionError, jsonschema.ValidationError)
 
 
 def load_canonical_items(repo: Path, path: Path) -> list[dict[str, Any]]:
