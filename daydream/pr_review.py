@@ -113,8 +113,9 @@ async def post_review_to_pr_from_report(
             print_warning(console, f"{problem}; skipping PR post.")
             return PostStatus.NOTHING_TO_POST
         print_warning(console, f"{problem}; posting the review outcome without findings.")
-        if findings_readable:
-            # Finalization accepted items a later step damaged; the sealed summary cannot say so.
+        if UNREADABLE_FINDINGS_LINE not in review_summary:
+            # The summary cannot say so when finalization accepted items a later step damaged,
+            # or when it fell back without the terminal result.
             review_summary += "\n\n" + UNREADABLE_FINDINGS_LINE
         issues = []
     elif (not issues and not approve_on_clean and not review_warnings

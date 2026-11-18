@@ -558,7 +558,7 @@ async def _post_review_from_report_empty_items_posts_diagram_case(
             posted = summary is not None and (not readable or merged.exists())
             assert status == (pr_review.PostStatus.POSTED if posted else pr_review.PostStatus.NOTHING_TO_POST)
             plan = captured.pop("plan", None)
-            expected = f"{summary}\n\n{UNREADABLE_FINDINGS_LINE}" if readable else summary
+            expected = f"{summary}\n\n{UNREADABLE_FINDINGS_LINE}"
             assert (plan is None) if not posted else (
                 plan is not None and plan.event is pr_review.ReviewEvent.COMMENT and plan.review_summary == expected)
         assert seen == [[], []]
