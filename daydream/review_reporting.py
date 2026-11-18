@@ -206,8 +206,6 @@ def _render_review_context(
         lines.append('Recorded check artifacts are shown below; '
                      'no checks or remote CI were refreshed for this summary.')
         for name, artifact in sorted(value.items())[:16]:
-            if name == 'item_associations':
-                continue
             lines.append(f'<details><summary>Recorded artifact: {_text(name, 128)}</summary>')
             if name == 'test-verdict.json' and isinstance(artifact, dict):
                 attempts = artifact.get('attempts')

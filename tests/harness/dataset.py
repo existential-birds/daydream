@@ -6,11 +6,11 @@ from daydream.dataset import LocalRecordStore, SnapshotRecords, semantic_evidenc
 
 def run_record(run_id: str = "run-1", **overrides: Any) -> dict[str, Any]:
     return {
-        "schema_version": "daydream.run.v4", "run_id": run_id,
+        "schema_version": "daydream.run.v5", "run_id": run_id,
         "captured_at": "2026-10-04T10:00:00Z", "outcome": "success",
-        "findings": {"status": "available", "value": {"claims": [],
+        "findings": {"status": "available", "value": {
             "items": [{"item_uid": "item:1", "source_uids": [], "fingerprint": "a" * 64}],
-            "derivation": {}, "terminal_coverage": None}}, **overrides,
+            "terminal_coverage": None}}, **overrides,
     }
 
 

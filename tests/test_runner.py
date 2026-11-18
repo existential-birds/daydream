@@ -682,11 +682,8 @@ def _fix_item(item_id: int = 1, *, severity: str = "medium") -> dict[str, Any]:
         "evidence": "main.py:1", "source_uids": [f"python:{item_id}"], "related_files": None,
     }
 
-async def _stub_verify(*_a: Any, **kwargs: Any) -> tuple[Path, dict[str, Any]]:
-    items = json.loads(kwargs["merged_items_path"].read_text())["items"]
-    return Path("/nonexistent"), {"verdicts": [], "selection": {"decisions": [
-        {"item_uid": item["item_uid"], "selected": True, "reason_code": "verify_all"} for item in items
-    ]}}
+async def _stub_verify(*_a: Any, **_kw: Any) -> dict[str, Any]:
+    return {"verdicts": []}
 
 async def _stub_fix_verify(
     _backend: Any, _work: Any, items: list[dict[str, Any]], *_args: Any, **_kwargs: Any,
@@ -721,7 +718,6 @@ async def _drive_fix_cycle_failing(
     reviewer.review_claims = [{"title": _fix_item()["description"], "file": "main.py", "line": 1}]
     config.test_command = "false"
     # The backend script observes phases; mute only terminal output.
-    monkeypatch.setattr("daydream.deep.fix_steps.print_verification_summary", lambda *a, **k: None)
     monkeypatch.setattr("daydream.agent.console", Console(file=StringIO()))
     monkeypatch.setattr("daydream.runner.console", type("C", (), {"print": lambda *a, **kw: None})())
     test_backend = ScriptedBackend(script=[*script, _BEYOND_SCRIPT], model="test-model-xyz")
@@ -837,4 +833,4 @@ def test_manifest_identity_preserves_mode_capabilities(tmp_path: Path, flow: Day
     assert identity.phases.remote_ci is runs_test
     # The labels follow the mode that ran.
     review = capture_manifest_run_identity(RunConfig(), DaydreamRunFlow.TTT, build_registry(), tmp_path)
-    assert (review.deep, review.review_only) == (True, True)
+    assert review.review_only is True

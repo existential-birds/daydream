@@ -77,7 +77,7 @@ def test_invalid_mutations_are_withheld(store: LocalRecordStore) -> None:
         ("run", b"{private-malformed", "invalid_or_unknown_record_schema"),
         # Two findings cannot share one identity.
         ("run", run_record("run-2", findings={"status": "available", "value": {
-            "claims": [], "derivation": {}, "terminal_coverage": None,
+            "terminal_coverage": None,
             "items": [{"item_uid": "item:1", "source_uids": [], "fingerprint": "a" * 64}] * 2}}),
          "invalid_or_unknown_record_schema"),
         ('observation', observation(author='gpt-6', role='adjudicator'), 'invalid_or_unknown_record_schema'),

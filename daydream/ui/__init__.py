@@ -33,7 +33,6 @@ from daydream.ui.summary import (
     format_verdict_join,
     print_fix_complete,
     print_fix_progress,
-    print_verification_summary,
     render_exploration_summary,
 )
 from daydream.ui.theme import (
@@ -68,7 +67,6 @@ __all__ = [
     "print_phase_hero",
     "print_success",
     "print_thinking",
-    "print_verification_summary",
     "print_warning",
     "render_exploration_summary",
     "set_shutdown_panel",

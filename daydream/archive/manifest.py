@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from daydream.archive.provenance import ExecutableProvenance
     from daydream.trajectory import RunSummary, RunWriteSnapshot
 
-MANIFEST_SCHEMA_VERSION = "3.0"
+MANIFEST_SCHEMA_VERSION = "4.0"
 
 
 def archive_recorder_provenance_from_snapshot(
@@ -120,14 +120,12 @@ class Manifest:
 
     # Run config
     run_flow: str = ""
-    model: str | None = None
     backend: str = "claude"
     review_backend: str | None = None
     review_model: str | None = None
     fix_backend: str | None = None
     test_backend: str | None = None
     review_only: bool = False
-    deep: bool = False
     fix_failures: dict[str, str] | None = None
     fix_leftover_untracked: list[str] | None = None
     fix_quality_gate: dict[str, Any] | None = None
@@ -190,7 +188,6 @@ class Manifest:
             ),
             "run": {
                 "flow": self.run_flow,
-                "model": self.model,
                 "backend": self.backend,
                 **_omit_falsy(
                     review_backend=self.review_backend,
@@ -199,7 +196,6 @@ class Manifest:
                     test_backend=self.test_backend,
                 ),
                 "review_only": self.review_only,
-                "deep": self.deep,
             },
             "fix_failures": self.fix_failures,
             "fix_leftover_untracked": self.fix_leftover_untracked,
@@ -277,7 +273,6 @@ def build_manifest_from_snapshot(
         archived_at=datetime.now(timezone.utc).isoformat(),
         status=status,
         run_flow=recorder_provenance.run_flow.value,
-        model=identity.model,
         backend=identity.backend,
         review_backend=identity.review_backend,
         review_model=identity.review_model,
@@ -289,7 +284,6 @@ def build_manifest_from_snapshot(
         retry_summary=dict(retry_summary) if retry_summary is not None else None,
         daydream=provenance,
         review_only=identity.review_only,
-        deep=identity.deep,
         fix_failures=(dict(fix_failures) or None) if runs_fix and fix_failures is not None else None,
         fix_leftover_untracked=(
             (list(fix_leftover_untracked) or None) if runs_fix and fix_leftover_untracked is not None else None

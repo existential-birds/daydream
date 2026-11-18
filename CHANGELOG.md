@@ -87,6 +87,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Corpus projections drop the reward, posterior and decisive fields.
   - Earlier stores, `daydream.snapshot.v1` snapshots and Hub destinations are refused with the
     existing message and nothing is converted; use a fresh store or destination.
+- **Breaking (0.y.z):** Persisted fields that stayed constant once every finding is verified by
+  one reviewer are removed ([#1895](https://github.com/existential-birds/daydream/issues/1895)):
+  - New records are `daydream.run.v5`, with no `findings.claims`, `findings.derivation` or
+    `verification.item_associations` (it repeated `findings.items` identities) and no `model` or `deep`
+    in `provenance.effective_configuration`.
+  - Run manifests are schema `4.0` and archive indexes schema 11, with no `run.model` or
+    `run.deep`.
+  - `recommendation-verdicts.json` has no `selection` block, and `phase_verify_recommendations`
+    returns only the verdicts payload. The Verdict Join table now shows the flagged
+    `contradicts`/`uncertain` counts in place of the separate "Recommendation verification" line.
+  - The analyzer's `evaluation.json` has no `whole_file_anchors`, `location.items[].lens` or
+    `pairs[].a_lens`/`b_lens`.
+  - Earlier records, stores and archive indexes are refused with the existing messages and
+    nothing is converted; use a fresh store, Hub destination or archive directory.
 
 ### Fixed
 

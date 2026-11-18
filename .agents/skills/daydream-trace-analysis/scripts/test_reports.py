@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fixture_evidence import v4_record
+from fixture_evidence import v5_record
 
 
 class ReportCliTests(unittest.TestCase):
@@ -24,9 +24,9 @@ class ReportCliTests(unittest.TestCase):
         self.script = self.root / "scripts" / "reports.py"
         shutil.copytree(Path(__file__).parent, self.script.parent, ignore=shutil.ignore_patterns("__pycache__"))
         self.source = self.root / "capture.jsonl"
-        self.records = [{"schema_version": "daydream.run.v4", "run_id": f"run-{i}",
+        self.records = [{"schema_version": "daydream.run.v5", "run_id": f"run-{i}",
                          "outcome": "success", "completeness": {},
-                         "provenance": {"effective_configuration": {"model": "other" if i == 4 else "same"}},
+                         "provenance": {"effective_configuration": {"backend": "other" if i == 4 else "same"}},
                          "original_task": {"status": "available", "value": "repeated search; later recovered"}}
                         for i in range(1, 6)]
         self.source.write_text("\n" + "\n".join(json.dumps(row) for row in self.records) + "\n")
@@ -222,7 +222,7 @@ class ReportCliTests(unittest.TestCase):
                         {"trajectory_id": "root", "steps": [{"step_id": 1, "message": "x" * padding}]},
                         {"trajectory_id": "sibling", "steps": [{"step_id": 1,
                                                                 "message": "retained sibling evidence"}]}]}})
-                stream.write(json.dumps(v4_record(record)) + "\n")
+                stream.write(json.dumps(v5_record(record)) + "\n")
         selected = subprocess.run([sys.executable, str(self.script.with_name("cohort.py")), "select", str(self.source)],
                                   capture_output=True, text=True)
         self.assertEqual(selected.returncode, 0, selected.stderr)

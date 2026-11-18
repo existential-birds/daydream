@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
 from io import StringIO
 from pathlib import Path
 
@@ -33,7 +32,6 @@ from daydream.ui import (
     print_dim,
     print_error,
     print_success,
-    print_verification_summary,
     render_exploration_summary,
 )
 from daydream.ui.agent_stream import AgentDisplay
@@ -43,27 +41,12 @@ from daydream.ui.tools import format_callback_progress
 from tests.harness.backend import ScriptedBackend
 
 
-def _capture_console(fn: Callable[[Console], None]) -> str:
-    """Run *fn* against a recording console and return the captured text."""
-    console = Console(file=StringIO(), record=True, force_terminal=True, width=200)
-    fn(console)
-    return console.export_text()
-
-
 def _ask(console: Console, message: str, default: str = "n") -> str:
     """Ask through the run's interaction gateway, the sole owner of prompt policy."""
     return resolve_run_context().choice(message, default=default, safe_default=default, console=console)
 
 
-def test_summaries_stay_quiet_and_choice_returns_the_typed_value(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    path = tmp_path / "recommendation-verdicts.json"
-    path.write_text(json.dumps({"verdicts": []}))
-    out = _capture_console(lambda c: print_verification_summary(c, path))
-    assert "selected" not in out
-    assert "Recommendation verification: 0 findings" in out
-
+def test_summaries_stay_quiet_and_choice_returns_the_typed_value(monkeypatch: pytest.MonkeyPatch) -> None:
     console = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     console.print(render_exploration_summary(ExplorationContext()))
     out = console.export_text()

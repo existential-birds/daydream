@@ -209,7 +209,7 @@ def make_manifest(session_id: str = "sess-0001", **overrides: Any) -> Manifest:
     """Build a minimal indexed manifest with optional field overrides, including PR identity."""
     defaults: dict[str, Any] = {
         "session_id": session_id, "archived_at": "2026-04-29T00:00:00+00:00", "status": "complete",
-        "run_flow": "normal", "model": "opus", "backend": "claude",
+        "run_flow": "normal", "backend": "claude",
         "archive_path": "/tmp/archive/runs/sess-0001",
     }
     defaults.update(overrides)

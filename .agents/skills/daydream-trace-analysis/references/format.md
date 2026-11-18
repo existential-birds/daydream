@@ -3,7 +3,7 @@
 ## Containers and identity
 
 The local store usually has `~/.daydream/dataset/runs/<digest>.jsonl`. Each
-nonblank line is a `daydream.run.v4` record, frequently hundreds of KB or more.
+nonblank line is a `daydream.run.v5` record, frequently hundreds of KB or more.
 Use the record's `run_id`, not the basename. Physical line numbers locate the
 record; JSON pointers locate evidence inside it. Earlier record versions are not
 read; inspect them with an earlier revision of this skill. For a cohort row, pass both its
@@ -19,7 +19,7 @@ the recorded ID, not its array position.
 | `provenance` | Producer identity, repository/revision, configuration/profile, resolved phases, collection diagnostics |
 | `trajectories.value.root_trajectory_id` | Root document identity; do not assume documents are root-first |
 | `trajectories.value.documents[]` | Embedded evidence documents: `trajectory_id`, `session_id`, `sha256`, `otlp_jsonl` (the exact OTLP/JSON lines) |
-| `findings.value.claims`, `.derivation`, `.terminal_coverage` | Stack claims, adjudication/dedup artifacts, scope and phase outcomes |
+| `findings.value.items`, `.terminal_coverage` | Canonical findings with their identities, scope and phase outcomes |
 
 Wrapper states include `available`, `unavailable`, `unproduced`, `withheld`,
 `failed`. Preserve state and reason. An unavailable section is not an empty
@@ -125,10 +125,7 @@ recommended patch and findings. Inspect only the phase relevant to the failure.
 `verification.value` may retain fix/test/quality-gate/push/remote-CI verdicts even
 when a generic final message is unhelpful.
 
-For finding provenance, `uid` identifies a pre-merge record, `item_uid` a merged
-item, `source_uids` the contributing records; integer `id` is renumberable.
-Content fingerprints measure similarity, not identity. Preserve these when
-following a repeated finding through review → adjudication → merge.
+For finding provenance, follow [finding identity](../../../../docs/extensions.md#finding-identity).
 
 ## Source owners in the Daydream checkout
 

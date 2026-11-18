@@ -201,7 +201,7 @@ def test_configuration_requires_matching_temporal_pin(tmp_path: Path) -> None:
     assert not config.out_dir.exists()
 
 
-def test_cli_posterior_annotation_preserves_captured_native_profile_with_claim_stack(tmp_path: Path) -> None:
+def test_cli_posterior_annotation_preserves_captured_native_profile(tmp_path: Path) -> None:
     # A record without legacy profile fields carries its native effective-configuration profile.
     native = {"schema_version": "1", "name": "strict", "source_kind": "builtin", "digest": "d" * 64}
     assert extract_provenance({"effective_configuration": {"profile": native}})["profile"] == {
@@ -210,9 +210,6 @@ def test_cli_posterior_annotation_preserves_captured_native_profile_with_claim_s
     assert explicit["profile"]["profile_name"] == "explicit"  # Recorded profile fields win over native fallback.
     store = LocalRecordStore(tmp_path / "records")
     run = projection_run(dispositions=("accepted",))
-    run["provenance"].pop("stack")
-    run["findings"]["value"]["items"][0]["source_uids"] = ["claim:1"]
-    run["findings"]["value"]["claims"] = [{"stack": "python", "records": [{"uid": "claim:1"}]}]
     store.commit_run(run)
     append_projection_evidence(store, run, dispositions=("accepted",))
     annotation = {"labels": ["accepted"], "pr_state": "closed", "valid_at": "2026-10-04T11:00:00Z",
@@ -230,7 +227,6 @@ def test_cli_posterior_annotation_preserves_captured_native_profile_with_claim_s
     assert cli_main(_cli_args(config)) == 0
     row = _read_jsonl(config.out_dir / "corpus.jsonl")[0]
     assert row["profile"] == run["provenance"]["profile"]
-    assert row["stack"] == "python"
     assert row["annotation"] == annotation
     assert row["reply_captures"] == [capture]
     assert row["evidence"] == [semantic]

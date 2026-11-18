@@ -17,6 +17,7 @@ from daydream.archive.scan import SEVERITY_BLOCKING, _scan_file, _scan_text
 from daydream.artifacts.filesystem import _create_private_directory, _projection_path
 from daydream.artifacts.models import ArtifactVisibilityError
 from daydream.dataset import (
+    RUN_SCHEMA_VERSION,
     LocalRecordStore,
     Record,
     StoreError,
@@ -29,7 +30,7 @@ from daydream.hub import DatasetHub, HfDatasetHub, HubConflict, HubError, _revis
 from daydream.json_utils import atomic_write_bytes, canonical_json
 
 MANIFEST_PATH = "manifest.json"
-_SCHEMAS = {"runs": ["daydream.run.v4"], "observations": ["daydream.observation.v4"]}
+_SCHEMAS = {"runs": [RUN_SCHEMA_VERSION], "observations": ["daydream.observation.v4"]}
 _IDENTITY_FIELDS = {"runs": "run_id", "observations": "observation_id"}
 _PARSERS = {"runs": parse_run, "observations": parse_observation}
 _VERSION = "daydream.hub.v3"

@@ -123,7 +123,6 @@ def _run_upsert_values(manifest: Manifest) -> dict[str, Any]:
     overrides = {
         **_project_daydream(manifest.daydream),
         "review_only": int(manifest.review_only),
-        "deep": int(manifest.deep),
         "remote_url": normalized_url,
         "repo_slug": normalized_slug,
         "changed_files": json.dumps(manifest.changed_files),

@@ -51,7 +51,7 @@ def collect_report_context(
     # No reviewer writes per-scope rationale; each entry keeps its stored shape with empty values.
     scopes = [{"scope_id": scope["scope_id"], "originating_run_id": None, "analyzed_revision": None,
                "review_context": None} for scope in planned[:32]]
-    verification = collect_verification(deep, read_json, [])
+    verification = collect_verification(deep, read_json)
     verification_failures = list(failures)
     verification_bytes = 0
     retained_verification = {}
