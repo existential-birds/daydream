@@ -52,6 +52,8 @@ def render_github_review_context(
     heading = ('Review completeness unavailable' if state is None else
                f'Review {state}' if state != 'complete' else 'Review incomplete')
     lines = [f'⚠️ **{heading}.**']
+    if terminal_result is not None and not terminal_result['projection_valid']:
+        lines.append(_findings_line(terminal_result, 0))
     diagnostics: dict[str, None] = {}
     for outcome in unfinished:
         key = outcome.get('scope_id', outcome.get('phase'))

@@ -529,20 +529,33 @@ async def _post_review_from_report_empty_items_posts_diagram_case(
             status = await pr_review.post_review_to_pr_from_report(
                 tmp_path, merged, console=_FakeConsole(),  # type: ignore[arg-type]
                 post=True, approve_on_clean=True, diagram_blocks=blocks,
-                renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO,
+                renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO, review_summary="sealed outcome",
             )
             assert status == pr_review.PostStatus.NOTHING_TO_POST and not captured
             assert warnings == ["Could not read merged-items.json; skipping PR post."]
-        # An incomplete review still posts its sealed outcome as a findings-free COMMENT.
-        status = await pr_review.post_review_to_pr_from_report(
-            tmp_path, merged, console=_FakeConsole(),  # type: ignore[arg-type]
-            post=True, renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO, review_complete=False,
-            review_summary="The findings could not be read after the review; the sealed result keeps them.",
-        )
-        assert status == pr_review.PostStatus.POSTED
+        # An incomplete review posts its sealed outcome as a findings-free COMMENT, never an approval or the
+        # items the reader kept; with no outcome to post it skips.
+        merged.write_text(json.dumps({"items": [{"file": "a.py", "line": 1, "description": "d", "severity": "low"},
+                                                {"description": "fileless"}]}))
+        seen: list[list[ParsedIssue]] = []
+
+        def classify(_t: Path, _p: PRInfo, issues: list[ParsedIssue], **_k: Any) -> pr_review.ClassifiedIssues:
+            seen.append(issues)
+            return _NO_ISSUES
+
+        monkeypatch.setattr(pr_review, "classify", classify)
+        for summary, expected in ((None, pr_review.PostStatus.NOTHING_TO_POST),
+                                  ("⚠️ **Review failed.**", pr_review.PostStatus.POSTED)):
+            status = await pr_review.post_review_to_pr_from_report(
+                tmp_path, merged, console=_FakeConsole(),  # type: ignore[arg-type]
+                post=True, approve_on_clean=True, renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO,
+                review_complete=False, review_summary=summary,
+            )
+            assert status == expected
+        assert seen == [[]]
+        assert warnings[-1] == "Could not read merged-items.json; posting the review outcome without findings."
         plan = captured["plan"]
-        assert plan.event is pr_review.ReviewEvent.COMMENT and not plan.inline and not plan.file_level
-        assert "could not be read after the review" in (plan.review_summary or "")
+        assert plan.event is pr_review.ReviewEvent.COMMENT and plan.review_summary == "⚠️ **Review failed.**"
         captured.clear()
     merged.write_text(json.dumps({"items": []}))
 

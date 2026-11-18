@@ -539,7 +539,9 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         # The report states the failure; it never calls a review with a sealed finding clean.
         report = (review.repo / '.review-output.md').read_text()
         assert 'No confirmed findings.' not in report
-        assert 'The findings could not be read after the review; the sealed result keeps them.' in report
+        # The posted summary says why it carries no findings, as the local report does.
+        unreadable = 'The findings could not be read after the review; the sealed result keeps them.'
+        assert unreadable in report and unreadable in review_reporting.render_github_review_context(result)
         assert report.count('The review used up its allowance before it finished; raise '
                             '<code>reviewer_tool_call_budget</code>') == 1
         return
