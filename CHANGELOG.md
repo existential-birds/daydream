@@ -102,7 +102,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Earlier records, stores and archive indexes are refused with the existing messages and
     nothing is converted; use a fresh store, Hub destination or archive directory.
 - **Breaking (0.y.z):** Data paths with no producer, found during
-  [#1920](https://github.com/existential-birds/daydream/pull/1920), are removed:
+  [#1920](https://github.com/existential-birds/daydream/pull/1920), are removed
+  ([#1921](https://github.com/existential-birds/daydream/pull/1921)):
   - The unverified-location demotion is gone. Its producer was retired in
     [#1834](https://github.com/existential-birds/daydream/issues/1834), so no finding carried
     `location_cited_line` or `location_distrust`. `--findings-out` findings drop
