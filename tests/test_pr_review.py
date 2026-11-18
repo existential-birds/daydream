@@ -556,6 +556,16 @@ async def _post_review_from_report_empty_items_posts_diagram_case(
         assert warnings[-1] == "Could not read merged-items.json; posting the review outcome without findings."
         plan = captured["plan"]
         assert plan.event is pr_review.ReviewEvent.COMMENT and plan.review_summary == "⚠️ **Review failed.**"
+        # Readable items that finalization sealed as an unusable projection post only the outcome too.
+        merged.write_text(json.dumps({"items": [{"file": "a.py", "line": 1, "description": "d", "severity": "low"}]}))
+        status = await pr_review.post_review_to_pr_from_report(
+            tmp_path, merged, console=_FakeConsole(),  # type: ignore[arg-type]
+            post=True, approve_on_clean=True, renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO,
+            review_complete=False, findings_readable=False, review_summary="⚠️ **Review failed.**",
+        )
+        assert status == pr_review.PostStatus.POSTED and seen == [[], []]
+        assert warnings[-1] == "Merged items are unusable; posting the review outcome without findings."
+        assert captured["plan"].event is pr_review.ReviewEvent.COMMENT
         captured.clear()
     merged.write_text(json.dumps({"items": []}))
 

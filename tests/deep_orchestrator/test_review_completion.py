@@ -23,7 +23,7 @@ from daydream.dataset import LocalRecordStore
 from daydream.deep import review_terminal
 from daydream.findings import FindingsValidationError, load_findings_artifact
 from daydream.host_tools import HostToolRejected
-from daydream.pr_review import post_findings_from_artifact
+from daydream.pr_review import ReviewEvent, post_findings_from_artifact
 from daydream.review_result import ReviewCoverage
 from daydream.trajectory import RUN_DOCUMENT_NAME
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
@@ -492,6 +492,7 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         notice = review_reporting.render_github_review_context(result)
         report = (review.repo / '.review-output.md').read_text()
         assert '**Review incomplete.**' in notice and '## Review outcome' in report
+        assert 'No confirmed findings.' not in notice and 'could not be read' not in notice
         assert all('used up its allowance' not in text for text in (panel, notice, report))
         return
     store = LocalRecordStore(review.tmp / 'records')
@@ -501,9 +502,14 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
             state['records_before_publication'] = store.record_index()['runs']
             raise ArtifactVisibilityError('public installation failed')
         review.patch.setattr(ArtifactSession, 'finalize_frozen', fail_publication)
+    # A retired lens is rewritten in comment mode, where the failed outcome is also posted.
+    plans: dict[str, Any] = {}
+    comment = {'output_mode': 'comment', 'findings_out': None} if fault == 'retired-lens' else {}
+    if comment:
+        review.patch.setattr('daydream.pr_review.post_classified_review', _recording_fake_submit(plans))
     # The reviewer retains its own failures, so every row ends as an exit status, never as an exception.
     assert await review.run(dataset_capture=fault in ('source-loss', 'publication'), dataset_store_path=store.root,
-                            force_worktree=force_worktree) == 1
+                            force_worktree=force_worktree, **comment) == 1
     panel = collapse_panel_text(capsys)
     if fault == 'publication':
         assert 'public installation failed' in panel and state['records_before_publication'] == []
@@ -517,14 +523,25 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
             review.load()
         return
     if fault in ('unconfined-path', 'retired-lens'):
-        # The confirmed finding is never delivered on an unconfined path or a retired lens; the sealed result keeps it.
-        data = review.load()
-        result = data['terminal_result']
-        assert data['findings'] == [] and result['reason_codes'] == ['malformed_artifact']
-        assert (result['analysis_state'], result['projection_valid']) == ('failed', False)
-        assert 'Review failed: no confirmed findings delivered (the reviewer confirmed 1).' in panel
+        # The confirmed finding is never delivered or posted on an unconfined path or a retired lens; the sealed
+        # result keeps it.
         sealed = json.loads((review.repo / '.daydream/deep/committed-review.json').read_text())
         assert [finding['payload']['file'] for finding in sealed['findings']] == ['api.py']
+        if comment:
+            plan, result = plans.pop('plan'), sealed['terminal_result']
+            assert plan.event is ReviewEvent.COMMENT and plan.inline == plan.file_level == plan.body_only == ()
+            summary = plan.review_summary
+        else:
+            data = review.load()
+            result = data['terminal_result']
+            assert data['findings'] == []
+            summary = review_reporting.render_github_review_context(result)
+        assert result['reason_codes'] == ['malformed_artifact']
+        assert (result['analysis_state'], result['projection_valid']) == ('failed', False)
+        assert 'Review failed: no confirmed findings delivered (the reviewer confirmed 1).' in panel
+        # Every scope finished, so the notice says only why it carries no findings, never that the review stopped.
+        assert summary == (
+            '⚠️ **Review failed.**\n\nThe findings could not be read after the review; the sealed result keeps them.')
         return
     if fault == 'projection':
         data = review.load()

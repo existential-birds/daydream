@@ -51,8 +51,8 @@ with an extension error. `exploration` is no longer a step of `deep`. Replacing 
 `review` phase (`register_phase(..., replace=True)`) does not replace the reviewer: the
 planned review is never dispatched, so the run seals without evidence and ends as a
 failed review with exit 1. Rewrite findings in a step after `load-items` instead; if that
-step leaves the items unusable, the review also ends as failed and its report says the
-findings could not be read.
+step leaves the items unusable, the review also ends as failed, its report and any posted
+review comment say the findings could not be read, and no findings are posted.
 
 ### Diagram
 

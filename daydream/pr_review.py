@@ -79,6 +79,7 @@ async def post_review_to_pr_from_report(
     captured_pr: PRInfo | None = None,
     snapshot_diff: str | None = None,
     review_complete: bool = True,
+    findings_readable: bool = True,
     publication_dir: Path | None = None,
     run_context: RunContext | None = None,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
@@ -98,21 +99,18 @@ async def post_review_to_pr_from_report(
     items = payload.get("items") if isinstance(payload, dict) else None
     issues = parsed_issues_from_items(items) if isinstance(items, list) and all(
         isinstance(item, dict) for item in items) else []
-    if not isinstance(items, list) or len(issues) != len(items):
+    if not findings_readable or not isinstance(items, list) or len(issues) != len(items):
         # A corrupt, partially-written or misshapen merged-items.json must not crash
         # the run, and an item the parser drops must not let a clean review approve
-        # over it (#400). An incomplete review cannot approve, so its sealed outcome
-        # still posts as a findings-free COMMENT; otherwise skip the post cleanly.
+        # over it (#400). Items that parse but that finalization sealed as an unusable
+        # projection are never posted either. An incomplete review cannot approve, so its
+        # sealed outcome still posts as a findings-free COMMENT; otherwise skip the post cleanly.
+        problem = (f"Could not read {merged_items_path.name}" if findings_readable
+                   else "Merged items are unusable")
         if review_complete or not review_summary:
-            print_warning(
-                console,
-                f"Could not read {merged_items_path.name}; skipping PR post.",
-            )
+            print_warning(console, f"{problem}; skipping PR post.")
             return PostStatus.NOTHING_TO_POST
-        print_warning(
-            console,
-            f"Could not read {merged_items_path.name}; posting the review outcome without findings.",
-        )
+        print_warning(console, f"{problem}; posting the review outcome without findings.")
         issues = []
     elif (not issues and not approve_on_clean and not review_warnings
           and not (diagram_blocks and diagram_blocks.strip())):

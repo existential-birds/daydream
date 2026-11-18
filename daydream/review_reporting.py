@@ -47,12 +47,13 @@ def render_github_review_context(
     unfinished = [outcome for kind in ('stack_outcomes', 'phase_outcomes')
                   for outcome in (terminal_result or {}).get(kind, []) if outcome['status'] != 'complete']
     warnings = dict.fromkeys(review_warnings)
+    unreadable = terminal_result is not None and not terminal_result['projection_valid']
     if state == 'complete' and not warnings:
         return ''
     heading = ('Review completeness unavailable' if state is None else
                f'Review {state}' if state != 'complete' else 'Review incomplete')
     lines = [f'⚠️ **{heading}.**']
-    if terminal_result is not None and not terminal_result['projection_valid']:
+    if unreadable:
         lines.append(_findings_line(terminal_result, 0))
     diagnostics: dict[str, None] = {}
     for outcome in unfinished:
@@ -66,7 +67,7 @@ def render_github_review_context(
     lines.extend('- ' + _text(warning, 512) for warning in list(diagnostics)[:8])
     if len(diagnostics) > 8:
         lines.append(f'- {len(diagnostics) - 8} additional notices; see run artifacts.')
-    if state not in {None, 'complete'} and not unfinished:
+    if state not in {None, 'complete'} and not unfinished and not unreadable:
         lines.append('Review did not finish; see run artifacts.')
     if terminal_result is not None and (sentence := allowance_sentence(terminal_result['reason_codes'])):
         lines.append(sentence)

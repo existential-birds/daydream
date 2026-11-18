@@ -104,6 +104,7 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
         pr_kwargs.update(captured_pr=pinned, snapshot_diff=ctx.data["snapshot_diff"],
                          publication_dir=ctx.work.source)
     pr_kwargs["review_complete"] = isinstance(result, dict) and result.get("analysis_state") == "complete"
+    pr_kwargs["findings_readable"] = not (isinstance(result, dict) and result.get("projection_valid") is False)
     try:
         pr_kwargs["review_summary"] = render_github_review_context(result, review_warnings=warnings)
     except (OSError, ValueError, TypeError, RecursionError) as exc:
