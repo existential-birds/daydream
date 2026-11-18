@@ -168,8 +168,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the post, so no approval follows. An unfinished review with a review summary, as the
   built-in flow always supplies, now posts that outcome as a comment without findings, and
   the comment says the findings could not be read. The same holds when review finalization
-  rejected items an extension step rewrote (for example an unconfined path): such findings
-  are no longer posted ([#1932](https://github.com/existential-birds/daydream/issues/1932)).
+  rejected items an extension step rewrote or deleted (for example an unconfined path):
+  such findings are no longer posted, and the comment no longer says the review did not
+  finish ([#1932](https://github.com/existential-birds/daydream/issues/1932)).
 - Run-data capture records a too deeply nested artifact as `malformed_json` instead of
   losing the run record ("Run evidence could not be persisted (RecursionError)")
   ([#1932](https://github.com/existential-birds/daydream/issues/1932)).
