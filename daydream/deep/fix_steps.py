@@ -78,8 +78,8 @@ from daydream.ui import (
 def _attach_verdicts(items: list[dict[str, Any]], payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Attach advisory verifier fields in place by canonical id/issue_id.
 
-    Normalization must make item ids unique across all lenses. Unmatched items
-    remain unchanged; return the same list.
+    Normalization must make item ids unique. Unmatched items remain unchanged;
+    return the same list.
     """
     payload = payload if isinstance(payload, dict) else {"verdicts": []}
     verdict_lookup: dict[int, dict[str, Any]] = {}

@@ -144,12 +144,12 @@ def target(tmp_path: Path) -> Path:
 
 
 def _strict_archive(*, target: Path, session_id: str, config: Any, write_snapshot: RunWriteSnapshot,
-    run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL, identity: ManifestRunIdentity | None = None,
+    run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL,
     destinations: tuple[RoutedDestination, ...] = (), work: Any = None,
     dump_path: Path | None = None,
 ) -> None:
     """Finalize a frozen run; target must exclude the archive directory, as in `_frozen_target`."""
-    finalize_archive_run(run=_archive_snapshot(write_snapshot, run_flow=run_flow, identity=identity),
+    finalize_archive_run(run=_archive_snapshot(write_snapshot, run_flow=run_flow),
         artifacts=ArtifactTreeSnapshot(
             session_id=session_id, workspace_key="workspace", root=target, manifest=manifest_tree(target),
             destinations=destinations,
@@ -163,14 +163,12 @@ def _strict_archive(*, target: Path, session_id: str, config: Any, write_snapsho
     )
 
 
-def _manifest_identity(**overrides: Any) -> ManifestRunIdentity:
-    """Build the public, already-resolved identity supplied by the runner."""
-    identity = ManifestRunIdentity(
-        backend="claude", review_backend="claude", review_model="sonnet", fix_backend="claude",
-        test_backend="claude", review_only=False, profile=None,
-        phases=RunPhaseCapabilities(merge=True, fix=True, test=True, push=True, remote_ci=True,),
-    )
-    return replace(identity, **overrides)
+# The public, already-resolved identity supplied by the runner.
+_MANIFEST_IDENTITY = ManifestRunIdentity(
+    backend="claude", review_backend="claude", review_model="sonnet", fix_backend="claude",
+    test_backend="claude", review_only=False, profile=None,
+    phases=RunPhaseCapabilities(merge=True, fix=True, test=True, push=True, remote_ci=True,),
+)
 
 
 def _manifest_write_snapshot(
@@ -192,21 +190,20 @@ def _manifest_write_snapshot(
 
 
 def _archive_snapshot(trajectories: RunWriteSnapshot, *, run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL,
-    identity: ManifestRunIdentity | None = None,
 ) -> ArchiveRunSnapshot:
     """Join frozen trajectory provenance with the runner's public identity."""
     return ArchiveRunSnapshot(
         recorder_provenance=archive_recorder_provenance_from_snapshot(write_snapshot=trajectories, run_flow=run_flow,),
-        identity=identity or _manifest_identity(), trajectories=trajectories,
+        identity=_MANIFEST_IDENTITY, trajectories=trajectories,
     )
 
 
 def _build(tmp_path: Path, *, git_ctx: GitContext | None = None, write_snapshot: RunWriteSnapshot | None = None,
-    run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL, identity: ManifestRunIdentity | None = None, **kw: Any,
+    run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL, **kw: Any,
 ) -> Manifest:
     """Build a manifest from immutable public archive inputs."""
     snapshot = write_snapshot or _manifest_write_snapshot(tmp_path / "evidence")
-    return build_manifest_from_snapshot(run=_archive_snapshot(snapshot, run_flow=run_flow, identity=identity,),
+    return build_manifest_from_snapshot(run=_archive_snapshot(snapshot, run_flow=run_flow),
         summary=summarize_run(snapshot), git_ctx=git_ctx if git_ctx is not None else GitContext(), status="complete",
         archive_path=tmp_path, **kw,
     )
