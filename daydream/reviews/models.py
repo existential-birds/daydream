@@ -24,9 +24,7 @@ class ReviewEvent(StrEnum):
 
 @dataclass
 class ParsedIssue:
-    """A finding with a potentially stale line hint and stable cross-run fingerprint.
-
-    Off-vocabulary severity is tracked separately from an omitted severity."""
+    """A finding with a potentially stale line hint and stable cross-run fingerprint."""
 
     path: str
     line: int | None
