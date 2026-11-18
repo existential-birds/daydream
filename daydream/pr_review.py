@@ -20,6 +20,7 @@ from daydream.extensions import (
 )
 from daydream.git_ops import INHERIT_GITHUB_AUTH, GitError, GitHubAuth
 from daydream.pr_comment_renderer import render_run_info
+from daydream.review_reporting import UNREADABLE_FINDINGS_LINE
 from daydream.reviews.diagrams import (
     post_diagram_artifact as post_diagram_artifact,
     render_diagram_blocks_from_payload as render_diagram_blocks_from_payload,
@@ -112,6 +113,9 @@ async def post_review_to_pr_from_report(
             print_warning(console, f"{problem}; skipping PR post.")
             return PostStatus.NOTHING_TO_POST
         print_warning(console, f"{problem}; posting the review outcome without findings.")
+        if findings_readable:
+            # Finalization accepted items a later step damaged; the sealed summary cannot say so.
+            review_summary += "\n\n" + UNREADABLE_FINDINGS_LINE
         issues = []
     elif (not issues and not approve_on_clean and not review_warnings
           and not (diagram_blocks and diagram_blocks.strip())):

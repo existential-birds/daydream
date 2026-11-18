@@ -110,10 +110,13 @@ def _host_attempt(attempt: Any) -> bool:
             and (identity['outcome'] == 'truncated' or attempt['passed'] == (identity['outcome'] == 'passed')))
 
 
+UNREADABLE_FINDINGS_LINE = 'The findings could not be read after the review; the sealed result keeps them.'
+
+
 def _findings_line(terminal_result: dict[str, Any] | None, findings_count: int) -> str:
     """Count the findings, or say that an unusable items projection left none to count."""
     if terminal_result is not None and not terminal_result.get('projection_valid', True):
-        return 'The findings could not be read after the review; the sealed result keeps them.'
+        return UNREADABLE_FINDINGS_LINE
     return 'No confirmed findings.' if not findings_count else f'Confirmed findings: {findings_count}.'
 
 

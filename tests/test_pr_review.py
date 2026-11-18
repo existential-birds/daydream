@@ -30,7 +30,7 @@ from daydream.pr_review import (
     resolve_review_renderers,
 )
 from daydream.reconcile import PriorDiagramComment
-from daydream.review_reporting import render_github_review_context
+from daydream.review_reporting import UNREADABLE_FINDINGS_LINE, render_github_review_context
 from daydream.reviews.diagrams import post_diagram_comment_to_pr
 from daydream.reviews.rendering import (
     build_payload_for_event,
@@ -544,8 +544,8 @@ async def _post_review_from_report_empty_items_posts_diagram_case(
             return _NO_ISSUES
 
         monkeypatch.setattr(pr_review, "classify", classify)
-        # A projection finalization rejected still posts the outcome after an extension step removed the file;
-        # a readable projection without the file skips silently.
+        # A projection finalization rejected still posts the outcome after an extension step removed the file; items
+        # damaged after finalization accepted them say so; a readable projection without the file skips silently.
         for summary, readable in ((None, True), ("⚠️ **Review failed.**", True), ("⚠️ **Review failed.**", False),
                                   ("⚠️ **Review failed.**", True)):
             if not readable:
@@ -558,8 +558,9 @@ async def _post_review_from_report_empty_items_posts_diagram_case(
             posted = summary is not None and (not readable or merged.exists())
             assert status == (pr_review.PostStatus.POSTED if posted else pr_review.PostStatus.NOTHING_TO_POST)
             plan = captured.pop("plan", None)
+            expected = f"{summary}\n\n{UNREADABLE_FINDINGS_LINE}" if readable else summary
             assert (plan is None) if not posted else (
-                plan is not None and plan.event is pr_review.ReviewEvent.COMMENT and plan.review_summary == summary)
+                plan is not None and plan.event is pr_review.ReviewEvent.COMMENT and plan.review_summary == expected)
         assert seen == [[], []]
         assert warnings[-2:] == [f"{problem}; posting the review outcome without findings."
                                  for problem in ("Could not read merged-items.json", "Merged items are unusable")]
