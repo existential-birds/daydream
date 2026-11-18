@@ -523,13 +523,14 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
             review.load()
         return
     if fault in ('unconfined-path', 'retired-lens'):
-        # The confirmed finding is never delivered or posted on an unconfined path or a retired lens; the sealed
-        # result keeps it.
+        # The confirmed finding is never delivered on an unconfined path or a retired lens, nor posted from a
+        # retired lens in comment mode; the sealed result keeps it.
         sealed = json.loads((review.repo / '.daydream/deep/committed-review.json').read_text())
         assert [finding['payload']['file'] for finding in sealed['findings']] == ['api.py']
         if comment:
             plan, result = plans.pop('plan'), sealed['terminal_result']
             assert plan.event is ReviewEvent.COMMENT and plan.inline == plan.file_level == plan.body_only == ()
+            assert 'Merged items are unusable; posting the review outcome without findings.' in panel
             summary = plan.review_summary
         else:
             data = review.load()

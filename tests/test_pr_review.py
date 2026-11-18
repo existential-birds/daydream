@@ -544,29 +544,22 @@ async def _post_review_from_report_empty_items_posts_diagram_case(
             return _NO_ISSUES
 
         monkeypatch.setattr(pr_review, "classify", classify)
-        for summary, expected in ((None, pr_review.PostStatus.NOTHING_TO_POST),
-                                  ("⚠️ **Review failed.**", pr_review.PostStatus.POSTED)):
+        # A projection finalization rejected still posts the outcome after an extension step removed the file.
+        for summary, readable in ((None, True), ("⚠️ **Review failed.**", True), ("⚠️ **Review failed.**", False)):
+            if not readable:
+                merged.unlink()
             status = await pr_review.post_review_to_pr_from_report(
                 tmp_path, merged, console=_FakeConsole(),  # type: ignore[arg-type]
                 post=True, approve_on_clean=True, renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO,
-                review_complete=False, review_summary=summary,
+                review_complete=False, findings_readable=readable, review_summary=summary,
             )
-            assert status == expected
-        assert seen == [[]]
-        assert warnings[-1] == "Could not read merged-items.json; posting the review outcome without findings."
-        plan = captured["plan"]
-        assert plan.event is pr_review.ReviewEvent.COMMENT and plan.review_summary == "⚠️ **Review failed.**"
-        # Readable items that finalization sealed as an unusable projection post only the outcome too.
-        merged.write_text(json.dumps({"items": [{"file": "a.py", "line": 1, "description": "d", "severity": "low"}]}))
-        status = await pr_review.post_review_to_pr_from_report(
-            tmp_path, merged, console=_FakeConsole(),  # type: ignore[arg-type]
-            post=True, approve_on_clean=True, renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO,
-            review_complete=False, findings_readable=False, review_summary="⚠️ **Review failed.**",
-        )
-        assert status == pr_review.PostStatus.POSTED and seen == [[], []]
-        assert warnings[-1] == "Merged items are unusable; posting the review outcome without findings."
-        assert captured["plan"].event is pr_review.ReviewEvent.COMMENT
-        captured.clear()
+            assert status == (pr_review.PostStatus.POSTED if summary else pr_review.PostStatus.NOTHING_TO_POST)
+            plan = captured.pop("plan", None)
+            assert (plan is None) if summary is None else (
+                plan is not None and plan.event is pr_review.ReviewEvent.COMMENT and plan.review_summary == summary)
+        assert seen == [[], []]
+        assert warnings[-2:] == [f"{problem}; posting the review outcome without findings."
+                                 for problem in ("Could not read merged-items.json", "Merged items are unusable")]
     merged.write_text(json.dumps({"items": []}))
 
     status = await pr_review.post_review_to_pr_from_report(

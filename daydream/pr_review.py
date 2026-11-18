@@ -90,7 +90,7 @@ async def post_review_to_pr_from_report(
     branch discovery; lookup errors fail, while missing PRs return NO_PR.
     post skips interactive confirmation; approve_on_clean enables severity-gated approval."""
     run_context = resolve_run_context(run_context)
-    if not merged_items_path.exists():
+    if findings_readable and not merged_items_path.exists():
         return PostStatus.NOTHING_TO_POST
     try:
         payload = json.loads(merged_items_path.read_text(encoding="utf-8"))
