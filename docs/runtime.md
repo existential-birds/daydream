@@ -499,18 +499,23 @@ materialization. Ordinary review mode uses this same owner; comment and commit-b
 `--findings-out` select an independently pinned committed PR subject instead, with a
 visible exclusion notice when the checkout is dirty. Improve retains its separate
 audit-workspace population policy. Fixing-flow migration is outside this contract:
-fixing reviews the checkout as is, so its diff is the commits plus tracked working-tree
-edits. When such edits exist the run says so before it reviews, and its coverage and
-committed result mark `analyzed_revision` with `tracked_worktree_edits: true`, with
-terminal/coverage version 3 and committed result schema 13; a clean checkout keeps
-version 1, schema 10 and no marker. Right after taking that diff the host freezes the
-tracked working tree and index as a dangling `git stash create` commit, leaving files,
-refs and the stash list untouched. New-side supporting selectors read that snapshot
-under the same [pinned-blob admission](#pi-host-tool-lifetime-and-limits), so their
-digest measures the reviewed working bytes while their `revision` stays `head_sha`
-beside the marker; untracked paths are unavailable, and the old side still reads the
-merge base. Without a snapshot those selectors are refused as unavailable, never read
-from `HEAD`, and the review still runs.
+fixing reviews the checkout as is, including its tracked working-tree edits. When such
+edits exist the run says so before it reviews, and its coverage and committed result
+mark `analyzed_revision` with `tracked_worktree_edits: true`, with terminal/coverage
+version 3 and committed result schema 13; a clean checkout keeps version 1, schema 10
+and no marker. Before taking the diff the host freezes the tracked working tree and
+index as a dangling `git stash create` commit, leaving files, refs and the stash list
+untouched, then diffs the pinned merge base against that snapshot: one block per path
+whose new side is the reviewed working bytes. Assigned new-side ranges, the hunk index,
+claim lines, recorded finding lines and fix prompts therefore count working-tree lines,
+and new-side supporting selectors read the same snapshot under the same
+[pinned-blob admission](#pi-host-tool-lifetime-and-limits). Every new-side ref's
+`revision` stays `head_sha` beside the marker; untracked paths are left out of the diff
+and unavailable to selectors, and the old side still reads the merge base. If the
+snapshot cannot be taken the run stops with a Git error before review, as for any
+failed diff query, instead of reviewing commits and edits in two line coordinates.
+When Git finds no tracked content to freeze, new-side selectors are refused as
+unavailable, never read from `HEAD`, and the review still runs.
 
 Local capture compares the pinned merge base with final working bytes, combining
 committed and later tracked edits. The index is not another change layer. Undone

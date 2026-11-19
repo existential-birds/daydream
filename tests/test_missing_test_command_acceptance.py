@@ -66,8 +66,10 @@ async def test_runner_rejects_missing_canonical_before_fix_or_test(
 
     The rejection is persisted as a no-execution verdict and recipe; the manifest
     candidate is never executed. Command-miss reasons have owner-level proof.
-    The owner's tracked edit is part of the reviewed subject: the run says so first and records it, and a
-    supporting reference into a line that exists only in that edit resolves against the reviewed bytes.
+    The owner's tracked edit is part of the reviewed subject: the run says so first and records it, a
+    supporting reference into a line that exists only in that edit resolves against the reviewed bytes, and a
+    committed line shifted by uncommitted lines above it is assigned and recorded at its working-tree line.
+    When those edits cannot be frozen the run stops before review.
     Untracked files alone leave the reviewed subject exactly the commits, with no notice.
     """
     reason, source = "empty-argv", "config"
@@ -90,7 +92,9 @@ async def test_runner_rejects_missing_canonical_before_fix_or_test(
         if dirty:
             # Line 2 exists only in the tracked uncommitted edit; HEAD's base.txt has one line.
             (target / "base.txt").write_text("base\nowner dirty bytes\n")
-            backend.review_claims = [{"title": "Sample issue", "file": "api.py", "line": 1, "supporting": [
+            # Uncommitted lines above the committed VALUE line move it to working-tree line 3.
+            (target / "api.py").write_text("DIRTY_ONE = 1\nDIRTY_TWO = 2\nVALUE = 2\n")
+            backend.review_claims = [{"title": "Sample issue", "file": "api.py", "line": 3, "supporting": [
                 {"path": "base.txt", "side": "new", "source_range": {"start": 2, "end": 2},
                  "basis": "source_inspection"}]}]
             before = _state(target)
@@ -106,6 +110,8 @@ async def test_runner_rejects_missing_canonical_before_fix_or_test(
     assert not _fix_prompts(backend)
     assert not any(call["prompt"].startswith("The tests failed") for call in backend.calls)
     committed = json.loads((deep / "committed-review.json").read_text())
+    assert [(finding["payload"]["file"], finding["payload"]["line"]) for finding in committed["findings"]] == [
+        ("api.py", 3)], "a claim citing only its assigned ref is admitted at the committed line's working-tree line"
     reviewed = hashlib.sha256((target / "base.txt").read_bytes()).hexdigest()
     assert [(ref["path"], ref["side"], ref["source_range"], ref["artifact_sha256"])
             for finding in committed["findings"] for ref in finding["payload"]["evidence_refs"]
@@ -132,6 +138,15 @@ async def test_runner_rejects_missing_canonical_before_fix_or_test(
     assert loaded.candidate is not None and loaded.candidate.argv == ("pytest",)
     assert not (deep / "repair-job.json").exists()
     assert not (deep / "repair-checkpoint.json").exists()
+
+    def unfrozen(repo: Path) -> str:
+        raise git_ops.GitError("index.lock exists")
+
+    monkeypatch.setattr("daydream.git_ops.stash_create", unfrozen)
+    calls = len(backend.calls)
+    assert await run(config) == 1
+    assert "Reviewed working edits could not be frozen: index.lock exists" in collapse_panel_text(capsys)
+    assert len(backend.calls) == calls, "without frozen working bytes the run stops before review"
 
 
 async def test_public_test_phase_returns_no_execution_without_repair(

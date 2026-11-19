@@ -303,27 +303,31 @@ async def run_deep(
             # rejected below, because the diagram path still reads the diff (and
             # its grounding) from working-tree content.
             dirty_snapshot = git_ops.has_worktree_edits(target_dir, untracked=True)
+        paths = [".", *(f":(exclude){p.rstrip('/')}" for p in config.ignore_paths or [])]
         try:
             if work.captured_source is not None:
                 diff = work.captured_source.diff
             elif config.findings_out is not None and mode != "diagram":
-                paths = [".", *(f":(exclude){p.rstrip('/')}" for p in config.ignore_paths or [])]
                 diff = git_ops.diff_paths(target_dir, captured_base, captured_head, paths)
             else:
-                diff = git_ops.diff(work.repo, work.base_branch, exclude=config.ignore_paths)
                 tracked_worktree_edits = git_ops.has_worktree_edits(work.repo)
+                if tracked_worktree_edits and mode != "diagram":
+                    # Freeze the tracked bytes, then review one layer from the pinned merge base to them, so
+                    # assigned ranges and new-side supporting selectors measure the same working lines.
+                    try:
+                        work = replace(work, reviewed_worktree=git_ops.stash_create(work.repo))
+                    except GitError as exc:
+                        print_error(console, "Git Error", f"Reviewed working edits could not be frozen: {exc}")
+                        return 1
+                if work.reviewed_worktree is None:
+                    diff = git_ops.diff(work.repo, work.base_branch, exclude=config.ignore_paths)
+                else:
+                    diff = git_ops.diff_paths(target_dir, captured_base, work.reviewed_worktree, paths)
         except GitTimeoutError as exc:
             print_error(console, "Git Timeout", f"git timed out under load: {exc}")
             return 1
         except GitError:
             diff = None
-        if tracked_worktree_edits and mode != "diagram":
-            # Freeze the reviewed tracked bytes for new-side sources. Without a
-            # snapshot those selectors are refused as unavailable; review still runs.
-            try:
-                work = replace(work, reviewed_worktree=git_ops.stash_create(work.repo))
-            except GitError as exc:
-                print_warning(console, f"Reviewed working edits could not be frozen: {exc}")
     if diff is not None and run_artifacts is not None and config.dataset_capture:
         from daydream.dataset_capture import retain_original_task
 

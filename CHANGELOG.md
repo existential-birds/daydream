@@ -157,6 +157,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A fixing run on a checkout with tracked uncommitted edits now reviews one diff, from the
+  pinned merge base to the frozen working tree, instead of the commits' diff followed by a
+  second diff from `HEAD`. A file changed both in a commit and in the working tree was
+  offered in two line coordinates under one `head_sha` label, so a claim at the line the
+  reviewer read in the checkout could be refused, or recorded and sent to the fixer at the
+  committed `HEAD` line. For such runs `diff.patch`, `diff_key`, `hunk-index.json` and
+  assignment ranges change: each path has one block whose new side counts working-tree lines.
+  If the working tree cannot be frozen the run stops with a Git error before review, where it
+  used to review the two-part diff. Clean checkouts and result schemas are unchanged
+  ([#1910](https://github.com/existential-birds/daydream/issues/1910)). See
+  [captured local source](docs/runtime.md#captured-local-source).
 - A review assignment that holds every diff block of a path, such as a type change's deletion
   then addition, no longer gives a hunk a source range one line too long. The last hunk of each
   block but the final one counted the next block's `---` and `+++` lines as source lines, so its
