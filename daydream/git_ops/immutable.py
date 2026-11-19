@@ -437,8 +437,6 @@ def _materialize(repo: Path, source: Path, head: str) -> None:
         body = process._run_git(repo, ["cat-file", "blob", oid], capture_bytes=True, timeout=30,
                                 error_context="immutable source blob unavailable",
                                 max_output_bytes=_MAX_BLOB_BYTES + 4096).stdout
-        if len(body) > _MAX_BLOB_BYTES:
-            raise GitError("immutable source files exceed the supported size")
         original = source / name
         try:
             info = original.lstat()
