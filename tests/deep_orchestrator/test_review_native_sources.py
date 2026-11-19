@@ -254,10 +254,13 @@ def test_type_changed_path_keeps_old_side_refs_under_each_block_header(
     factory = StageInputFactory(PiBackend(model='unexecuted'), work_context(repo, run_id='type-change'),
         StackAssignment('python', ['x']), change=CanonicalChange.capture(diff_path, write_hunk_index(root, patch)),
         revision=revision, read_only=True)
-    refs = [{(ref['side'], ref['path']) for ref in part.assignment['source_refs']} for part in factory.parts]
     if lines == 3:
-        assert refs == [{('old', 'x'), ('new', 'x')}]
+        # Each joined block's hunk stops at the next block's header: no range past EOF, no empty new side.
+        assert [(ref['side'], ref['path'], ref['source_range']) for part in factory.parts
+                for ref in part.assignment['source_refs']] == [
+            ('old', 'x', {'start': 1, 'end': 3}), ('new', 'x', {'start': 1, 'end': 1})]
         return
+    refs = [{(ref['side'], ref['path']) for ref in part.assignment['source_refs']} for part in factory.parts]
     headers = [[line for line in part.diff.splitlines() if line.startswith(('diff --git', 'new file', 'deleted file'))]
                for part in factory.parts]
     deleted = [['diff --git a/x b/x', 'deleted file mode ' + ('100644' if to_symlink else '120000')]]

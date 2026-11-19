@@ -157,6 +157,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A review assignment that holds every diff block of a path, such as a type change's deletion
+  then addition, no longer gives a hunk a source range one line too long. The last hunk of each
+  block but the final one counted the next block's `---` and `+++` lines as source lines, so its
+  range could run past end of file, and a deletion block gained a new-side `0..0` reference that
+  no selector could match. A regular file changed to a symlink is now assigned `old 1..3` and
+  `new 1..1` instead of `old 1..4`, `new 0..0` and `new 1..1`
+  ([#1909](https://github.com/existential-birds/daydream/issues/1909)).
 - A `merged-items.json` nested too deeply for the JSON parser no longer crashes the run.
   Review finalization warns "Cannot validate terminal findings: RecursionError", as it
   already did for other malformed merged items, and the fix gate stops at its preflight
