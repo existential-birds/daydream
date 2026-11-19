@@ -35,6 +35,12 @@ truthful coverage, and verification evidence. Finding counts and run success are
 not correctness labels. Where adjudication or needed actions are missing, mark
 finding quality unknown rather than infer false positives or missed findings.
 
+Independent labels frozen with the cohort ([cohorts.md](cohorts.md#attach-independent-labels))
+are that adjudication. Template runs carry them as `finding_labels`; keep that
+copy unchanged or remove it. Cite a label as evidence with the pointer
+`/finding_labels/items/<i>/<field>` and an excerpt, as for record evidence, and
+name its `source` in the observation.
+
 ## Fill each run
 
 Run `status` is `analyzed`, `skipped`, or `unavailable`; explain skipped or

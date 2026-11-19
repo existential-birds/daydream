@@ -30,8 +30,11 @@ class ReportCliTests(unittest.TestCase):
                          "original_task": {"status": "available", "value": "repeated search; later recovered"}}
                         for i in range(1, 6)]
         self.source.write_text("\n" + "\n".join(json.dumps(row) for row in self.records) + "\n")
-        selected = subprocess.run([sys.executable, str(self.script.with_name("cohort.py")), "select", str(self.source)],
-                                  capture_output=True, text=True)
+        labels = self.root / "labels.jsonl"
+        labels.write_text(json.dumps({"run_id": "run-1", "label": "missed", "issue": "Race in cache refresh",
+                                      "source": "independent judge"}) + "\n")
+        selected = subprocess.run([sys.executable, str(self.script.with_name("cohort.py")), "select", str(self.source),
+                                   "--labels", str(labels)], capture_output=True, text=True)
         self.assertEqual(selected.returncode, 0, selected.stderr)
         manifest = json.loads(selected.stdout)
         runs = manifest["runs"]
@@ -112,6 +115,23 @@ class ReportCliTests(unittest.TestCase):
         template = self.cli("template", self.manifest, self.plan, "--batch", "batch-1")
         self.assertTrue(template["template"])
         self.assertEqual([r["run_id"] for r in template["runs"]], [f"run-{i}" for i in range(1, 5)])
+        # Analysts see the frozen labels a finding_quality assessment can cite, and unlabeled runs stay unknown.
+        labels = template["runs"][0]["finding_labels"]
+        self.assertEqual((labels["status"], labels["items"][0]["issue"]), ("labeled", "Race in cache refresh"))
+        self.assertEqual(template["runs"][1]["finding_labels"], {"status": "unknown", "items": []})
+        trace = [sys.executable, str(self.script.with_name("trace.py")), "summary", str(self.source),
+                 "--manifest", str(self.manifest), "--run-id", "run-1"]
+        summary = subprocess.run(trace, capture_output=True, text=True)
+        self.assertEqual(summary.returncode, 0, summary.stderr)
+        self.assertEqual(json.loads(summary.stdout)["finding_labels"]["items"], labels["items"])
+        # Labels frozen for one record are never shown beside a different record at the same line.
+        original = self.source.read_text()
+        self.source.write_text(original.replace("later recovered", "rewritten in place", 1))
+        self.assertIn("changed", subprocess.run(trace, capture_output=True, text=True).stderr)
+        self.source.write_text(original)
+        self.source.with_name("copy.jsonl").write_text(original)
+        trace[3] = str(self.source.with_name("copy.jsonl"))
+        self.assertIn("frozen", subprocess.run(trace, capture_output=True, text=True).stderr)
         self.report = self.write("template.json", template)
         self.assertIn("template", self.synthesize(ok=False))
         assessment = self.cli("assessment-template", "--pattern", "unchanged-search",
@@ -150,7 +170,7 @@ class ReportCliTests(unittest.TestCase):
     def test_report_rows_cannot_override_frozen_run_metadata(self):
         # Excerpt checks cannot protect source provenance if analyst keys overwrite it afterward.
         for key, value in (("source", "/invented"), ("line", 999), ("sha256", "bad"),
-                           ("context", {"model": "invented"})):
+                           ("context", {"model": "invented"}), ("finding_labels", {"status": "unknown", "items": []})):
             with self.subTest(key=key):
                 changed = json.loads(json.dumps(self.report_value))
                 changed["runs"][0][key] = value
@@ -161,11 +181,19 @@ class ReportCliTests(unittest.TestCase):
         frozen = json.loads(self.manifest.read_text())["runs"][0]
         for key in ("source", "line", "sha256", "context"):
             self.assertEqual(output["runs"][0][key], frozen[key])
+        self.assertEqual(output["runs"][0]["finding_labels"]["items"][0]["source"], "independent judge")
+        self.assertEqual(output["runs"][4]["finding_labels"]["status"], "unknown")
 
     def test_synthesis_rejects_forged_evidence_and_unknown_as_zero(self):
-        # A valid JSON pointer alone cannot prove an excerpt came from the captured record.
+        # A valid JSON pointer alone cannot prove an excerpt came from the captured record or frozen labels.
+        citation = {"pointer": "/finding_labels/items/0/issue", "excerpt": "Race in cache"}
+        self.report_value["runs"][0]["assessments"][0].update(
+            pattern="missed-finding", category="finding_quality", evidence=[citation])
+        self.write("report.json", self.report_value)
+        self.synthesize()
         for mutation, message in (({"pointer": "/missing"}, "pointer"),
                                   ({"pointer": "/original_task/value", "excerpt": "invented"}, "excerpt"),
+                                  (dict(citation, excerpt="Race in parser"), "excerpt"),
                                   ({"pointer": "/original_task/value", "excerpt": "x" * 101}, "excerpt")):
             with self.subTest(mutation=mutation):
                 self.report_value["runs"][0]["assessments"][0]["evidence"][0] = mutation
