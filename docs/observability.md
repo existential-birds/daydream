@@ -179,6 +179,12 @@ Python repr). No native capacity diagnostic exists. See
 
 ## Committed-review evidence
 
+`run_committed_review` owns one tracing run with `daydream.flow` `committed-review`, from
+`config.observability` or, when that is unset, the operator's environment. Destinations
+resolve through the bound [registry](extensions.md#trace-exporters), else the built-in
+exporters. A call made inside another run records into its own session, never the enclosing
+one; the `deep` flow's review step stays inside that flow's run.
+
 [Committed reviews](runtime.md#committed-review-requestresult) record each
 [work item](runtime.md#assignment-policy-and-work) as a separate native invocation;
 concurrent local work uses forked sibling trajectories. Challenge work records under the
