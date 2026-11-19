@@ -95,6 +95,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- The Codex adapter no longer reads `result` or `output` from `turn.completed`
+  ([#1817](https://github.com/existential-birds/daydream/issues/1817)). No observed Codex build
+  (0.139.0, 0.163.0, 0.169.0) emits either key, with or without `--output-schema`; schema output
+  still comes from the final `agent_message` text, and the `structured_output_parse_failed`
+  parser warning is gone.
 - **Breaking (0.y.z):** The training stages, outcome model, reward calibration and
   capture-time reward are deleted
   ([#1898](https://github.com/existential-birds/daydream/issues/1898)):
