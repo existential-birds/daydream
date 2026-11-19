@@ -18,7 +18,7 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(tmp_pa
     )
     dotfile = tmp_path / ".daydream.toml"
     dotfile.write_text(
-        "scope_issue_filing = true\n"
+        "scope_issue_filing = true\nretained_runs = 3\n"
         'supervisor_deny_globs = ["vendor/**"]\n'
         'tool_supervisor = "rules"\ntool_bash_deny = ["rm -rf"]\n'
         "quality_gate_erosion_delta = 0\nquality_gate_verbosity_delta = 0.05\n"
@@ -30,7 +30,7 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(tmp_pa
 
     assert config.backend == "claude"
     assert config.phases == {"review": {"model": "pyproject-review"}, "fix": {"backend": "codex"}}
-    assert config.scope_issue_filing is True
+    assert (config.scope_issue_filing, config.retained_runs) == (True, 3)
     assert config.supervisor_deny_globs == ["vendor/**"]
     assert (config.tool_supervisor, config.tool_bash_deny) == ("rules", ["rm -rf"])
     assert (
@@ -45,7 +45,7 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(tmp_pa
     assert (config.diagram_mode, config.diagram_min_branch_points) == ("off", 6)
 
     dotfile.write_text(
-        "scope_issue_filing = 1\n"
+        "scope_issue_filing = 1\nretained_runs = 0\n"
         "supervisor_deny_globs = [1]\n"
         'tool_supervisor = "unknown"\ntool_bash_deny = [1]\n'
         '[improve]\npartition-max-files = 0\nmax-partition-groups = "many"\n'
@@ -56,7 +56,7 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(tmp_pa
 
     degraded = load_file_config(tmp_path)
 
-    assert degraded.scope_issue_filing is None
+    assert (degraded.scope_issue_filing, degraded.retained_runs) == (None, None)
     assert degraded.supervisor_deny_globs == []
     assert (degraded.tool_supervisor, degraded.tool_bash_deny) == (None, [])
     assert (degraded.improve_partition_max_files, degraded.improve_max_partition_groups) == (None, None)

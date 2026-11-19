@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Finished runs no longer accumulate without bound under `~/.daydream/runtime`
+  ([#1789](https://github.com/existential-birds/daydream/issues/1789)). When a run closes it
+  keeps the newest five runs of its workspace, itself included, deletes the older ones and drops
+  each kept run's `live/` copy once its `frozen/` copy exists, roughly halving every run
+  directory. Set a different positive count with `retained_runs` in `[tool.daydream]` or
+  `.daydream.toml`. Runs that recovery still holds are kept whole. See
+  [artifacts and recovery](docs/runtime.md#artifacts-and-recovery).
 - **Breaking (0.y.z):** `daydream.run_config` names the resolved per-phase settings publicly:
   `resolved_backend_name`, `resolved_model`, `resolved_reasoning_effort` and the new
   `resolved_phase_settings(config, phases)`, which returns each phase's `backend`, `model` and

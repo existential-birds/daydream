@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from daydream.config import PHASE_DEFAULT_EFFORT, PHASE_DEFAULT_MODELS
+from daydream.config import DEFAULT_RETAINED_RUNS, PHASE_DEFAULT_EFFORT, PHASE_DEFAULT_MODELS
 from daydream.config_file import DaydreamFileConfig
 from daydream.exploration import ExplorationContext
 from daydream.observability.config import ObservabilityConfig
@@ -95,6 +95,11 @@ class RunConfig:
 def _file_config_or_empty(config: RunConfig) -> DaydreamFileConfig:
     """Treat absent file_config as an empty policy for every resolver."""
     return config.file_config if config.file_config is not None else DaydreamFileConfig()
+
+
+def retained_runs(config: RunConfig) -> int:
+    """Finished runs one workspace keeps in private runtime storage: file config, then the default."""
+    return _file_config_or_empty(config).retained_runs or DEFAULT_RETAINED_RUNS
 
 
 def _configured_phase_value(config: RunConfig, phase: str, setting: str) -> str | None:

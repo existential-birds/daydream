@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, AsyncIterator, Literal
 import anyio
 
 from daydream import git_ops
+from daydream.config import DEFAULT_RETAINED_RUNS
 from daydream.json_utils import _fsync_directory
 
 if TYPE_CHECKING:
@@ -35,7 +36,7 @@ if TYPE_CHECKING:
     from daydream.workspace import WorkContext
 
 
-from daydream.artifacts import external, filesystem, ledger, ownership, publication, transactions, transfer
+from daydream.artifacts import external, filesystem, ledger, ownership, publication, retention, transactions, transfer
 from daydream.artifacts.external import _AtomicNameExchange
 from daydream.artifacts.filesystem import (
     manifest_tree as manifest_tree,
@@ -675,7 +676,7 @@ class ArtifactSession:
             raise ArtifactVisibilityError(f"run snapshot {exc}") from exc
         seen_paths: set[Path] = set()
         retained: list[TrajectoryDocument] = []
-        frozen_root = self.layout.live_root.parent / "frozen"
+        frozen_root = self.layout.frozen_root
         for document in run_snapshot.documents:
             path = document.private_path
             route = self._trajectory_route
@@ -722,11 +723,11 @@ class ArtifactSession:
         from daydream.trajectory import TrajectoryDocumentIntegrityError
 
         entries = filesystem.manifest_tree(self.layout.live_root)
-        frozen_root = self.layout.live_root.parent / "frozen"
+        frozen_root = self.layout.frozen_root
         if frozen_root.exists() or frozen_root.is_symlink():
             raise ArtifactVisibilityError("frozen artifact tree already exists")
         filesystem._copy_tree(self.layout.live_root, frozen_root, entries)
-        filesystem._atomic_json(frozen_root.parent / "frozen-manifest.json", filesystem._manifest_payload(entries))
+        filesystem._atomic_json(self.layout.frozen_manifest, filesystem._manifest_payload(entries))
         if trajectories is not None:
             # The verified copy matches its manifest. A reference covering a whole
             # file is checked against it without another read; a shorter prefix (a
@@ -1143,6 +1144,13 @@ def _print_dropped_child_warning(exc: ValueError) -> None:
     )
 
 
+def _print_retention_warning(runs: Path) -> None:
+    from daydream.agent import console
+    from daydream.ui import print_warning
+
+    print_warning(console, f"Some finished run directories under {runs} could not be cleaned; they were left in place.")
+
+
 def _print_rebaseline_warning(source: Path, canonical: Path) -> None:
     from daydream.agent import console
     from daydream.ui import print_warning
@@ -1308,8 +1316,8 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
     )
 
 
-def _close_artifact_session(session: ArtifactSession) -> None:
-    """Reconcile and close one acquired session on a blocking worker thread."""
+def _close_artifact_session(session: ArtifactSession, retained_runs: int) -> None:
+    """Reconcile, apply run retention under the still-held lock, and close one session on a worker thread."""
     primary: BaseException | None = None
     try:
         if session._state == "publishing":
@@ -1318,6 +1326,15 @@ def _close_artifact_session(session: ArtifactSession) -> None:
             session._restore_prior()
     except BaseException as exc:
         primary = exc
+    else:
+        try:
+            failures = retention.retain_finished_runs(
+                session.layout.state_root, current=session.layout.session_id, retained=retained_runs,
+            )
+        except (OSError, ArtifactVisibilityError):
+            failures = 1
+        if failures:
+            _print_retention_warning(session.layout.live_root.parent.parent)
     try:
         session._close()
     except BaseException as close_error:
@@ -1334,6 +1351,7 @@ async def open_artifact_session(
     *,
     session_id: str,
     owner: PrivateWorkspaceOwner,
+    retained_runs: int = DEFAULT_RETAINED_RUNS,
 ) -> AsyncIterator[ArtifactSession]:
     with anyio.CancelScope(shield=True):
         session = await anyio.to_thread.run_sync(partial(_open_layout, work, session_id, owner))
@@ -1347,7 +1365,7 @@ async def open_artifact_session(
     finally:
         try:
             with anyio.CancelScope(shield=True):
-                await anyio.to_thread.run_sync(_close_artifact_session, session)
+                await anyio.to_thread.run_sync(_close_artifact_session, session, retained_runs)
         except BaseException as recovery_error:
             if primary is None:
                 raise
