@@ -20,7 +20,7 @@ import re
 import sys
 from pathlib import Path
 
-from cohort import load_manifest, run_labels
+from cohort import iter_runs, load_manifest, run_labels
 from evidence import is_evidence_line, reduce, with_views
 
 
@@ -250,8 +250,12 @@ def summary(trace, args):
     labels = {}
     if args.manifest is not None:
         manifest = load_manifest(args.manifest)
-        if base(trace) not in [{k: row[k] for k in ("source", "line", "run_id")} for row in manifest["runs"]]:
+        frozen = [row for row in manifest["runs"] if {k: row[k] for k in ("source", "line", "run_id")} == base(trace)]
+        if not frozen:
             raise ValueError("selected run is not this manifest's frozen source/line/run_id")
+        # Recheck the frozen digest and label targets before showing labels beside this record.
+        for _ in iter_runs(frozen, manifest.get("labels")):
+            pass
         view = run_labels(manifest, trace["run_id"])
         labels = {"finding_labels": {"pointer": "/finding_labels", "status": view["status"],
                                      **page(view["items"], args)}}

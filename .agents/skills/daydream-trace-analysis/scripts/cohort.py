@@ -119,7 +119,8 @@ def finding_uids(record):
     findings = record.get("findings")
     value = findings.get("value") if isinstance(findings, dict) and findings.get("status") == "available" else None
     items = value.get("items") if isinstance(value, dict) else None
-    return {item.get("item_uid") for item in items if isinstance(item, dict)} if isinstance(items, list) else set()
+    return ({item["item_uid"] for item in items if isinstance(item, dict) and isinstance(item.get("item_uid"), str)}
+            if isinstance(items, list) else set())
 
 
 def label_row(value, line):
@@ -214,8 +215,15 @@ def load_manifest(path):
     return manifest
 
 
-def iter_runs(rows):
-    """Check and yield frozen records in physical order, scanning each source once."""
+def iter_runs(rows, labels=None):
+    """Check and yield frozen records in physical order, scanning each source once.
+
+    With a manifest's labels, each finding label must still name a finding of its frozen record.
+    """
+    labeled = {}
+    for item in (labels or {}).get("items", []):
+        if "item_uid" in item:
+            labeled.setdefault(item["run_id"], set()).add(item["item_uid"])
     sources = {}
     for row in rows:
         sources.setdefault(row["source"], {}).setdefault(row["line"], []).append(row)
@@ -231,6 +239,8 @@ def iter_runs(rows):
                 for row in selected:
                     if current != row:
                         raise ValueError(f"{source}:{line}: frozen record or metadata changed")
+                    if not labeled.get(row["run_id"], set()) <= finding_uids(record):
+                        raise ValueError(f"{row['run_id']}: label item_uid is not a finding of the frozen capture")
                     yield row, record
                 del record, current
                 if not pending:
@@ -339,7 +349,7 @@ def batches(args):
     manifest = load_manifest(args.manifest)
     if not manifest["runs"]:
         raise ValueError("cannot batch an empty cohort")
-    for _, record in iter_runs(manifest["runs"]):
+    for _, record in iter_runs(manifest["runs"], manifest.get("labels")):
         del record
     planned = [{"batch_id": f"batch-{n + 1}", "bytes": 0, "run_ids": []}
                for n in range(min(args.count, len(manifest["runs"])))]

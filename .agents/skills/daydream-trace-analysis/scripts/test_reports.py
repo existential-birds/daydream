@@ -124,7 +124,12 @@ class ReportCliTests(unittest.TestCase):
         summary = subprocess.run(trace, capture_output=True, text=True)
         self.assertEqual(summary.returncode, 0, summary.stderr)
         self.assertEqual(json.loads(summary.stdout)["finding_labels"]["items"], labels["items"])
-        self.source.with_name("copy.jsonl").write_text(self.source.read_text())
+        # Labels frozen for one record are never shown beside a different record at the same line.
+        original = self.source.read_text()
+        self.source.write_text(original.replace("later recovered", "rewritten in place", 1))
+        self.assertIn("changed", subprocess.run(trace, capture_output=True, text=True).stderr)
+        self.source.write_text(original)
+        self.source.with_name("copy.jsonl").write_text(original)
         trace[3] = str(self.source.with_name("copy.jsonl"))
         self.assertIn("frozen", subprocess.run(trace, capture_output=True, text=True).stderr)
         self.report = self.write("template.json", template)

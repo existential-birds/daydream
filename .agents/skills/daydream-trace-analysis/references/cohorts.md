@@ -63,7 +63,8 @@ finding in that run's frozen `findings.value.items`. A label for an excluded or
 unknown run or finding, an unknown label, or a repeated target from the same
 source is a selection error. Different sources may disagree; both labels are kept.
 The manifest's `labels` section freezes the file path, its SHA256, and each
-label with its physical line. A run with no labels stays `unknown`; absence
+label with its physical line; helpers recheck label targets with the frozen
+records. A run with no labels stays `unknown`; absence
 of a label never means a finding was correct or nothing was missed.
 
 `trace.py summary "$RUN" --run-id "$RUN_ID" --line "$RUN_LINE" --manifest

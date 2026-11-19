@@ -153,7 +153,9 @@ class CohortCliTests(unittest.TestCase):
         # Hand-copied labels were unbound: a foreign run, unknown finding, or conflict went unnoticed.
         labeled, unlabeled, excluded = (capture(name, "2026-10-17T00:00:00Z")
                                         for name in ("labeled", "unlabeled", "excluded"))
-        labeled["findings"] = {"status": "available", "value": {"items": [{"item_uid": "f1"}, {"item_uid": "f2"}]}}
+        # A malformed nested item_uid cannot be labeled and must not abort selection.
+        labeled["findings"] = {"status": "available", "value": {"items": [
+            {"item_uid": "f1"}, {"item_uid": "f2"}, {"item_uid": ["nested"]}]}}
         excluded["outcome"] = "failed"
         self.write(labeled, unlabeled, excluded)
         good = [{"run_id": "labeled", "item_uid": "f1", "label": "matched", "source": "judge"},
@@ -172,12 +174,15 @@ class CohortCliTests(unittest.TestCase):
         spec.loader.exec_module(helper)
         self.assertEqual(helper.run_labels(report, "unlabeled"), {"status": "unknown", "items": []})
         self.assertEqual(len(helper.run_labels(report, "labeled")["items"]), 3)
-        forged = json.loads(json.dumps(report))
-        forged["labels"]["items"][2]["run_id"] = "excluded"
-        forged["cohort_id"] = helper.digest({k: v for k, v in forged.items() if k != "cohort_id"})
-        path = self.root / "forged.json"
-        path.write_text(json.dumps(forged))
-        self.assertIn("outside the cohort", self.cli("batches", path, "--count", 1, "--question", "why", code=2))
+        # A recomputed cohort_id cannot move a label outside the cohort or onto an absent finding.
+        for index, field, value, message in ((2, "run_id", "excluded", "outside the cohort"),
+                                             (0, "item_uid", "f9", "not a finding")):
+            forged = json.loads(json.dumps(report))
+            forged["labels"]["items"][index][field] = value
+            forged["cohort_id"] = helper.digest({k: v for k, v in forged.items() if k != "cohort_id"})
+            path = self.root / "forged.json"
+            path.write_text(json.dumps(forged))
+            self.assertIn(message, self.cli("batches", path, "--count", 1, "--question", "why", code=2))
         bad = [({"run_id": "excluded", "label": "missed", "issue": "x", "source": "s"}, "not in the cohort"),
                ({"run_id": "labeled", "item_uid": "f9", "label": "matched", "source": "s"}, "not a finding"),
                ({"run_id": "labeled", "item_uid": "f2", "label": "maybe", "source": "s"}, "label must be"),

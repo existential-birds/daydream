@@ -177,7 +177,7 @@ def validate_report(report, manifest, plan, batches):
 def template(manifest, plan, batches, batch_id):
     require(batch_id in batches, "--batch is not in plan")
     # All frozen sources are checked, including runs assigned to other batches.
-    for _, record in iter_runs(manifest["runs"]):
+    for _, record in iter_runs(manifest["runs"], manifest.get("labels")):
         del record
     return {"schema": "daydream.trace-report.v1", "cohort_id": manifest["cohort_id"], "plan_id": plan["plan_id"],
             "batch_id": batch_id, "template": True,
@@ -234,7 +234,7 @@ def synthesize(manifest, plan, runs, batches, paths):
                         f"pattern {pattern} has conflicting categories; reconcile reports before synthesis")
                 categories[pattern] = category
     # Validate every frozen source once; retain only analyst and manifest metadata.
-    for frozen, record in iter_runs(runs.values()):
+    for frozen, record in iter_runs(runs.values(), manifest.get("labels")):
         # Evidence pointers address the record with each embedded document reduced to its view,
         # plus the run's frozen independent labels at /finding_labels.
         require("finding_labels" not in record, f"{frozen['run_id']}: capture already has a finding_labels field")
