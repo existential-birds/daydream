@@ -1198,7 +1198,9 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
         flow="committed-review",
     ) as run:
         result = await _review_request(request, started=started)
-        run.finish(0)
+        # As the deep flow's exit: failed analysis or uninstalled output fails the run.
+        failed = not result.output_installed or result.to_dict()["terminal_result"]["analysis_state"] == "failed"
+        run.finish(int(failed), error_type=result.output_error or "DaydreamError")
         return result
 
 

@@ -477,6 +477,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     review_inputs: StageInputFactory,
     monkeypatch: pytest.MonkeyPatch,
     challenge: str,
+    artifact_runtime_root: Path,
 ) -> None:
     """Real host/Git/output/recorder composition preserves work across execution failures.
 
@@ -557,6 +558,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
             trajectory_hub_repo="fixture/requested-export" if challenge == "hub-export" else None,
             review_profile=_profile_with_pipeline(reviewer_investigation_budget_s=90, reviewer_tool_call_budget=10),
             frozen_author_description=FrozenAuthorDescription(review_inputs.revision["head_sha"], author_context),
+            observability=ObservabilityConfig(destinations=("local",)),
         ),
     )
     if challenge == "hub-export":
@@ -639,6 +641,11 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     assert not (repo / ".daydream/committed-review.json").exists()
     assert not (repo / ".daydream/review-summary.json").exists() and result.summary is None
     assert not (repo / ".review-output.md").exists()
+    # The run span reports that failure; it previously recorded success.
+    local_trace, = artifact_runtime_root.glob("*/runs/*/otel-trace.jsonl")
+    run_span = json.loads(local_trace.read_text().splitlines()[-1])["resourceSpans"][0]["scopeSpans"][0]["spans"][-1]
+    assert run_span["status"]["code"] == 2
+    assert {"key": "daydream.exit_code", "value": {"intValue": "1"}} in run_span["attributes"]
     assert value["terminal_result"]["run_id"] == value["run_id"]
     assert value["analyzed_revision"]["head_sha"] == review_inputs.revision["head_sha"]
     assert value["claims"] and [e["assignment"] for e in value["execution"]] == ["discovery", "challenge"]
