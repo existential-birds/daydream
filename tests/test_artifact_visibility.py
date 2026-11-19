@@ -57,6 +57,7 @@ from daydream.artifacts import (
     transfer as artifact_transfer,
 )
 from daydream.artifacts.filesystem import _atomic_json
+from daydream.config import DEFAULT_RETAINED_RUNS
 from daydream.json_utils import _fsync_directory, _fsync_file
 from daydream.run_artifacts import _RunWriteCapture
 from daydream.trajectory import (
@@ -127,9 +128,11 @@ def _owner(source: Path, *, locations: PrivateRootLocations | None = None) -> Pr
 
 @asynccontextmanager
 async def open_artifact_session(work: WorkContext, *, session_id: str, owner: PrivateWorkspaceOwner | None = None,
+    retained_runs: int = DEFAULT_RETAINED_RUNS,
 ) -> AsyncIterator[Any]:
     selected = _owner(work.source) if owner is None else owner
-    async with _open_artifact_session(work, session_id=session_id, owner=selected) as session:
+    async with _open_artifact_session(work, session_id=session_id, owner=selected,
+                                      retained_runs=retained_runs) as session:
         yield session
 
 
@@ -673,6 +676,58 @@ async def test_artifact_session_preserves_resume_mtimes_across_publication_and_r
         assert (live_deep / "alternatives.json").stat().st_mtime_ns == prerequisite_mtime_ns
     assert _manifest(source) == published
     assert artifact_dir_for(source, allow_standalone=True) == source / ".daydream"
+
+
+async def test_closing_session_bounds_finished_runs_and_drops_finalized_live_copies(
+    tmp_path: Path, source: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Retention runs under the closing session's lock and never deletes evidence recovery still holds.
+
+    An unfrozen run keeps its only copy until the bound prunes it; a finalized run keeps only its
+    frozen copy; a quarantined run, a symlink and an unsafe tree beyond the bound all stay in place.
+    """
+    owner = _owner(source)
+    runs = owner.artifact_state_root / "runs"
+
+    async def finish(session_id: str, *, freeze: bool, retained_runs: int) -> None:
+        async with open_artifact_session(
+            _work(source), session_id=session_id, owner=owner, retained_runs=retained_runs,
+        ) as session:
+            if freeze:
+                _publish(session, _freeze_run(session, session_id))
+
+    await finish("unfrozen", freeze=False, retained_runs=1)
+    await finish("published", freeze=True, retained_runs=3)
+    assert sorted(path.name for path in (runs / "unfrozen").iterdir()) == ["live"]
+    assert sorted(path.name for path in (runs / "published").iterdir()) == ["frozen", "frozen-manifest.json"]
+    os.utime(runs / "unfrozen", ns=(1, 1))
+    os.utime(runs / "published/frozen-manifest.json", ns=(3, 3))
+
+    held = runs / "held"
+    for name in ("live", "frozen"):
+        (held / name).mkdir(parents=True)
+        (held / name / "evidence").write_bytes(b"retained for the operator")
+    (held / "frozen-manifest.json").write_bytes(b"{}")
+    (owner.artifact_state_root / "unreconciled/detach-held-0123456789abcdef").mkdir(parents=True)
+    unsafe = runs / "unsafe"
+    unsafe.mkdir()
+    os.mkfifo(unsafe / "fifo")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_bytes(b"not runtime state")
+    (runs / "link").symlink_to(outside, target_is_directory=True)
+    for run in (held, unsafe):
+        os.utime(run, ns=(0, 0))
+    capsys.readouterr()
+
+    await finish("latest", freeze=True, retained_runs=2)
+
+    assert sorted(path.name for path in runs.iterdir()) == ["held", "latest", "link", "published", "unsafe"]
+    assert sorted(path.name for path in (runs / "latest").iterdir()) == ["frozen", "frozen-manifest.json"]
+    assert sorted(path.name for path in held.iterdir()) == ["frozen", "frozen-manifest.json", "live"]
+    assert (unsafe / "fifo").exists() and (outside / "keep").read_bytes() == b"not runtime state"
+    assert "could not be cleaned" in capsys.readouterr().out
+    assert (source / ".daydream/runs/latest" / RUN_DOCUMENT_NAME).is_file()
 
 
 async def test_bound_routing_propagates_to_tasks_and_rejects_wrong_or_aliased_repo(tmp_path: Path, source: Path,

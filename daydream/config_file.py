@@ -32,7 +32,8 @@ class DaydreamFileConfig:
     ``repair_max_executions`` is a count, and ``repair_grant_job_wall_s`` is an
     operator's additional finite allowance for a job that ran out of time.
     Non-negative bounds preserve zero: a zero group budget intentionally skips
-    fixes. Test-command timeouts and diagram/improve bounds must be positive.
+    fixes. Test-command timeouts, diagram/improve bounds and ``retained_runs``
+    must be positive.
     Test commands preserve whitespace and a safe invalid-type marker for actionable readiness
     diagnostics instead of silently coercing malformed values to absent.
 
@@ -82,6 +83,7 @@ class DaydreamFileConfig:
     test_command_invalid: bool = False
     test_command_wall_s: float | None = None
     test_required_suites: list[str] = field(default_factory=list)
+    retained_runs: int | None = None
 
 
 def load_toml_or_empty(path: Path) -> dict[str, Any]:
@@ -282,6 +284,7 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         test_command_invalid=test_command is not None and not isinstance(test_command, str),
         test_command_wall_s=_coerce_positive_float(take("test_command_wall_s", None)),
         test_required_suites=_coerce_string_list(take("test_required_suites", None)),
+        retained_runs=_coerce_non_negative_int(take("retained_runs", None)) or None,
     )
     if "workspace" not in dotfile:
         take("workspace", None)  # workspace.py reads [tool.daydream.workspace] from pyproject.toml itself.

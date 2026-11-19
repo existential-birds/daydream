@@ -97,7 +97,7 @@ from daydream.review_result import (
 )
 from daydream.review_source_refs import SOURCE_SELECTORS_SCHEMA, SourceSelectorRejected, _SubmissionSources
 from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
-from daydream.run_config import FrozenAuthorDescription, RunConfig, resolved_backend_name
+from daydream.run_config import FrozenAuthorDescription, RunConfig, resolved_backend_name, retained_runs
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 from daydream.runner import _resolve_backend
 from daydream.trajectory import RUN_DOCUMENT_NAME, DaydreamPhase, DaydreamRunFlow, phase_scope
@@ -1324,7 +1324,9 @@ async def _run_committed_review(
         if work.captured_source is None:
             git_ops.validate_committed_worktree(captured_root, original.head_sha)
         lifetime.enter_context(bind_run_context(context))
-        session = await lifetime.enter_async_context(open_artifact_session(work, session_id=run_id, owner=owner))
+        session = await lifetime.enter_async_context(open_artifact_session(
+            work, session_id=run_id, owner=owner, retained_runs=retained_runs(config),
+        ))
         record_local_trace(session.layout.otel_trace)
         report_path, result_path = session.review_output, session.daydream_dir / "committed-review.json"
         summary_path = session.daydream_dir / "review-summary.json"

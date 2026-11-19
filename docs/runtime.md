@@ -1203,6 +1203,23 @@ through subprocess dispatch; inherited Git routing cannot select replacement
 metadata. Unsafe cleanup retains the operational worktree and warns without
 replacing a primary failure.
 
+Each run's private directory, `~/.daydream/runtime/<workspace>/runs/<run id>/`, holds
+the `live/` tree, the `frozen/` copy with `frozen-manifest.json`, and the local trace.
+Run directories are created and finalized only under the exclusive workspace lock, and
+recovery reads transactions and the canonical copy, never run directories. So the
+closing session, once it has reconciled and before it releases that lock, bounds the
+workspace's finished runs: it keeps the newest `retained_runs` of them, itself included
+(default `DEFAULT_RETAINED_RUNS` in [config.py](../daydream/config.py), a positive count set
+in `[tool.daydream]` or `.daydream.toml`; hosted review uses the default), ordered by freeze
+time or, for an unfrozen run, its directory's time, and deletes the rest. Each kept run
+that has a frozen copy loses its `live/` tree, which no consumer reads after freeze;
+capture, archive and publication have already finished by then. A run named by a
+transaction under `transactions/` or `unreconciled/` keeps every byte and does not count
+toward the bound. A session whose reconciliation failed applies no retention. Removal
+never follows links and refuses an unsafe tree whole, leaving it in place with a warning;
+retention never fails a run. It touches nothing outside the workspace's `runs/`: not the
+canonical copy, dataset store, archives or other workspaces.
+
 Evidence documents are written to disk as the run proceeds, never held whole in RAM.
 Every run snapshot names each document by reference: its document id, logical path,
 the private file and the size and SHA-256 of its accepted prefix. A signal snapshot
