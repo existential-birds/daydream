@@ -16,6 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory. Set a different positive count with `retained_runs` in `[tool.daydream]` or
   `.daydream.toml`. Runs that recovery still holds are kept whole. See
   [artifacts and recovery](docs/runtime.md#artifacts-and-recovery).
+- **Breaking (0.y.z):** A hosted immutable review with a bundle (`bundle_sha256` set) reviews
+  the one tree the new `daydream.git_ops.immutable.materialize_immutable_source(identity, bundle,
+  destination, *, environment=None)` writes, in place, instead of validating a Git checkout and
+  reviewing a second private copy
+  ([#1820](https://github.com/existential-birds/daydream/issues/1820)). The engine verifies the
+  bundle and then `source` (exact blobs, modes and symlink targets, plus an empty `.git`
+  directory) before any native work and again before sealing. It never writes beside `source`:
+  publish and restore stages move under `private_base/runtime/`, and only private Git storage
+  under `private_base/immutable-inputs/` is created and removed. A checkout passed with a bundle
+  is refused before native work. To migrate, replace your own checkout writer with
+  `materialize_immutable_source(identity, bundle, tree)` into an absent or empty directory,
+  optionally seal that tree for the whole review, and pass it as `source` with the same
+  `immutable_input` and `immutable_bundle`. Inputs without a bundle, envelope v1 and the bundle
+  format are unchanged. See [immutable PR inputs](docs/runtime.md#immutable-pr-inputs).
 - **Breaking (0.y.z):** `daydream.run_config` names the resolved per-phase settings publicly:
   `resolved_backend_name`, `resolved_model`, `resolved_reasoning_effort` and the new
   `resolved_phase_settings(config, phases)`, which returns each phase's `backend`, `model` and

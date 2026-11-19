@@ -3,6 +3,9 @@
 No command opens the supplied repository: only regular object bytes and HEAD are
 read. A fresh empty-template repository owns all subsequent Git reads. Checkout
 is implemented from blobs, so target hooks, filters and configuration never run.
+A bundle-backed tree is written once by `materialize_immutable_source` and reviewed
+in place: private storage reaches it only as `GIT_WORK_TREE`, never through a
+`.git` inside it.
 """
 
 from __future__ import annotations
@@ -13,18 +16,20 @@ import re
 import shutil
 import stat
 import tempfile
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from pathlib import Path
-from typing import BinaryIO, NoReturn
+from functools import partial
+from pathlib import Path, PurePosixPath
+from typing import Any, BinaryIO, NoReturn
 
 from daydream.git_ops import process
 from daydream.git_ops.models import GitError
 from daydream.immutable_review import ImmutableReviewInput
 from daydream.repository_paths import git_observed_path_is_confined
 
-_CONTEXT: ContextVar[tuple[Path, dict[str, str]] | None] = ContextVar("immutable_git_context", default=None)
+_CONTEXT: ContextVar[tuple[Path, dict[str, str], Path | None] | None] = ContextVar(
+    "immutable_git_context", default=None)
 _MAX_SOURCE_BYTES = 256 * 1024 * 1024
 _MAX_BLOB_BYTES = 8 * 1024 * 1024
 _MAX_OBJECT_BYTES = 2 * 1024 * 1024 * 1024
@@ -32,8 +37,14 @@ _MAX_FILES = 100_000
 
 
 @contextmanager
-def inert_git_context(repo: Path, environment: Mapping[str, str] | None = None) -> Iterator[None]:
-    """Scope sanitized Git reads to one fresh host-owned repository subtree."""
+def inert_git_context(
+    repo: Path, environment: Mapping[str, str] | None = None, *, work_tree: Path | None = None,
+) -> Iterator[None]:
+    """Scope sanitized Git reads to one fresh host-owned repository subtree.
+
+    A ``work_tree`` outside it reaches that repository's storage only through
+    explicit ``GIT_DIR``/``GIT_WORK_TREE``, so Git never discovers its own owner there.
+    """
     env = {
         "PATH": os.defpath if environment is None else environment.get("PATH", os.defpath),
         "HOME": str(repo), "XDG_CONFIG_HOME": str(repo / ".inert-config"),
@@ -43,7 +54,7 @@ def inert_git_context(repo: Path, environment: Mapping[str, str] | None = None) 
         # Git's checked allocations include a trailing NUL for object contents.
         "GIT_ALLOC_LIMIT": str(_MAX_OBJECT_BYTES + 1),
     }
-    token = _CONTEXT.set((repo.resolve(), env))
+    token = _CONTEXT.set((repo.resolve(), env, None if work_tree is None else work_tree.resolve()))
     try:
         yield
     finally:
@@ -53,9 +64,12 @@ def inert_git_context(repo: Path, environment: Mapping[str, str] | None = None) 
 def git_environment(repo: Path) -> dict[str, str] | None:
     """Return the scoped environment only for the independently prepared source."""
     current = _CONTEXT.get()
-    if current is not None and repo.resolve().is_relative_to(current[0]):
-        return dict(current[1])
-    return None
+    if current is None:
+        return None
+    root, env, work_tree = current
+    if work_tree is not None and repo.resolve().is_relative_to(work_tree):
+        return {**env, "GIT_DIR": str(root / ".git"), "GIT_WORK_TREE": str(work_tree)}
+    return dict(env) if repo.resolve().is_relative_to(root) else None
 
 
 def redaction_environment() -> Mapping[str, str]:
@@ -430,90 +444,199 @@ def _inventory(repo: Path, head: str, *, max_blob_bytes: int | None = None) -> l
     return result
 
 
-def _materialize(repo: Path, source: Path, head: str) -> None:
+def _blob_identity(source: Path, name: str, algorithm: str) -> tuple[str, str] | None:
+    """Hash one confined native leaf as Git stores it; an unreadable or unsupported leaf has none."""
+    try:
+        with _parent(source, name, private=False) as (parent, leaf):
+            info = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode):
+                mode, body = "120000", os.fsencode(os.readlink(leaf, dir_fd=parent))
+            else:
+                fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                with os.fdopen(fd, "rb") as stream:
+                    opened = os.fstat(stream.fileno())
+                    if not stat.S_ISREG(opened.st_mode) or opened.st_size > _MAX_BLOB_BYTES:
+                        return None
+                    mode = "100755" if opened.st_mode & stat.S_IXUSR else "100644"
+                    body = stream.read(_MAX_BLOB_BYTES + 1)
+    except OSError:
+        return None
+    return mode, hashlib.new(algorithm, b"blob %d\0" % len(body) + body).hexdigest()
+
+
+def _write_tree(repo: Path, destination: Path, head: str, *, checkout: Path | None = None) -> None:
+    """Write raw head blobs under confined parents, refusing any existing leaf.
+
+    A supplied operator ``checkout`` must hold each blob's exact bytes and mode first.
+    """
+    algorithm = "sha256" if len(head) == 64 else "sha1"
     for mode, oid, name in _inventory(repo, head):
         if mode == "160000":
             continue
+        if checkout is not None and _blob_identity(checkout, name, algorithm) != (mode, oid):
+            raise GitError("immutable source checkout differs from captured raw bytes or modes")
         body = process._run_git(repo, ["cat-file", "blob", oid], capture_bytes=True, timeout=30,
                                 error_context="immutable source blob unavailable",
                                 max_output_bytes=_MAX_BLOB_BYTES + 4096).stdout
-        original = source / name
-        try:
-            info = original.lstat()
-            confined = not any(parent.is_symlink() for parent in original.parents if parent.is_relative_to(source))
-            if mode == "120000":
-                valid = confined and stat.S_ISLNK(info.st_mode) and os.fsencode(os.readlink(original)) == body
-            else:
-                valid = (confined and stat.S_ISREG(info.st_mode) and _regular(original, limit=_MAX_BLOB_BYTES) == body
-                    and bool(info.st_mode & stat.S_IXUSR) == (mode == "100755"))
-        except OSError as exc:
-            raise GitError("immutable source checkout is unavailable") from exc
-        if not valid:
-            raise GitError("immutable source checkout differs from captured raw bytes or modes")
-        destination = repo / name
-        destination.parent.mkdir(parents=True, exist_ok=True)
         if mode == "120000":
-            destination.symlink_to(os.fsdecode(body))
-        else:
-            destination.write_bytes(body)
-            destination.chmod(0o755 if mode == "100755" else 0o644)
+            with _parent(destination, name, create=True) as (parent, leaf):
+                os.symlink(os.fsdecode(body), leaf, dir_fd=parent)
+            continue
+        with _exclusive_file(destination, name) as stream:
+            stream.write(body)
+            os.fchmod(stream.fileno(), 0o755 if mode == "100755" else 0o644)
+
+
+def _verify_tree(source: Path, entries: Sequence[tuple[str, str, str]], algorithm: str) -> None:
+    """Require exactly the head tree in place: blob bytes, modes and symlink targets, plus an empty `.git`."""
+    marker = source / ".git"
+    try:
+        empty = marker.is_dir() and not marker.is_symlink() and not any(marker.iterdir())
+    except OSError as exc:
+        raise GitError("immutable source tree is unavailable") from exc
+    if not empty:
+        raise GitError("immutable bundle source must be the tree materialize_immutable_source writes, "
+                       "with an empty .git directory, not a Git checkout")
+    expected = {name: (mode, oid) for mode, oid, name in entries if mode != "160000"}
+    directories = {parent.as_posix() for name in expected for parent in PurePosixPath(name).parents} - {"."}
+    files: set[str] = set()
+    folders: set[str] = set()
+
+    def unavailable(exc: OSError) -> NoReturn:
+        raise GitError("immutable source tree is unavailable") from exc
+
+    for directory, dirs, names in os.walk(source, onerror=unavailable):
+        parent = Path(directory)
+        if parent == source:
+            dirs[:] = [name for name in dirs if name != ".git"]
+        for name in list(dirs):
+            if (parent / name).is_symlink():
+                dirs.remove(name)
+                names.append(name)
+            else:
+                folders.add((parent / name).relative_to(source).as_posix())
+        files.update((parent / name).relative_to(source).as_posix() for name in names)
+    changed = (files ^ expected.keys()) | (folders ^ directories)
+    changed.update(name for name in expected.keys() & files
+                   if _blob_identity(source, name, algorithm) != expected[name])
+    if changed:
+        raise GitError(f"immutable source tree differs from the captured head tree at {min(changed)!r}")
+
+
+def _bundle_bytes(local: Mapping[str, Any], bundle: Path | None) -> bytes | None:
+    if (local["bundle_sha256"] is None) != (bundle is None):
+        raise GitError("immutable frozen bundle evidence is missing or unexpected")
+    bundle_bytes = None if bundle is None else _regular(bundle, limit=_MAX_OBJECT_BYTES)
+    if bundle_bytes is not None and hashlib.sha256(bundle_bytes).hexdigest() != local["bundle_sha256"]:
+        raise GitError("immutable frozen bundle digest mismatch")
+    return bundle_bytes
+
+
+def _restore(destination: Path, local: Mapping[str, Any], bundle_bytes: bytes | None, common: Path | None) -> None:
+    """Populate fresh storage and check every captured identity before any tree is read or written."""
+    _git(destination, "init", "--template=", "--object-format=" +
+         ("sha256" if len(local["head_sha"]) == 64 else "sha1"), ".")
+    if bundle_bytes is None:
+        assert common is not None
+        _copy_objects(common, destination / ".git" / "objects")
+    else:
+        frozen = destination / ".git" / "input.bundle"
+        frozen.write_bytes(bundle_bytes)
+        heads = _git(destination, "bundle", "list-heads", str(frozen)).splitlines()
+        if local["kind"] == "synthetic" and set(heads) != {
+            local["comparison_base_sha"] + " refs/heads/base", local["head_sha"] + " refs/heads/head",
+        }:
+            raise GitError("immutable synthetic bundle must advertise exactly base and head")
+        _git(destination, "bundle", "unbundle", str(frozen))
+        frozen.unlink()
+        for _ in _object_files(destination / ".git"):
+            pass
+    _validate_object_population(destination)
+    _git(destination, "fsck", "--full", "--strict", "--no-reflogs", "--no-dangling")
+    for key in ("head_sha", "requested_base_sha", "comparison_base_sha"):
+        if _git(destination, "rev-parse", "--verify", local[key] + "^{commit}") != local[key]:
+            raise GitError("immutable local commit is unavailable")
+    comparison = _git(destination, "merge-base", local["requested_base_sha"], local["head_sha"])
+    if comparison != local["comparison_base_sha"]:
+        raise GitError("immutable comparison does not match the local merge base")
+    for commit, tree in (("head_sha", "head_tree_sha"), ("comparison_base_sha", "comparison_tree_sha")):
+        if _git(destination, "rev-parse", local[commit] + "^{tree}") != local[tree]:
+            raise GitError("immutable source tree identity mismatch")
+    if local["kind"] == "synthetic":
+        validate_synthetic_history(destination, local["comparison_base_sha"], local["head_sha"])
+    diff = immutable_review_diff(destination, local["comparison_base_sha"], local["head_sha"])
+    if hashlib.sha256(diff.encode()).hexdigest() != local["review_diff_key"]:
+        raise GitError("immutable review diff identity mismatch")
+
+
+def materialize_immutable_source(
+    identity: ImmutableReviewInput, bundle: Path, destination: Path, *,
+    environment: Mapping[str, str] | None = None,
+) -> None:
+    """Verify a frozen bundle against its identity, then write its head tree for in-place review.
+
+    ``destination`` must be absent or an empty directory. It receives the head tree's raw
+    blobs, modes and symlink targets plus an empty ``.git`` directory, and nothing else: no
+    Git storage remains and no native or model process runs. Pass it as the request ``source``.
+    """
+    local = identity.to_dict()["materialization"]
+    bundle_bytes = _bundle_bytes(local, bundle)
+    created = not (destination.exists() or destination.is_symlink())
+    if not created and (destination.is_symlink() or not destination.is_dir() or any(destination.iterdir())):
+        raise GitError("immutable materialization destination must be absent or an empty directory")
+    with tempfile.TemporaryDirectory(prefix="daydream-immutable-materialize-") as directory:
+        storage = Path(directory)
+        with inert_git_context(storage, environment):
+            _restore(storage, local, bundle_bytes, None)
+            destination.mkdir(exist_ok=not created)
+            try:
+                _write_tree(storage, destination, local["head_sha"])
+                # Stock search applies the tree's .gitignore only beside a .git entry.
+                os.mkdir(destination / ".git")
+            except _StorageConflict as conflict:
+                conflict.reraise()
+            except BaseException:
+                if created:
+                    shutil.rmtree(destination)
+                else:
+                    for child in list(destination.iterdir()):
+                        shutil.rmtree(child) if child.is_dir() and not child.is_symlink() else child.unlink()
+                raise
 
 
 @contextmanager
 def prepare_immutable_source(
     source: Path, identity: ImmutableReviewInput, destination: Path, *,
     bundle: Path | None = None, environment: Mapping[str, str] | None = None,
-) -> Iterator[Path]:
-    """Validate supplied identities and checkout bytes, then yield an inert source."""
-    value = identity.to_dict()
-    local = value["materialization"]
-    git_dir, common = _source_git_dir(source)
-    if _source_head(git_dir, common) != local["head_sha"]:
-        raise GitError("immutable source checkout HEAD differs from requested local head")
-    if (local["bundle_sha256"] is None) != (bundle is None):
-        raise GitError("immutable frozen bundle evidence is missing or unexpected")
-    bundle_bytes = None if bundle is None else _regular(bundle, limit=_MAX_OBJECT_BYTES)
-    if bundle_bytes is not None and hashlib.sha256(bundle_bytes).hexdigest() != local["bundle_sha256"]:
-        raise GitError("immutable frozen bundle digest mismatch")
+) -> Iterator[tuple[Path, Callable[[], None] | None]]:
+    """Validate supplied identities and source, then yield the reviewed root and its final check.
+
+    With a bundle, ``destination`` holds only private Git storage and the materialized
+    ``source`` is verified, then reviewed in place; the yielded check re-verifies it.
+    Without one, the operator checkout supplies objects and its validated raw bytes are
+    copied into an inert private tree at ``destination``, which no caller can change.
+    """
+    local = identity.to_dict()["materialization"]
+    common = None
+    if bundle is None:
+        git_dir, common = _source_git_dir(source)
+        if _source_head(git_dir, common) != local["head_sha"]:
+            raise GitError("immutable source checkout HEAD differs from requested local head")
+    bundle_bytes = _bundle_bytes(local, bundle)
     destination.mkdir(mode=0o700, parents=True)
     try:
-        with inert_git_context(destination, environment):
-            _git(destination, "init", "--template=", "--object-format=" +
-                 ("sha256" if len(local["head_sha"]) == 64 else "sha1"), ".")
-            if bundle_bytes is None:
-                _copy_objects(common, destination / ".git" / "objects")
+        with inert_git_context(destination, environment, work_tree=None if bundle is None else source):
+            _restore(destination, local, bundle_bytes, common)
+            check: Callable[[], None] | None = None
+            if bundle is None:
+                _write_tree(destination, destination, local["head_sha"], checkout=source)
             else:
-                frozen = destination / ".git" / "input.bundle"
-                frozen.write_bytes(bundle_bytes)
-                heads = _git(destination, "bundle", "list-heads", str(frozen)).splitlines()
-                if local["kind"] == "synthetic" and set(heads) != {
-                    local["comparison_base_sha"] + " refs/heads/base", local["head_sha"] + " refs/heads/head",
-                }:
-                    raise GitError("immutable synthetic bundle must advertise exactly base and head")
-                _git(destination, "bundle", "unbundle", str(frozen))
-                frozen.unlink()
-                for _ in _object_files(destination / ".git"):
-                    pass
-            _validate_object_population(destination)
-            _git(destination, "fsck", "--full", "--strict", "--no-reflogs", "--no-dangling")
-            for key in ("head_sha", "requested_base_sha", "comparison_base_sha"):
-                if _git(destination, "rev-parse", "--verify", local[key] + "^{commit}") != local[key]:
-                    raise GitError("immutable local commit is unavailable")
-            comparison = _git(destination, "merge-base", local["requested_base_sha"], local["head_sha"])
-            if comparison != local["comparison_base_sha"]:
-                raise GitError("immutable comparison does not match the local merge base")
-            for commit, tree in (("head_sha", "head_tree_sha"), ("comparison_base_sha", "comparison_tree_sha")):
-                if _git(destination, "rev-parse", local[commit] + "^{tree}") != local[tree]:
-                    raise GitError("immutable source tree identity mismatch")
-            if local["kind"] == "synthetic":
-                validate_synthetic_history(destination, local["comparison_base_sha"], local["head_sha"])
-            diff = immutable_review_diff(destination, local["comparison_base_sha"], local["head_sha"])
-            if hashlib.sha256(diff.encode()).hexdigest() != local["review_diff_key"]:
-                raise GitError("immutable review diff identity mismatch")
-            _materialize(destination, source, local["head_sha"])
+                check = partial(_verify_tree, source, _inventory(destination, local["head_sha"]),
+                                "sha256" if len(local["head_sha"]) == 64 else "sha1")
+                check()
             (destination / ".git" / "HEAD").write_text(local["head_sha"] + "\n")
             _git(destination, "read-tree", local["head_sha"])
-            yield destination
+            yield (destination if bundle is None else source), check
     except _StorageConflict as conflict:
         conflict.reraise()
     except BaseException:

@@ -29,7 +29,7 @@ from daydream.artifact_visibility import (
     private_root_locations,
     resolve_private_workspace_owner,
 )
-from daydream.artifacts.ownership import operational_worktree_root
+from daydream.artifacts.ownership import WorkspaceOwnership, operational_worktree_root
 from daydream.backends import Backend, BackendExecutionInput, effective_fanout_concurrency
 from daydream.committed_review_model import (
     ADMIT_TOOL,
@@ -1121,6 +1121,8 @@ class ReviewProgram:
     settings: dict[str, Any]
     backends: dict[str, Any]
     finish: float
+    # Re-checks an adopted immutable tree, the counterpart of a captured source's validation.
+    verify_source: Callable[[], None] | None = None
 
     async def dispatch(self, recorder: Any) -> None:
         if self.review.inputs.stack.files:
@@ -1141,11 +1143,12 @@ class ReviewProgram:
         self.review.execution.append(_host_entry(assignment, reason.value))
 
     def seal(self, *, projection_valid: bool = True) -> dict[str, Any]:
-        """Freeze coverage once; a captured source that changed makes every scope unfinished."""
+        """Freeze coverage once; a reviewed source that changed makes every scope unfinished."""
         captured = self.review.inputs.captured_source
-        if captured is not None:
+        check = self.verify_source if captured is None else captured.validate
+        if check is not None:
             try:
-                captured.validate()
+                check()
             except (git_ops.GitError, OSError):
                 self.fail("source_integrity", ReasonCode.EVIDENCE_INCOMPLETE)
         return self.review.seal(self.settings, projection_valid=projection_valid)
@@ -1222,15 +1225,17 @@ async def _review_request(request: CommittedReviewRequest, *, started: float) ->
     from daydream.git_ops.immutable import prepare_immutable_source
 
     destination = request.hosted_policy.private_base / "immutable-inputs" / str(uuid.uuid4())
+    # With a bundle, only Git storage is written here and the materialized source is reviewed in place.
     with prepare_immutable_source(
         source, request.immutable_input, destination, bundle=request.immutable_bundle,
         environment=request.hosted_policy.environment,
-    ) as prepared:
-        return await _run_committed_review(request, started=started, prepared_source=prepared)
+    ) as (prepared, verify):
+        return await _run_committed_review(request, started=started, prepared_source=prepared, verify_source=verify)
 
 
 async def _run_committed_review(
     request: CommittedReviewRequest, *, started: float, prepared_source: Path | None = None,
+    verify_source: Callable[[], None] | None = None,
 ) -> CommittedReviewResult:
     """Review a pinned detached worktree; retain concerns and interrupted coverage before propagating cancellation."""
     from daydream.config_file import load_file_config
@@ -1315,10 +1320,12 @@ async def _run_committed_review(
             assert request.immutable_input is not None
             local = request.immutable_input.to_dict()["materialization"]
             captured_root = source
+            # Publish and restore stages stay in private state, never beside the prepared tree.
             original = work = WorkContext(
                 repo=source, source=source, base_branch=local["requested_base_sha"],
                 base_sha=local["comparison_base_sha"], head_branch=None, head_sha=local["head_sha"],
                 is_ephemeral=True, run_id=run_id,
+                ownership=lifetime.enter_context(WorkspaceOwnership(owner, private_stages=True)),
             )
         assert original.head_sha is not None and original.base_sha is not None
         if work.captured_source is None:
@@ -1369,7 +1376,7 @@ async def _run_committed_review(
         else:
             from daydream.git_ops.immutable import immutable_review_diff
 
-            diff = immutable_review_diff(captured_root, original.base_sha, original.head_sha)
+            diff = immutable_review_diff(git_ops.git_common_dir(captured_root), original.base_sha, original.head_sha)
         revision = AnalyzedRevision(
             original.head_sha, original.base_sha, hashlib.sha256(diff.encode()).hexdigest(),
             source_id=None if work.captured_source is None else work.captured_source.source_id,
@@ -1388,6 +1395,7 @@ async def _run_committed_review(
             index_path=index_path, files=files, started=started, historical_context=historical,
             allowed_tools=None if hosted is None else HOSTED_PI_TOOLS, immutable_input=request.immutable_input,
         )
+        program.verify_source = verify_source
         finish = program.finish
         recorder = _open_recorder(
             config=config, target_dir=captured_root, work=work,
