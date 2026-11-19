@@ -13,6 +13,10 @@ if TYPE_CHECKING:
 _SCHEMA_VERSION = 1
 _DAYDREAM = ".daydream"
 _REVIEW_OUTPUT = ".review-output.md"
+#: Per-run private tree names under ``<state root>/runs/<session id>/``; retention reads them too.
+_LIVE = "live"
+_FROZEN = "frozen"
+_FROZEN_MANIFEST = "frozen-manifest.json"
 #: Recognized public directory anchors.
 _PUBLIC_DIRECTORY_ANCHORS = frozenset(("runs", "deep", "exploration", "partial-fixes", "improve"))
 _PUBLIC_FILE_ANCHORS = frozenset(("diff.patch", "hunk-index.json", "recommended.patch", ".DS_Store"))
@@ -140,7 +144,15 @@ class ArtifactLayout:
     def live_root(self) -> Path:
         from daydream.trajectory import run_directory
 
-        return run_directory(self.state_root, self.session_id) / "live"
+        return run_directory(self.state_root, self.session_id) / _LIVE
+
+    @property
+    def frozen_root(self) -> Path:
+        return self.live_root.parent / _FROZEN
+
+    @property
+    def frozen_manifest(self) -> Path:
+        return self.live_root.parent / _FROZEN_MANIFEST
 
     @property
     def otel_trace(self) -> Path:

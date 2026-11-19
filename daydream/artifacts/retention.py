@@ -11,10 +11,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from daydream.artifacts import filesystem
-from daydream.artifacts.models import ArtifactVisibilityError
+from daydream.artifacts.models import _FROZEN_MANIFEST, _LIVE, ArtifactVisibilityError
+from daydream.trajectory import RUNS_DIRNAME
 
-_LIVE = "live"
-_FROZEN_MANIFEST = "frozen-manifest.json"
 _TRANSACTION_ROOTS = ("transactions", "unreconciled")
 
 
@@ -41,7 +40,7 @@ def retain_finished_runs(state_root: Path, *, current: str, retained: int) -> in
     The caller holds the workspace lock and has reconciled *current*. Return how many
     runs could not be cleaned; an unsafe tree is refused whole and left in place.
     """
-    runs = state_root / "runs"
+    runs = state_root / RUNS_DIRNAME
     held = _held_sessions(state_root)
     finished = sorted(
         (run for run in runs.iterdir()

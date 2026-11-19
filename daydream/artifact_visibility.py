@@ -676,7 +676,7 @@ class ArtifactSession:
             raise ArtifactVisibilityError(f"run snapshot {exc}") from exc
         seen_paths: set[Path] = set()
         retained: list[TrajectoryDocument] = []
-        frozen_root = self.layout.live_root.parent / "frozen"
+        frozen_root = self.layout.frozen_root
         for document in run_snapshot.documents:
             path = document.private_path
             route = self._trajectory_route
@@ -723,11 +723,11 @@ class ArtifactSession:
         from daydream.trajectory import TrajectoryDocumentIntegrityError
 
         entries = filesystem.manifest_tree(self.layout.live_root)
-        frozen_root = self.layout.live_root.parent / "frozen"
+        frozen_root = self.layout.frozen_root
         if frozen_root.exists() or frozen_root.is_symlink():
             raise ArtifactVisibilityError("frozen artifact tree already exists")
         filesystem._copy_tree(self.layout.live_root, frozen_root, entries)
-        filesystem._atomic_json(frozen_root.parent / "frozen-manifest.json", filesystem._manifest_payload(entries))
+        filesystem._atomic_json(self.layout.frozen_manifest, filesystem._manifest_payload(entries))
         if trajectories is not None:
             # The verified copy matches its manifest. A reference covering a whole
             # file is checked against it without another read; a shorter prefix (a
@@ -1334,7 +1334,7 @@ def _close_artifact_session(session: ArtifactSession, retained_runs: int) -> Non
         except (OSError, ArtifactVisibilityError):
             failures = 1
         if failures:
-            _print_retention_warning(session.layout.state_root / "runs")
+            _print_retention_warning(session.layout.live_root.parent.parent)
     try:
         session._close()
     except BaseException as close_error:
