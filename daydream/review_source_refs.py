@@ -357,11 +357,14 @@ def part_source_mapping(diff: str, assignment: dict[str, Any], *, artifact_sha25
                              'fragment': {'offset': offset, 'bytes': size, 'sha256': _sha(fragment)}})
     else:
         lines = lf_lines(diff)
-        starts = [index for index, line in enumerate(lines) if _HUNK_HEADER.match(line)]
-        for ordinal, start in enumerate(starts):
+        # A whole-file part joins a path's blocks, so a hunk body also ends at the next block's header.
+        bounds = [index for index, line in enumerate(lines)
+                  if line.startswith('diff --git ') or _HUNK_HEADER.match(line)] + [len(lines)]
+        for position, start in enumerate(bounds[:-1]):
             match = _HUNK_HEADER.match(lines[start])
-            assert match is not None
-            hunk_body = ''.join(lines[start + 1:starts[ordinal + 1] if ordinal + 1 < len(starts) else len(lines)])
+            if match is None:
+                continue
+            hunk_body = ''.join(lines[start + 1:bounds[position + 1]])
             summary = _side_summary(hunk_body, 0, len(hunk_body.encode()), int(match[1]), int(match[3]))
             summaries.append(summary)
             for side in ('old', 'new'):
