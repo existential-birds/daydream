@@ -811,7 +811,6 @@ class CodexBackend:
         thread_id: str | None = None
         provider_name: str | None = None
         model_name = self.model
-        structured_result: Any = None
 
         # Pair idless starts/completions by FIFO; misses get
         # observable orphan ids. Accumulate item.updated text because completion
@@ -1368,23 +1367,6 @@ class CodexBackend:
                         cost_source="estimated",
                     )
 
-                    # Genuine structured fields from the transport; the host resolves assistant text.
-                    if output_schema:
-                        for key in ("result", "output"):
-                            raw = event.get(key)
-                            if raw is not None:
-                                if isinstance(raw, dict):
-                                    structured_result = raw
-                                elif isinstance(raw, str) and raw.strip():
-                                    try:
-                                        structured_result = json.loads(raw)
-                                    except json.JSONDecodeError:
-                                        _warn("structured_output_parse_failed")
-                                        for diagnostic in _take_early_diagnostics():
-                                            yield diagnostic
-                                if structured_result is not None:
-                                    break
-
                     continuation_token = None
                     # A disposable checkout disappears after this invocation and an ephemeral
                     # thread is never stored: only persisted sessions with a stable cwd can resume.
@@ -1394,8 +1376,10 @@ class CodexBackend:
                             data={"thread_id": thread_id},
                         )
 
+                    # No observed turn.completed carries a result (0.139.0, 0.163.0 and 0.169.0, with or without
+                    # --output-schema); the host resolves schema output from the final assistant text.
                     _pending_result = ResultEvent(
-                        structured_output=structured_result,
+                        structured_output=None,
                         continuation=continuation_token,
                         model_name=model_name,
                         provider_name=provider_name,
@@ -1478,8 +1462,7 @@ class CodexBackend:
             if lifecycle is not None:
                 lifecycle.teardown_completed()
             if host is not None:
-                # Host acceptance is the only result, whatever the turn carried natively; this
-                # completed turn, zero exit and cleanup settle it.
+                # Host acceptance is the only result; this completed turn, zero exit and cleanup settle it.
                 _pending_result.structured_output = host.binding.accepted_result
                 host.binding.native_settled = host.binding.accepted
             yield _pending_result

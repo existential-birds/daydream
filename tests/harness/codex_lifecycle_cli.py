@@ -294,8 +294,7 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
                     _emit({"type": "item.started", "item": {**late, "status": "in_progress"}})
                     _emit({"type": "item.completed", "item": {**late, **failed}})
     _emit({"type": "item.completed", "item": {"id": "final", "type": "agent_message", "text": "Assignment complete."}})
-    # A native result field must never stand in for the host-accepted submission.
-    _emit({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}, "result": {"native": True}})
+    _emit({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}})
     _observe("terminal", mode=mode, host=host)
 
 

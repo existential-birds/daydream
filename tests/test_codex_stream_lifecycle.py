@@ -246,7 +246,7 @@ async def test_codex_process_outcomes_require_completion_and_zero_exit(
                           (bound.budget.charged, bound.budget.observed))
     accepted = {"final": {"ok": True}}
     assert outcomes == {
-        # The accepted submission, not the turn's native result field, is the settled result.
+        # The accepted submission is the settled result.
         "settled": (accepted, True, True, True, None, [accepted], (1, 1)),
         # The failed exit keeps its accepted submission unsettled.
         "failed exit": (accepted, False, True, True, "PROCESS_EXIT", [], (1, 1)),

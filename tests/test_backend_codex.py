@@ -205,13 +205,20 @@ async def _run_inline_lines(backend: Any, prompt: Any, lines: list[str]) -> list
     return events
 
 
+@pytest.mark.parametrize('final_text', ['{"issues": [1]}', ""], ids=["final-json", "empty-final"])
 @pytest.mark.parametrize('staged', [False, True])
-async def test_empty_final_codex_message_cannot_reuse_planning_json(tmp_path: Path, staged: bool) -> None:
+async def test_codex_schema_output_comes_only_from_the_final_agent_message(
+    tmp_path: Path, staged: bool, final_text: str,
+) -> None:
+    """Codex's usage-only turn.completed under --output-schema leaves the final message as the result.
+
+    An empty final message cannot reuse earlier planning JSON.
+    """
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}, "required": ["issues"]}
     lines = [json.dumps(event) for event in [
         {"type": "thread.started", "thread_id": "empty-final"},
         {"type": "item.completed", "item": {"type": "agent_message", "text": '{"issues": []}'}},
-        {"type": "item.completed", "item": {"type": "agent_message", "text": ""}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": final_text}},
         {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}},
     ]]
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec",
@@ -222,7 +229,10 @@ async def test_empty_final_codex_message_cannot_reuse_planning_json(tmp_path: Pa
             budget=BudgetLedger("stage", deadline=clock.monotonic() + 300, limit=40, start_floor=1,
                                 investigation=True) if staged else None,
         )
-    assert isinstance(result, StructuredOutputFailure) and result.reason == "missing_output"
+    if final_text:
+        assert result == {"issues": [1]}
+    else:
+        assert isinstance(result, StructuredOutputFailure) and result.reason == "missing_output"
     assert token is not None and token.data == {"thread_id": "empty-final"}
     assert reason is None
 
@@ -1026,7 +1036,7 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
         {"type": "item.completed", "item": {"type": "agent_message", "id": "verified", "text": "Verified"}},
         {"type": "turn.completed", "model": "gpt-5.5-pro", "provider": "native-provider", "usage": {
             "input_tokens": 100, "output_tokens": 30, "cached_input_tokens": 20, "reasoning_output_tokens": 10,
-        }, "result": {"issues": []}},
+        }},
     ]
     process = make_mock_process([json.dumps(row) for row in rows])
     backend = CodexBackend(model="gpt-5.5")
@@ -1067,7 +1077,8 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
     assert {key: results[key].output for key in mcp_outputs} == mcp_outputs and results["write"].is_error
     assert results["refused"].is_error and results["refused"].status == "failed"
     terminal = [event for event in events if isinstance(event, ResultEvent)]
-    assert len(terminal) == 1 and terminal[0].structured_output == {"issues": []}
+    # Under a schema the adapter never selects JSON from assistant text; the host resolves the final turn.
+    assert len(terminal) == 1 and terminal[0].structured_output is None
     assert (terminal[0].session_id, terminal[0].model_name, terminal[0].provider_name) == (
         "native-thread", "gpt-5.5-pro", "native-provider",
     )
