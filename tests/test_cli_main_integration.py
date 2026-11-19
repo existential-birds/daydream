@@ -102,7 +102,10 @@ def test_cli_main_only_fix_selects_fixing(
         return "y"
 
     monkeypatch.setattr("daydream.run_context._prompt_user", answer)
-    target = (str(tiny_diff_target), "--no-archive", "--no-cleanup", "--test-command", f"{sys.executable} -c pass")
+    # The repository's own .daydream.toml supplies the only test command, so the fix loop can pass only if
+    # the CLI parser path attached the file config to the run.
+    (tiny_diff_target / ".daydream.toml").write_text(f"test_command = '{sys.executable} -c pass'\n")
+    target = (str(tiny_diff_target), "--no-archive", "--no-cleanup")
 
     code = _cli_main_exit(monkeypatch, *target)
     assert (
