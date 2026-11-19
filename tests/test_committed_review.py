@@ -1419,7 +1419,8 @@ async def test_immutable_invalid_evidence_fails_before_native_work(
     invalid immutable compilation evidence before that plan exists.
     """
     shared = tmp_path / "source"
-    seed_feature_branch(shared, base={"api.py": "VALUE = 1\n"}, feature={"api.py": "VALUE = 0\n"})
+    seed_feature_branch(shared, base={"api.py": "VALUE = 1\n", "kept.py": "KEPT = 1\n"},
+                        feature={"api.py": "VALUE = 0\n"})
     # Identity disagreement leaves the repository untouched; authority runs first, before any private storage.
     for fault in ("authority", "head", "base", "tree", "review-key"):
         await _immutable_evidence_case(tmp_path / fault, monkeypatch, operator_policy, fault, shared=shared)
@@ -1517,13 +1518,15 @@ async def _immutable_evidence_case(
             value["provenance"][key] = value["materialization"][key]
         identity = ImmutableReviewInput.from_dict(value)
     elif fault in {"object-fifo", "object-hash"}:
-        head = value["materialization"]["head_sha"]
-        object_path = repo / ".git/objects" / head[:2] / head[2:]
+        oid = git(repo, "rev-parse", "HEAD:kept.py") if fault == "object-hash" else value["materialization"]["head_sha"]
+        object_path = repo / ".git/objects" / oid[:2] / oid[2:]
         if fault == "object-hash":
-            _, _, body = zlib.decompress(object_path.read_bytes()).partition(b"\0")
-            body += b"\n"
+            # Git reads blobs without checking their names and the diff skips an unchanged
+            # one, so only fsck refuses bytes that match the checkout but not the object name.
+            body = b"KEPT = 2\n"
             object_path.chmod(0o600)
-            object_path.write_bytes(zlib.compress(f"commit {len(body)}".encode() + b"\0" + body))
+            object_path.write_bytes(zlib.compress(f"blob {len(body)}".encode() + b"\0" + body))
+            (repo / "kept.py").write_bytes(body)
         else:
             object_path.unlink()
             os.mkfifo(object_path)
