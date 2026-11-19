@@ -42,6 +42,7 @@ from daydream.committed_review_model import (
 from daydream.committed_review_output import render_committed_review
 from daydream.committed_review_summary import build_review_summary, validate_review_summary
 from daydream.deep.detection import StackAssignment
+from daydream.extensions import get_registry, set_registry
 from daydream.extensions.registry import Registry
 from daydream.findings import MAX_ARTIFACT_BYTES, committed_export_bytes
 from daydream.git_ops.captured_source import capture_source
@@ -50,7 +51,6 @@ from daydream.hosted_review import HostedReviewPolicy, UnsupportedHostedPolicy
 from daydream.hunk_index import write_hunk_index
 from daydream.immutable_review import ImmutableReviewInput
 from daydream.observability.config import ObservabilityConfig
-from daydream.observability.runtime import trace_run
 from daydream.pr_review import post_findings_from_artifact
 from daydream.prompt_budget import SanctionedInputUnavailable
 from daydream.prompts.grounding import REPOSITORY_SEARCH_GUIDANCE
@@ -477,6 +477,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     review_inputs: StageInputFactory,
     monkeypatch: pytest.MonkeyPatch,
     challenge: str,
+    artifact_runtime_root: Path,
 ) -> None:
     """Real host/Git/output/recorder composition preserves work across execution failures.
 
@@ -557,6 +558,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
             trajectory_hub_repo="fixture/requested-export" if challenge == "hub-export" else None,
             review_profile=_profile_with_pipeline(reviewer_investigation_budget_s=90, reviewer_tool_call_budget=10),
             frozen_author_description=FrozenAuthorDescription(review_inputs.revision["head_sha"], author_context),
+            observability=ObservabilityConfig(destinations=("local",)),
         ),
     )
     if challenge == "hub-export":
@@ -639,6 +641,11 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     assert not (repo / ".daydream/committed-review.json").exists()
     assert not (repo / ".daydream/review-summary.json").exists() and result.summary is None
     assert not (repo / ".review-output.md").exists()
+    # The run span reports that failure; it previously recorded success.
+    local_trace, = artifact_runtime_root.glob("*/runs/*/otel-trace.jsonl")
+    run_span = json.loads(local_trace.read_text().splitlines()[-1])["resourceSpans"][0]["scopeSpans"][0]["spans"][-1]
+    assert run_span["status"]["code"] == 2
+    assert {"key": "daydream.exit_code", "value": {"intValue": "1"}} in run_span["attributes"]
     assert value["terminal_result"]["run_id"] == value["run_id"]
     assert value["analyzed_revision"]["head_sha"] == review_inputs.revision["head_sha"]
     assert value["claims"] and [e["assignment"] for e in value["execution"]] == ["discovery", "challenge"]
@@ -2083,14 +2090,15 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
 
 
 async def test_denied_over_limit_discovery_start_cannot_spend_protected_challenge_reserve(
-    review_inputs: StageInputFactory, monkeypatch: pytest.MonkeyPatch,
+    review_inputs: StageInputFactory, monkeypatch: pytest.MonkeyPatch, artifact_runtime_root: Path,
 ) -> None:
     """A denied over-limit start is observed overshoot; it must not shrink challenge.
 
     Previously challenge received the shared ledger's remainder, so discovery's
     rejected extra start (charged before the limit check) consumed one protected call.
     The challenge re-dispatch the host refuses for want of calls runs no agent, so its
-    budget stop is a trace event, retained in local evidence for the review summary.
+    budget stop is a trace event, retained in local evidence for the review summary. The
+    review owns that run span; previously it only reached an enclosing session's.
     """
     allocations: list[tuple[str, int]] = []
 
@@ -2132,12 +2140,25 @@ async def test_denied_over_limit_discovery_start_cannot_spend_protected_challeng
     exporter = InMemorySpanExporter()
     registry = Registry()
     registry.register_trace_exporter("memory", lambda _: exporter)
-    async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review") as run:
+    previous_registry = get_registry()
+    set_registry(registry)
+    try:
+        # The review owns its run session: the operator's destinations, including the local file.
         profile = _profile_with_pipeline(reviewer_investigation_budget_s=90, reviewer_tool_call_budget=10)
         result = await run_committed_review(CommittedReviewRequest(
             review_inputs.work.source, review_inputs.revision["merge_base_sha"],
-            config=RunConfig(backend="pi", output_mode="review", review_profile=profile)))
-        run.finish(0)
+            config=RunConfig(backend="pi", output_mode="review", review_profile=profile,
+                             observability=ObservabilityConfig(destinations=("local", "memory")))))
+    finally:
+        set_registry(previous_registry)
+    *_, root = exporter.get_finished_spans()
+    assert root.parent is None and (root.attributes or {})["daydream.flow"] == "committed-review"
+    local_trace, = artifact_runtime_root.glob("*/runs/*/otel-trace.jsonl")
+    *_, local_root = [span for line in local_trace.read_text().splitlines()
+                      for resource in json.loads(line)["resourceSpans"]
+                      for scope in resource["scopeSpans"] for span in scope["spans"]]
+    assert local_root["spanId"] == format(root.context.span_id, "016x")
+    assert "daydream.budget.stop" in [event["name"] for event in local_root["events"]]
     assert allocations == [("discovery", 5), ("challenge", 5)] and result.output_installed
     # The report names the one profile key that raises the allowance discovery ran out of.
     assert ("\nThe review used up its allowance before it finished; raise <code>reviewer_tool_call_budget</code> "

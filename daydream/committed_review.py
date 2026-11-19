@@ -63,6 +63,7 @@ from daydream.committed_review_output import write_committed_review_output
 from daydream.committed_review_summary import build_review_summary
 from daydream.config import REVIEWER_BATCHES_PER_ALLOWANCE
 from daydream.deep.detection import StackAssignment
+from daydream.extensions import get_registry
 from daydream.findings import MAX_ARTIFACT_BYTES, committed_export_bytes
 from daydream.git_ops.captured_source import CapturedSource, capture_source
 from daydream.host_tools import (
@@ -78,6 +79,8 @@ from daydream.hosted_review import HOSTED_PI_TOOLS, HostedReviewPolicy, Unsuppor
 from daydream.hunk_index import write_hunk_index
 from daydream.immutable_review import HISTORICAL_CONTEXT_MAX_BYTES, ImmutableReviewInput
 from daydream.json_utils import canonical_json, validate_json_schema
+from daydream.observability.config import resolve_observability_config
+from daydream.observability.runtime import record_local_trace, trace_run
 from daydream.observability.spans import record_budget_stop
 from daydream.prompt_budget import SanctionedInputUnavailable, truncate_utf8_to_budget
 from daydream.redaction import redact_text
@@ -1184,11 +1187,24 @@ async def plan_review(
 
 
 async def run_committed_review(request: CommittedReviewRequest) -> CommittedReviewResult:
-    """Review selected local/committed source or a validated trusted immutable envelope."""
+    """Review selected local/committed source or a validated trusted immutable envelope in its own traced run."""
     started = clock.monotonic()
     if type(request.local) is not bool or request.local and (
             request.immutable_input is not None or request.hosted_policy is not None):
         raise ValueError('local captured review requires ordinary local source, without hosted/immutable authority')
+    observability = request.config.observability
+    async with trace_run(
+        resolve_observability_config() if observability is None else observability, get_registry(),
+        flow="committed-review",
+    ) as run:
+        result = await _review_request(request, started=started)
+        # As the deep flow's exit: failed analysis or uninstalled output fails the run.
+        failed = not result.output_installed or result.to_dict()["terminal_result"]["analysis_state"] == "failed"
+        run.finish(int(failed), error_type=result.output_error or "DaydreamError")
+        return result
+
+
+async def _review_request(request: CommittedReviewRequest, *, started: float) -> CommittedReviewResult:
     if request.immutable_input is None:
         if request.immutable_bundle is not None:
             raise ValueError("immutable bundle requires a versioned immutable input")
@@ -1309,6 +1325,7 @@ async def _run_committed_review(
             git_ops.validate_committed_worktree(captured_root, original.head_sha)
         lifetime.enter_context(bind_run_context(context))
         session = await lifetime.enter_async_context(open_artifact_session(work, session_id=run_id, owner=owner))
+        record_local_trace(session.layout.otel_trace)
         report_path, result_path = session.review_output, session.daydream_dir / "committed-review.json"
         summary_path = session.daydream_dir / "review-summary.json"
         findings_path: Path | None = None

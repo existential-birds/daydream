@@ -72,6 +72,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and wall time, with unrecorded values `null`. Local evidence gains per-phase usage shares,
   each retry's failure class and the host schedule's refused dispatches. See
   [committed-review summary](docs/runtime.md#committed-review-summary).
+- `run_committed_review` opens its own tracing run (flow `committed-review`), so the
+  operator's `--trace-to` / `DAYDREAM_TRACE_TO` destinations, including the `local` file,
+  record committed reviews as they do runner flows
+  ([#1788](https://github.com/existential-birds/daydream/issues/1788)). Tracing stays off by
+  default. See [committed-review evidence](docs/observability.md#committed-review-evidence).
 
 ### Removed
 
