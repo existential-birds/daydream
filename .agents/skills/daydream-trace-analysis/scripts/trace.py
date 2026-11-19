@@ -6,7 +6,8 @@ document (``evidence.otlp.jsonl`` or ``forks/*.otlp.jsonl``). Each embedded docu
 verified against its sha256 and reduced to its view (see evidence.py). All pointers are
 RFC 6901 paths within the selected record with documents replaced by their views:
 ``/trajectories/value/documents/<i>/view/steps/<n>``; for a standalone document they
-address its view directly (``/steps/<n>``).
+address its view directly (``/steps/<n>``). ``summary --manifest`` adds the run's frozen
+independent finding labels, cited as ``/finding_labels/items/<i>``.
 No imports from Daydream, command execution, network access, or artifact writes.
 """
 
@@ -19,6 +20,7 @@ import re
 import sys
 from pathlib import Path
 
+from cohort import load_manifest, run_labels
 from evidence import is_evidence_line, reduce, with_views
 
 
@@ -245,6 +247,14 @@ def summary(trace, args):
                    if "diagnostic" in key or "budget_stop" in key]
     availability = {k: {"status": v.get("status"), "reason": v.get("reason")}
                     for k, v in record.items() if isinstance(v, dict) and "status" in v and "value" in v}
+    labels = {}
+    if args.manifest is not None:
+        manifest = load_manifest(args.manifest)
+        if base(trace) not in [{k: row[k] for k in ("source", "line", "run_id")} for row in manifest["runs"]]:
+            raise ValueError("selected run is not this manifest's frozen source/line/run_id")
+        view = run_labels(manifest, trace["run_id"])
+        labels = {"finding_labels": {"pointer": "/finding_labels", "status": view["status"],
+                                     **page(view["items"], args)}}
     return {**base(trace), "schema": record.get("schema_version"), "captured_at": record.get("captured_at"),
             "outcome": record.get("outcome"), "completeness": record.get("completeness"),
             "availability": availability, "root_trajectory_id": trace["root_id"],
@@ -253,7 +263,7 @@ def summary(trace, args):
             "document_count": len(docs), "step_count": sum(len(d.get("steps", [])) for d in docs),
             "tool_call_count": len(calls), "documents": page(rows, args),
             "unmatched_results": page(list(unmatched_results(trace, args)), args),
-            "diagnostics": page(diagnostics, args)}
+            "diagnostics": page(diagnostics, args), **labels}
 
 
 def timeline(trace, args):
@@ -447,7 +457,9 @@ def main():
         sub.add_argument("--run-id", help="Select a record in a multi-record JSONL file")
         if command != "list":
             sub.add_argument("--line", type=int, help="Select an exact physical record line; cohort row line")
-        sub.set_defaults(doc=None, phase=None)
+        if command == "summary":
+            sub.add_argument("--manifest", help="Cohort manifest whose frozen finding labels to show for this run")
+        sub.set_defaults(doc=None, phase=None, manifest=None)
         if command in ("tools", "mine", "timeline"):
             sub.add_argument("--doc", type=int, help="Zero-based embedded document index")
             sub.add_argument("--phase", help="Exact recorded phase (arbiter may be deep)")

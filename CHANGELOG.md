@@ -77,6 +77,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   record committed reviews as they do runner flows
   ([#1788](https://github.com/existential-birds/daydream/issues/1788)). Tracing stays off by
   default. See [committed-review evidence](docs/observability.md#committed-review-evidence).
+- **agent skills:** Daydream trace analysis takes independent finding labels
+  ([#1900](https://github.com/existential-birds/daydream/issues/1900)).
+  `cohort.py select --labels FILE` reads JSONL labels (`matched`, `valid_unmatched` or `wrong`
+  for a finding's `item_uid`, or `missed` with free-text `issue`), each with its `source` and an
+  optional `note`, and freezes them in the manifest with the file's SHA-256. A label for a run
+  or finding outside the cohort is a selection error, and an unlabeled run stays `unknown`.
+  `trace.py summary --manifest` and report templates show a run's labels, and `finding_quality`
+  assessments can cite them as validated evidence.
 
 ### Removed
 

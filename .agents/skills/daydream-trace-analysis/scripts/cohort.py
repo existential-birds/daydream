@@ -3,6 +3,7 @@
 
 Standard library only. Sources are read-only JSONL; directory inputs inspect
 only immediate *.jsonl files. Selection uses captured_at, never filesystem time.
+Independent finding labels are frozen data; their free text is never followed.
 """
 
 import argparse
@@ -16,6 +17,9 @@ from pathlib import Path
 SCHEMA = "daydream.trace-cohort.v1"
 SECTIONS = ("original_task", "final_state", "recommended_patch", "trajectories", "findings", "verification")
 MISSING = object()
+# Labels on delivered findings (by item_uid); "missed" names an issue the run did not report.
+FINDING_LABELS = ("matched", "valid_unmatched", "wrong")
+MAX_LABEL_TEXT = 2000
 
 
 def canonical(value):
@@ -111,6 +115,67 @@ def run_row(record, source, line):
             "availability": availability, "context": context(record)}
 
 
+def finding_uids(record):
+    findings = record.get("findings")
+    value = findings.get("value") if isinstance(findings, dict) and findings.get("status") == "available" else None
+    items = value.get("items") if isinstance(value, dict) else None
+    return {item.get("item_uid") for item in items if isinstance(item, dict)} if isinstance(items, list) else set()
+
+
+def label_row(value, line):
+    """Validate one independent label and return it with its physical label-file line."""
+    if not isinstance(value, dict):
+        raise ValueError("label must be a JSON object")
+    label = value.get("label")
+    if label not in (*FINDING_LABELS, "missed"):
+        raise ValueError(f"label must be one of {', '.join((*FINDING_LABELS, 'missed'))}")
+    target = "issue" if label == "missed" else "item_uid"
+    required = ("run_id", target, "source")
+    if not set(required) <= value.keys() or not value.keys() <= {"label", "note", *required}:
+        raise ValueError(f"{label} label requires run_id, {target}, and source, with an optional note")
+    for key in (*required, "note"):
+        if key in value and (not isinstance(value[key], str) or not value[key].strip()
+                             or len(value[key]) > MAX_LABEL_TEXT):
+            raise ValueError(f"label {key} must be nonempty text <= {MAX_LABEL_TEXT} characters")
+    if type(line) is not int or line < 1:
+        raise ValueError("label line must be a positive integer")
+    return {**value, "line": line}
+
+
+def read_labels(path, findings):
+    """Freeze labels for selected runs; findings maps each run_id to its frozen finding item_uids."""
+    path = Path(path).expanduser().resolve()
+    data = path.read_bytes()
+    labels = {"path": str(path), "sha256": hashlib.sha256(data).hexdigest(), "items": []}
+    errors, seen = [], set()
+    for line, text in enumerate(data.splitlines(), 1):
+        if not text.strip():
+            continue
+        try:
+            row = label_row(parse_json(text.decode("utf-8")), line)
+            if row["run_id"] not in findings:
+                raise ValueError("label run_id is not in the cohort")
+            if "item_uid" in row and row["item_uid"] not in findings[row["run_id"]]:
+                raise ValueError("label item_uid is not a finding of the frozen capture")
+            target = (row["run_id"], row.get("item_uid"), row.get("issue"), row["source"])
+            if target in seen:
+                raise ValueError("duplicate label for the same target from the same source")
+            seen.add(target)
+            labels["items"].append(row)
+        except (ValueError, UnicodeError, RecursionError) as exc:
+            errors.append({"source": str(path), "line": line, "error": str(exc)})
+    if not labels["items"] and not errors:
+        errors.append({"source": str(path), "line": None, "error": "empty input"})
+    return labels, errors
+
+
+def run_labels(manifest, run_id):
+    """A run's frozen labels; without any its finding quality stays unknown."""
+    labels = manifest.get("labels")
+    items = [row for row in labels["items"] if row["run_id"] == run_id] if labels else []
+    return {"status": "labeled" if items else "unknown", "items": items}
+
+
 def load_manifest(path):
     """Validate manifest identity/shape; partial selection with errors is unsafe."""
     manifest = parse_json(Path(path).expanduser().read_text(encoding="utf-8"))
@@ -135,6 +200,17 @@ def load_manifest(path):
                 or not isinstance(row.get("sha256"), str) or not re.fullmatch(r"[a-f0-9]{64}", row["sha256"])):
             raise ValueError("manifest run requires absolute source, positive line/bytes, and SHA256")
         seen.add(row["run_id"])
+    labels = manifest.get("labels")
+    if labels is not None:
+        if (not isinstance(labels, dict) or set(labels) != {"path", "sha256", "items"}
+                or not isinstance(labels["path"], str) or not Path(labels["path"]).is_absolute()
+                or not isinstance(labels["sha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", labels["sha256"])
+                or not isinstance(labels["items"], list)):
+            raise ValueError("manifest labels require absolute path, SHA256, and items")
+        for row in labels["items"]:
+            if (not isinstance(row, dict) or row.get("run_id") not in seen
+                    or label_row({k: v for k, v in row.items() if k != "line"}, row.get("line")) != row):
+                raise ValueError("manifest label is invalid or names a run outside the cohort")
     return manifest
 
 
@@ -213,7 +289,7 @@ def select(args):
             paths.update(file.resolve() for file in files)
         else:
             paths.add(path)
-    grouped = {}
+    grouped, findings = {}, {}
     for path in sorted(paths):
         try:
             with path.open("rb") as stream:
@@ -228,6 +304,7 @@ def select(args):
                         reason = exclusion_reason(record, row, filters, since, until)
                         # Keep metadata, never the entire corpus of embedded trajectories.
                         grouped.setdefault(row["run_id"], []).append((row, reason))
+                        findings[row["run_id"]] = finding_uids(record)
                     except (ValueError, UnicodeError, RecursionError) as exc:
                         manifest["errors"].append({"source": str(path), "line": line, "error": str(exc)})
                 if not found:
@@ -249,6 +326,11 @@ def select(args):
     if args.limit is not None:
         manifest["exclusions"].extend({**row, "reason": "limit"} for row in manifest["runs"][args.limit:])
         manifest["runs"] = manifest["runs"][:args.limit]
+    manifest["labels"] = None
+    if args.labels is not None:
+        manifest["labels"], errors = read_labels(args.labels, {row["run_id"]: findings[row["run_id"]]
+                                                               for row in manifest["runs"]})
+        manifest["errors"].extend(errors)
     manifest["cohort_id"] = digest(manifest)
     return manifest
 
@@ -280,6 +362,7 @@ def main():
     sub.add_argument("--since", help="Inclusive captured_at lower bound with timezone")
     sub.add_argument("--until", help="Inclusive captured_at upper bound with timezone")
     sub.add_argument("--limit", type=int, help="Maximum latest captures after filtering; default all")
+    sub.add_argument("--labels", help="Independent finding labels JSONL for selected runs (see references/cohorts.md)")
     sub = commands.add_parser("batches", help="Balance canonical record bytes without splitting run siblings")
     sub.add_argument("manifest")
     sub.add_argument("--count", type=int, required=True)

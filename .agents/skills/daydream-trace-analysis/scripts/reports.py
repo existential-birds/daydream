@@ -12,7 +12,7 @@ import re
 import sys
 from pathlib import Path
 
-from cohort import canonical, digest, iter_runs, load_manifest, parse_json
+from cohort import canonical, digest, iter_runs, load_manifest, parse_json, run_labels
 from evidence import with_views
 
 CATEGORIES = {"environment_scope", "investigation_loop", "handoff_loss", "verification_gap",
@@ -130,10 +130,14 @@ def validate_report(report, manifest, plan, batches):
     seen = set()
     for row in report["runs"]:
         require(isinstance(row, dict), "reported run must be an object")
-        require(set(row) == {"run_id", "status", "reason", "assessments"},
-                "reported run accepts only run_id/status/reason/assessments; frozen metadata belongs to the manifest")
+        require(set(row) - {"finding_labels"} == {"run_id", "status", "reason", "assessments"},
+                "reported run accepts only run_id/status/reason/assessments and the template's finding_labels; "
+                "frozen metadata belongs to the manifest")
         run_id = row.get("run_id")
         require(isinstance(run_id, str) and run_id in assigned, "report run violates batch assignment")
+        require("finding_labels" not in row
+                or canonical(row["finding_labels"]) == canonical(run_labels(manifest, run_id)),
+                f"{run_id}: finding_labels must equal the manifest's frozen metadata")
         require(run_id not in seen, f"duplicate reported run {run_id}")
         seen.add(run_id)
         require(row.get("status") in {"analyzed", "skipped", "unavailable"}, "invalid run status")
@@ -178,7 +182,8 @@ def template(manifest, plan, batches, batch_id):
     return {"schema": "daydream.trace-report.v1", "cohort_id": manifest["cohort_id"], "plan_id": plan["plan_id"],
             "batch_id": batch_id, "template": True,
             "runs": [{"run_id": run_id, "status": "skipped", "reason": "TODO: analyze this run",
-                      "assessments": []} for run_id in batches[batch_id]["run_ids"]]}
+                      "finding_labels": run_labels(manifest, run_id), "assessments": []}
+                     for run_id in batches[batch_id]["run_ids"]]}
 
 
 def assessment_template(pattern, category):
@@ -230,8 +235,10 @@ def synthesize(manifest, plan, runs, batches, paths):
                 categories[pattern] = category
     # Validate every frozen source once; retain only analyst and manifest metadata.
     for frozen, record in iter_runs(runs.values()):
-        # Evidence pointers address the record with each embedded document reduced to its view.
-        record = with_views(record)
+        # Evidence pointers address the record with each embedded document reduced to its view,
+        # plus the run's frozen independent labels at /finding_labels.
+        require("finding_labels" not in record, f"{frozen['run_id']}: capture already has a finding_labels field")
+        record = {**with_views(record), "finding_labels": run_labels(manifest, frozen["run_id"])}
         for item in rows.get(frozen["run_id"], {}).get("assessments", []):
             evidence(item["evidence"], record, plan["evidence_chars"])
             evidence(item["counterevidence"], record, plan["evidence_chars"])
@@ -259,8 +266,9 @@ def synthesize(manifest, plan, runs, batches, paths):
             and all(row["status"] == "analyzed" for row in rows.values()),
             "missing_batches": missing_batches, "missing_runs": missing_runs,
             "strata": ordered_strata, "patterns": patterns,
-            "runs": [{**row, **rows.get(run_id, {"status": "missing", "reason": "No assigned report entry",
-                                               "assessments": []})} for run_id, row in runs.items()],
+            "runs": [{**row, "finding_labels": run_labels(manifest, run_id),
+                      **rows.get(run_id, {"status": "missing", "reason": "No assigned report entry",
+                                          "assessments": []})} for run_id, row in runs.items()],
             "interpretation": "Evidence membership and counts validated; "
             "confidence, cause, impact and priority require adjudication."}
 
