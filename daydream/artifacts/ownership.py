@@ -224,11 +224,14 @@ class SourceOwnership:
 
     Only this owner acquires or compares checkout identities. A recovered capability
     must match the journal's proof before any operation can use the current path.
+    Publish and restore stages sit beside the checkout unless ``stage_root`` keeps them
+    in private state, for a checkout that never receives public artifacts.
     """
 
-    def __init__(self, path: Path, *, label: str = "artifact source") -> None:
+    def __init__(self, path: Path, *, label: str = "artifact source", stage_root: Path | None = None) -> None:
         self.path, expected = filesystem._available_directory_metadata(path, label=label)
         self._label = label
+        self.stage_root = stage_root
         try:
             self._descriptor = filesystem._open_directory_descriptor(self.path, label=label)
         except ArtifactVisibilityError as exc:
@@ -439,15 +442,23 @@ class CodeWorkspace:
 
 
 class WorkspaceOwnership:
-    """One descriptor lifetime from workspace setup through guarded Git cleanup."""
+    """One descriptor lifetime from workspace setup through guarded Git cleanup.
 
-    def __init__(self, owner: PrivateWorkspaceOwner) -> None:
+    ``private_stages`` stages publication and restoration under the owner's state root,
+    leaving a prepared source and its parent unwritten.
+    """
+
+    def __init__(self, owner: PrivateWorkspaceOwner, *, private_stages: bool = False) -> None:
         self.owner = owner
         self._held = ExitStack()
         self._directories: dict[Path, SourceOwnership] = {}
         self._code: dict[Path, CodeWorkspace] = {}
         try:
-            self.source = self._hold(owner.source, label="artifact source")
+            self.source = self._held.enter_context(SourceOwnership(
+                owner.source, label="artifact source",
+                stage_root=owner.artifact_state_root / "stages" if private_stages else None,
+            ))
+            self._directories[owner.source] = self.source
             self.source_code = self.bind_code(owner.source)
         except BaseException:
             self.close()

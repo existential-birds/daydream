@@ -708,20 +708,37 @@ source references, complete planned-work binding and independent execution outco
 
 ```python
 from daydream.committed_review import CommittedReviewRequest, run_committed_review
+from daydream.git_ops.immutable import materialize_immutable_source
 from daydream.immutable_review import ImmutableReviewInput
 
 identity = ImmutableReviewInput.from_dict(captured_envelope)
+# 1. Materialize: verify the bundle and write its head tree to an absent or empty directory.
+materialize_immutable_source(identity, frozen_bundle, source_tree, environment=policy.environment)
+# 2. Protect: optionally make source_tree read-only and lock its parents until teardown.
+# 3. Review that tree in place.
 result = await run_committed_review(CommittedReviewRequest(
-    source=prepared_checkout,
+    source=source_tree,
     base=identity.to_dict()["materialization"]["requested_base_sha"],
     hosted_policy=policy,
     immutable_input=identity,
-    immutable_bundle=frozen_bundle,  # None for an exact object-only input
+    immutable_bundle=frozen_bundle,
 ))
 ```
 
-`source` is the prepared checkout whose HEAD, raw bytes and modes are validated;
-`immutable_bundle` supplies the actual frozen bytes when `bundle_sha256` is set.
+When `bundle_sha256` is set, `immutable_bundle` supplies the frozen bytes and `source`
+is the tree `materialize_immutable_source` wrote: the head tree's raw blobs, modes and
+symlink targets plus an empty `.git` directory, with which stock `grep` applies the
+tree's `.gitignore`. The materializer runs no native or model process and leaves no
+Git storage behind. The review restores the bundle into private Git storage under
+`private_base/immutable-inputs/`, checks the identities below, and verifies that
+`source` holds exactly that tree, all before resolving a backend. It then reviews
+`source` itself, never writing, renaming or removing anything in it or in its parent,
+and verifies it again before sealing; a change is recorded as unfinished
+`source_integrity` coverage, as for a [captured source](#captured-local-source). The
+engine proves the tree at both ends; the caller keeps it unchanged in between. A Git
+checkout passed with a bundle is refused before native work. Without a bundle,
+`source` is the operator's checkout whose HEAD, raw bytes and modes are validated
+before its objects and bytes are copied into private storage.
 The host's output directory receives `review-output.md`, `committed-review.json`,
 `review-summary.json`, strict `findings.json` and trajectory evidence through the same
 artifact session.
@@ -760,19 +777,24 @@ limit. Historical blobs retain the object-store limit. Both comparison and head
 trees are checked before diff expansion; each diff capture stops at 256 MiB of
 subprocess output. Control and blob captures are bounded while reading.
 
-Cloud supplies exact original local objects. Their commit identities, merge-base
-relationship, trees, raw checkout bytes and current execution diff key must match.
-Harbor supplies the same envelope with `kind="synthetic"`: exactly two synthetic
+An `exact` input carries original local objects. Their commit identities, merge-base
+relationship, trees, raw source bytes and current execution diff key must match.
+Daydream Cloud sends `kind="synthetic"` with a bundle: exactly two synthetic
 commits, a root base and its single-child head, preserving the attested comparison
 and head trees. The frozen bundle bytes must match their
 digest. Original commits need not be present for this projection. Trusted compiler
 evidence connects original provenance to those local objects; synthetic commits
 and admitted references retain their actual identities throughout review/export.
+Harbor benchmarks call the runner, not this API.
 
 The immutable Git owner creates independent storage and materializes raw blobs
 without executing target/ambient hooks, filters, configuration or checkout
 resources. Subsequent source, classification and artifact queries use that inert
-storage. This boundary is separate from contribution Git: commit, push and
+storage; a materialized tree is reached only through `GIT_DIR` and `GIT_WORK_TREE`,
+never through a `.git` inside it, so the tree may belong to another user. Publish and
+restore stages for a prepared tree sit under the artifact owner's state root in
+`private_base/runtime/`, where recovery also looks; teardown removes only the private
+Git storage. This boundary is separate from contribution Git: commit, push and
 verification hooks remain mandatory. Host infrastructure isolation still applies.
 
 Immutable analysis and export use only captured/local evidence. They perform no

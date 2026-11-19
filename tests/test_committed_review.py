@@ -1086,6 +1086,24 @@ def immutable_input_for(repo: Path, *, requested_base: str | None = None) -> Imm
     })
 
 
+def synthetic_bundle_input(repo: Path, bundle: Path) -> ImmutableReviewInput:
+    """Freeze main and HEAD's trees as exactly two synthetic commits, as Cloud's compiler does."""
+    from daydream.git_ops.immutable import immutable_review_diff
+
+    base = git(repo, "commit-tree", git(repo, "rev-parse", "main^{tree}"), "-m", "snapshot base")
+    head = git(repo, "commit-tree", git(repo, "rev-parse", "HEAD^{tree}"), "-p", base, "-m", "snapshot head")
+    git(repo, "update-ref", "refs/heads/base", base)
+    git(repo, "update-ref", "refs/heads/head", head)
+    git(repo, "bundle", "create", str(bundle), "refs/heads/base", "refs/heads/head")
+    return ImmutableReviewInput.from_dict({**immutable_input_for(repo).to_dict(), "materialization": {
+        "kind": "synthetic", "head_sha": head, "requested_base_sha": base, "comparison_base_sha": base,
+        "head_tree_sha": git(repo, "rev-parse", head + "^{tree}"),
+        "comparison_tree_sha": git(repo, "rev-parse", base + "^{tree}"),
+        "review_diff_key": hashlib.sha256(immutable_review_diff(repo, base, head).encode()).hexdigest(),
+        "bundle_sha256": hashlib.sha256(bundle.read_bytes()).hexdigest(),
+    }})
+
+
 def test_immutable_object_population_bounds_precede_body_validation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1124,6 +1142,10 @@ def _object_population_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rou
             with immutable.prepare_immutable_source(repo, identity, tmp_path / "prepared", bundle=bundle):
                 pytest.fail("oversized object population reached source admission")
     assert not (tmp_path / "prepared").exists()
+    if bundle is not None:
+        with pytest.raises(git_ops.GitError, match="reconstructed object population exceeds the supported size"):
+            immutable.materialize_immutable_source(identity, bundle, tmp_path / "tree")
+        assert not (tmp_path / "tree").exists()
 
 
 @pytest.mark.parametrize("outcome", ["no-diff", "install-failure", "copy-cancel"])
@@ -1407,6 +1429,91 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     assert [post.payload["event"] for post in posts] == ["APPROVE"]
 
 
+@pytest.mark.parametrize("outcome", ["complete", "install-failure", "caller-change"])
+async def test_bundle_review_reads_one_materialized_tree_unchanged_and_unwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy, outcome: str,
+) -> None:
+    """A bundle input is reviewed in the one tree the public materializer wrote.
+
+    The journey above copies an operator checkout. Here no head-tree file exists under
+    private storage, and neither the tree nor its parent gains, loses or changes an
+    entry, even when output installation fails; the parent's ctime catches an entry
+    created and removed beside the tree. A change the caller makes during review is
+    found again before sealing, as a captured source's is.
+    """
+    from daydream.git_ops.immutable import materialize_immutable_source
+
+    original = tmp_path / "original"
+    seed_feature_branch(original, base={"api.py": "VALUE = 1\n", ".gitignore": "*.log\n"},
+                        feature={"api.py": "VALUE = 0\n", "bin/run.sh": "#!/bin/sh\n"})
+    os.chmod(original / "bin/run.sh", 0o755)
+    (original / "link").symlink_to("api.py")
+    git(original, "add", "bin/run.sh", "link")
+    commit(original, "capture a mode and a symlink")
+    bundle = tmp_path / "captured.bundle"
+    identity = synthetic_bundle_input(original, bundle)
+    parent = tmp_path / "sealed"
+    parent.mkdir()
+    source = parent / "tree"
+    materialize_immutable_source(identity, bundle, source)
+    assert sorted(path.relative_to(source).as_posix() for path in source.rglob("*")) == [
+        ".git", ".gitignore", "api.py", "bin", "bin/run.sh", "link"]
+    assert os.readlink(source / "link") == "api.py" and os.access(source / "bin/run.sh", os.X_OK)
+
+    def record() -> dict[str, tuple[int, ...]]:
+        return {path.relative_to(parent).as_posix(): (info.st_ino, info.st_size, info.st_mode, info.st_mtime_ns,
+                                                      info.st_ctime_ns)
+                for path in (parent, *parent.rglob("*")) for info in (path.lstat(),)}
+
+    before = record()
+    dispatched: list[Path] = []
+
+    async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, None]:
+        dispatched.append(cwd)
+        assert not [path for path in operator_policy.private_base.rglob("*") if path.name in {"api.py", "run.sh"}]
+        binding = kwargs["host_tools"]
+        async with binding.session():
+            value = {"targets": [{"target_id": part["target_id"], "status": "reviewed", "reason": "Inspected.",
+                                  "evidence_refs": [{"source_id": part["source_options"][0]["source_id"],
+                                                     "source_range": None, "basis": "supplied_diff"}]}
+                                 for part in _looked_up(binding)], "claims": []}
+            binding.admit("submit", "structured_output", value, terminal=True)
+            accepted = binding.submit("submit", value)
+            binding.native_settled = True
+        if outcome == "caller-change":
+            (source / "api.py").write_bytes(b"VALUE = 2\n")
+        return accepted, None, None
+
+    async def readiness(self: PiBackend) -> None:
+        return None
+
+    monkeypatch.setattr(PiBackend, "validate_hosted_policy", readiness)
+    monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=execute, console=agent.console))
+    real_link = os.link
+
+    def fail_install(target: Any, destination: Any, **kwargs: Any) -> None:
+        if outcome == "install-failure" and _matches_link_destination(
+                destination, operator_policy.output_dir / "findings.json", dir_fd=kwargs.get("dst_dir_fd")):
+            raise FileExistsError("competing output")
+        real_link(target, destination, **kwargs)
+
+    monkeypatch.setattr(os, "link", fail_install)
+    request = CommittedReviewRequest(source, identity.to_dict()["materialization"]["requested_base_sha"],
+                                     hosted_policy=operator_policy, immutable_input=identity, immutable_bundle=bundle)
+    result = await run_committed_review(request)
+    value = result.to_dict()
+    assert dispatched and set(dispatched) == {source}
+    assert result.output_installed == (outcome != "install-failure")
+    if outcome == "caller-change":
+        assert value["terminal_result"]["analysis_state"] == "incomplete"
+        assert value["execution"][-1]["assignment"] == "source_integrity"
+    else:
+        assert value["terminal_result"]["analysis_state"] == "complete"
+        assert record() == before
+    # Teardown removes only the private Git storage.
+    assert list((operator_policy.private_base / "immutable-inputs").iterdir()) == []
+
+
 async def test_immutable_envelope_rejects_unsupported_or_inconsistent_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy,
 ) -> None:
@@ -1428,8 +1535,13 @@ async def test_immutable_invalid_evidence_fails_before_native_work(
     shared = tmp_path / "source"
     seed_feature_branch(shared, base={"api.py": "VALUE = 1\n", "kept.py": "KEPT = 1\n"},
                         feature={"api.py": "VALUE = 0\n"})
+    (shared / "link").symlink_to("api.py")
+    git(shared, "add", "link")
+    commit(shared, "capture a symlink")
     # Identity disagreement leaves the repository untouched; authority runs first, before any private storage.
-    for fault in ("authority", "head", "base", "tree", "review-key"):
+    # A bundle's materialized tree that no longer holds exactly the head tree is refused in place.
+    for fault in ("authority", "head", "base", "tree", "review-key", "in-place-byte", "in-place-mode",
+                  "in-place-symlink", "in-place-missing", "in-place-extra", "in-place-checkout"):
         await _immutable_evidence_case(tmp_path / fault, monkeypatch, operator_policy, fault, shared=shared)
     for fault in ("object-fifo", "object-hash", "raw-bytes", "symlink-parent", "base-source-size", "source-total-size",
                   "ref-symlink", "ref-packed-suffix", "ref-backslash", "ref-control"):
@@ -1556,6 +1668,29 @@ async def _immutable_evidence_case(
             (repo / ".git" / ref).unlink()
             (repo / ".git/packed-refs").write_text(f"{head} invalid {ref}\n")
         (repo / ".git/HEAD").write_text("ref: " + ref + "\n")
+    source, bundle = repo, None
+    if fault.startswith("in-place-"):
+        from daydream.git_ops.immutable import materialize_immutable_source
+
+        bundle = tmp_path / "captured.bundle"
+        git(repo, "bundle", "create", str(bundle), "--all")
+        value["materialization"]["bundle_sha256"] = hashlib.sha256(bundle.read_bytes()).hexdigest()
+        identity = ImmutableReviewInput.from_dict(value)
+        if fault != "in-place-checkout":
+            source = tmp_path / "tree"
+            materialize_immutable_source(identity, bundle, source)
+            kept = source / "kept.py"
+            if fault == "in-place-byte":
+                kept.write_bytes(b"KEPT = 2\n")
+            elif fault == "in-place-mode":
+                kept.chmod(0o755)
+            elif fault == "in-place-symlink":
+                (source / "link").unlink()
+                (source / "link").symlink_to("kept.py")
+            elif fault == "in-place-missing":
+                kept.unlink()
+            else:
+                (source / "extra.py").write_text("EXTRA = 1\n")
     policy = replace(operator_policy, trusted_prepared_source=fault != "authority")
     attempts = []
 
@@ -1574,14 +1709,16 @@ async def _immutable_evidence_case(
         "symlink-parent": "checkout differs from captured raw", "base-source-size": "files exceed the supported size",
         "source-total-size": "files exceed the supported size",
         "authority": "trusted_prepared_source=True",
-    }[fault]
+        "in-place-checkout": "must be the tree materialize_immutable_source writes",
+    }.get(fault, "differs from the captured head tree")
     bounded_source = fault in {"base-source-size", "source-total-size"}
     if bounded_source:
         tracemalloc.start()
     try:
         with pytest.raises((ValueError, git_ops.GitError), match=expected):
             await run_committed_review(CommittedReviewRequest(
-                repo, value["materialization"]["requested_base_sha"], hosted_policy=policy, immutable_input=identity))
+                source, value["materialization"]["requested_base_sha"], hosted_policy=policy,
+                immutable_input=identity, immutable_bundle=bundle))
     finally:
         if bounded_source:
             _, peak = tracemalloc.get_traced_memory()
@@ -1596,58 +1733,52 @@ async def _immutable_evidence_case(
 async def test_immutable_synthetic_bundle_rejects_attested_extra_commit_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy,
 ) -> None:
-    """A correctly hashed two-ref bundle can still expose unintended history.
+    """A correctly hashed two-ref bundle can still expose unintended history; a wrong digest names no bytes.
 
-    Compiler bundle tests own compilation; this enters the runtime request with
-    recomputed evidence so digest/ref guards cannot mask its topology obligation.
+    Compiler bundle tests own compilation; this enters the materializer and the runtime request
+    with recomputed evidence so digest/ref guards cannot mask its topology obligation.
     """
     from daydream.git_ops import process
-    from daydream.git_ops.immutable import immutable_review_diff
+    from daydream.git_ops.immutable import materialize_immutable_source
+
     original = tmp_path / "original"
     seed_feature_branch(original, base={"api.py": "VALUE = 1\n"}, feature={"api.py": "VALUE = 0\n"})
-    original_input = immutable_input_for(original).to_dict()
     bundle = tmp_path / "captured.bundle"
-    # Exactly two synthetic commits carrying the original base and head trees.
-    synthetic_base = git(original, "commit-tree", git(original, "rev-parse", "main^{tree}"), "-m", "snapshot base")
-    synthetic_head = git(original, "commit-tree", git(original, "rev-parse", "HEAD^{tree}"), "-p", synthetic_base,
-                         "-m", "snapshot head")
-    git(original, "update-ref", "refs/heads/base", synthetic_base)
-    git(original, "update-ref", "refs/heads/head", synthetic_head)
-    git(original, "bundle", "create", str(bundle), "refs/heads/base", "refs/heads/head")
-    source = tmp_path / "synthetic"
-    git(tmp_path, "clone", "--no-local", str(bundle), str(source))
-    base = git(source, "rev-parse", "origin/base")
-    head = git(source, "rev-parse", "origin/head")
-    git(source, "checkout", "--detach", head)
-    git(source, "config", "user.name", "Fixture compiler")
-    git(source, "config", "user.email", "compiler@example.invalid")
-    extra = git(source, "commit-tree", git(source, "rev-parse", base + "^{tree}"), "-m", "unexpected original history")
-    pack = process._run_git(
-        source, ["pack-objects", "--stdout", "--revs"], input_text=f"{base}\n{head}\n{extra}\n",
-        capture_bytes=True, error_context="fixture bundle packing failed",
-    ).stdout
-    header, _, _ = bundle.read_bytes().partition(b"\n\n")
-    bundle.write_bytes(header + b"\n\n" + pack)
-    local = {
-        "kind": "synthetic", "head_sha": head, "requested_base_sha": base, "comparison_base_sha": base,
-        "head_tree_sha": git(source, "rev-parse", head + "^{tree}"),
-        "comparison_tree_sha": git(source, "rev-parse", base + "^{tree}"),
-        "review_diff_key": hashlib.sha256(immutable_review_diff(source, base, head).encode()).hexdigest(),
-        "bundle_sha256": hashlib.sha256(bundle.read_bytes()).hexdigest(),
-    }
-    identity = ImmutableReviewInput.from_dict({**original_input, "materialization": local})
-    policy = operator_policy
+    value = synthetic_bundle_input(original, bundle).to_dict()
     attempts = []
 
     async def native_work(self: PiBackend) -> None:
         attempts.append("native")
-        raise AssertionError("invalid synthetic topology reached native work")
+        raise AssertionError("invalid synthetic evidence reached native work")
 
     monkeypatch.setattr(PiBackend, "validate_hosted_policy", native_work)
-    with pytest.raises(git_ops.GitError, match="contains extra commit history"):
-        await run_committed_review(CommittedReviewRequest(
-            source, base, hosted_policy=policy, immutable_input=identity, immutable_bundle=bundle))
-    assert attempts == [] and not policy.output_dir.exists()
+    for fault, refusal in (("extra-history", "contains extra commit history"), ("digest", "bundle digest mismatch")):
+        local = value["materialization"]
+        if fault == "extra-history":
+            # Exactly two advertised synthetic commits, packed beside one unattested root commit.
+            extra = git(original, "commit-tree", local["comparison_tree_sha"],
+                        "-m", "unexpected original history")
+            pack = process._run_git(
+                original, ["pack-objects", "--stdout", "--revs"],
+                input_text=f"{local['comparison_base_sha']}\n{local['head_sha']}\n{extra}\n",
+                capture_bytes=True, error_context="fixture bundle packing failed",
+            ).stdout
+            header, _, _ = bundle.read_bytes().partition(b"\n\n")
+            bundle.write_bytes(header + b"\n\n" + pack)
+            local["bundle_sha256"] = hashlib.sha256(bundle.read_bytes()).hexdigest()
+        else:
+            local["bundle_sha256"] = "0" * 64
+        identity = ImmutableReviewInput.from_dict(value)
+        tree = tmp_path / fault
+        with pytest.raises(git_ops.GitError, match=refusal):
+            materialize_immutable_source(identity, bundle, tree)
+        assert not tree.exists()
+        tree.mkdir()
+        with pytest.raises(git_ops.GitError, match=refusal):
+            await run_committed_review(CommittedReviewRequest(
+                tree, local["requested_base_sha"], hosted_policy=operator_policy, immutable_input=identity,
+                immutable_bundle=bundle))
+        assert attempts == [] and not operator_policy.output_dir.exists()
 
 
 _LONG_LINE = "VALUE = '" + "é" * 30000 + "'\n"  # One UTF-8 line over 50 KB: unreadable by stock Pi read.

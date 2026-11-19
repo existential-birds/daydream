@@ -242,6 +242,10 @@ def _restore_manifest_noclobber(
         return tuple(conflicts)
 
 
+def _stage_parent(source: SourceOwnership) -> Path:
+    return source.path.parent if source.stage_root is None else source.stage_root
+
+
 def _source_stage_path(source: SourceOwnership, transaction_id: str, purpose: str) -> Path:
     if (
         not transaction_id
@@ -249,14 +253,14 @@ def _source_stage_path(source: SourceOwnership, transaction_id: str, purpose: st
         or purpose not in ("publish", "restore")
     ):
         raise ArtifactVisibilityError("artifact source-stage identity is invalid")
-    return source.path.parent / f".{source.path.name}.daydream-{purpose}-{transaction_id}"
+    return _stage_parent(source) / f".{source.path.name}.daydream-{purpose}-{transaction_id}"
 
 
 def _source_stage_owner(
     source: SourceOwnership, transaction_id: str, purpose: str, workspace_key: str,
 ) -> dict[str, object]:
     """Derive the owner attestation a source stage carries, re-stat'ing its parent."""
-    parent = source.path.parent.lstat()
+    parent = _stage_parent(source).lstat()
     return {
         "schema_version": _SCHEMA_VERSION,
         "workspace_key": workspace_key,
@@ -269,13 +273,15 @@ def _source_stage_owner(
 
 def _create_source_stage(source: SourceOwnership, transaction_id: str, purpose: str, *, workspace_key: str) -> Path:
     stage = _source_stage_path(source, transaction_id, purpose)
+    if source.stage_root is not None:
+        filesystem._create_private_directory(source.stage_root)
     if stage.exists() or stage.is_symlink():
         raise ArtifactVisibilityError("artifact source-stage collision")
     stage.mkdir(mode=0o700)
     filesystem._atomic_json(
         stage / "stage-owner.json", _source_stage_owner(source, transaction_id, purpose, workspace_key)
     )
-    _fsync_directory(source.path.parent)
+    _fsync_directory(_stage_parent(source))
     return stage
 
 
@@ -285,7 +291,7 @@ def _retire_source_stage(source: SourceOwnership, transaction_id: str, purpose: 
     expected = _source_stage_owner(source, transaction_id, purpose, workspace_key)
     if filesystem._load_json(stage / "stage-owner.json") != expected:
         raise ArtifactVisibilityError("artifact source-stage ownership is malformed")
-    filesystem._remove_owned_tree(stage, source.path.parent)
+    filesystem._remove_owned_tree(stage, _stage_parent(source))
 
 
 def _reset_source_stage(source: SourceOwnership, transaction_id: str, purpose: str, *, workspace_key: str) -> None:
@@ -303,7 +309,7 @@ def _reset_source_stage(source: SourceOwnership, transaction_id: str, purpose: s
         return
     if filesystem._load_json(owner) != _source_stage_owner(source, transaction_id, purpose, workspace_key):
         return
-    filesystem._remove_owned_tree(stage, source.path.parent)
+    filesystem._remove_owned_tree(stage, _stage_parent(source))
 
 
 def _overlay_destination(
