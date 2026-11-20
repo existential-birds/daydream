@@ -44,10 +44,9 @@ The pre-push hook checks signatures and runs this gate. Follow
 [CONTRIBUTING.md's setup and focused checks](CONTRIBUTING.md#everyday-commands-and-the-required-gate).
 Follow [the coverage ratchet](docs/coverage.md) without lowering it.
 
-## Local PR reviews
+## PR reviews
 
-Run Daydream reviews during development with
-[the command in CONTRIBUTING.md](CONTRIBUTING.md#shared-agent-skill-workflow).
+Daydream Cloud reviews every PR. Handle its findings with [the review loop in CONTRIBUTING.md](CONTRIBUTING.md#shared-agent-skill-workflow).
 
 ## Testing standard (mandatory)
 
