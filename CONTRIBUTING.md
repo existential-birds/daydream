@@ -228,18 +228,14 @@ Use this sequence for a GitHub issue or implementation spec:
    enabled. Open a PR following the [PR requirements](#pull-request-requirements),
    then complete the review loop below before reporting merge readiness.
 
-Daydream Cloud reviews each PR and posts its findings as `daydream-review[bot]`
-(the "Daydream Code Review" check); do not run a local Daydream review. Wait for
-that review to finish, then use
-[fetch-pr-feedback](.agents/skills/fetch-pr-feedback/SKILL.md) with
-`--include-author --include-self` to collect all reviewer and bot feedback,
-including `daydream-review[bot]` and `greptile-apps`, and
+Daydream Cloud reviews each PR as `daydream-review[bot]`. Once it finishes, collect
+all reviewer and bot feedback with
+[fetch-pr-feedback](.agents/skills/fetch-pr-feedback/SKILL.md)
+(`--include-author --include-self`), then verify, fix and reply with
 [receive-feedback](.agents/skills/receive-feedback/SKILL.md) and
-[respond-pr-feedback](.agents/skills/respond-pr-feedback/SKILL.md) to verify
-findings, address valid issues, and reply. Before reporting merge readiness,
-confirm the Daydream Cloud review completed without failure, every in-scope
-finding is settled, and required CI covers the latest PR HEAD. The workflow stops
-before merging.
+[respond-pr-feedback](.agents/skills/respond-pr-feedback/SKILL.md). Report merge
+readiness only when that review succeeded, its findings are settled, and required
+CI covers the latest PR HEAD. The workflow stops before merging.
 
 For a curated simplification, use
 [publish-improve-finding](.agents/skills/publish-improve-finding/SKILL.md) to capture
