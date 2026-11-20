@@ -59,8 +59,9 @@ When no code changes are needed, hand verified dispositions directly to an
 authorized response workflow; do not invent a commit or require an empty push.
 After publication/replies, refresh the selected PR's feedback and checks. Evaluate
 new or changed findings with the same scope, including Daydream Cloud's and other
-bots' results. Continue the authorized loop until required checks pass and every
-in-scope finding is settled or an explicit blocker is reported. Preserve evidence
+bots' results. Continue the authorized loop until required checks pass, the
+Daydream Cloud review has completed without failure, and every in-scope finding
+is settled or an explicit blocker is reported. Preserve evidence
 for each reviewed head and avoid duplicate replies.
 
 ## Example
