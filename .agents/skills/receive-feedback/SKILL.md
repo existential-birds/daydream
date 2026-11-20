@@ -58,11 +58,11 @@ After the push succeeds and remote publication is confirmed, report the publishe
 When no code changes are needed, hand verified dispositions directly to an
 authorized response workflow; do not invent a commit or require an empty push.
 After publication/replies, refresh the selected PR's feedback and checks. Evaluate
-new or changed findings with the same scope, including other bots' results. Re-run
-the requested Daydream review on the updated PR head when fixes changed the code.
-Continue the authorized loop until required checks pass, the review covers the
-current head, and every in-scope finding is settled or an explicit blocker is
-reported. Preserve evidence for each reviewed head and avoid duplicate replies.
+new or changed findings with the same scope, including Daydream Cloud's and other
+bots' results. Continue the authorized loop until required checks pass, the
+Daydream Cloud review has completed without failure, and every in-scope finding
+is settled or an explicit blocker is reported. Preserve evidence
+for each reviewed head and avoid duplicate replies.
 
 ## Example
 

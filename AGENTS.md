@@ -44,11 +44,6 @@ The pre-push hook checks signatures and runs this gate. Follow
 [CONTRIBUTING.md's setup and focused checks](CONTRIBUTING.md#everyday-commands-and-the-required-gate).
 Follow [the coverage ratchet](docs/coverage.md) without lowering it.
 
-## Local PR reviews
-
-Run Daydream reviews during development with
-[the command in CONTRIBUTING.md](CONTRIBUTING.md#shared-agent-skill-workflow).
-
 ## Testing standard (mandatory)
 
 There is one suite and one gate. `make check`, as the pre-push hook runs it, has a

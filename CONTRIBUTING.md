@@ -19,8 +19,7 @@ Verify these prerequisites before running the local gate:
 - **Claude Code CLI** ([claude.ai/code](https://claude.ai/code)) — the default review backend for running Daydream; the gate does not need it
 
 `make install` only provisions Python dependencies. Backend CLIs (`gh`, Pi, Codex,
-Osprey) are feature-specific; the gate needs none of them. The Pi CLI is needed only
-to run the Daydream review in the [review loop](#shared-agent-skill-workflow).
+Osprey) are feature-specific; the gate needs none of them.
 
 ## Setup
 
@@ -229,29 +228,14 @@ Use this sequence for a GitHub issue or implementation spec:
    enabled. Open a PR following the [PR requirements](#pull-request-requirements),
    then complete the review loop below before reporting merge readiness.
 
-After opening the PR, run the available Daydream reviewer from its checkout:
-
-```bash
-daydream . --backend pi --comment --non-interactive --capture-data
-```
-
-Leave `--model` unset so the configured backend default applies, and omit `--yes`,
-which review modes reject. `--comment` publishes to the PR, so outside this loop
-run it only when a review is requested.
-
-Verify the selected PR's base/head first. If the default comparison base differs
-from its verified base, append `--base <verified ref/SHA>`; the
-[prepare-implement skill](.agents/skills/prepare-implement/SKILL.md) explains how
-to resolve and record the exact review target.
-
-Then use [fetch-pr-feedback](.agents/skills/fetch-pr-feedback/SKILL.md),
-[receive-feedback](.agents/skills/receive-feedback/SKILL.md), and
-[respond-pr-feedback](.agents/skills/respond-pr-feedback/SKILL.md) to collect all
-reviewer and bot feedback, verify findings, address valid issues, and reply.
-Include other bots such as `greptile-apps`; author/self comments can contain
-Daydream findings, so the goal uses `--include-author --include-self`. Follow the
-linked skills for the review loop and confirm review and required CI cover the
-latest PR HEAD before reporting merge readiness. The workflow stops before merging.
+Daydream Cloud reviews each PR as `daydream-review[bot]`. Once it finishes, collect
+all reviewer and bot feedback with
+[fetch-pr-feedback](.agents/skills/fetch-pr-feedback/SKILL.md)
+(`--include-author --include-self`), then verify, fix and reply with
+[receive-feedback](.agents/skills/receive-feedback/SKILL.md) and
+[respond-pr-feedback](.agents/skills/respond-pr-feedback/SKILL.md). Report merge
+readiness only when that review succeeded, its findings are settled, and required
+CI covers the latest PR HEAD. The workflow stops before merging.
 
 For a curated simplification, use
 [publish-improve-finding](.agents/skills/publish-improve-finding/SKILL.md) to capture

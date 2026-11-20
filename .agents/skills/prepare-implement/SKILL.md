@@ -81,30 +81,22 @@ stands alone in the new session:
   open a ready-for-review PR after the applicable checks pass.
 - **PR review loop:** after opening the PR, verify its selected base/head
   repositories, refs, and SHAs, and use the implementation checkout bound to that
-  head. Run the
-  [Daydream review command](../../../CONTRIBUTING.md#shared-agent-skill-workflow)
-  by default.
-  Confirm its comparison base resolves to the verified PR base SHA; if the
-  default is wrong or stale, including for a non-default PR target,
-  append only `--base <verified ref/SHA>`. Fetch the required base if needed
-  without disturbing user work, and verify any chosen ref resolves to that exact
-  PR base SHA. Record the actual command, selected base/head SHAs, resolved review
-  comparison/merge-base, and command result. Refresh moved PR refs before review.
-  Use
+  head. Daydream Cloud reviews the PR as `daydream-review[bot]`
+  ([review loop](../../../CONTRIBUTING.md#shared-agent-skill-workflow)). Wait
+  for its review to finish, then use
   `fetch-pr-feedback` with `--include-author --include-self`, then
   `receive-feedback`, then `respond-pr-feedback` to fetch, evaluate, address, and
-  reply to the results. Fetch posted evidence even if Daydream partially fails;
-  retain the failure as a blocker until a successful review covers the current
-  HEAD. Include feedback from every reviewer and bot, including `greptile-apps`,
+  reply to the results. Record the reviewed commit and outcome; a failed review
+  remains a blocker. Include feedback from every reviewer and bot, including
+  `daydream-review[bot]` and `greptile-apps`,
   across inline threads, submitted reviews, and general PR comments. Distinguish
   reviewer findings from self-authored agent replies and PR descriptions rather
   than treating every fetched message as a new finding. Verify findings
   against the current code before accepting or rejecting them. Fix confirmed
   issues, rerun affected checks, commit and push with hooks, then post
   evidence-based replies and resolve eligible threads according to those skills.
-  Rerun Daydream after changes so its review covers the latest PR HEAD, refresh
-  other reviewer feedback and required CI, and continue until all actionable
-  feedback is addressed and the latest HEAD satisfies the completion criteria.
+  After changes, refresh Daydream Cloud and other reviewer feedback and required
+  CI, and continue until all actionable feedback is addressed and the latest HEAD satisfies the completion criteria.
   Recheck known queued or in-progress reviewer/bot runs even when they are not
   required CI; an empty fetch does not complete a pending review. Wait for those
   known runs or report an external blocker, without waiting for bots that are
@@ -116,7 +108,7 @@ stands alone in the new session:
   reviewer replies, and eligible thread resolutions. Continue those actions
   without redundant approval requests within the goal's scope. Merge-ready means
   all acceptance criteria completed, applicable local checks and required CI
-  passing on the latest HEAD, independent and Daydream reviews completed with
+  passing on the latest HEAD, independent and Daydream Cloud reviews completed with
   verified findings addressed, a pushed branch and open ready-for-review PR,
   and a clean working tree apart from preserved unrelated work. Report the PR
   URL, final HEAD, checks, and feedback dispositions. Stop before merging; if an
