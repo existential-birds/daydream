@@ -91,4 +91,6 @@ def retain_public_runs(source: SourceOwnership, state_root: Path, *, current: st
     if not stat.S_ISDIR(metadata.st_mode):
         return 1
     source.validate()
-    return _bound(runs, current=current, held=_held_sessions(state_root), retained=retained)[1]
+    # A run that published nothing, such as a rolled-back one, takes no slot from earlier runs.
+    published = (runs / current).exists() or (runs / current).is_symlink()
+    return _bound(runs, current=current, held=_held_sessions(state_root), retained=retained + (not published))[1]

@@ -781,6 +781,11 @@ async def test_closing_session_bounds_finished_runs_and_drops_finalized_live_cop
     assert (public / "latest" / RUN_DOCUMENT_NAME).is_file() and (public / "newer/evidence").read_bytes() == b"newer"
     assert (public / "public-unsafe/fifo").exists()
 
+    # A rolled-back run publishes nothing, so it takes no slot: the newest earlier public run stays.
+    shutil.rmtree(public / "public-unsafe")
+    await finish("rolled-back", freeze=False, retained_runs=1)
+    assert sorted(path.name for path in public.iterdir()) == ["held", "latest"]
+
 
 async def test_bound_routing_propagates_to_tasks_and_rejects_wrong_or_aliased_repo(tmp_path: Path, source: Path,
 ) -> None:

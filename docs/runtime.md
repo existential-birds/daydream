@@ -1249,8 +1249,9 @@ transaction under `transactions/` or `unreconciled/` keeps every byte and does n
 toward the bound. A session whose reconciliation failed applies no retention, and a
 checkout without public run evidence, such as a hosted review's, is left alone. Removal
 never follows links and refuses an unsafe tree whole, leaving it in place with a warning;
-retention never fails a run. Pruned public runs remain in `~/.daydream/archive/` unless the
-run used `--no-archive`. Retention touches nothing
+retention never fails a run. A pruned public run has another copy only if its run was
+archived to `~/.daydream/archive/`: archiving is on unless `--no-archive`, and a failed
+archive is reported without stopping publication. Retention touches nothing
 outside the two `runs/` directories: not the dataset store, archives or other workspaces.
 
 Evidence documents are written to disk as the run proceeds, never held whole in RAM.

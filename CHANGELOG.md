@@ -37,8 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the newest ten runs of its workspace in each place, itself included, deletes the older ones and
   drops each kept private run's `live/` copy once its `frozen/` copy exists. Set a different
   positive count with `retained_runs` in `[tool.daydream]` or `.daydream.toml`. Runs that recovery
-  still holds are kept whole, and pruned public runs stay in `~/.daydream/archive/` unless the run
-  used `--no-archive`. See [artifacts and recovery](docs/runtime.md#artifacts-and-recovery).
+  still holds are kept whole. A pruned public run keeps a copy in `~/.daydream/archive/` only if its
+  run was archived (the default, unless `--no-archive` or archiving failed). See
+  [artifacts and recovery](docs/runtime.md#artifacts-and-recovery).
 - **Breaking (0.y.z):** A hosted immutable review with a bundle (`bundle_sha256` set) reviews
   the one tree the new `daydream.git_ops.immutable.materialize_immutable_source(identity, bundle,
   destination, *, environment=None)` writes, in place, instead of validating a Git checkout and
