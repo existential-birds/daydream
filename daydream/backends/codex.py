@@ -85,7 +85,7 @@ _BACKTRACE_FRAME = re.compile(r"\d+: |at ")
 # Only public error items activate this contract; absent markers cannot
 # justify invented tool events or invocation-wide coverage claims.
 # External contract: this literal identifies Codex CLI release/wire mode.
-_TRANSPORT_COVERAGE_CONTRACT = "codex-cli-0.153.4-json-code-mode"
+_TRANSPORT_COVERAGE_CONTRACT = "codex-cli-0.171.0-json-code-mode"
 _HOST_SERVER = "daydream"
 # The child reads this attempt's callback secret from its environment, never from argv or a prompt.
 _HOST_TOKEN_ENV = "DAYDREAM_HOST_TOOLS_TOKEN"
@@ -809,8 +809,6 @@ class CodexBackend:
             schema_path = write_temp_json_schema(output_schema, prefix="daydream-schema-")
 
         thread_id: str | None = None
-        provider_name: str | None = None
-        model_name = self.model
 
         # Pair idless starts/completions by FIFO; misses get
         # observable orphan ids. Accumulate item.updated text because completion
@@ -1047,7 +1045,7 @@ class CodexBackend:
             if lifecycle is not None:
                 lifecycle.request_prepared()
             yield RequestEvent(
-                prompt=prompt, system_prompt=review_instructions, model_name=model_name, output_schema=output_schema,
+                prompt=prompt, system_prompt=review_instructions, model_name=self.model, output_schema=output_schema,
                 reasoning_effort=effort,
                 session_id=codex_resume_thread,
                 config=CodexRequestConfig(
@@ -1322,21 +1320,18 @@ class CodexBackend:
                     if not isinstance(usage, dict):
                         malformed_shapes["usage_not_object"] += 1
                         usage = {}
-                    native_model = event.get("model")
-                    native_provider = event.get("provider")
-                    if isinstance(native_model, str) and native_model:
-                        model_name = native_model
-                    if isinstance(native_provider, str) and native_provider:
-                        provider_name = native_provider
-                    # Codex has no message id or cost: use an empty id and estimate cost
-                    # from user-overridable prices (None for unknown models). Require both
-                    # token counts; reasoning tokens are an output subset, never additive.
+                    # turn.completed carries only usage: no message id, model, provider, finish reason or
+                    # cost. Use an empty id and the configured model, and estimate cost from user-overridable
+                    # prices (None for unknown models). Require both token counts; reasoning tokens are an output
+                    # subset, never additive. cache_write_input_tokens is not read: Codex does not say whether it
+                    # is part of input_tokens, every observed build reports 0, and input it writes to the cache
+                    # is already priced as uncached input.
                     cached_tokens = usage.get("cached_input_tokens")
                     reasoning_tokens = usage.get("reasoning_output_tokens")
                     in_tok = usage.get("input_tokens")
                     out_tok = usage.get("output_tokens")
                     synth_cost = compute_cost_from_totals(
-                        model_name,
+                        self.model,
                         total_input_tokens=in_tok or 0,
                         cached_input_tokens=cached_tokens or 0,
                         output_tokens=out_tok or 0,
@@ -1350,8 +1345,7 @@ class CodexBackend:
                             cached_tokens=cached_tokens,
                             cost_usd=synth_cost,
                             reasoning_tokens=reasoning_tokens,
-                            model_name=model_name,
-                            provider_name=provider_name,
+                            model_name=self.model,
                             usage_scope="invocation",
                             measurement_source="turn_end",
                         )
@@ -1361,8 +1355,7 @@ class CodexBackend:
                         output_tokens=out_tok,
                         cached_tokens=cached_tokens,
                         reasoning_tokens=reasoning_tokens,
-                        model_name=model_name,
-                        provider_name=provider_name,
+                        model_name=self.model,
                         measurement_source="turn_end",
                         cost_source="estimated",
                     )
@@ -1376,15 +1369,12 @@ class CodexBackend:
                             data={"thread_id": thread_id},
                         )
 
-                    # No observed turn.completed carries a result (0.139.0, 0.163.0 and 0.169.0, with or without
-                    # --output-schema); the host resolves schema output from the final assistant text.
+                    # With or without --output-schema, the host resolves schema output from the final assistant text.
                     _pending_result = ResultEvent(
                         structured_output=None,
                         continuation=continuation_token,
-                        model_name=model_name,
-                        provider_name=provider_name,
+                        model_name=self.model,
                         session_id=thread_id,
-                        finish_reason=event.get("finish_reason"),
                     )
 
                 elif event_type == "turn.failed":

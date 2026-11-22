@@ -2,7 +2,7 @@
 #
 # Capture (or refresh) the REAL codex CLI golden fixture.
 #
-# Runs `codex exec --experimental-json --sandbox read-only` against the tiny
+# Runs a read-only `codex exec --experimental-json` turn against the tiny
 # in-repo sample repo and writes the JSONL stdout to
 # tests/fixtures/codex_jsonl/real/golden.jsonl.
 #
@@ -14,7 +14,7 @@
 #
 # REQUIREMENTS:
 #   - `codex` on $PATH (codex --version) with valid auth (ChatGPT or API).
-#   - The default model must be one the authenticated account can use.
+#   - Daydream's default Codex model must be one the authenticated account can use.
 #
 # The committed golden is REAL output, not synthesized. Do not hand-edit it;
 # re-run this script instead.
@@ -38,8 +38,11 @@ echo "→ prompt: read README.md then hello.py, then describe both"
 # Read prompt from stdin, run read-only so nothing mutates the sample repo.
 # --cd pins the codex working directory to SAMPLE_REPO so the golden is always
 # captured against the in-repo sample repo, never the caller's cwd.
+# Daydream's default model; --skip-git-repo-check is harmless here and keeps the script runnable on a copy.
+MODEL="$(uv run --project "$REPO_ROOT" python -c 'from daydream.config import DEFAULT_CODEX_MODEL; print(DEFAULT_CODEX_MODEL)')"
 echo "Read README.md, then read hello.py, then describe both files in one sentence each." \
-  | codex exec --experimental-json --sandbox read-only --cd "$SAMPLE_REPO" > "$GOLDEN_OUT"
+  | codex exec --experimental-json --model "$MODEL" --sandbox read-only --cd "$SAMPLE_REPO" \
+    --ephemeral --skip-git-repo-check > "$GOLDEN_OUT"
 
 LINES=$(wc -l < "$GOLDEN_OUT" | tr -d ' ')
 echo "✓ captured $LINES JSONL lines"

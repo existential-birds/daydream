@@ -1065,15 +1065,10 @@ refused before any process or server starts, and the disposable read-only checko
   instructions exceed the platform's single-argument size and the work stays unfinished.
 - Secret: a per-attempt token travels only in the child environment, never in argv, a
   prompt or request evidence, and it authorizes nothing once the attempt ends. The
-  variable is blanked inside model shell commands. Codex 0.139.0 and 0.153.4 also write
-  the session environment to a shell-snapshot file under the Codex home that a model
-  shell command can read, so on those versions the model can obtain the secret, and it
-  can then reach the provider as tool output; 0.163.0 and 0.169.0 do not expose it.
-  Codex removes the snapshot at exit and keeps no session files for these invocations
-  (see Session history). The impact is bounded: the token serves one attempt's three
-  host tools, every call is charged and validated by the same binding, and the sandboxed
-  shell could not open a loopback connection on those two versions. A process of the same
-  user can also read the Codex process environment while it runs.
+  variable is blanked inside model shell commands, and the supported builds keep it out of
+  the shell-snapshot file Codex writes under its home. Codex removes the snapshot at exit
+  and keeps no session files for these invocations (see Session history). A process of the same user
+  can also read the Codex process environment while it runs.
 - Session history: every committed-review invocation is non-persisted, so the command
   passes `--ephemeral` and Codex writes no session rollout or thread rows for it. Its logs
   and state databases, `installation_id` and shell snapshots remain its own.
@@ -1086,10 +1081,9 @@ refused before any process or server starts, and the disposable read-only checko
   first turn starts, else `native_readiness`. Codex exposes no view of the schema it
   registered, so there is nothing to compare before model work.
 - Schemas: Codex removes `maxLength`, `minLength`, `pattern`, `minimum`, `maximum`,
-  `maxItems` and `uniqueItems` from the schema it shows the model; 0.139.0 also removes
-  `minItems`, which the later versions keep. It passes object arguments through without
-  validating them, so the host enforces the full bound schema on every such call and
-  explains each rejection. Codex itself rejects non-object arguments (see Failure) and
+  `maxItems` and `uniqueItems` from the schema it shows the model. It passes object
+  arguments through without validating them, so the host enforces the full bound schema
+  on every such call and explains each rejection. Codex itself rejects non-object arguments (see Failure) and
   answers unparseable ones without reporting a tool call.
 - Accounting: Codex has no hook before a tool runs. A host call is charged by the MCP
   handler under a host-assigned identity and served synchronously, so it can be denied
@@ -1127,11 +1121,11 @@ refused before any process or server starts, and the disposable read-only checko
   that limit's reason is then sealed.
 - Not offered: resuming a native conversation with host tools or a capacity preflight.
 
-Exercised offline with a scripted local provider and no login, on Linux, against Codex
-CLI 0.139.0, 0.153.4, 0.163.0 and 0.169.0. On 0.139.0 a tool result reaches the model as
-one JSON-encoded content array, so captured bytes are JSON-escaped there; later versions
-pass each block as its own text. A real provider and model, both authentication modes
-and macOS are not yet exercised.
+On each [supported build](extensions.md#invocation-scoped-host-tools), a real provider
+with a ChatGPT login on macOS exercised registration and approval, required-server
+startup, readiness, charging of host and Codex-owned calls, settlement and the shell
+snapshot. The other rules were exercised offline with a scripted local provider on Linux
+against 0.163.0 and 0.169.0. API-key authentication is not exercised.
 
 ## Replaced reviewer options
 

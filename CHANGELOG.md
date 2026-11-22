@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The Codex backend supports Codex CLI 0.163.0, 0.169.0 and 0.171.0, the newest release
+  ([#1942](https://github.com/existential-birds/daydream/issues/1942)). Codex 0.139.0 and
+  0.153.4 are no longer supported: a ChatGPT login refuses current models for them, and they let
+  a model shell command read the host-tool callback secret from Codex's shell snapshot. The
+  backend no longer reads `model`, `provider` or `finish_reason` from `turn.completed`, which no
+  supported build sends, so records keep the configured model with no provider or finish reason.
+  Usage and cost are unchanged; `cache_write_input_tokens` is not counted. See
+  [Codex host tools](docs/runtime.md#codex-host-tools).
 - Updated Claude Agent SDK to 0.2.181 and Traceloop SDK to 0.63.0, along with the
   runtime dependencies for Daydream's host-tool transport and configuration.
 - Finished runs no longer accumulate without bound under `~/.daydream/runtime`
