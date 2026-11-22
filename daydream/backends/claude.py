@@ -23,7 +23,7 @@ from anyio.streams.text import TextReceiveStream, TextSendStream
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookJSONOutput, HookMatcher
 from claude_agent_sdk._errors import CLIConnectionError, CLINotFoundError
 from claude_agent_sdk._internal._task_compat import spawn_detached
-from claude_agent_sdk._internal.query import Query
+from claude_agent_sdk._internal.query import _RUN_END_CEILING_ENV, Query, run_end_ceiling_ms
 from claude_agent_sdk._internal.transport import subprocess_cli as _sdk_subprocess
 from claude_agent_sdk._version import __version__ as _sdk_version
 from claude_agent_sdk.types import (
@@ -176,6 +176,8 @@ class _RunLocalSubprocessCLITransport(_sdk_subprocess.SubprocessCLITransport):
 
         prompt: AsyncIterable[dict[str, Any]] = _empty_prompt()
         super().__init__(prompt=prompt, options=options)
+        # The SDK checks the running CLI's init message using this flag.
+        self._version_checked = bool(environment.get("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK"))
 
     def _find_cli(self) -> str:
         bundled_cli = self._find_bundled_cli()
@@ -183,24 +185,23 @@ class _RunLocalSubprocessCLITransport(_sdk_subprocess.SubprocessCLITransport):
             return bundled_cli
 
         search_path = self._run_environment.get("PATH", "")
-        which_hit = shutil.which("claude", path=search_path)
-        if which_hit and (
-            platform.system() != "Windows" or self._is_windows_native_exe(which_hit)
-        ):
-            return which_hit
-        if platform.system() == "Windows":
-            exe = shutil.which("claude.exe", path=search_path)
-            if exe and self._is_windows_native_exe(exe):
-                return exe
+        windows = platform.system() == "Windows"
+        if windows:
+            # Search only absolute entries for the native executable.
+            for directory in map(Path, search_path.split(os.pathsep)):
+                exe = directory / "claude.exe"
+                if directory.is_absolute() and os.path.isfile(exe):
+                    return str(exe)
+        elif search_path and (cli := shutil.which("claude", path=search_path)):
+            return cli
 
-        home_raw = self._run_environment.get("HOME") or self._run_environment.get(
-            "USERPROFILE"
-        )
+        home_raw = self._run_environment.get("HOME") or self._run_environment.get("USERPROFILE")
+        locations = []
         if home_raw:
             home = Path(home_raw)
             locations = (
                 [home / ".local/bin/claude.exe"]
-                if platform.system() == "Windows"
+                if windows
                 else [
                     home / ".npm-global/bin/claude",
                     home / ".local/bin/claude",
@@ -209,15 +210,11 @@ class _RunLocalSubprocessCLITransport(_sdk_subprocess.SubprocessCLITransport):
                     home / ".claude/local/claude",
                 ]
             )
-            for path in locations:
-                if path.exists() and path.is_file():
-                    return str(path)
-        if platform.system() != "Windows":
-            for path in (Path("/usr/local/bin/claude"),):
-                if path.exists() and path.is_file():
-                    return str(path)
-        if which_hit is not None:
-            return which_hit
+        if not windows:
+            locations.append(Path("/usr/local/bin/claude"))
+        for path in locations:
+            if os.path.isfile(path):
+                return str(path)
         raise CLINotFoundError(
             "Claude Code not found in the run-owned execution environment"
         )
@@ -230,6 +227,9 @@ class _RunLocalSubprocessCLITransport(_sdk_subprocess.SubprocessCLITransport):
         }
         process_env.setdefault("CLAUDE_CODE_ENTRYPOINT", "sdk-py")
         process_env["CLAUDE_AGENT_SDK_VERSION"] = _sdk_version
+        session_state_env = _sdk_subprocess._SDK_READS_SESSION_STATE_ENV
+        if not any(key.upper() == session_state_env for key in process_env):
+            process_env[session_state_env] = "1"
 
         try:
             from opentelemetry import propagate
@@ -262,8 +262,6 @@ class _RunLocalSubprocessCLITransport(_sdk_subprocess.SubprocessCLITransport):
         if self._cli_path is None:
             self._cli_path = await anyio.to_thread.run_sync(self._find_cli)
         self._reject_windows_batch_cli(self._cli_path)
-        if not self._run_environment.get("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK"):
-            await self._check_claude_version()
 
         cmd = self._build_command()
         try:
@@ -300,47 +298,6 @@ class _RunLocalSubprocessCLITransport(_sdk_subprocess.SubprocessCLITransport):
             error = CLIConnectionError(f"Failed to start Claude Code: {exc}")
             self._exit_error = error
             raise error from exc
-
-    async def _check_claude_version(self) -> None:
-        """Run the SDK version probe with the same run-owned environment."""
-        if self._cli_path is None:
-            raise CLINotFoundError("CLI path not resolved. Call connect() first.")
-        version_process = None
-        try:
-            with anyio.fail_after(2):
-                version_process = await anyio.open_process(
-                    [self._cli_path, "-v"],
-                    stdout=PIPE,
-                    stderr=PIPE,
-                    env=self._native_environment(),
-                )
-                if version_process.stdout:
-                    stdout_bytes = await version_process.stdout.receive()
-                    version_output = stdout_bytes.decode().strip()
-                    match = re.match(r"([0-9]+\.[0-9]+\.[0-9]+)", version_output)
-                    if match:
-                        version_parts = [int(value) for value in match.group(1).split(".")]
-                        minimum_parts = [
-                            int(value)
-                            for value in _sdk_subprocess.MINIMUM_CLAUDE_CODE_VERSION.split(
-                                "."
-                            )
-                        ]
-                        if version_parts < minimum_parts:
-                            _sdk_subprocess.logger.warning(
-                                "Claude Code version %s at %s is unsupported; minimum is %s",
-                                match.group(1),
-                                self._cli_path,
-                                _sdk_subprocess.MINIMUM_CLAUDE_CODE_VERSION,
-                            )
-        except Exception:
-            pass
-        finally:
-            if version_process:
-                with suppress(Exception):
-                    version_process.terminate()
-                with suppress(Exception):
-                    await version_process.wait()
 
 
 def _sdk_mcp_servers(options: ClaudeAgentOptions) -> dict[str, Any]:
@@ -414,6 +371,10 @@ class _RunLocalClaudeSDKClient(ClaudeSDKClient):
             exclude_dynamic_sections=exclude_dynamic_sections,
             skills=self.options.skills,
             forward_subagent_text=self.options.forward_subagent_text,
+            # Supply a value even when absent so the SDK cannot read the host environment.
+            run_end_ceiling_ms=run_end_ceiling_ms({
+                _RUN_END_CEILING_ENV: self.options.env.get(_RUN_END_CEILING_ENV, ""),
+            }),
         )
         await self._query.start()
         await self._query.initialize()
