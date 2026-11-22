@@ -50,6 +50,7 @@ def cli_process(stdout: object) -> MagicMock:
     """A mocked subprocess with the full write/wait/terminate surface."""
     process = MagicMock()
     process.stdout = stdout
+    process.stderr = ImmediateStdout([])  # read only when the adapter gives stderr its own sink
     process.stdin = MagicMock()
     process.stdin.write = MagicMock()
     process.stdin.close = MagicMock()

@@ -22,7 +22,7 @@ import sys as sys
 import tempfile
 import threading
 import uuid
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import AsyncGenerator, Iterator, Mapping
 from contextlib import AsyncExitStack, aclosing, suppress
 from pathlib import Path
@@ -852,8 +852,20 @@ class CodexBackend:
             if terminal_deadline is not None:
                 return max(0.0, terminal_deadline - asyncio.get_running_loop().time())
             return idle_timeout_s
-        non_json_lines: list[str] = []  # redacted/capped process-exit excerpts
-        in_backtrace = False  # inside a backtrace's header, frames and blank lines
+        exit_excerpt: deque[str] = deque(maxlen=_NON_JSON_EXCERPT_MAX_LINES)  # redacted/capped stderr
+        in_backtrace = False  # inside a stderr backtrace's header and frames
+
+        def _keep_stderr(line: str) -> None:
+            """Keep Codex's stderr (its stdin notice, MCP server logs, failure causes) only for the
+            process-exit exception excerpt: it is not the public stream, so parser coverage and
+            lifecycle line counts never see it. A backtrace is not kept, so frames cannot push
+            Codex's cause line out.
+            """
+            nonlocal in_backtrace
+            in_backtrace = line.casefold() == "stack backtrace:" or (
+                in_backtrace and _BACKTRACE_FRAME.match(line) is not None)
+            if not in_backtrace:
+                exit_excerpt.append(_bounded_process_excerpt(line))
         unmatched_seq = 0  # monotonic source for orphaned tool-result ids
 
         def _warn(reason: str) -> None:
@@ -925,6 +937,23 @@ class CodexBackend:
             return item_id
 
         transport: CliTransport | None = None
+
+        async def _teardown_once(started: CliTransport) -> TimeoutError | None:
+            """Terminate, reap and join the stderr drain once; return a cleanup expiry for the caller."""
+            nonlocal cleaned_up
+            cleaned_up = True
+            if lifecycle is not None:
+                lifecycle.teardown_started()
+            try:
+                await teardown(started, self._transports, cleanup_timeout_s=self._cleanup_timeout_s)
+            except TimeoutError as exc:
+                if lifecycle is not None:
+                    lifecycle.expiry("cleanup")
+                return exc
+            if lifecycle is not None:
+                lifecycle.teardown_completed()
+            return None
+
         execution_cwd = cwd
         shared_checkout: _SharedCheckout | None = None
         # As with Pi, only a persisted call resumes: --ephemeral would still append to a resumed thread.
@@ -1068,6 +1097,7 @@ class CodexBackend:
                 "codex",
                 args,
                 stdin_data=prompt.encode(),
+                stderr_sink=_keep_stderr,
                 limit=_CODEX_STDOUT_LIMIT_BYTES,
                 env=child_env,
                 cwd=str(execution_cwd) if execution_cwd != cwd else None,
@@ -1091,16 +1121,8 @@ class CodexBackend:
                 try:
                     event = json.loads(raw_line)
                 except json.JSONDecodeError:
-                    # Keep bounded raw lines only for the process-exit exception excerpt; diagnostics and
-                    # logs retain only the count. Blank lines and a backtrace (its header, then frame and
-                    # blank lines) are counted but not kept, so frames cannot push Codex's cause line out.
+                    # Diagnostics and logs retain only the count of non-JSON stdout lines.
                     non_json_count += 1
-                    in_backtrace = raw_line.casefold() == "stack backtrace:" or (
-                        in_backtrace and (not raw_line or _BACKTRACE_FRAME.match(raw_line) is not None))
-                    if raw_line and not in_backtrace:
-                        if len(non_json_lines) >= _NON_JSON_EXCERPT_MAX_LINES:
-                            non_json_lines.pop(0)
-                        non_json_lines.append(_bounded_process_excerpt(raw_line))
                     _logger.debug("codex: non-JSON line skipped")
                     for diagnostic in _take_early_diagnostics():
                         yield diagnostic
@@ -1426,12 +1448,17 @@ class CodexBackend:
             # Fail fast on non-zero exit: if codex crashed without emitting a
             # turn.failed event, surface the failure with diagnostic output
             # instead of reporting a successful completion with empty/partial
-            # output.
+            # output. Close descendant-held stderr first so its drain reaches EOF
+            # and the excerpt holds Codex's cause; the exit stays the primary error.
+            if returncode:
+                if host is not None:
+                    host.binding.close_attempt()  # as in finally: no callback is served during teardown
+                await _teardown_once(transport)
             raise_for_exit(
                 returncode,
                 error_type=CodexError,
                 category="PROCESS_EXIT",
-                build_message=lambda rc: process_exit_message(display="Codex", returncode=rc, lines=non_json_lines),
+                build_message=lambda rc: process_exit_message(display="Codex", returncode=rc, lines=list(exit_excerpt)),
             )
             if _pending_result is None or not current_turn_completed or returncode != 0:
                 raise CodexError(
@@ -1439,18 +1466,8 @@ class CodexBackend:
                     category="TRANSPORT", retryable=False if terminal_deadline is not None else None)
             # Completion is delivered only after actual zero exit and bounded
             # cleanup; cleanup cannot manufacture a successful turn.
-            if lifecycle is not None:
-                lifecycle.teardown_started()
-            try:
-                await teardown(transport, self._transports, cleanup_timeout_s=self._cleanup_timeout_s)
-            except TimeoutError as exc:
-                if lifecycle is not None:
-                    lifecycle.expiry("cleanup")
-                raise _lifecycle_error("cleanup", self._cleanup_timeout_s) from exc
-            finally:
-                cleaned_up = True
-            if lifecycle is not None:
-                lifecycle.teardown_completed()
+            if (cleanup_expiry := await _teardown_once(transport)) is not None:
+                raise _lifecycle_error("cleanup", self._cleanup_timeout_s) from cleanup_expiry
             if host is not None:
                 # Host acceptance is the only result; this completed turn, zero exit and cleanup settle it.
                 _pending_result.structured_output = host.binding.accepted_result
@@ -1474,19 +1491,10 @@ class CodexBackend:
                 # Closure first: no callback is served while the process is torn down.
                 host.binding.close_attempt()
             if transport is not None and not cleaned_up:
-                if lifecycle is not None:
-                    lifecycle.teardown_started()
-                try:
-                    await teardown(transport, self._transports, cleanup_timeout_s=self._cleanup_timeout_s)
-                except TimeoutError as exc:
-                    if lifecycle is not None:
-                        lifecycle.expiry("cleanup")
-                    if primary is None:
-                        cleanup_error = _lifecycle_error("cleanup", self._cleanup_timeout_s)
-                        cleanup_error.__cause__ = exc
-                else:
-                    if lifecycle is not None:
-                        lifecycle.teardown_completed()
+                cleanup_expiry = await _teardown_once(transport)
+                if cleanup_expiry is not None and primary is None:
+                    cleanup_error = _lifecycle_error("cleanup", self._cleanup_timeout_s)
+                    cleanup_error.__cause__ = cleanup_expiry
             if schema_path:
                 try:
                     Path(schema_path).unlink(missing_ok=True)
