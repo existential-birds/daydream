@@ -55,7 +55,7 @@ dev = [
     "types-protobuf>=7.35.1.20260906",
     "pytest-cov==7.1.0",  # exact pin: fail_under comparisons depend on reproducible coverage tool behavior (#932)
     "vulture>=2.13",
-    "types-psutil>=7,<8",
+    "types-psutil>=7.2.2.20261111,<8",
     "actionlint-py==1.7.12.25",
 ]
 
