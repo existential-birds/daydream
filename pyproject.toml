@@ -6,7 +6,7 @@ requires-python = ">=3.14"
 dependencies = [
     "claude-agent-sdk==0.2.181",
     # Claude host tools serve a lowlevel SDK MCP server that reads per-call _meta (1.x request handlers).
-    "mcp>=1.30,<2",
+    "mcp>=2.3.0,<3",
     # Codex host tools serve that SDK's streamable HTTP transport on loopback; the floor is the SDK's own.
     "uvicorn>=0.54.0,<1",
     "anyio>=4.16.0",
