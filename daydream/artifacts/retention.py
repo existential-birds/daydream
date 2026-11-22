@@ -1,4 +1,4 @@
-"""Bound one workspace's finished run directories (docs/runtime.md#artifacts-and-recovery).
+"""Bound a workspace's finished runs, private and public (docs/runtime.md#artifacts-and-recovery).
 
 Run directories are created and finalized only under the exclusive workspace lock,
 so while a closing session still holds it every other run directory is finished.
@@ -8,10 +8,12 @@ quarantined transaction keeps every byte for the operator.
 
 from __future__ import annotations
 
+import stat
 from pathlib import Path
 
 from daydream.artifacts import filesystem
-from daydream.artifacts.models import _FROZEN_MANIFEST, _LIVE, ArtifactVisibilityError
+from daydream.artifacts.models import _FROZEN_MANIFEST, _LIVE, _RUNS, ArtifactVisibilityError
+from daydream.artifacts.ownership import SourceOwnership
 from daydream.trajectory import RUNS_DIRNAME
 
 _TRANSACTION_ROOTS = ("transactions", "unreconciled")
@@ -34,14 +36,12 @@ def _finished_at(run: Path) -> tuple[int, str]:
     return stamp.lstat().st_mtime_ns, run.name
 
 
-def retain_finished_runs(state_root: Path, *, current: str, retained: int) -> int:
-    """Keep the *retained* newest runs, *current* included, and drop each kept frozen run's live copy.
+def _bound(runs: Path, *, current: str, held: set[str], retained: int) -> tuple[list[Path], int]:
+    """Keep the *retained* newest runs under *runs*, *current* and held runs aside, and delete the rest.
 
-    The caller holds the workspace lock and has reconciled *current*. Return how many
-    runs could not be cleaned; an unsafe tree is refused whole and left in place.
+    Return the kept runs other than *current* and how many could not be deleted. Links are never
+    followed, and an unsafe tree is refused whole and left in place.
     """
-    runs = state_root / RUNS_DIRNAME
-    held = _held_sessions(state_root)
     finished = sorted(
         (run for run in runs.iterdir()
          if run.name != current and run.name not in held and run.is_dir() and not run.is_symlink()),
@@ -54,6 +54,17 @@ def retain_finished_runs(state_root: Path, *, current: str, retained: int) -> in
             filesystem._remove_owned_tree(run, runs)
         except (OSError, ArtifactVisibilityError):
             failures += 1
+    return kept, failures
+
+
+def retain_finished_runs(state_root: Path, *, current: str, retained: int) -> int:
+    """Bound the private runs, dropping each kept frozen run's live copy; return the failure count.
+
+    The caller holds the workspace lock and has reconciled *current*.
+    """
+    runs = state_root / RUNS_DIRNAME
+    held = _held_sessions(state_root)
+    kept, failures = _bound(runs, current=current, held=held, retained=retained)
     for run in ([] if current in held else [runs / current]) + kept:
         live = run / _LIVE
         manifest = run / _FROZEN_MANIFEST
@@ -63,3 +74,25 @@ def retain_finished_runs(state_root: Path, *, current: str, retained: int) -> in
             except (OSError, ArtifactVisibilityError):
                 failures += 1
     return failures
+
+
+def retain_public_runs(source: SourceOwnership, state_root: Path, *, current: str, retained: int) -> int:
+    """Bound the checkout's ``.daydream/runs/`` with the same rule (a public run is ordered by its directory's
+    time: it never holds a frozen manifest); return the failure count.
+
+    The caller holds the workspace lock and has reconciled *current*, so nothing is parked. A
+    checkout without public run evidence, such as a hosted review's, is left alone.
+    """
+    runs = source.path / _RUNS
+    # Each component must be a real directory: a .daydream link that appeared mid-run is never followed.
+    for directory in (runs.parent, runs):
+        try:
+            metadata = directory.lstat()
+        except FileNotFoundError:
+            return 0
+        if not stat.S_ISDIR(metadata.st_mode):
+            return 1
+    source.validate()
+    # A run that published nothing, such as a rolled-back one, takes no slot from earlier runs.
+    published = (runs / current).exists() or (runs / current).is_symlink()
+    return _bound(runs, current=current, held=_held_sessions(state_root), retained=retained + (not published))[1]

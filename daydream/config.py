@@ -57,10 +57,10 @@ DEFAULT_REPAIR_EXECUTION_WALL_S = 1800.0  # wall ceiling for one repair executio
 DEFAULT_REPAIR_JOB_WALL_S = 7200.0  # cumulative wall ceiling across all executions
 DEFAULT_REPAIR_MAX_EXECUTIONS = 4  # bounded repair executions per job
 
-# Finished run directories kept per workspace under ~/.daydream/runtime, the
-# closing run included; retention is docs/runtime.md#artifacts-and-recovery.
+# Finished runs kept per workspace, the closing run included, both under ~/.daydream/runtime
+# and in the checkout's .daydream/runs/; retention is docs/runtime.md#artifacts-and-recovery.
 # Overridable through [tool.daydream] retained_runs (a positive count).
-DEFAULT_RETAINED_RUNS = 5
+DEFAULT_RETAINED_RUNS = 10
 
 # Report per-file erosion/verbosity regressions without blocking the run.
 # Use before/after deltas, or absolute after-values when the baseline is undefined.

@@ -1214,8 +1214,8 @@ workspace's private state (beside the checkout when no rename reaches it) and co
 only the shared set into the live tree. Publication checks the parked shared set
 against that baseline, renames the parked `runs/` and this run's evidence into a
 stage on the same filesystem, installs it by rename and deletes the replaced shared
-set; rollback and recovery rename everything back. Earlier evidence is never copied,
-hashed or deleted. A tree that appears in the checkout while one is parked keeps
+set; rollback and recovery rename everything back. Publication never copies, hashes or
+deletes earlier evidence; only retention, below, prunes it. A tree that appears in the checkout while one is parked keeps
 both and refuses, naming both paths. Pending transactions of the earlier
 canonical-copy format are preserved and refused with recovery steps; once none is
 pending, the stale `canonical/` copy is deleted.
@@ -1237,17 +1237,22 @@ the `live/` tree, the `frozen/` copy with `frozen-manifest.json`, and the local 
 Run directories are created and finalized only under the exclusive workspace lock, and
 recovery reads transactions, never run directories. So the
 closing session, once it has reconciled and before it releases that lock, bounds the
-workspace's finished runs: it keeps the newest `retained_runs` of them, itself included
-(default `DEFAULT_RETAINED_RUNS` in [config.py](../daydream/config.py), a positive count set
-in `[tool.daydream]` or `.daydream.toml`; hosted review uses the default), ordered by freeze
-time or, for an unfrozen run, its directory's time, and deletes the rest. Each kept run
+workspace's finished runs, both these private directories and the checkout's
+`.daydream/runs/<run id>/` evidence, with one rule: it keeps the newest `retained_runs` of
+them, itself included (default `DEFAULT_RETAINED_RUNS` in [config.py](../daydream/config.py),
+a positive count set in `[tool.daydream]` or `.daydream.toml`; hosted review uses the
+default), and deletes the rest. Private runs are ordered by freeze time or, for an unfrozen
+run, their directory's time; public runs by their directory's time. Each kept private run
 that has a frozen copy loses its `live/` tree, which no consumer reads after freeze;
 capture, archive and publication have already finished by then. A run named by a
 transaction under `transactions/` or `unreconciled/` keeps every byte and does not count
-toward the bound. A session whose reconciliation failed applies no retention. Removal
+toward the bound. A session whose reconciliation failed applies no retention, and a
+checkout without public run evidence, such as a hosted review's, is left alone. Removal
 never follows links and refuses an unsafe tree whole, leaving it in place with a warning;
-retention never fails a run. It touches nothing outside the workspace's `runs/`: not the
-dataset store, archives or other workspaces.
+retention never fails a run. A pruned public run has another copy only if its run was
+archived to `~/.daydream/archive/`: archiving is on unless `--no-archive`, and a failed
+archive is reported without stopping publication. Retention touches nothing
+outside the two `runs/` directories: not the dataset store, archives or other workspaces.
 
 Evidence documents are written to disk as the run proceeds, never held whole in RAM.
 Every run snapshot names each document by reference: its document id, logical path,
