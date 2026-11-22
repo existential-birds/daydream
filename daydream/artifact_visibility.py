@@ -1175,14 +1175,18 @@ def _close_artifact_session(session: ArtifactSession, retained_runs: int) -> Non
     except BaseException as exc:
         primary = exc
     else:
-        try:
-            failures = retention.retain_finished_runs(
-                session.layout.state_root, current=session.layout.session_id, retained=retained_runs,
-            )
-        except (OSError, ArtifactVisibilityError):
-            failures = 1
-        if failures:
-            _print_retention_warning(session.layout.live_root.parent.parent)
+        state_root, current = session.layout.state_root, session.layout.session_id
+        for runs, retain in (
+            (session.layout.live_root.parent.parent, partial(retention.retain_finished_runs, state_root)),
+            (session.layout.source / _RUNS, partial(retention.retain_public_runs, session.ownership.source,
+                                                     state_root)),
+        ):
+            try:
+                failures = retain(current=current, retained=retained_runs)
+            except (OSError, ArtifactVisibilityError):
+                failures = 1
+            if failures:
+                _print_retention_warning(runs)
     try:
         session._close()
     except BaseException as close_error:

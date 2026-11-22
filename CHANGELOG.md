@@ -31,13 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [Codex host tools](docs/runtime.md#codex-host-tools).
 - Updated Claude Agent SDK to 0.2.181 and Traceloop SDK to 0.63.0, along with the
   runtime dependencies for Daydream's host-tool transport and configuration.
-- Finished runs no longer accumulate without bound under `~/.daydream/runtime`
-  ([#1789](https://github.com/existential-birds/daydream/issues/1789)). When a run closes it
-  keeps the newest five runs of its workspace, itself included, deletes the older ones and drops
-  each kept run's `live/` copy once its `frozen/` copy exists, roughly halving every run
-  directory. Set a different positive count with `retained_runs` in `[tool.daydream]` or
-  `.daydream.toml`. Runs that recovery still holds are kept whole. See
-  [artifacts and recovery](docs/runtime.md#artifacts-and-recovery).
+- Finished runs no longer accumulate without bound, in `~/.daydream/runtime` or in the checkout's
+  `.daydream/runs/` ([#1789](https://github.com/existential-birds/daydream/issues/1789),
+  [#1946](https://github.com/existential-birds/daydream/issues/1946)). When a run closes it keeps
+  the newest ten runs of its workspace in each place, itself included, deletes the older ones and
+  drops each kept private run's `live/` copy once its `frozen/` copy exists. Set a different
+  positive count with `retained_runs` in `[tool.daydream]` or `.daydream.toml`. Runs that recovery
+  still holds are kept whole, and pruned public runs stay in `~/.daydream/archive/` unless the run
+  used `--no-archive`. See [artifacts and recovery](docs/runtime.md#artifacts-and-recovery).
 - **Breaking (0.y.z):** A hosted immutable review with a bundle (`bundle_sha256` set) reviews
   the one tree the new `daydream.git_ops.immutable.materialize_immutable_source(identity, bundle,
   destination, *, environment=None)` writes, in place, instead of validating a Git checkout and

@@ -718,14 +718,19 @@ async def test_closing_session_bounds_finished_runs_and_drops_finalized_live_cop
 
     An unfrozen run keeps its only copy until the bound prunes it; a finalized run keeps only its
     frozen copy; a quarantined run, a symlink and an unsafe tree beyond the bound all stay in place.
+    The checkout's public runs follow the same rule, ordered by directory time.
     """
     owner = _owner(source)
     runs = owner.artifact_state_root / "runs"
 
-    async def finish(session_id: str, *, freeze: bool, retained_runs: int) -> None:
+    async def finish(session_id: str, *, freeze: bool, retained_runs: int,
+                     while_parked: Callable[[Path], None] | None = None) -> None:
         async with open_artifact_session(
             _work(source), session_id=session_id, owner=owner, retained_runs=retained_runs,
         ) as session:
+            if while_parked is not None:
+                parked, = owner.artifact_state_root.glob(f"transactions/detach-{session_id}-*/parked/.daydream/runs")
+                while_parked(parked)
             if freeze:
                 _publish(session, _freeze_run(session, session_id))
 
@@ -751,16 +756,30 @@ async def test_closing_session_bounds_finished_runs_and_drops_finalized_live_cop
     (runs / "link").symlink_to(outside, target_is_directory=True)
     for run in (held, unsafe):
         os.utime(run, ns=(0, 0))
+    public = source / ".daydream/runs"
+    for name, mtime in (("older", 1), ("published", 2), ("newer", 5), ("held", 0)):
+        (public / name).mkdir(exist_ok=True)
+        (public / name / "evidence").write_bytes(name.encode())
+        os.utime(public / name, ns=(mtime, mtime))
+
+    def plant_unsafe_public(parked: Path) -> None:
+        # Session open refuses it in the checkout, so it appears while the tree is parked.
+        (parked / "public-unsafe").mkdir()
+        os.mkfifo(parked / "public-unsafe" / "fifo")
+        os.utime(parked / "public-unsafe", ns=(0, 0))
+
     capsys.readouterr()
 
-    await finish("latest", freeze=True, retained_runs=2)
+    await finish("latest", freeze=True, retained_runs=2, while_parked=plant_unsafe_public)
 
     assert sorted(path.name for path in runs.iterdir()) == ["held", "latest", "link", "published", "unsafe"]
     assert sorted(path.name for path in (runs / "latest").iterdir()) == ["frozen", "frozen-manifest.json"]
     assert sorted(path.name for path in held.iterdir()) == ["frozen", "frozen-manifest.json", "live"]
     assert (unsafe / "fifo").exists() and (outside / "keep").read_bytes() == b"not runtime state"
-    assert "could not be cleaned" in capsys.readouterr().out
-    assert (source / ".daydream/runs/latest" / RUN_DOCUMENT_NAME).is_file()
+    assert capsys.readouterr().out.count("could not be cleaned") == 2
+    assert sorted(path.name for path in public.iterdir()) == ["held", "latest", "newer", "public-unsafe"]
+    assert (public / "latest" / RUN_DOCUMENT_NAME).is_file() and (public / "newer/evidence").read_bytes() == b"newer"
+    assert (public / "public-unsafe/fifo").exists()
 
 
 async def test_bound_routing_propagates_to_tasks_and_rejects_wrong_or_aliased_repo(tmp_path: Path, source: Path,

@@ -45,7 +45,8 @@ and `--yes` answers its gates. One reviewer covers the whole change and challeng
 every finding in a fresh context before reporting it; it needs a backend with native
 host tools (Pi, Claude or Codex). Use `--help` for common options and `--help-all` for
 configuration and advanced flags.
-Reports land in `.review-output.md`; evidence in `.daydream/runs/<id>/` (`daydream evidence verify` checks it).
+Reports land in `.review-output.md`; evidence for the [newest runs](docs/runtime.md#artifacts-and-recovery) in
+`.daydream/runs/<id>/` (`daydream evidence verify` checks it).
 Report-only local review uses the captured net base-to-final-working change,
 including nonignored untracked files. PR comments exclude local edits and use a
 [pinned committed subject](docs/runtime.md#captured-local-source).
