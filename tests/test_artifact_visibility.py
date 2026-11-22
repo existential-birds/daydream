@@ -1043,13 +1043,14 @@ async def test_artifact_session_recovers_real_process_death_at_durable_transitio
         expected = _seed_public_artifacts(source)
         requested = source / "explicit-output.txt"
         requested.write_bytes(b"prior explicit bytes")
-        first_repo, second_repo = _worktrees(source, "ephemeral-one", "ephemeral-two")
+        (second_repo,) = _worktrees(source, "ephemeral-two")
         source_canary = source.parent / "cleanup-source-canary"
         source_canary.write_bytes(b"source sibling")
         state_root = artifact_runtime_root / _workspace_key(source)
         marker = tmp_path / f"production-{location}"
+        # Only an in-place run parks at open.
         with _case_note(location), _child_at_marker(
-            marker, "production-transaction", str(source), str(first_repo), str(artifact_runtime_root),
+            marker, "production-transaction", str(source), str(source), str(artifact_runtime_root),
             "PUBLIC_PARKED", location, str(marker),
         ):
             assert not (source / ".daydream").exists() and not (source / ".review-output.md").exists()
@@ -1590,20 +1591,36 @@ async def test_artifact_session_detects_source_mutation_without_deleting_unique_
         pass
     assert _manifest(source) == expected
 
-    # A parked tree changed during the run returns as it now is; the run's own outputs stay in its frozen copy.
-    changed_source = tmp_path / "changed-source"
-    _init_repo(changed_source)
-    _seed_public_artifacts(changed_source)
-    changed_owner = _owner(changed_source)
-    async with open_artifact_session(_work(changed_source), session_id="changed", owner=changed_owner) as session:
-        frozen = _freeze_run(session, "changed")
-        changed_parked, = changed_owner.artifact_state_root.glob("transactions/detach-changed-*/parked")
-        (changed_parked / ".daydream" / "deep" / "prior.md").write_bytes(b"edited while parked\n")
-        with pytest.raises(ArtifactVisibilityError, match="changed during the run"):
-            _publish(session, frozen)
-    assert (changed_source / ".daydream" / "deep" / "prior.md").read_bytes() == b"edited while parked\n"
-    assert not (changed_source / ".daydream" / "runs" / "changed").exists()
-    assert (frozen.root / ".daydream" / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
+    # A shared entry changed during the run refuses publication, both versions survive: the user's change in the
+    # checkout (parked for an in-place run, still visible otherwise) and the run's own outputs in its frozen copy.
+    for in_place, mutation in ((True, "edit"), (False, "edit"), (False, "delete")):
+        changed_source = tmp_path / f"changed-source-{in_place}-{mutation}"
+        _init_repo(changed_source)
+        _seed_public_artifacts(changed_source)
+        changed_owner = _owner(changed_source)
+        work = (_work(changed_source) if in_place
+                else _work(changed_source, repo=_worktrees(changed_source, f"wt-{mutation}")[0]))
+        with _case_note(f"in_place={in_place} mutation={mutation}"):
+            async with open_artifact_session(work, session_id="changed", owner=changed_owner) as session:
+                frozen = _freeze_run(session, "changed")
+                if in_place:
+                    edited, = changed_owner.artifact_state_root.glob("transactions/detach-changed-*/parked")
+                else:
+                    edited = changed_source
+                    assert (changed_source / ".daydream" / "deep" / "prior.md").is_file()
+                if mutation == "edit":
+                    (edited / ".daydream" / "deep" / "prior.md").write_bytes(b"edited during the run\n")
+                else:
+                    shutil.rmtree(edited / ".daydream")
+                    (edited / ".review-output.md").unlink()
+                with pytest.raises(ArtifactVisibilityError, match="changed during the run"):
+                    _publish(session, frozen)
+            if mutation == "edit":
+                assert (changed_source / ".daydream/deep/prior.md").read_bytes() == b"edited during the run\n"
+                assert not (changed_source / ".daydream" / "runs" / "changed").exists()
+            else:
+                assert _manifest(changed_source) == ()
+            assert (frozen.root / ".daydream" / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
 
 
 async def test_publication_preparation_failure_restores_source_without_orphan_state(

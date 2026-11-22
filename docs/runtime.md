@@ -1209,9 +1209,12 @@ refused rather than adopted or migrated.
 
 A run publishes only its own `.daydream/runs/<session id>/`. Every other public
 entry, with `.review-output.md`, is the shared set. Opening a session hashes the
-shared set, renames `.daydream/` and `.review-output.md` out of the checkout into the
-workspace's private state (beside the checkout when no rename reaches it) and copies
-only the shared set into the live tree. Publication checks the parked shared set
+shared set and copies only it into the live tree. `.daydream/` is hidden only while a
+model works in the checkout: an in-place run whose models work there (in-place `--fix`,
+`--diagram-only`, custom flows) renames `.daydream/` and `.review-output.md` into the
+workspace's private state at open (beside the checkout when no rename reaches it); any
+other run, Improve included, leaves them in place until publication parks them the same
+way, so a failed run of that kind restores nothing. Publication checks the parked shared set
 against that baseline, renames the parked `runs/` and this run's evidence into a
 stage on the same filesystem, installs it by rename and deletes the replaced shared
 set; rollback and recovery rename everything back. Publication never copies, hashes or

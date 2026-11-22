@@ -304,9 +304,13 @@ class _UnbornAuditBackend(ImproveStubBackend):
         self.first_symbolic_head: str | None = None
         self.first_was_unborn: bool | None = None
         self.ignored_visible: bool | None = None
+        self.public_evidence = target / ".daydream/runs/earlier/evidence"
+        self.public_visible: bool | None = None
 
     async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         if not self.audit_paths:
+            # The models work only in the snapshot, so the checkout's public tree stays where its user sees it.
+            self.public_visible = self.public_evidence.is_file()
             self.first_was_unborn = git_ops.is_unborn_head(cwd)
             self.first_symbolic_head = git(cwd, "symbolic-ref", "--short", "HEAD")
             self.ignored_visible = (cwd / "ignored-secret.txt").exists()
@@ -396,9 +400,12 @@ async def test_full_improve_uses_independent_unborn_snapshot(
     before_patch = git_ops.staged_patch(repo)
     before_status = _git_status_porcelain(repo)
     backend = install_capable_improve_backend(monkeypatch, _UnbornAuditBackend(repo))
+    backend.public_evidence.parent.mkdir(parents=True)
+    backend.public_evidence.write_bytes(b"earlier")
     code = await _run_improve(make_config, repo)
 
     assert code == 0
+    assert backend.public_visible is True and backend.public_evidence.read_bytes() == b"earlier"
     assert backend.first_was_unborn is True
     assert backend.first_symbolic_head == "seedless"
     assert backend.ignored_visible is False

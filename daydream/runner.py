@@ -582,6 +582,8 @@ async def _run_workspace(
             session_id = str(uuid.uuid4())
             async with open_artifact_session(
                 work, session_id=session_id, owner=private_owner, retained_runs=retained_runs(config),
+                # Improve's model turns all run in its audit snapshot.
+                models_outside_checkout=config.flow_name == "improve",
             ) as artifacts:
                 record_local_trace(artifacts.layout.otel_trace)
                 def _route(path: str | Path | None, label: OutputLabel) -> RoutedDestination | None:
