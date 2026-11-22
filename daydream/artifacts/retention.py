@@ -84,12 +84,14 @@ def retain_public_runs(source: SourceOwnership, state_root: Path, *, current: st
     checkout without public run evidence, such as a hosted review's, is left alone.
     """
     runs = source.path / _RUNS
-    try:
-        metadata = runs.lstat()
-    except FileNotFoundError:
-        return 0
-    if not stat.S_ISDIR(metadata.st_mode):
-        return 1
+    # Each component must be a real directory: a .daydream link that appeared mid-run is never followed.
+    for directory in (runs.parent, runs):
+        try:
+            metadata = directory.lstat()
+        except FileNotFoundError:
+            return 0
+        if not stat.S_ISDIR(metadata.st_mode):
+            return 1
     source.validate()
     # A run that published nothing, such as a rolled-back one, takes no slot from earlier runs.
     published = (runs / current).exists() or (runs / current).is_symlink()

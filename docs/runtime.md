@@ -1214,8 +1214,8 @@ workspace's private state (beside the checkout when no rename reaches it) and co
 only the shared set into the live tree. Publication checks the parked shared set
 against that baseline, renames the parked `runs/` and this run's evidence into a
 stage on the same filesystem, installs it by rename and deletes the replaced shared
-set; rollback and recovery rename everything back. Earlier evidence is never copied,
-hashed or deleted. A tree that appears in the checkout while one is parked keeps
+set; rollback and recovery rename everything back. Publication never copies, hashes or
+deletes earlier evidence; only retention, below, prunes it. A tree that appears in the checkout while one is parked keeps
 both and refuses, naming both paths. Pending transactions of the earlier
 canonical-copy format are preserved and refused with recovery steps; once none is
 pending, the stale `canonical/` copy is deleted.
