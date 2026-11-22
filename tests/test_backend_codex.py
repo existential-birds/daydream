@@ -1034,7 +1034,9 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
         }},
         {"type": "turn.started"},
         {"type": "item.completed", "item": {"type": "agent_message", "id": "verified", "text": "Verified"}},
-        {"type": "turn.completed", "model": "gpt-5.5-pro", "provider": "native-provider", "usage": {
+        # No observed build emits model, provider or finish_reason here; the adapter must not read them.
+        {"type": "turn.completed", "model": "gpt-5.5-pro", "provider": "native-provider", "finish_reason": "stop",
+         "usage": {
             "input_tokens": 100, "output_tokens": 30, "cached_input_tokens": 20, "reasoning_output_tokens": 10,
         }},
     ]
@@ -1079,21 +1081,17 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
     terminal = [event for event in events if isinstance(event, ResultEvent)]
     # Under a schema the adapter never selects JSON from assistant text; the host resolves the final turn.
     assert len(terminal) == 1 and terminal[0].structured_output is None
-    assert (terminal[0].session_id, terminal[0].model_name, terminal[0].provider_name) == (
-        "native-thread", "gpt-5.5-pro", "native-provider",
+    assert (terminal[0].session_id, terminal[0].model_name, terminal[0].provider_name, terminal[0].finish_reason) == (
+        "native-thread", "gpt-5.5", None, None,
     )
     assert sum(isinstance(event, TurnEndEvent) for event in events) == 5
     metrics = [event for event in events if isinstance(event, MetricsEvent)]
     assert [(m.message_id, m.prompt_tokens, m.completion_tokens, m.cached_tokens, m.reasoning_tokens)
             for m in metrics] == [("", 200, 90, 50, 20), ("", 100, 30, 20, 10)]
     costs = [event for event in events if isinstance(event, CostEvent)]
-    assert [event.cost_usd for event in costs] == pytest.approx([0.003475, 0.0084])
-    assert [(event.model_name, event.provider_name) for event in metrics] == [
-        ("gpt-5.5", None), ("gpt-5.5-pro", "native-provider"),
-    ]
-    assert [(event.model_name, event.provider_name) for event in costs] == [
-        ("gpt-5.5", None), ("gpt-5.5-pro", "native-provider"),
-    ]
+    assert [event.cost_usd for event in costs] == pytest.approx([0.003475, 0.00131])
+    assert {(event.model_name, event.provider_name) for event in metrics} == {("gpt-5.5", None)}
+    assert {(event.model_name, event.provider_name) for event in costs} == {("gpt-5.5", None)}
     assert [event.usage_scope for event in metrics] == ["invocation", "invocation"]
     request = next(event for event in events if isinstance(event, RequestEvent))
     assert isinstance(request.config, CodexRequestConfig)
@@ -1119,8 +1117,8 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
     billed = [step["metrics"] for step in steps if step.get("metrics")]
     assert [(m["prompt_tokens"], m["completion_tokens"], m["cached_tokens"], m["extra"]["reasoning_tokens"])
             for m in billed] == [(200, 90, 50, 20), (100, 30, 20, 10)]
-    assert [m["cost_usd"] for m in billed] == pytest.approx([0.003475, 0.0084])
+    assert [m["cost_usd"] for m in billed] == pytest.approx([0.003475, 0.00131])
     assert document["final_metrics"]["total_prompt_tokens"] == 300
     assert document["final_metrics"]["total_completion_tokens"] == 120
     assert document["final_metrics"]["total_cached_tokens"] == 70
-    assert document["final_metrics"]["total_cost_usd"] == pytest.approx(0.011875)
+    assert document["final_metrics"]["total_cost_usd"] == pytest.approx(0.004785)

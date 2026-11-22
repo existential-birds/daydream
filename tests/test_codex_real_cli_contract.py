@@ -1,6 +1,6 @@
 """Committed real Codex captures parse and keep truthful provenance; maintenance scripts only write candidates.
 
-The separate sanitized codex 0.153.4 omission capture retains raw/sanitized digests. Its maintenance
+The separate sanitized codex 0.171.0 omission capture retains raw/sanitized digests. Its maintenance
 script creates only an unpublished public candidate for exact-run corroboration and review.
 """
 
@@ -36,7 +36,7 @@ def test_codex_capture_provenance_is_sanitized_and_candidates_never_replace_it(t
 
     assert capture_script.is_file() and os.access(capture_script, os.X_OK)
     assert hashlib.sha256(fixture_bytes).hexdigest() == metadata["fixture_sha256_sanitized"]
-    assert metadata["capture_sha256_raw"] == ("896389a5da72401e74ee50324bedd745c513cb7468fa5dcb0fbf682e4b125683")
+    assert metadata["capture_sha256_raw"] == ("8ce9d71c89dd6686e21cffb6c549a68f64cbab5a063a95762ffab81d3ccd6381")
     assert metadata["capture_sha256_raw"] != metadata["fixture_sha256_sanitized"]
     assert metadata["fixture_sanitized"] is True
     assert metadata["sanitizations"] == [{
@@ -48,15 +48,15 @@ def test_codex_capture_provenance_is_sanitized_and_candidates_never_replace_it(t
         if record["type"] != "item.completed"
         else f"item.completed/{record['item']['type']}"
         for record in records
-    ] == ["thread.started", "item.completed/error", "turn.started", "item.completed/error",
+    ] == ["thread.started", "item.completed/error", "turn.started",
         "item.completed/agent_message", "item.completed/agent_message", "turn.completed",
     ]
     assert metadata["ordered_public_shape"] == [
-        "thread.started", "item.completed/error", "turn.started", "item.completed/error",
+        "thread.started", "item.completed/error", "turn.started",
         "item.completed/agent_message", "item.completed/agent_message", "turn.completed",
     ]
-    assert metadata["cli_version"] == "0.153.4"
-    assert metadata["captured_at_utc"] == "2026-09-06T02:31:50Z"
+    assert metadata["cli_version"] == "0.171.0"
+    assert metadata["captured_at_utc"] == "2026-11-22T19:14:17Z"
     assert metadata["capture_working_directory"] == "disposable_git_repo"
     assert metadata["public_flags"] == ["--json", "--sandbox", "read-only", "--enable", "code_mode"]
     assert metadata["exit_code"] == 0
@@ -74,7 +74,7 @@ def test_codex_capture_provenance_is_sanitized_and_candidates_never_replace_it(t
     )
 
     public_items = [record["item"] for record in records if "item" in record]
-    assert [item["type"] for item in public_items] == ["error", "error", "agent_message", "agent_message"]
+    assert [item["type"] for item in public_items] == ["error", "agent_message", "agent_message"]
     for item in public_items:
         assert not ({"name", "call_id", "arguments", "output"} & item.keys())
 
@@ -184,7 +184,7 @@ async def test_real_golden_parses_to_expected_events() -> None:
     results = [event.id for event in events if isinstance(event, ToolResultEvent)]
     assert len(starts) == len(results) == 2 and set(results) == starts
     metrics = next(event for event in events if isinstance(event, MetricsEvent))
-    for value in (metrics.prompt_tokens, metrics.completion_tokens, metrics.cached_tokens,
-                  metrics.reasoning_tokens, metrics.cost_usd):
+    for value in (metrics.prompt_tokens, metrics.completion_tokens, metrics.cached_tokens, metrics.cost_usd):
         assert value is not None and value > 0
+    assert metrics.reasoning_tokens is not None
     assert any(isinstance(event, ResultEvent) for event in events)
