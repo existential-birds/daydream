@@ -83,7 +83,7 @@ def _capturing_backend(apply_patch: Any, **kwargs: Any) -> tuple[ClaudeBackend, 
 
 
 async def test_injected_claude_uses_run_local_environment_for_one_cli_process(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
     capture = tmp_path / "native-env.jsonl"
     cli = tmp_path / "claude"
@@ -109,6 +109,7 @@ async def test_injected_claude_uses_run_local_environment_for_one_cli_process(
         "'subtype': 'success', 'request_id': message['request_id'], "
         "'response': {}}}), flush=True)\n"
         "    elif message.get('type') == 'user':\n"
+        "        print(json.dumps({'type': 'system', 'subtype': 'init'}), flush=True)\n"
         "        print(json.dumps({'type': 'assistant', 'message': {"
         "'id': 'm1', 'model': 'fixture-model', 'role': 'assistant', "
         "'content': [{'type': 'text', 'text': 'OK'}], "
@@ -133,25 +134,35 @@ async def test_injected_claude_uses_run_local_environment_for_one_cli_process(
 
     # No explicit path: connect resolves the CLI lazily, and a bundled CLI wins over PATH discovery.
     monkeypatch.setattr(_RunLocalSubprocessCLITransport, "_find_bundled_cli", lambda _self: str(cli))
-    options = ClaudeAgentOptions(
-        cwd=str(tmp_path), env=dict(environment),
-        hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[cast(Any, _hook)])]},
-    )
-    transport = _RunLocalSubprocessCLITransport(options, environment=environment)
-    async with _RunLocalClaudeSDKClient(options=options, transport=transport, initialize_timeout_s=60.0) as client:
-        await transport.connect()
-        await client.query("review")
-        messages = [message async for message in client.receive_response()]
+    skip_flag = "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK"
+    for skip_check in (False, True):
+        # Opposite settings expose any fallback to the SDK's ambient environment.
+        monkeypatch.setenv(skip_flag, "" if skip_check else "1")
+        run_environment = {**environment, skip_flag: "1" if skip_check else ""}
+        options = ClaudeAgentOptions(
+            cwd=str(tmp_path), env=dict(run_environment),
+            hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[cast(Any, _hook)])]},
+        )
+        transport = _RunLocalSubprocessCLITransport(options, environment=run_environment)
+        caplog.clear()
+        async with _RunLocalClaudeSDKClient(options=options, transport=transport, initialize_timeout_s=60.0) as client:
+            await transport.connect()
+            await client.query("review")
+            messages = [message async for message in client.receive_response()]
 
-    observations = [json.loads(line) for line in capture.read_text().splitlines()]
-    assert [item for item in observations if item["kind"] == "env"] == [{
-        "kind": "env", "anthropic": "run-key", "ambient": None, "path": str(tmp_path),
-        "pwd": str(tmp_path), "home": str(tmp_path / "run-home"), "sdk_session_state": "1",
-    }]
-    protocol = [item["message"] for item in observations if item["kind"] == "protocol"]
-    initialize = next(item for item in protocol if item["type"] == "control_request")
-    assert initialize["request"]["hooks"]["PreToolUse"][0]["hookCallbackIds"]
-    assert len(messages) == 2
+        # Older CLIs send an init frame without a version.
+        warned = "too old to report its version" in caplog.text
+        assert warned is (not skip_check)
+        observations = [json.loads(line) for line in capture.read_text().splitlines()]
+        capture.unlink()
+        assert [item for item in observations if item["kind"] == "env"] == [{
+            "kind": "env", "anthropic": "run-key", "ambient": None, "path": str(tmp_path),
+            "pwd": str(tmp_path), "home": str(tmp_path / "run-home"), "sdk_session_state": "1",
+        }]
+        protocol = [item["message"] for item in observations if item["kind"] == "protocol"]
+        initialize = next(item for item in protocol if item["type"] == "control_request")
+        assert initialize["request"]["hooks"]["PreToolUse"][0]["hookCallbackIds"]
+        assert len(messages) == 3
 
     # A resolved CLI that disappeared must surface as a startup failure.
     monkeypatch.setattr(transport, "_cli_path", str(tmp_path / "missing-claude"))
