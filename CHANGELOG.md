@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Updated Claude Agent SDK to 0.2.181 and Traceloop SDK to 0.63.0, along with the
+  runtime dependencies for Daydream's host-tool transport and configuration.
 - Finished runs no longer accumulate without bound under `~/.daydream/runtime`
   ([#1789](https://github.com/existential-birds/daydream/issues/1789)). When a run closes it
   keeps the newest five runs of its workspace, itself included, deletes the older ones and drops
@@ -308,6 +310,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dense in control characters, which a result's JSON escapes to six bytes each, no longer
   exceeds the host's result bound and ends the assignment: each page also stays within
   64 KiB escaped. See [immutable PR inputs](docs/runtime.md#immutable-pr-inputs).
+
+### Security
+
+- Require MCP Python SDK 1.30 or newer on the 1.x release line and Requests 2.33 or
+  newer on the 2.x release line so package installs select versions with the upstream
+  security fixes ([MCP advisory](https://github.com/advisories/GHSA-qx49-fqc8-xw99),
+  [Requests advisory](https://github.com/advisories/GHSA-gc5v-m9x4-r6x2)).
 
 ## [0.36.0] - 2026-11-15
 

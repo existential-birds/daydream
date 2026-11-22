@@ -10,7 +10,6 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
-import anyio
 import pytest
 from claude_agent_sdk import ClaudeAgentOptions, CLINotFoundError, HookMatcher
 from mcp import types as mcp_types
@@ -83,7 +82,7 @@ def _capturing_backend(apply_patch: Any, **kwargs: Any) -> tuple[ClaudeBackend, 
     return ClaudeBackend(model="opus", **kwargs), captured
 
 
-async def test_injected_claude_uses_run_local_transport_for_version_and_main_spawn(
+async def test_injected_claude_uses_run_local_environment_for_one_cli_process(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
     capture = tmp_path / "native-env.jsonl"
@@ -92,27 +91,30 @@ async def test_injected_claude_uses_run_local_transport_for_version_and_main_spa
         f"#!{sys.executable}\n"
         "import json, os, sys\n"
         "with open(os.environ['CAPTURE_LOG'], 'a', encoding='utf-8') as out:\n"
-        "    out.write(json.dumps({'kind': 'env', 'version': '-v' in sys.argv, "
+        "    out.write(json.dumps({'kind': 'env', "
         "'anthropic': os.environ.get('ANTHROPIC_API_KEY'), "
         "'ambient': os.environ.get('AMBIENT_ONLY'), "
-        "'path': os.environ.get('PATH'), 'pwd': os.environ.get('PWD')}) + '\\n')\n"
+        "'path': os.environ.get('PATH'), 'pwd': os.environ.get('PWD'), "
+        "'home': os.environ.get('HOME'), "
+        "'sdk_session_state': os.environ.get('CLAUDE_CODE_SDK_READS_SESSION_STATE')}) + '\\n')\n"
         "if '-v' in sys.argv:\n"
-        "    print('0.0.1', flush=True)\n"
-        "else:\n"
-        "    for line in sys.stdin:\n"
-        "        message = json.loads(line)\n"
-        "        with open(os.environ['CAPTURE_LOG'], 'a', encoding='utf-8') as out:\n"
-        "            out.write(json.dumps({'kind': 'protocol', 'message': message}) + '\\n')\n"
-        "        if message.get('type') == 'control_request':\n"
-        "            print(json.dumps({'type': 'control_response', 'response': {"
+        "    print('99.0.0', flush=True)\n"
+        "    sys.exit(0)\n"
+        "for line in sys.stdin:\n"
+        "    message = json.loads(line)\n"
+        "    with open(os.environ['CAPTURE_LOG'], 'a', encoding='utf-8') as out:\n"
+        "        out.write(json.dumps({'kind': 'protocol', 'message': message}) + '\\n')\n"
+        "    if message.get('type') == 'control_request':\n"
+        "        print(json.dumps({'type': 'control_response', 'response': {"
         "'subtype': 'success', 'request_id': message['request_id'], "
         "'response': {}}}), flush=True)\n"
-        "        elif message.get('type') == 'user':\n"
-        "            print(json.dumps({'type': 'assistant', 'message': {"
+        "    elif message.get('type') == 'user':\n"
+        "        print(json.dumps({'type': 'system', 'subtype': 'init'}), flush=True)\n"
+        "        print(json.dumps({'type': 'assistant', 'message': {"
         "'id': 'm1', 'model': 'fixture-model', 'role': 'assistant', "
         "'content': [{'type': 'text', 'text': 'OK'}], "
         "'stop_reason': 'end_turn', 'usage': {}}}), flush=True)\n"
-        "            print(json.dumps({'type': 'result', 'subtype': 'success', "
+        "        print(json.dumps({'type': 'result', 'subtype': 'success', "
         "'duration_ms': 1, 'duration_api_ms': 1, 'is_error': False, "
         "'num_turns': 1, 'session_id': 's1', 'total_cost_usd': 0, "
         "'usage': {}, 'result': 'OK'}), flush=True)\n",
@@ -126,67 +128,43 @@ async def test_injected_claude_uses_run_local_transport_for_version_and_main_spa
     monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-key")
     monkeypatch.setenv("AMBIENT_ONLY", "must-not-cross")
     monkeypatch.setenv("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT", "malformed-ambient")
-    open_process = anyio.open_process
-    spawn_attempts: list[tuple[bool, dict[str, str]]] = []
-    async def _record_open_process(
-        command: list[str], *args: Any, **kwargs: Any
-    ) -> Any:
-        native_environment = kwargs.get("env")
-        assert isinstance(native_environment, dict)
-        is_version = command == [str(cli), "-v"]
-        spawn_attempts.append((is_version, dict(native_environment)))
-        return await open_process(command, *args, **kwargs)
-    monkeypatch.setattr(anyio, "open_process", _record_open_process)
+
     async def _hook(*args: Any, **kwargs: Any) -> dict[str, Any]:
         return {"continue": True}
+
     # No explicit path: connect resolves the CLI lazily, and a bundled CLI wins over PATH discovery.
     monkeypatch.setattr(_RunLocalSubprocessCLITransport, "_find_bundled_cli", lambda _self: str(cli))
-    options = ClaudeAgentOptions(
-        cwd=str(tmp_path), env=dict(environment),
-        hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[cast(Any, _hook)])]},
-    )
-    transport = _RunLocalSubprocessCLITransport(options, environment=environment)
-    with caplog.at_level("WARNING"):
-        client_context = _RunLocalClaudeSDKClient(options=options, transport=transport, initialize_timeout_s=60.0)
-        async with client_context as client:
+    skip_flag = "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK"
+    for skip_check in (False, True):
+        # Opposite settings expose any fallback to the SDK's ambient environment.
+        monkeypatch.setenv(skip_flag, "" if skip_check else "1")
+        run_environment = {**environment, skip_flag: "1" if skip_check else ""}
+        options = ClaudeAgentOptions(
+            cwd=str(tmp_path), env=dict(run_environment),
+            hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[cast(Any, _hook)])]},
+        )
+        transport = _RunLocalSubprocessCLITransport(options, environment=run_environment)
+        caplog.clear()
+        async with _RunLocalClaudeSDKClient(options=options, transport=transport, initialize_timeout_s=60.0) as client:
+            await transport.connect()
             await client.query("review")
             messages = [message async for message in client.receive_response()]
-    # The best-effort version probe warns about an unsupported CLI without blocking the session.
-    assert "Claude Code version 0.0.1" in caplog.text
-    observations = [json.loads(line) for line in capture.read_text().splitlines()]
-    native = [item for item in observations if item["kind"] == "env"]
-    protocol = [item["message"] for item in observations if item["kind"] == "protocol"]
-    assert len(spawn_attempts) == 2
-    assert {is_version for is_version, _ in spawn_attempts} == {False, True}
-    for _, attempted_environment in spawn_attempts:
-        assert attempted_environment["ANTHROPIC_API_KEY"] == "run-key"
-        assert "AMBIENT_ONLY" not in attempted_environment
-        assert attempted_environment["PATH"] == str(tmp_path)
-        assert attempted_environment["PWD"] == str(tmp_path)
-        assert attempted_environment["HOME"] == str(tmp_path / "run-home")
-    main_native = [item for item in native if not item["version"]]
-    assert len(main_native) == 1
-    assert all(item["anthropic"] == "run-key" for item in native)
-    assert all(item["ambient"] is None for item in native)
-    assert all(item["path"] == str(tmp_path) for item in native)
-    assert main_native[0]["pwd"] == str(tmp_path)
-    initialize = next(item for item in protocol if item["type"] == "control_request")
-    assert initialize["request"]["hooks"]["PreToolUse"][0]["hookCallbackIds"]
-    assert len(messages) == 2
 
-    # The version probe is best effort: supported or unreadable output never warns or fails the session.
-    for version_script in ("print('99.0.0')", "pass"):
-        caplog.clear()
-        cli.write_text(f"#!{sys.executable}\n{version_script}\n", encoding="utf-8")
-        await transport._check_claude_version()  # noqa: SLF001 - best-effort probe seam
-        assert "unsupported" not in caplog.text
-    # A started transport never spawns again.
-    monkeypatch.setattr(transport, "_process", object())
-    spawned = len(spawn_attempts)
-    await transport.connect()
-    assert len(spawn_attempts) == spawned
-    # A resolved CLI that disappeared fails as a missing CLI, not a hung or silent session.
-    monkeypatch.setattr(transport, "_process", None)
+        # Older CLIs send an init frame without a version.
+        warned = "too old to report its version" in caplog.text
+        assert warned is (not skip_check)
+        observations = [json.loads(line) for line in capture.read_text().splitlines()]
+        capture.unlink()
+        assert [item for item in observations if item["kind"] == "env"] == [{
+            "kind": "env", "anthropic": "run-key", "ambient": None, "path": str(tmp_path),
+            "pwd": str(tmp_path), "home": str(tmp_path / "run-home"), "sdk_session_state": "1",
+        }]
+        protocol = [item["message"] for item in observations if item["kind"] == "protocol"]
+        initialize = next(item for item in protocol if item["type"] == "control_request")
+        assert initialize["request"]["hooks"]["PreToolUse"][0]["hookCallbackIds"]
+        assert len(messages) == 3
+
+    # A resolved CLI that disappeared must surface as a startup failure.
     monkeypatch.setattr(transport, "_cli_path", str(tmp_path / "missing-claude"))
     with pytest.raises(CLINotFoundError, match="missing-claude"):
         await transport.connect()
