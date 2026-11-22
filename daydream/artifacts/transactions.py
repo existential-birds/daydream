@@ -168,7 +168,7 @@ def _load_transition(journal: Path, transaction_id: str) -> tuple[_Transition, s
     ):
         raise ArtifactVisibilityError("artifact journal identity is malformed")
     session_id = payload["session_id"]
-    if payload["state"] in _EARLIER_FORMAT_STATES:
+    if isinstance(payload["state"], str) and payload["state"] in _EARLIER_FORMAT_STATES:
         state_root = journal.parents[2]
         raise ArtifactVisibilityError(
             f"artifact transaction {transaction_id} in workspace {state_root} was written by an earlier Daydream, "

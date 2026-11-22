@@ -1067,6 +1067,12 @@ async def test_artifact_session_rejects_existing_session_and_malformed_transacti
     with pytest.raises(ArtifactVisibilityError, match="metadata is malformed"):
         async with open_artifact_session(_work(source), session_id="after-malformed"):
             pass
+    # A parseable journal whose state is not a string is malformed too, never an unhandled error.
+    _atomic_json(residue / "journal.json",
+                 {"schema_version": 1, "transaction_id": "malformed", "session_id": "prior", "state": ["DETACHED"]})
+    with pytest.raises(ArtifactVisibilityError, match="journal state is malformed"):
+        async with open_artifact_session(_work(source), session_id="after-unhashable"):
+            pass
     shutil.rmtree(residue)
 
     # Cleanup residue that is neither a ticket nor a retired transaction is never adopted or deleted.
