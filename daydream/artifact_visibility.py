@@ -799,13 +799,13 @@ class ArtifactSession:
         session_id = self.layout.session_id
         if publish_public:
             staged, evidence, expected = publication._publication_entries(snapshot.manifest, self._baseline, session_id)
-            if publication._parked_root(source, self._detach_transaction, workspace_key=key) is None:
-                # A run whose model never worked in the checkout parks only now; the carry rechecks the baseline.
-                _park_public(source, self._detach_transaction, session_id)
+            # A run whose model never worked in the checkout parks only now; the carry rechecks the baseline.
+            parked = (publication._parked_root(source, self._detach_transaction, workspace_key=key)
+                      or _park_public(source, self._detach_transaction, session_id))
         else:
             # Hosted callers deliver explicit routes; any prior public tree returns untouched first.
             publication._unpark(source, self._detach_transaction, workspace_key=key)
-        parked = publication._parked_root(source, self._detach_transaction, workspace_key=key)
+            parked = None
         transaction_id = f"publish-{session_id}-{secrets.token_hex(8)}"
         transaction = self.layout.state_root / "transactions" / transaction_id
         transaction.mkdir(parents=True)
