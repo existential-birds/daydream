@@ -1591,15 +1591,16 @@ async def test_artifact_session_detects_source_mutation_without_deleting_unique_
         pass
     assert _manifest(source) == expected
 
-    # A shared entry changed during the run refuses publication, both versions survive: the edit in the checkout
-    # (parked for an in-place run, still visible otherwise) and the run's own outputs in its frozen copy.
-    for in_place in (True, False):
-        changed_source = tmp_path / f"changed-source-{in_place}"
+    # A shared entry changed during the run refuses publication, both versions survive: the user's change in the
+    # checkout (parked for an in-place run, still visible otherwise) and the run's own outputs in its frozen copy.
+    for in_place, mutation in ((True, "edit"), (False, "edit"), (False, "delete")):
+        changed_source = tmp_path / f"changed-source-{in_place}-{mutation}"
         _init_repo(changed_source)
         _seed_public_artifacts(changed_source)
         changed_owner = _owner(changed_source)
-        work = _work(changed_source) if in_place else _work(changed_source, repo=_worktrees(changed_source, "wt")[0])
-        with _case_note(f"in_place={in_place}"):
+        work = (_work(changed_source) if in_place
+                else _work(changed_source, repo=_worktrees(changed_source, f"wt-{mutation}")[0]))
+        with _case_note(f"in_place={in_place} mutation={mutation}"):
             async with open_artifact_session(work, session_id="changed", owner=changed_owner) as session:
                 frozen = _freeze_run(session, "changed")
                 if in_place:
@@ -1607,11 +1608,18 @@ async def test_artifact_session_detects_source_mutation_without_deleting_unique_
                 else:
                     edited = changed_source
                     assert (changed_source / ".daydream" / "deep" / "prior.md").is_file()
-                (edited / ".daydream" / "deep" / "prior.md").write_bytes(b"edited during the run\n")
+                if mutation == "edit":
+                    (edited / ".daydream" / "deep" / "prior.md").write_bytes(b"edited during the run\n")
+                else:
+                    shutil.rmtree(edited / ".daydream")
+                    (edited / ".review-output.md").unlink()
                 with pytest.raises(ArtifactVisibilityError, match="changed during the run"):
                     _publish(session, frozen)
-            assert (changed_source / ".daydream" / "deep" / "prior.md").read_bytes() == b"edited during the run\n"
-            assert not (changed_source / ".daydream" / "runs" / "changed").exists()
+            if mutation == "edit":
+                assert (changed_source / ".daydream/deep/prior.md").read_bytes() == b"edited during the run\n"
+                assert not (changed_source / ".daydream" / "runs" / "changed").exists()
+            else:
+                assert _manifest(changed_source) == ()
             assert (frozen.root / ".daydream" / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
 
 

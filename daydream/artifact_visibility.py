@@ -1074,7 +1074,9 @@ def _park_public(source: ownership.SourceOwnership, transaction: Path, session_i
     return parked
 
 
-def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwner) -> ArtifactSession:
+def _open_layout(
+    work: WorkContext, session_id: str, owner: PrivateWorkspaceOwner, models_outside_checkout: bool,
+) -> ArtifactSession:
     """Detach the public tree and return the held session, on a worker thread."""
     from daydream.trajectory import RUNS_DIRNAME
 
@@ -1142,7 +1144,8 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
             )
             filesystem._atomic_json(transaction / "shared-manifest.json", filesystem._manifest_payload(baseline))
             # Only a model working in the checkout itself must not see the tree; other runs park it at publication.
-            parked = _park_public(source_owner, transaction, session_id) if identity.repo == source else None
+            in_checkout = identity.repo == source and not models_outside_checkout
+            parked = _park_public(source_owner, transaction, session_id) if in_checkout else None
             layout = ArtifactLayout(
                 repo=identity.repo,
                 source=source,
@@ -1214,9 +1217,14 @@ async def open_artifact_session(
     session_id: str,
     owner: PrivateWorkspaceOwner,
     retained_runs: int = DEFAULT_RETAINED_RUNS,
+    models_outside_checkout: bool = False,
 ) -> AsyncIterator[ArtifactSession]:
+    """Open one run's artifact session; ``models_outside_checkout`` declares that every model turn of an
+    in-place run works elsewhere (Improve's audit snapshot), so the public tree stays visible until publication.
+    """
     with anyio.CancelScope(shield=True):
-        session = await anyio.to_thread.run_sync(partial(_open_layout, work, session_id, owner))
+        session = await anyio.to_thread.run_sync(
+            partial(_open_layout, work, session_id, owner, models_outside_checkout))
     token = _SESSION.set(session)
     primary: BaseException | None = None
     try:

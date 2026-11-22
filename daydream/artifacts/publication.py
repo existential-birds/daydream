@@ -414,17 +414,17 @@ def _carry(
     session_id: str,
 ) -> None:
     """Check the parked shared set, then rename earlier evidence and this run's evidence into the stage."""
-    if parked is not None and _shared_manifest(parked) != baseline:
+    # Nothing parked means the run found no public tree, or its user deleted it mid-run: both compare as empty.
+    if (() if parked is None else _shared_manifest(parked)) != baseline:
         raise ArtifactVisibilityError(
-            f"parked public artifacts at {parked} changed during the run; they are restored and this run's "
-            "outputs stay in its frozen copy"
+            f"public artifacts in {source.path} changed during the run; they are kept and this run's outputs stay "
+            "in its frozen copy"
         )
     if any(os.path.lexists(source.path / name) for name in (_DAYDREAM, _REVIEW_OUTPUT)):
         raise ArtifactVisibilityError("public artifacts appeared in the checkout during the run")
     public = stage / "public"
     runs = public / _RUNS
-    if filesystem._entry_at(baseline, _RUNS) is not None:
-        assert parked is not None
+    if parked is not None and filesystem._entry_at(baseline, _RUNS) is not None:
         if not os.path.lexists(public / _DAYDREAM):
             root = cast(ArtifactManifestEntry, filesystem._entry_at(baseline, _DAYDREAM))
             (public / _DAYDREAM).mkdir(mode=root.mode)
