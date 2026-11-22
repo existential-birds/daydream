@@ -4,7 +4,7 @@ version = "0.36.0"
 description = "Automated code review and fix loop using Claude"
 requires-python = ">=3.14"
 dependencies = [
-    "claude-agent-sdk==0.2.181",
+    "claude-agent-sdk==0.2.185",
     # Claude host tools serve a lowlevel SDK MCP server that reads per-call _meta (1.x request handlers).
     "mcp>=1.30,<2",
     # Codex host tools serve that SDK's streamable HTTP transport on loopback; the floor is the SDK's own.
@@ -12,7 +12,7 @@ dependencies = [
     "anyio>=4.16.0",
     "rich>=15.0.0",
     "pyfiglet>=1.0",
-    "pydantic>=2.14.3",
+    "pydantic>=2.14.4",
     "httpx>=0.28",
     "PyJWT>=2.15.0",
     "jsonschema>=4.0",
@@ -26,7 +26,7 @@ dependencies = [
     "tree-sitter-go==0.25.0",
     "tree-sitter-rust==0.24.2",
     "pyyaml>=6.0",
-    "traceloop-sdk==0.63.0",
+    "traceloop-sdk==0.63.1",
     "opentelemetry-api>=1.45.2,<2",
     "opentelemetry-sdk>=1.42,<2",
     "opentelemetry-exporter-otlp-proto-http>=1.45.2,<2",
@@ -41,14 +41,14 @@ hub = ["huggingface_hub>=2.4.0"]
 
 [dependency-groups]
 dev = [
-    "grpcio>=1.85.1",
+    "grpcio>=1.85.3",
     "grpc-stubs>=1.53",
     "opentelemetry-proto>=1.42,<2",
     "mypy>=2.4.1",
     "pytest>=9.2.0",
     "pytest-asyncio>=1.5.0",
     "pytest-xdist>=3.6",
-    "ruff>=0.17.5",
+    "ruff>=0.17.6",
     "types-jsonschema>=4.26.0.20261006",  # tracked to jsonschema 4.26.x
     "types-pyyaml>=6.0.12.20261103",
     "types-requests>=2.33.0.20261030",
