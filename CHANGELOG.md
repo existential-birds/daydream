@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `.daydream/` and `.review-output.md` stay visible in the checkout during report-only,
+  comment, `--branch`/`--worktree` and Improve runs
+  ([#1947](https://github.com/existential-birds/daydream/issues/1947)). They are hidden only
+  while a model works in the checkout itself (in-place `--fix`, `--diagram-only` and custom
+  flows); other runs move them aside only while publishing. If a shared entry such as
+  `.review-output.md` or `.daydream/deep/` changes during such a run, publication refuses and
+  both versions are kept; changes under `.daydream/runs/` are carried as they are. See
+  [artifacts and recovery](docs/runtime.md#artifacts-and-recovery).
 - A run no longer copies or hashes earlier runs' public evidence
   ([#1945](https://github.com/existential-birds/daydream/issues/1945)). It publishes only its own
   `.daydream/runs/<session id>/`; while it runs, the checkout's `.daydream/` and

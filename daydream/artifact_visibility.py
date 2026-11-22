@@ -799,6 +799,9 @@ class ArtifactSession:
         session_id = self.layout.session_id
         if publish_public:
             staged, evidence, expected = publication._publication_entries(snapshot.manifest, self._baseline, session_id)
+            if publication._parked_root(source, self._detach_transaction, workspace_key=key) is None:
+                # A run whose model never worked in the checkout parks only now; the carry rechecks the baseline.
+                _park_public(source, self._detach_transaction, session_id)
         else:
             # Hosted callers deliver explicit routes; any prior public tree returns untouched first.
             publication._unpark(source, self._detach_transaction, workspace_key=key)
@@ -1060,6 +1063,17 @@ def _print_retention_warning(runs: Path) -> None:
     print_warning(console, f"Some finished run directories under {runs} could not be cleaned; they were left in place.")
 
 
+def _park_public(source: ownership.SourceOwnership, transaction: Path, session_id: str) -> Path | None:
+    """Park the public tree for one session and journal it; return where it waits, if anything was parked."""
+    parked = publication._park(source, transaction, workspace_key=transaction.parent.parent.name)
+    if parked is not None:
+        transactions._write_transition(
+            transaction / "journal.json", transaction_id=transaction.name, session_id=session_id,
+            state=_Transition.PUBLIC_PARKED,
+        )
+    return parked
+
+
 def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwner) -> ArtifactSession:
     """Detach the public tree and return the held session, on a worker thread."""
     from daydream.trajectory import RUNS_DIRNAME
@@ -1127,12 +1141,8 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
                 source=source_owner,
             )
             filesystem._atomic_json(transaction / "shared-manifest.json", filesystem._manifest_payload(baseline))
-            parked = publication._park(source_owner, transaction, workspace_key=workspace_key)
-            if parked is not None:
-                transactions._write_transition(
-                    transaction / "journal.json", transaction_id=transaction_id, session_id=session_id,
-                    state=_Transition.PUBLIC_PARKED,
-                )
+            # Only a model working in the checkout itself must not see the tree; other runs park it at publication.
+            parked = _park_public(source_owner, transaction, session_id) if identity.repo == source else None
             layout = ArtifactLayout(
                 repo=identity.repo,
                 source=source,
@@ -1143,8 +1153,8 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
                 session_id=session_id,
                 state_root=state_root,
             )
-            # Only the shared set is copied; earlier evidence stays parked, never read.
-            filesystem._copy_tree(parked or transaction, layout.live_root, baseline)
+            # Only the shared set is copied; earlier evidence is never read.
+            filesystem._copy_tree(parked or source, layout.live_root, baseline)
         except BaseException as primary:
             if transaction is not None and transaction.exists() and not transaction.is_symlink():
                 try:

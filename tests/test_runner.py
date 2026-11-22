@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import threading
 from collections.abc import AsyncIterator, Callable
@@ -458,7 +459,9 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
         assert "Run evidence could not be persisted" not in captured.out
         assert external_trajectory.read_bytes().decode() == documents[0]["otlp_jsonl"]
         assert (dump / "prior.txt").read_text() == "prior dump"
-        assert list((tmp_path / "private" / "runtime").glob("*/transactions/*/journal.json"))
+        # The session transaction stays for recovery; only an in-place run parked the tree and journalled it.
+        retained = (tmp_path / "private" / "runtime").glob("*/transactions/*/source-identity.json")
+        assert [path.parent.joinpath("journal.json").is_file() for path in retained] == [not force_worktree]
         return
     assert re.search(r"Finalization complete after \d+\.\ds", progress)
     assert result == [0] and "Data Collection" not in captured.out
@@ -549,7 +552,17 @@ async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
 
     # A review cancelled on the ordinary route seals what it admitted before the cancellation escapes:
     # its claim and its unfinished coverage are published, and the embedder's result handler is not called.
+    # Its model works in a captured source, so the checkout's public tree stays visible and unchanged meanwhile,
+    # and a user's edit or deletion under runs/ during the run is carried as it is.
+    from tests.test_artifact_visibility import _manifest
+
     reviewed = _feature_repo(tmp_path / "reviewed")
+    public = reviewed / ".daydream"
+    for relative, content in (("runs/earlier/evidence", b"earlier"), ("runs/deleted/evidence", b"deleted"),
+                              ("custom/keep.txt", b"kept")):
+        (public / relative).parent.mkdir(parents=True, exist_ok=True)
+        (public / relative).write_bytes(content)
+    seeded = _manifest(reviewed)
     reviewer = StubBackend(reviewed)
     reviewer.review_claims = [{"title": "Admitted before cancellation", "file": "app.py", "line": 1}]
     monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: reviewer)
@@ -567,9 +580,19 @@ async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
         except BaseException as exc:
             caught.append(exc)
             raise
+    observed: list[Any] = []
     async with anyio.create_task_group() as group:
-        reviewer.review_after_acceptance = lambda kind: group.cancel_scope.cancel() if kind == "discovery" else None
+        def edit_then_cancel(kind: str) -> None:
+            if kind == "discovery":
+                observed.append(_manifest(reviewed))
+                if observed == [seeded]:
+                    (public / "runs/earlier/evidence").write_bytes(b"edited during the run")
+                    shutil.rmtree(public / "runs/deleted")
+                group.cancel_scope.cancel()
+
+        reviewer.review_after_acceptance = edit_then_cancel
         group.start_soon(review)
+    assert observed == [seeded]
     assert len(caught) == 1 and isinstance(caught[0], anyio.get_cancelled_exc_class())
     assert handled == [] and not exported.exists()
     sealed = json.loads((reviewed / ".daydream/deep/committed-review.json").read_text())
@@ -582,6 +605,8 @@ async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
     assert (summary["run_id"], summary["terminal"]["pipeline_state"]) == (sealed["run_id"], "cancelled")
     assert "Admitted before cancellation" in (reviewed / ".review-output.md").read_text()
     assert not list((tmp_path / "private").rglob("review-capture-*"))
+    assert (public / "runs/earlier/evidence").read_bytes() == b"edited during the run"
+    assert not (public / "runs/deleted").exists() and (public / "custom/keep.txt").read_bytes() == b"kept"
 
 
 @pytest.mark.usefixtures("fake_gh")
