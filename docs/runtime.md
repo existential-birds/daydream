@@ -1066,10 +1066,8 @@ refused before any process or server starts, and the disposable read-only checko
 - Secret: a per-attempt token travels only in the child environment, never in argv, a
   prompt or request evidence, and it authorizes nothing once the attempt ends. The
   variable is blanked inside model shell commands, and the supported builds keep it out of
-  the shell-snapshot file Codex writes under its home. Codex 0.139.0 and 0.153.4 wrote it
-  there, where a model shell command could read it and return it to the provider as tool
-  output; they are no longer supported. Codex removes the snapshot at exit and keeps no
-  session files for these invocations (see Session history). A process of the same user
+  the shell-snapshot file Codex writes under its home. Codex removes the snapshot at exit
+  and keeps no session files for these invocations (see Session history). A process of the same user
   can also read the Codex process environment while it runs.
 - Session history: every committed-review invocation is non-persisted, so the command
   passes `--ephemeral` and Codex writes no session rollout or thread rows for it. Its logs
@@ -1084,8 +1082,8 @@ refused before any process or server starts, and the disposable read-only checko
   registered, so there is nothing to compare before model work.
 - Schemas: Codex removes `maxLength`, `minLength`, `pattern`, `minimum`, `maximum`,
   `maxItems` and `uniqueItems` from the schema it shows the model. It passes object
-  arguments through without validating them, so the host enforces the full bound schema on every such call and
-  explains each rejection. Codex itself rejects non-object arguments (see Failure) and
+  arguments through without validating them, so the host enforces the full bound schema
+  on every such call and explains each rejection. Codex itself rejects non-object arguments (see Failure) and
   answers unparseable ones without reporting a tool call.
 - Accounting: Codex has no hook before a tool runs. A host call is charged by the MCP
   handler under a host-assigned identity and served synchronously, so it can be denied
@@ -1123,7 +1121,7 @@ refused before any process or server starts, and the disposable read-only checko
   that limit's reason is then sealed.
 - Not offered: resuming a native conversation with host tools or a capacity preflight.
 
-Supported builds are Codex CLI 0.163.0, 0.169.0 and 0.171.0. On each, a real provider
+On each [supported build](extensions.md#invocation-scoped-host-tools), a real provider
 with a ChatGPT login on macOS exercised registration and approval, required-server
 startup, readiness, charging of host and Codex-owned calls, settlement and the shell
 snapshot. The other rules were exercised offline with a scripted local provider on Linux

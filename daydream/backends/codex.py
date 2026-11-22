@@ -809,7 +809,6 @@ class CodexBackend:
             schema_path = write_temp_json_schema(output_schema, prefix="daydream-schema-")
 
         thread_id: str | None = None
-        model_name = self.model
 
         # Pair idless starts/completions by FIFO; misses get
         # observable orphan ids. Accumulate item.updated text because completion
@@ -1046,7 +1045,7 @@ class CodexBackend:
             if lifecycle is not None:
                 lifecycle.request_prepared()
             yield RequestEvent(
-                prompt=prompt, system_prompt=review_instructions, model_name=model_name, output_schema=output_schema,
+                prompt=prompt, system_prompt=review_instructions, model_name=self.model, output_schema=output_schema,
                 reasoning_effort=effort,
                 session_id=codex_resume_thread,
                 config=CodexRequestConfig(
@@ -1321,18 +1320,18 @@ class CodexBackend:
                     if not isinstance(usage, dict):
                         malformed_shapes["usage_not_object"] += 1
                         usage = {}
-                    # turn.completed carries only usage (0.163.0, 0.169.0 and 0.171.0): no message id, model,
-                    # provider, finish reason or cost. Use an empty id and the configured model, and estimate
-                    # cost from user-overridable prices (None for unknown models). Require both token counts;
-                    # reasoning tokens are an output subset, never additive. cache_write_input_tokens is not
-                    # read: Codex does not say whether it is part of input_tokens, every observed build
-                    # reports 0, and input it writes to the cache is already priced as uncached input.
+                    # turn.completed carries only usage: no message id, model, provider, finish reason or
+                    # cost. Use an empty id and the configured model, and estimate cost from user-overridable
+                    # prices (None for unknown models). Require both token counts; reasoning tokens are an output
+                    # subset, never additive. cache_write_input_tokens is not read: Codex does not say whether it
+                    # is part of input_tokens, every observed build reports 0, and input it writes to the cache
+                    # is already priced as uncached input.
                     cached_tokens = usage.get("cached_input_tokens")
                     reasoning_tokens = usage.get("reasoning_output_tokens")
                     in_tok = usage.get("input_tokens")
                     out_tok = usage.get("output_tokens")
                     synth_cost = compute_cost_from_totals(
-                        model_name,
+                        self.model,
                         total_input_tokens=in_tok or 0,
                         cached_input_tokens=cached_tokens or 0,
                         output_tokens=out_tok or 0,
@@ -1346,7 +1345,7 @@ class CodexBackend:
                             cached_tokens=cached_tokens,
                             cost_usd=synth_cost,
                             reasoning_tokens=reasoning_tokens,
-                            model_name=model_name,
+                            model_name=self.model,
                             usage_scope="invocation",
                             measurement_source="turn_end",
                         )
@@ -1356,7 +1355,7 @@ class CodexBackend:
                         output_tokens=out_tok,
                         cached_tokens=cached_tokens,
                         reasoning_tokens=reasoning_tokens,
-                        model_name=model_name,
+                        model_name=self.model,
                         measurement_source="turn_end",
                         cost_source="estimated",
                     )
@@ -1374,7 +1373,7 @@ class CodexBackend:
                     _pending_result = ResultEvent(
                         structured_output=None,
                         continuation=continuation_token,
-                        model_name=model_name,
+                        model_name=self.model,
                         session_id=thread_id,
                     )
 

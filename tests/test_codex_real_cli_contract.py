@@ -48,11 +48,7 @@ def test_codex_capture_provenance_is_sanitized_and_candidates_never_replace_it(t
         if record["type"] != "item.completed"
         else f"item.completed/{record['item']['type']}"
         for record in records
-    ] == ["thread.started", "item.completed/error", "turn.started",
-        "item.completed/agent_message", "item.completed/agent_message", "turn.completed",
-    ]
-    assert metadata["ordered_public_shape"] == [
-        "thread.started", "item.completed/error", "turn.started",
+    ] == metadata["ordered_public_shape"] == ["thread.started", "item.completed/error", "turn.started",
         "item.completed/agent_message", "item.completed/agent_message", "turn.completed",
     ]
     assert metadata["cli_version"] == "0.171.0"
@@ -73,9 +69,7 @@ def test_codex_capture_provenance_is_sanitized_and_candidates_never_replace_it(t
         "and include its error category without inventing it."
     )
 
-    public_items = [record["item"] for record in records if "item" in record]
-    assert [item["type"] for item in public_items] == ["error", "agent_message", "agent_message"]
-    for item in public_items:
+    for item in (record["item"] for record in records if "item" in record):
         assert not ({"name", "call_id", "arguments", "output"} & item.keys())
 
     fixture_text = fixture_bytes.decode()
@@ -89,10 +83,7 @@ def test_codex_capture_provenance_is_sanitized_and_candidates_never_replace_it(t
     }:
         assert forbidden_key not in metadata
 
-    committed_fixture = fixture_path
-    committed_metadata = metadata_path
-    before_fixture = committed_fixture.read_bytes()
-    before_metadata = committed_metadata.read_bytes()
+    before_metadata = metadata_path.read_bytes()
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -152,8 +143,8 @@ def test_codex_capture_provenance_is_sanitized_and_candidates_never_replace_it(t
     assert not [key for key in candidate if key.startswith("private_")]
     assert hashlib.sha256(candidate_fixture.read_bytes()).hexdigest() == candidate["fixture_sha256_sanitized"]
     assert "/Users/fake-person" not in candidate_fixture.read_text()
-    assert committed_fixture.read_bytes() == before_fixture
-    assert committed_metadata.read_bytes() == before_metadata
+    assert fixture_path.read_bytes() == fixture_bytes
+    assert metadata_path.read_bytes() == before_metadata
 
     rejected_root = tmp_path / "rejected-candidates"
     env["DAYDREAM_CODEX_CAPTURE_ROOT"] = str(rejected_root)
@@ -164,8 +155,8 @@ def test_codex_capture_provenance_is_sanitized_and_candidates_never_replace_it(t
     assert rejected.returncode != 0
     assert "update the parser contract" in rejected.stderr
     assert not [path for path in rejected_root.iterdir() if not path.name.startswith(".")]
-    assert committed_fixture.read_bytes() == before_fixture
-    assert committed_metadata.read_bytes() == before_metadata
+    assert fixture_path.read_bytes() == fixture_bytes
+    assert metadata_path.read_bytes() == before_metadata
 
 
 async def test_real_golden_parses_to_expected_events() -> None:

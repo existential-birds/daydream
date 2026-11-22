@@ -2,7 +2,7 @@
 #
 # Capture (or refresh) the REAL codex CLI golden fixture.
 #
-# Runs `codex exec --experimental-json --sandbox read-only` against the tiny
+# Runs a read-only `codex exec --experimental-json` turn against the tiny
 # in-repo sample repo and writes the JSONL stdout to
 # tests/fixtures/codex_jsonl/real/golden.jsonl.
 #
@@ -38,7 +38,7 @@ echo "→ prompt: read README.md then hello.py, then describe both"
 # Read prompt from stdin, run read-only so nothing mutates the sample repo.
 # --cd pins the codex working directory to SAMPLE_REPO so the golden is always
 # captured against the in-repo sample repo, never the caller's cwd.
-# The flags mirror Daydream's own read-only invocation, with its default model.
+# Daydream's default model; --skip-git-repo-check is harmless here and keeps the script runnable on a copy.
 MODEL="$(uv run --project "$REPO_ROOT" python -c 'from daydream.config import DEFAULT_CODEX_MODEL; print(DEFAULT_CODEX_MODEL)')"
 echo "Read README.md, then read hello.py, then describe both files in one sentence each." \
   | codex exec --experimental-json --model "$MODEL" --sandbox read-only --cd "$SAMPLE_REPO" \

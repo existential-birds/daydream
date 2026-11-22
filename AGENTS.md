@@ -187,8 +187,7 @@ and the relevant contracts below.
   overrides and child environment, never the Codex home. Keep the loopback server
   required, authenticated and approved for its own tools only, its secret out of argv and
   prompts and blanked in the shell environment, and the user's proxy exemptions intact.
-  Codex-owned tools cannot be denied before they run; keep
-  charging them after acceptance ([Codex host tools](docs/runtime.md#codex-host-tools)).
+  Codex-owned tools cannot be denied before they run; keep charging them after acceptance ([Codex host tools](docs/runtime.md#codex-host-tools)).
 - No turn limits; bound invocations with the host ledger's absolute deadline and tool
   limit ([budget ledger](docs/runtime.md#budget-ledger)). Read defaults from
   `config.py` and `retry_policy_from_environment` in `backends/__init__.py`.
