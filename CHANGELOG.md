@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A run no longer copies or hashes earlier runs' public evidence
+  ([#1945](https://github.com/existential-birds/daydream/issues/1945)). It publishes only its own
+  `.daydream/runs/<session id>/`; while it runs, the checkout's `.daydream/` and
+  `.review-output.md` wait in private storage, moved there by rename, and earlier runs' evidence
+  is carried back by rename without being read. With 256 MiB of earlier evidence a review
+  previously copied about 1 GB and hashed about 4.8 GB of it; it now does the same artifact work as
+  with none. The public layout is unchanged. Unknown top-level entries in `.daydream/` are now
+  carried instead of refused. **Breaking (0.y.z), private state only:** the private
+  `canonical/` copy is gone. A stale one is deleted at the next run, and a pending transaction
+  written by an earlier release is kept and refused with recovery steps (run that release once
+  in the checkout, or restore the tree from its `canonical/` copy by hand). See
+  [artifacts and recovery](docs/runtime.md#artifacts-and-recovery).
 - The Codex backend supports Codex CLI 0.163.0, 0.169.0 and 0.171.0, the newest release
   ([#1942](https://github.com/existential-birds/daydream/issues/1942)). Codex 0.139.0 and
   0.153.4 are no longer supported: a ChatGPT login refuses current models for them, and they let

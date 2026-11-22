@@ -290,6 +290,7 @@ def _walk(
     inodes: set[tuple[int, int]],
     *,
     digest: bool,
+    prune: str | None,
 ) -> None:
     try:
         metadata = path.lstat()
@@ -302,6 +303,8 @@ def _walk(
         raise ArtifactVisibilityError("artifact roots accept only regular files and directories")
     if stat.S_ISDIR(metadata.st_mode):
         entries.append(ArtifactManifestEntry(relative, "directory", 0, mode, None))
+        if relative == prune:
+            return
         try:
             children = sorted(path.iterdir(), key=lambda child: _manifest_order_key(child.name))
         except OSError as exc:
@@ -312,7 +315,7 @@ def _walk(
             if key in normalized:
                 raise ArtifactVisibilityError("artifact tree contains duplicate normalized names")
             normalized.add(key)
-            _walk(root, child, entries, inodes, digest=digest)
+            _walk(root, child, entries, inodes, digest=digest, prune=prune)
         return
     if not stat.S_ISREG(metadata.st_mode):
         raise ArtifactVisibilityError("artifact roots accept only regular files and directories")
@@ -332,12 +335,14 @@ def manifest_tree(
     names: Sequence[str] | None = None,
     *,
     digest: bool = True,
+    prune: str | None = None,
 ) -> tuple[ArtifactManifestEntry, ...]:
     """Enumerate a tree, hashing every file unless ``digest`` is disabled.
 
     Reject symlinks, special files, normalized-name collisions, and duplicate inodes.
     A digest-free listing carries no ``sha256`` and is therefore only valid for
     enumerating a tree in order to delete it, never for attestation or storage.
+    A ``prune`` directory is listed without its descendants.
     """
     try:
         root_metadata = root.lstat()
@@ -357,7 +362,7 @@ def manifest_tree(
         normalized.add(key)
         path = root / name
         if path.exists() or path.is_symlink():
-            _walk(root, path, entries, inodes, digest=digest)
+            _walk(root, path, entries, inodes, digest=digest, prune=prune)
     return tuple(entries)
 
 

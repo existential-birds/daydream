@@ -2,8 +2,8 @@
 
 Run directories are created and finalized only under the exclusive workspace lock,
 so while a closing session still holds it every other run directory is finished.
-Recovery reads transactions and the canonical copy, never run directories; a run
-named by a retained or quarantined transaction keeps every byte for the operator.
+Recovery reads transactions, never run directories; a run named by a retained or
+quarantined transaction keeps every byte for the operator.
 """
 
 from __future__ import annotations

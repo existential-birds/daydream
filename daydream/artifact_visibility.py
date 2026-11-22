@@ -9,7 +9,6 @@ from __future__ import annotations
 import fcntl
 import os
 import secrets
-import shutil
 import stat
 from collections.abc import Sequence
 from contextlib import ExitStack, asynccontextmanager, suppress
@@ -46,6 +45,7 @@ from daydream.artifacts.models import (
     _DAYDREAM,
     _PUBLIC_LABELS,
     _REVIEW_OUTPUT,
+    _RUNS,
     _TRAJECTORY_LABELS,
     ArtifactDisposition as ArtifactDisposition,
     ArtifactEvidenceProvenance as ArtifactEvidenceProvenance,
@@ -103,7 +103,7 @@ class ArtifactSession:
         workspace: ownership.WorkspaceOwnership,
         code_workspace: ownership.CodeWorkspace,
         owns_workspace: bool,
-        canonical_entries: tuple[ArtifactManifestEntry, ...],
+        baseline: tuple[ArtifactManifestEntry, ...],
         detach_transaction: Path,
     ) -> None:
         self.layout = layout
@@ -111,7 +111,7 @@ class ArtifactSession:
         self.ownership = workspace
         self.code_workspace = code_workspace
         self._owns_workspace = owns_workspace
-        self._canonical_entries = canonical_entries
+        self._baseline = baseline
         self._detach_transaction = detach_transaction
         self._state = _SessionState.ACTIVE
         self._destinations: list[RoutedDestination] = []
@@ -588,25 +588,10 @@ class ArtifactSession:
 
     def _rollback_paired_capture(self, initial: int) -> None:
         """Undo the two destination captures a failed paired registration made."""
-        captured = self._records()[initial:]
-        if captured:
-            restore_stage = publication._create_source_stage(
-                self.ownership.source,
-                self._detach_transaction.name,
-                "restore",
-                workspace_key=self.layout.workspace_key,
-            )
-            try:
-                publication._restore_destination_records(
-                    self.ownership.source, self._detach_transaction, captured, restore_stage,
-                )
-            finally:
-                publication._retire_source_stage(
-                    self.ownership.source,
-                    self._detach_transaction.name,
-                    "restore",
-                    workspace_key=self.layout.workspace_key,
-                )
+        publication._restore_destinations(
+            self.ownership.source, self._detach_transaction, self._records()[initial:],
+            workspace_key=self.layout.workspace_key,
+        )
         for index in range(initial, initial + 2):
             baseline_root = self._detach_transaction / f"destination-{index:04d}-baseline"
             if baseline_root.exists() or baseline_root.is_symlink():
@@ -809,43 +794,37 @@ class ArtifactSession:
             self._retire_late_paths()
             self._state = _SessionState.PUBLISHED
             return
-        # Hosted callers deliver explicit routes while preserving the source's
-        # prior public bytes through the same conflict-safe transaction.
-        public_root = snapshot.root if publish_public else self.layout.state_root / "canonical"
-        public_entries = tuple(
-            entry
-            for entry in (snapshot.manifest if publish_public else self._canonical_entries)
-            if entry.path == _DAYDREAM or entry.path.startswith(f"{_DAYDREAM}/") or entry.path == _REVIEW_OUTPUT
-        )
-        transaction_id = f"publish-{self.layout.session_id}-{secrets.token_hex(8)}"
+        source = self.ownership.source
+        key = self.layout.workspace_key
+        session_id = self.layout.session_id
+        if publish_public:
+            staged, evidence, expected = publication._publication_entries(snapshot.manifest, self._baseline, session_id)
+        else:
+            # Hosted callers deliver explicit routes; any prior public tree returns untouched first.
+            publication._unpark(source, self._detach_transaction, workspace_key=key)
+        parked = publication._parked_root(source, self._detach_transaction, workspace_key=key)
+        transaction_id = f"publish-{session_id}-{secrets.token_hex(8)}"
         transaction = self.layout.state_root / "transactions" / transaction_id
         transaction.mkdir(parents=True)
         mark = partial(
             transactions._write_transition,
             transaction / "journal.json",
             transaction_id=transaction_id,
-            session_id=self.layout.session_id,
+            session_id=session_id,
         )
         publication_stage: Path | None = None
         try:
             transactions._write_transaction_owner(
-                transaction,
-                workspace_key=self.layout.workspace_key,
-                session_id=self.layout.session_id,
-                kind="publish",
-                source=self.ownership.source,
+                transaction, workspace_key=key, session_id=session_id, kind="publish", source=source,
             )
-            filesystem._atomic_json(transaction / "publish-manifest.json", filesystem._manifest_payload(public_entries))
-            publication_stage = publication._create_source_stage(
-                self.ownership.source,
-                transaction_id,
-                "publish",
-                workspace_key=self.layout.workspace_key,
-            )
-            public_stage = publication_stage / "public"
-            filesystem._copy_tree(public_root, public_stage, public_entries)
-            canonical_stage = transaction / "canonical-stage"
-            filesystem._copy_tree(public_root, canonical_stage, public_entries)
+            publication_stage = publication._create_source_stage(source, transaction_id, "publish", workspace_key=key)
+            # A privately parked tree shares a filesystem with the checkout: its stage joins it, so carry
+            # and install are renames.
+            private = parked is not None and parked.parent == self._detach_transaction
+            stage = transaction if private else publication_stage
+            if publish_public:
+                filesystem._atomic_json(transaction / "publish-manifest.json", filesystem._manifest_payload(expected))
+                publication._stage_public(snapshot.root, stage, staged, evidence)
             publish_records: list[_DestinationRecord] = []
             for index, item in enumerate(self._routed):
                 destination, baseline_record = item.route, item.record
@@ -892,13 +871,11 @@ class ArtifactSession:
                 transaction, publish_records, include_published=True, include_baseline=True
             )
             external._inherit_external_capability_proofs(self._detach_transaction, transaction)
-            mark(state=_Transition.PUBLISH_STAGED)
+            mark(state=_Transition.PUBLIC_STAGED)
         except BaseException as primary:
             try:
                 if publication_stage is not None:
-                    publication._retire_source_stage(
-                        self.ownership.source, transaction_id, "publish", workspace_key=self.layout.workspace_key
-                    )
+                    publication._retire_source_stage(source, transaction_id, "publish", workspace_key=key)
                 transactions._retire_transaction(
                     self.layout.state_root, transaction, terminal_state=_TerminalState.PUBLISH_RECONCILED
                 )
@@ -906,12 +883,11 @@ class ArtifactSession:
                 primary.add_note(f"publication staging cleanup retained evidence ({type(cleanup_error).__name__})")
             raise
         self._state = _SessionState.PUBLISHING
-        (transaction / "public-backup").mkdir()
-        _fsync_directory(transaction)
-        mark(state=_Transition.PUBLISH_BACKED_UP)
-        publication._replace_public_from_tree(
-            self.ownership.source, public_stage, public_entries
-        )
+        if publish_public:
+            publication._carry(source, parked, stage, self._baseline, session_id)
+        mark(state=_Transition.PUBLIC_CARRIED)
+        if publication._move_roots_in(source, stage / "public"):
+            raise ArtifactVisibilityError("public artifacts appeared in the checkout during publication")
         for index, record in enumerate(publish_records):
             if record.delivery is DestinationDelivery.LIVE_EXTERNAL:
                 continue
@@ -921,29 +897,22 @@ class ArtifactSession:
                 allowed=(record.baseline,),
                 desired=record.published,
                 transaction=transaction,
-                workspace_key=self.layout.workspace_key,
-                source=self.ownership.source,
+                workspace_key=key,
+                source=source,
             )
         self.validate_source()
-        mark(state=_Transition.PUBLISH_INSTALLED)
-        canonical = self.layout.state_root / "canonical"
-        os.replace(canonical, transaction / "old-canonical")
-        os.replace(canonical_stage, canonical)
-        _fsync_directory(self.layout.state_root)
-        filesystem._atomic_json(
-            self.layout.state_root / "canonical-manifest.json", filesystem._manifest_payload(public_entries)
-        )
+        mark(state=_Transition.PUBLIC_INSTALLED)
+        if publish_public and publication._public_view(source.path, session_id) != expected:
+            raise ArtifactVisibilityError("public artifact publication verification failed")
         self.validate_source()
-        mark(state=_Transition.PUBLISH_VERIFIED)
-        self._canonical_entries = public_entries
+        mark(state=_Transition.PUBLIC_VERIFIED)
+        publication._discard_parked(source, self._detach_transaction, workspace_key=key)
         transactions._retire_transaction(
             self.layout.state_root,
             self._detach_transaction,
             terminal_state=_TerminalState.DETACHED_RECONCILED,
         )
-        publication._retire_source_stage(
-            self.ownership.source, transaction_id, "publish", workspace_key=self.layout.workspace_key
-        )
+        publication._retire_source_stage(source, transaction_id, "publish", workspace_key=key)
         transactions._retire_transaction(
             self.layout.state_root, transaction, terminal_state=_TerminalState.PUBLISH_VERIFIED
         )
@@ -957,40 +926,19 @@ class ArtifactSession:
             # earlier attempt (``finalize_frozen`` and session close both call
             # this). There is nothing left to restore from.
             return
-        canonical = state_root / "canonical"
-        publication._reset_source_stage(
-            self.ownership.source, transaction.name, "restore", workspace_key=self.layout.workspace_key
-        )
-        source_stage = publication._create_source_stage(
-            self.ownership.source,
-            transaction.name,
-            "restore",
-            workspace_key=self.layout.workspace_key,
-        )
+        source, key = self.ownership.source, self.layout.workspace_key
         # Destination failures and public failures need opposite treatment, so
         # they are collected apart rather than into one list.
         destination_errors: list[Exception] = []
         public_errors: list[Exception] = []
         try:
-            publication._restore_destination_records(
-                self.ownership.source, transaction, self._records(), source_stage
-            )
+            publication._restore_destinations(source, transaction, self._records(), workspace_key=key)
         except Exception as exc:
             destination_errors.append(exc)
         try:
-            projection = source_stage / "public"
-            filesystem._copy_tree(canonical, projection, self._canonical_entries)
-            publication._replace_public_from_tree(
-                self.ownership.source, projection, self._canonical_entries
-            )
+            publication._unpark(source, transaction, workspace_key=key)
         except Exception as exc:
             public_errors.append(exc)
-        try:
-            publication._retire_source_stage(
-                self.ownership.source, transaction.name, "restore", workspace_key=self.layout.workspace_key
-            )
-        except Exception as exc:
-            destination_errors.append(exc)
         try:
             external._cleanup_external_directories(transaction, self._created_external_parents)
             self._created_external_parents.clear()
@@ -998,17 +946,14 @@ class ArtifactSession:
             destination_errors.append(exc)
         if public_errors:
             # The journal has to stay: the next session open replays it and
-            # reinstalls the public tree from canonical before anything can
-            # adopt the missing tree as a new baseline. Name it instead.
+            # returns the parked tree before anything else may run. Name it instead.
             raise transactions._transaction_context(public_errors[0], state_root, transaction)
         try:
             self._retire_late_paths()
         except Exception as exc:
             destination_errors.append(exc)
         if destination_errors:
-            raise transactions._clear_failed_restore(
-                state_root, self.ownership.source, transaction, destination_errors[0]
-            )
+            raise transactions._clear_failed_restore(state_root, source, transaction, destination_errors[0])
         transactions._retire_transaction(state_root, transaction, terminal_state=_TerminalState.DETACHED_RECONCILED)
 
     def _close(self) -> None:
@@ -1087,42 +1032,6 @@ def assert_model_cwd_clean(cwd: Path) -> None:
             raise ArtifactVisibilityError("model cwd contains generated Daydream artifacts")
 
 
-def _rebaseline_canonical_from_public(
-    state_root: Path,
-    source: Path,
-    public_entries: tuple[ArtifactManifestEntry, ...],
-    *,
-    transaction: Path,
-) -> None:
-    """Adopt between-run public changes as the canonical recovery baseline and warn.
-    Session opening holds the exclusive lock with no transaction in flight; mid-run
-    divergence still fails through conflict recovery.
-    """
-    canonical = state_root / "canonical"
-    canonical_manifest = state_root / "canonical-manifest.json"
-    backup = transaction / "rebaseline-old-canonical"
-    stage = transaction / "rebaseline-stage"
-    if canonical.exists():
-        os.replace(canonical, backup)
-    try:
-        filesystem._copy_tree(source, stage, public_entries)
-        if canonical.exists() or canonical.is_symlink():
-            filesystem._remove_owned_tree(canonical, state_root)
-        os.replace(stage, canonical)
-        _fsync_directory(state_root)
-        filesystem._atomic_json(canonical_manifest, filesystem._manifest_payload(public_entries))
-    except BaseException:
-        with suppress(OSError):
-            shutil.rmtree(stage, ignore_errors=True)
-        if not canonical.exists() and backup.exists():
-            os.replace(backup, canonical)
-            _fsync_directory(state_root)
-        raise
-    with suppress(OSError):
-        shutil.rmtree(backup, ignore_errors=True)
-    _print_rebaseline_warning(source, canonical)
-
-
 def _prefix_intact(document: TrajectoryDocumentReference) -> bool:
     from daydream.trajectory import TrajectoryDocumentIntegrityError
 
@@ -1149,19 +1058,6 @@ def _print_retention_warning(runs: Path) -> None:
     from daydream.ui import print_warning
 
     print_warning(console, f"Some finished run directories under {runs} could not be cleaned; they were left in place.")
-
-
-def _print_rebaseline_warning(source: Path, canonical: Path) -> None:
-    from daydream.agent import console
-    from daydream.ui import print_warning
-
-    print_warning(
-        console,
-        "Public artifacts changed between runs; adopting the observed public "
-        f"state at {source / _DAYDREAM} (and {source / _REVIEW_OUTPUT}) as the "
-        f"new baseline in the canonical recovery copy at {canonical}. "
-        "Mid-run divergence still fails closed.",
-    )
 
 
 def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwner) -> ArtifactSession:
@@ -1211,24 +1107,18 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
         try:
             source_owner.validate()
             transactions._recover_transactions(state_root, source_owner)
+            publication._retire_canonical(state_root)
             publication._delete_retired_review_cache(source_owner)
-            validated_canonical_entries = publication._validated_canonical_entries(state_root)
-            validated_public_entries = publication._validate_public_tree(
-                source,
-                canonical_entries=validated_canonical_entries,
-            )
+            baseline = publication._validate_public_tree(source)
             runs = state_root / RUNS_DIRNAME
             transactions_root = state_root / "transactions"
             filesystem._create_private_directory(runs)
             filesystem._create_private_directory(transactions_root)
             run_root = runs / session_id
-            if run_root.exists() or run_root.is_symlink():
+            # Retention may have dropped an earlier run's private directory while its public evidence stays.
+            if os.path.lexists(run_root) or os.path.lexists(source / _RUNS / session_id):
                 raise ArtifactVisibilityError("artifact session id already exists")
             run_root.mkdir(mode=0o700)
-
-            public_entries = filesystem.manifest_tree(source, (_DAYDREAM, _REVIEW_OUTPUT))
-            if public_entries != validated_public_entries:
-                raise ArtifactVisibilityError("public artifacts changed during session open")
             transaction_id = f"detach-{session_id}-{secrets.token_hex(8)}"
             transaction = transactions_root / transaction_id
             transaction.mkdir(mode=0o700)
@@ -1236,56 +1126,13 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
                 transaction, workspace_key=workspace_key, session_id=session_id, kind="detach",
                 source=source_owner,
             )
-            mark = partial(
-                transactions._write_transition,
-                transaction / "journal.json",
-                transaction_id=transaction_id,
-                session_id=session_id,
-            )
-            detach_stage = transaction / "detach-stage"
-            canonical = state_root / "canonical"
-            canonical_manifest = state_root / "canonical-manifest.json"
-            # Canonical is itself the durable copy the DETACH_REMOVING ordering
-            # needs, so stage one only when this workspace has none yet. Session
-            # open is the one safe reconciliation point for benign between-run
-            # public drift: the lock excludes concurrent sessions, so adopt it as
-            # the canonical baseline BEFORE staging (doing so after would leave a
-            # stale stage on a crash).
-            canonical_present = canonical.exists()
-            if canonical_present:
-                canonical_entries = filesystem._parse_manifest(canonical_manifest)
-                if filesystem.manifest_tree(canonical) != canonical_entries:
-                    raise ArtifactVisibilityError("canonical artifact recovery copy is corrupt")
-                if public_entries != canonical_entries:
-                    _rebaseline_canonical_from_public(state_root, source, public_entries, transaction=transaction)
-                    canonical_entries = public_entries
-            else:
-                filesystem._copy_tree(source, detach_stage, public_entries)
-            filesystem._atomic_json(transaction / "manifest.json", filesystem._manifest_payload(public_entries))
-            mark(state=_Transition.DETACH_STAGED)
-            if canonical_present:
-                # Re-baselining already made canonical match the observed public
-                # state; keep the equality the recovery path relies on.
-                canonical_entries = filesystem._parse_manifest(canonical_manifest)
-                if public_entries != canonical_entries:
-                    raise ArtifactVisibilityError("canonical artifact recovery copy is inconsistent")
-            else:
-                os.replace(detach_stage, canonical)
-                _fsync_directory(state_root)
-                filesystem._atomic_json(canonical_manifest, filesystem._manifest_payload(public_entries))
-                canonical_entries = public_entries
-            mark(state=_Transition.DETACH_CANONICAL)
-            mark(state=_Transition.DETACH_REMOVING)
-            if public_entries:
-                transfer._remove_manifested(
-                    source,
-                    public_entries,
-                    transaction=transaction,
-                    workspace_key=workspace_key,
-                    purpose="detach-public",
-                    source=source_owner,
+            filesystem._atomic_json(transaction / "shared-manifest.json", filesystem._manifest_payload(baseline))
+            parked = publication._park(source_owner, transaction, workspace_key=workspace_key)
+            if parked is not None:
+                transactions._write_transition(
+                    transaction / "journal.json", transaction_id=transaction_id, session_id=session_id,
+                    state=_Transition.PUBLIC_PARKED,
                 )
-            mark(state=_Transition.DETACHED)
             layout = ArtifactLayout(
                 repo=identity.repo,
                 source=source,
@@ -1296,13 +1143,14 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
                 session_id=session_id,
                 state_root=state_root,
             )
-            filesystem._copy_tree(canonical, layout.live_root, canonical_entries)
+            # Only the shared set is copied; earlier evidence stays parked, never read.
+            filesystem._copy_tree(parked or transaction, layout.live_root, baseline)
         except BaseException as primary:
             if transaction is not None and transaction.exists() and not transaction.is_symlink():
                 try:
-                    transactions._reconcile_failed_detach(state_root, source_owner, transaction)
-                except Exception:
-                    primary.add_note("artifact recovery retained a closed conflict")
+                    transactions._recover_session(state_root, source_owner, transaction, completed=False)
+                except Exception as exc:
+                    primary.add_note(f"artifact recovery retained a closed conflict: {exc}")
             raise
         held.pop_all()
     return ArtifactSession(
@@ -1311,7 +1159,7 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
         workspace=workspace,
         code_workspace=code_workspace,
         owns_workspace=owns_workspace,
-        canonical_entries=canonical_entries,
+        baseline=baseline,
         detach_transaction=transaction,
     )
 
