@@ -228,6 +228,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Codex runs no longer report a parser coverage gap (`codex_parser_coverage`, analyzed as
+  `parser_coverage_gap`) for Codex's own stderr. Codex always prints `Reading prompt from
+  stdin...` there, and configured MCP servers can log to it. Stderr was merged into the JSON
+  stdout stream, so every clean run counted at least one non-JSON line. Stderr now has its own pipe and is no longer
+  counted as stream lines in lifecycle evidence. On a non-zero exit the `CodexError` still
+  quotes Codex's redacted stderr cause, such as a required MCP server failing to initialize.
+  See [Codex lifecycle evidence](docs/observability.md#codex-lifecycle-evidence).
 - A fixing run on a checkout with tracked uncommitted edits now reviews one diff, from the
   pinned merge base to the frozen working tree, instead of the commits' diff followed by a
   second diff from `HEAD`. A file changed both in a commit and in the working tree was

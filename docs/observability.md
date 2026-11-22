@@ -229,6 +229,11 @@ absolute drain deadlines or double-charge usage. After terminal expiry, prohibit
 retry of possibly completed mutations. Preserve bounded drain, reap, and cleanup
 in [the adapter](../daydream/backends/codex.py) and
 [lifecycle tests](../tests/test_codex_stream_lifecycle.py).
+Codex's stderr is not part of the public stream. It is drained separately, so it adds
+nothing to parser coverage or raw-line counts. A redacted excerpt of the last 20 stderr
+lines, without backtrace frames, is kept only for the exception raised on a non-zero exit.
+The host tears the process down before it formats that exception, so the excerpt includes
+stderr that a descendant kept open.
 
 Lifecycle milestones are host-observed monotonic elapsed times. Pull-driven read
 absence does not prove empty OS buffers. Child exit is independent of pipe EOF;

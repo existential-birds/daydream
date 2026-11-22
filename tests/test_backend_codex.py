@@ -48,6 +48,7 @@ from tests.harness.codex_replay import (
     make_mock_process,
     make_mock_process_from_fixture,
 )
+from tests.harness.fake_cli_process import ImmediateStdout
 from tests.harness.git_helpers import git as _git
 from tests.harness.process_replay import replay_process
 from tests.harness.trajectory import make_recorder, read_trajectory
@@ -260,7 +261,8 @@ async def test_repeated_turn_completion_charges_usage_once() -> None:
 
 async def test_nonzero_exit_raises_with_captured_output() -> None:
     backend = CodexBackend(model="fixture-model")
-    mock_proc = make_mock_process(["Error: authentication required. Run `codex login` to authenticate."])
+    mock_proc = make_mock_process(["not-json stdout"])
+    mock_proc.stderr = ImmediateStdout(["Error: authentication required. Run `codex login` to authenticate."])
     mock_proc.returncode = 1
     events = []
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -273,6 +275,7 @@ async def test_nonzero_exit_raises_with_captured_output() -> None:
     assert isinstance(events[0], RequestEvent)
     assert isinstance(events[1], DiagnosticEvent)
     assert events[1].code == "codex_parser_coverage"
+    assert events[1].metadata["non_json_lines"] == 1  # stdout only; the stderr cause is not counted
     msg = str(exc_info.value)
     assert "authentication required" in msg
     assert exc_info.value.category == "AUTH_CONFIG"
@@ -737,7 +740,7 @@ async def test_turn_failed_flushes_current_aggregate_without_waiting_for_stdout(
     assert stdout.blocking_read_started is False
 
 
-async def test_parser_diagnostic_precedes_nonzero_process_exit() -> None:
+async def test_nonzero_process_exit_reports_stderr_cause_without_parser_gap() -> None:
     backend = CodexBackend(model="fixture-model")
     secret_line = (
         "not-json token=opaque-parser-secret /Users/private-person/.codex/config.toml "
@@ -750,7 +753,8 @@ async def test_parser_diagnostic_precedes_nonzero_process_exit() -> None:
         "Transport [codex_rmcp_client::tool_list_changes::ToolListChanges<rmcp::transport::worker::WorkerTransport>] "
         "error: Client error: HTTP request failed: error sending request for url, when send initialize request"
     )
-    lines = [
+    stderr_lines = [
+        "Reading prompt from stdin...",
         *[secret_line] * 30,
         "thread 'tokio-runtime-worker' panicked at src/x.rs:1:1:",
         "stack backtrace:",
@@ -766,16 +770,20 @@ async def test_parser_diagnostic_precedes_nonzero_process_exit() -> None:
         "  24: std::rt::lang_start_internal",
         "             at /rustc/abc/library/std/src/rt.rs:1:1",
     ]
-    mock_proc = make_mock_process(lines)
-    mock_proc.returncode = 9
+
+    def spawn(*_argv: Any, stderr: int, **_options: Any) -> Any:
+        # Model the OS: stderr merged into stdout arrives there; otherwise on its own pipe. Stdout is all JSON.
+        process = make_mock_process(stderr_lines if stderr == asyncio.subprocess.STDOUT else [])
+        process.stderr = ImmediateStdout(stderr_lines)
+        process.returncode = 9
+        return process
+
     observed: list[Any] = []
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", side_effect=spawn):
         with pytest.raises(CodexError, match="return code 9") as exc_info:
             async for event in backend.execute(Path("/tmp"), "Fail"):
                 observed.append(event)
-    assert isinstance(observed[-1], DiagnosticEvent)
-    assert observed[-1].metadata["non_json_lines"] == len(lines)
-    assert "opaque-parser-secret" not in json.dumps(observed[-1].metadata)
+    assert not any(isinstance(event, DiagnosticEvent) for event in observed)  # stderr is not parser coverage
     message = str(exc_info.value)
     assert "last 10 non-JSON lines" in message
     assert message.count("required MCP servers failed to initialize") == 2
