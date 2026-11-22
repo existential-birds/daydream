@@ -8,6 +8,7 @@ Child processes exercise session locks and crash recovery at durable transitions
 from __future__ import annotations
 
 import atexit
+import errno
 import functools
 import hashlib
 import inspect
@@ -184,6 +185,11 @@ def _manifest(root: Path) -> tuple[_Entry, ...]:
     return tuple(entries)
 
 
+def _shared(entries: tuple[_Entry, ...]) -> tuple[_Entry, ...]:
+    """The shared set a live tree receives: every public entry except earlier run evidence."""
+    return tuple(entry for entry in entries if not entry.path.startswith(".daydream/runs/"))
+
+
 def _park(marker: Path, state: str) -> None:
     """Publish the kill-point marker durably, then wait to be SIGKILLed."""
     marker.write_text(state, encoding="ascii")
@@ -236,9 +242,23 @@ def _production_external_child(source: Path, repo: Path, runtime: Path, checkpoi
     anyio.run(run)
 
 
-def _production_transaction_child(source: Path, repo: Path, runtime: Path, transition: str, marker: Path) -> None:
+def _cross_device_park(move_out: Callable[..., None]) -> Callable[..., None]:
+    """Make the private park fail with EXDEV, as on a checkout another filesystem holds."""
+
+    def cross_device(source: artifact_ownership.SourceOwnership, name: str, destination: Path) -> None:
+        if destination.parent.name == "parked":
+            raise OSError(errno.EXDEV, os.strerror(errno.EXDEV))
+        move_out(source, name, destination)
+
+    return cross_device
+
+
+def _production_transaction_child(source: Path, repo: Path, runtime: Path, transition: str, location: str,
+                                  marker: Path) -> None:
     locations = private_root_locations(base=runtime.parent)
     owner = resolve_private_workspace_owner(source, locations=locations)
+    if location == "beside":
+        artifact_publication._move_out = _cross_device_park(artifact_publication._move_out)
 
     def stop_at_transition(state: str) -> None:
         if state == transition:
@@ -253,6 +273,15 @@ def _production_transaction_child(source: Path, repo: Path, runtime: Path, trans
     anyio.run(run)
 
 
+_EARLIER_EVIDENCE = b"\x00\xff\xfe\x80payload\n"
+
+
+def _copies(content: bytes, *roots: Path) -> int:
+    """Regular files under ``roots`` holding ``content``; earlier evidence is moved, never copied."""
+    return sum(path.is_file() and not path.is_symlink() and path.read_bytes() == content
+               for root in roots for path in root.rglob("*"))
+
+
 def _seed_public_artifacts(source: Path) -> tuple[_Entry, ...]:
     deep = source / ".daydream" / "deep"
     runs = source / ".daydream" / "runs"
@@ -261,7 +290,7 @@ def _seed_public_artifacts(source: Path) -> tuple[_Entry, ...]:
     runs.mkdir()
     empty.mkdir()
     (deep / "prior.md").write_bytes(b"prior reasoning\n")
-    (runs / "opaque.bin").write_bytes(b"\x00\xff\xfe\x80payload\n")
+    (runs / "opaque.bin").write_bytes(_EARLIER_EVIDENCE)
     (source / ".review-output.md").write_bytes(b"review output\n")
     os.chmod(source / ".daydream", 0o750)
     os.chmod(deep, 0o710)
@@ -518,7 +547,8 @@ async def test_artifact_session_preserves_resume_mtimes_across_publication_and_r
     """One owned workspace rolls back, publishes several output kinds, then resumes elsewhere.
 
     This sequence pins owner metadata, byte/mode preservation and projection together; independent
-    setup fragments cannot expose a route or canonical-copy regression across those transitions.
+    setup fragments cannot expose a route or shared-set regression across those transitions. Earlier
+    evidence is carried by rename, so it keeps its inode, and no canonical copy is kept.
     """
 
     def fail_default_lookup() -> Path:
@@ -585,7 +615,7 @@ async def test_artifact_session_preserves_resume_mtimes_across_publication_and_r
     assert artifact_dir_for(source, allow_standalone=True) == source / ".daydream"
     assert review_output_path_for(source, allow_standalone=True) == source / ".review-output.md"
     async with open_artifact_session(_work(source), session_id="restore-explicit", owner=owner) as rollback:
-        assert _manifest(rollback.layout.live_root) == baseline
+        assert _manifest(rollback.layout.live_root) == _shared(baseline)
         assert not (source / ".daydream").exists() and not (source / ".review-output.md").exists()
         assert artifact_dir_for(source, session=rollback) == rollback.daydream_dir
         assert review_output_path_for(source, session=rollback) == rollback.review_output
@@ -608,6 +638,8 @@ async def test_artifact_session_preserves_resume_mtimes_across_publication_and_r
     stale_cache.write_bytes(b"{}")
     session_id = "mtime-first"
     payload = _payload(session_id)
+    earlier_evidence = source / ".daydream/runs/opaque.bin"
+    earlier_inode = earlier_evidence.lstat().st_ino
     async with open_artifact_session(_work(source, repo=first), session_id=session_id, owner=owner) as session:
         assert session.layout.workspace_key == owner.workspace_key
         assert session.layout.state_root == owner.artifact_state_root
@@ -659,21 +691,22 @@ async def test_artifact_session_preserves_resume_mtimes_across_publication_and_r
     assert not any((owner.artifact_state_root / "transactions").iterdir())
     assert (source / ".daydream/runs" / session_id / RUN_DOCUMENT_NAME).read_bytes() == payload
     assert (source / ".daydream/runs" / session_id / "evidence/child.json").read_bytes() == b"child"
-    canonical = owner.artifact_state_root / "canonical"
-    for copied_deep in (source / ".daydream/deep", canonical / ".daydream/deep"):
-        assert (copied_deep / "diff-key").stat().st_mtime_ns == key_mtime_ns
-        assert (copied_deep / "alternatives.json").stat().st_mtime_ns == prerequisite_mtime_ns
+    assert earlier_evidence.lstat().st_ino == earlier_inode
+    assert not (owner.artifact_state_root / "canonical").exists()
     public_deep = source / ".daydream/deep"
+    assert (public_deep / "diff-key").stat().st_mtime_ns == key_mtime_ns
+    assert (public_deep / "alternatives.json").stat().st_mtime_ns == prerequisite_mtime_ns
     contradictory_mtime_ns = key_mtime_ns - 10_000_000_000
     os.utime(public_deep / "alternatives.json", ns=(contradictory_mtime_ns, contradictory_mtime_ns))
     published = _manifest(source)
     async with open_artifact_session(_work(source, repo=second), session_id="mtime-second", owner=owner) as resumed:
         assert resumed.layout.workspace_key == owner.workspace_key
         assert resumed.layout.state_root == owner.artifact_state_root
-        assert _manifest(resumed.layout.live_root) == published
+        assert _manifest(resumed.layout.live_root) == _shared(published)
         live_deep = resumed.daydream_dir / "deep"
+        # The live copy keeps the current public times, including a change made between runs.
         assert (live_deep / "diff-key").stat().st_mtime_ns == key_mtime_ns
-        assert (live_deep / "alternatives.json").stat().st_mtime_ns == prerequisite_mtime_ns
+        assert (live_deep / "alternatives.json").stat().st_mtime_ns == contradictory_mtime_ns
     assert _manifest(source) == published
     assert artifact_dir_for(source, allow_standalone=True) == source / ".daydream"
 
@@ -822,23 +855,18 @@ async def _public_validation_classifies_the_exact_manifested_tree_case(
     source: Path, monkeypatch: pytest.MonkeyPatch, mutation: str, message: str,
 ) -> None:
     daydream = source / ".daydream"
-    anchor = daydream / ("runs" if mutation == "unknown-sibling" else "improve")
+    anchor = daydream / "improve"
     anchor.mkdir(parents=True)
     original_manifest = artifact_filesystem.manifest_tree
     mutated = False
 
-    def mutate_before_manifest(root: Path, names: Any = None, *, digest: bool = True,) -> Any:
+    def mutate_before_manifest(root: Path, names: Any = None, **kwargs: Any) -> Any:
         nonlocal mutated
         if root == source and names == (".daydream", ".review-output.md") and not mutated:
             mutated = True
-            if mutation == "unknown-sibling":
-                unknown = daydream / "inserted" / "opaque.bin"
-                unknown.parent.mkdir()
-                unknown.write_bytes(b"inserted after classification")
-            else:
-                anchor.rmdir()
-                anchor.write_bytes(b"wrong kind after classification")
-        return original_manifest(root, names, digest=digest)
+            anchor.rmdir()
+            anchor.write_bytes(b"wrong kind after classification")
+        return original_manifest(root, names, **kwargs)
 
     monkeypatch.setattr(artifact_filesystem, "manifest_tree", mutate_before_manifest)
     with pytest.raises(ArtifactVisibilityError, match=message):
@@ -967,48 +995,51 @@ async def test_artifact_session_freeze_rejects_invalid_run_snapshot(source: Path
 
 
 async def test_artifact_session_recovers_real_process_death_at_durable_transition(
-    tmp_path: Path, source: Path, artifact_runtime_root: Path,
+    tmp_path: Path, artifact_runtime_root: Path,
 ) -> None:
-    """A SIGKILLed session owner parked at a durable detach transition is recovered by the next session."""
-    transition = "DETACH_STAGED"
-    expected = _seed_public_artifacts(source)
-    requested = source / "explicit-output.txt"
-    requested.write_bytes(b"prior explicit bytes")
-    # A prior session leaves canonical evidence, so recovery must prove the staged detach is the same tree.
-    async with open_artifact_session(_work(source), session_id="prime-canonical"):
-        pass
-    first_repo, second_repo = _worktrees(source, "ephemeral-one", "ephemeral-two")
-    source_canary = source.parent / "cleanup-source-canary"
-    source_canary.write_bytes(b"source sibling")
+    """A session owner SIGKILLed while its tree is parked, privately or beside the checkout, is recovered next open."""
     runtime_canary = artifact_runtime_root.parent / "cleanup-runtime-canary"
     runtime_canary.parent.mkdir(parents=True, exist_ok=True)
     runtime_canary.write_bytes(b"runtime sibling")
-    marker = tmp_path / f"production-{transition}"
-    with _child_at_marker(
-        marker, "production-transaction", str(source), str(first_repo), str(artifact_runtime_root), transition,
-        str(marker),
-    ):
-        # The parked owner still holds the workspace lock; a live contender must not interleave.
-        with pytest.raises(ArtifactVisibilityError, match="locked by another process"):
-            async with open_artifact_session(_work(source, repo=second_repo), session_id="contender"):
-                pass
+    for location in ("private", "beside"):
+        source = tmp_path / location / "source"
+        _init_repo(source)
+        expected = _seed_public_artifacts(source)
+        requested = source / "explicit-output.txt"
+        requested.write_bytes(b"prior explicit bytes")
+        first_repo, second_repo = _worktrees(source, "ephemeral-one", "ephemeral-two")
+        source_canary = source.parent / "cleanup-source-canary"
+        source_canary.write_bytes(b"source sibling")
+        state_root = artifact_runtime_root / _workspace_key(source)
+        marker = tmp_path / f"production-{location}"
+        with _case_note(location), _child_at_marker(
+            marker, "production-transaction", str(source), str(first_repo), str(artifact_runtime_root),
+            "PUBLIC_PARKED", location, str(marker),
+        ):
+            assert not (source / ".daydream").exists() and not (source / ".review-output.md").exists()
+            parked, = (state_root.glob("transactions/detach-production-crash-*/parked") if location == "private"
+                       else source.parent.glob(f".{source.name}.daydream-park-detach-production-crash-*"))
+            assert _manifest(parked) == expected
+            # The parked owner still holds the workspace lock; a live contender must not interleave.
+            with pytest.raises(ArtifactVisibilityError, match="locked by another process"):
+                async with open_artifact_session(_work(source, repo=second_repo), session_id="contender"):
+                    pass
 
-    async with open_artifact_session(_work(source, repo=second_repo), session_id="recovery-detach-staged",
-    ) as recovered:
-        assert (recovered.daydream_dir / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
-        assert not (recovered.daydream_dir / "runs" / "production-crash").exists()
+        async with open_artifact_session(_work(source, repo=second_repo), session_id="recovery-parked",
+        ) as recovered:
+            assert (recovered.daydream_dir / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
+            assert requested.read_bytes() == b"prior explicit bytes"
+            recovered.register_destination(requested, label=OutputLabel.FINDINGS_OUTPUT)
+            assert not requested.exists()
+
         assert requested.read_bytes() == b"prior explicit bytes"
-        recovered.register_destination(requested, label=OutputLabel.FINDINGS_OUTPUT)
-        assert not requested.exists()
-
-    assert requested.read_bytes() == b"prior explicit bytes"
-    # Bytes, modes and empty directories remain exact.
-    assert _manifest(source) == expected
-    state_root = artifact_runtime_root / _workspace_key(source)
-    assert not any((state_root / "transactions").iterdir())
-    cleanup = state_root / "cleanup"
-    assert not cleanup.exists() or not any(cleanup.iterdir())
-    assert source_canary.read_bytes() == b"source sibling"
+        # Bytes, modes and empty directories remain exact.
+        assert _manifest(source) == expected
+        assert not any((state_root / "transactions").iterdir())
+        assert not list(source.parent.glob(f".{source.name}.daydream-*"))
+        cleanup = state_root / "cleanup"
+        assert not cleanup.exists() or not any(cleanup.iterdir())
+        assert source_canary.read_bytes() == b"source sibling"
     assert runtime_canary.read_bytes() == b"runtime sibling"
 
 
@@ -1043,10 +1074,11 @@ async def test_artifact_session_rejects_existing_session_and_malformed_transacti
 async def test_artifact_session_rejects_closed_recovery_manifest_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A dead session's pending publication is refused untouched when malformed, and unparked when unstarted."""
     # Each case retains private evidence in its workspace, so every case owns a fresh repository.
     for index, manifest_problem in enumerate(
         ("duplicate-path", "normalized-duplicate", "embedded-dot", "bool-schema-version", "missing-proof",
-         "bool-device-proof"),
+         "bool-device-proof", "unstarted"),
     ):
         await _run_case(_artifact_session_rejects_closed_recovery_manifest_untouched_case,
                         root=tmp_path / f"case-{index}", monkeypatch=monkeypatch, manifest_problem=manifest_problem)
@@ -1054,44 +1086,58 @@ async def test_artifact_session_rejects_closed_recovery_manifest_untouched(
 
 async def _artifact_session_rejects_closed_recovery_manifest_untouched_case(source: Path, manifest_problem: str,
 ) -> None:
-    _seed_public_artifacts(source)
+    expected = _seed_public_artifacts(source)
     state_root = _owner(source).artifact_state_root
-    transaction = state_root / "transactions" / "malicious"
-    stage = transaction / "detach-stage"
-    stage.mkdir(parents=True)
-    stage_canary = stage / "canary"
-    stage_canary.write_bytes(b"stage must remain unchanged")
-    raw_path = {"duplicate-path": ".daydream", "normalized-duplicate": "runs/e\u0301.json",
-        "embedded-dot": "runs/./record.json", "bool-schema-version": "runs/record.json", "missing-proof": "runs",
-        "bool-device-proof": "runs",
+    # A dead session parked its tree and staged a publication whose manifest or source proof is malformed,
+    # or that died before its first journal entry.
+    transactions = state_root / "transactions"
+    transactions.mkdir(mode=0o700)
+    session, publish = transactions / "detach-prior-0123456789abcdef", transactions / "publish-prior-0123456789abcdef"
+    (session / "parked").mkdir(parents=True)
+    publish.mkdir()
+    for name in (".daydream", ".review-output.md"):
+        (source / name).rename(session / "parked" / name)
+    metadata = source.lstat()
+    for transaction, kind in ((session, "detach"), (publish, "publish")):
+        _atomic_json(transaction / "transaction-owner.json", {
+            "schema_version": 1, "workspace_key": state_root.name, "transaction_id": transaction.name,
+            "session_id": "prior", "kind": kind,
+        })
+        # A valid journal cannot authorize recovery with an absent or malformed source proof.
+        if manifest_problem != "missing-proof":
+            _atomic_json(transaction / "source-identity.json", {
+                "schema_version": 1, "source": str(source), "inode": metadata.st_ino,
+                "device": True if manifest_problem == "bool-device-proof" else metadata.st_dev,
+            })
+    if manifest_problem == "unstarted":
+        async with open_artifact_session(_work(source), session_id="after-unstarted"):
+            pass
+        assert _manifest(source) == expected and not any(transactions.iterdir())
+        return
+    raw_path = {"duplicate-path": ".daydream", "normalized-duplicate": ".daydream/e\u0301.json",
+        "embedded-dot": ".daydream/./record.json", "bool-schema-version": ".daydream/record.json",
+        "missing-proof": ".daydream", "bool-device-proof": ".daydream",
     }[manifest_problem]
     entry = {"path": raw_path, "kind": "directory", "size": 0, "mode": 0o700, "sha256": None}
     if manifest_problem == "duplicate-path":
         entries = [entry, entry]
     elif manifest_problem == "normalized-duplicate":
         # Distinct, individually valid raw paths in byte order; only the NFC uniqueness guard refuses them.
-        entries = [entry, {**entry, "path": "runs/\u00e9.json"}]
+        entries = [entry, {**entry, "path": ".daydream/\u00e9.json"}]
     else:
         entries = [entry]
     schema_version = True if manifest_problem == "bool-schema-version" else 1
-    _atomic_json(transaction / "manifest.json", {"schema_version": schema_version, "entries": entries})
-    _atomic_json(transaction / "journal.json",
-        {"schema_version": 1, "transaction_id": "malicious", "session_id": "prior", "state": "DETACH_STAGED"},
+    _atomic_json(publish / "publish-manifest.json", {"schema_version": schema_version, "entries": entries})
+    _atomic_json(publish / "journal.json",
+        {"schema_version": 1, "transaction_id": publish.name, "session_id": "prior", "state": "PUBLIC_STAGED"},
     )
-    metadata = source.lstat()
-    # A valid journal cannot authorize recovery with an absent or malformed source proof.
-    if manifest_problem != "missing-proof":
-        _atomic_json(transaction / "source-identity.json", {
-            "schema_version": 1, "source": str(source), "inode": metadata.st_ino,
-            "device": True if manifest_problem == "bool-device-proof" else metadata.st_dev,
-        })
 
-    expected = "duplicate normalized paths" if manifest_problem == "normalized-duplicate" else "manifest"
-    with pytest.raises(ArtifactVisibilityError, match=expected):
+    expected_message = "duplicate normalized paths" if manifest_problem == "normalized-duplicate" else "manifest"
+    with pytest.raises(ArtifactVisibilityError, match=expected_message):
         async with open_artifact_session(_work(source), session_id="blocked"):
             pass
-    assert (source / ".daydream" / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
-    assert stage_canary.read_bytes() == b"stage must remain unchanged"
+    assert _manifest(session / "parked") == expected
+    assert not (source / ".daydream").exists() and not (source / ".review-output.md").exists()
 
 
 async def test_bound_routing_rejects_same_spelling_repository_replacements(
@@ -1209,7 +1255,7 @@ async def _publication_preparation_cleanup_preserves_primary_and_retains_evidenc
         nonlocal stage
         target = Path(path)
         if target.name == ".review-output.md" and target.parent.name == "public":
-            stage = target.parent.parent
+            stage, = source.parent.glob(f".{source.name}.daydream-publish-*")
             raise primary
         return real_open(path, flags, *args, **kwargs)
 
@@ -1242,7 +1288,6 @@ async def _publication_preparation_cleanup_preserves_primary_and_retains_evidenc
     assert any("publication staging cleanup retained evidence (PermissionError)" == note for note in primary.__notes__)
     assert all("secondary private cleanup detail" not in note for note in primary.__notes__)
     assert _manifest(source) == expected
-    assert _manifest(owner.artifact_state_root / "canonical") == expected
     assert _manifest(frozen.root) == frozen_manifest
     transaction, = (owner.artifact_state_root / "transactions").glob("publish-*")
     assert (transaction / "source-identity.json").is_file()
@@ -1384,7 +1429,7 @@ async def _publication_rechecks_source_case(
     assert not (replacement / "findings.json").exists()
     assert publication_error is not None
     assert _git(replacement, "status", "--porcelain=v1", "--untracked-files=all") == ""
-    assert _manifest(owner.artifact_state_root / "canonical") == expected
+    assert expected and _copies(_EARLIER_EVIDENCE, tmp_path, owner.artifact_state_root) == 1
     assert (frozen.root / ".explicit" / "0000" / "findings.json").read_bytes() == b"frozen findings\n"
     assert len(tuple((owner.artifact_state_root / "transactions").glob("*/journal.json"))) == 2
 
@@ -1466,58 +1511,49 @@ async def _artifact_session_rejects_symlinked_source_and_runtime_ancestry_case(t
 
 
 async def test_artifact_session_detects_source_mutation_without_deleting_unique_bytes(
-    tmp_path: Path, source: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, source: Path,
 ) -> None:
-    """Concurrent public writes during detach or publication are refused and survive untouched."""
-    _seed_public_artifacts(source)
-
-    def mutate_before_removal(state: str) -> None:
-        if state == "DETACH_REMOVING":
-            (source / ".daydream" / "concurrent.bin").write_bytes(b"unique concurrent bytes")
-
-    monkeypatch.setattr(artifact_transactions, "_transition_observer", mutate_before_removal)
-    with pytest.raises(ArtifactVisibilityError, match="changed during detach"):
-        async with open_artifact_session(_work(source), session_id="detach-mutation"):
-            pass
-    assert (source / ".daydream" / "concurrent.bin").read_bytes() == b"unique concurrent bytes"
-    assert (source / ".daydream" / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
-
-    # Publication window: an insertion after backup is refused before install, and every transfer
-    # intent was durable before the detach's first move (#1162).
-    published_source = tmp_path / "published-source"
-    _init_repo(published_source)
-    seeded = _seed_public_artifacts(published_source)
-    observed: list[tuple[Path, dict[str, Any]]] = []
-
-    def capture_first_move(path: Path, moved: Path) -> None:
-        if not observed:
-            stage = next(candidate for candidate in moved.parents if (candidate / "stage-owner.json").is_file())
-            observed.append((path, _load_json(stage / "intents.json")))
-
-    monkeypatch.setattr(artifact_transactions, "_transition_observer", None)
-    monkeypatch.setattr(artifact_transfer, "_transfer_observer", capture_first_move)
-    session_id = "publish-mutation"
-    with pytest.raises(ArtifactVisibilityError, match="changed during recovery"):
-        async with open_artifact_session(_work(published_source), session_id=session_id) as session:
-            frozen = _freeze_run(session, session_id)
-
-            def insert_before_install(state: str) -> None:
-                if state == "PUBLISH_BACKED_UP":
-                    concurrent = published_source / ".daydream" / "concurrent.bin"
-                    concurrent.parent.mkdir()
-                    concurrent.write_bytes(b"unique concurrent bytes")
-
-            monkeypatch.setattr(artifact_transactions, "_transition_observer", insert_before_install)
-            with pytest.raises(ArtifactVisibilityError, match="changed before publication"):
+    """A tree that appears in the checkout while the prior one is parked, or a parked tree changed during the run,
+    refuses publication; both versions survive and the refusal names both paths.
+    """
+    expected = _seed_public_artifacts(source)
+    owner = _owner(source)
+    concurrent = source / ".daydream" / "concurrent.bin"
+    with pytest.raises(ArtifactVisibilityError, match="both are kept") as caught:
+        async with open_artifact_session(_work(source), session_id="competing", owner=owner) as session:
+            frozen = _freeze_run(session, "competing")
+            concurrent.parent.mkdir()
+            concurrent.write_bytes(b"unique concurrent bytes")
+            with pytest.raises(ArtifactVisibilityError, match="appeared in the checkout"):
                 _publish(session, frozen)
-    assert (published_source / ".daydream" / "concurrent.bin").read_bytes() == b"unique concurrent bytes"
-    canonical = frozen.root.parents[2] / "canonical"
-    assert (canonical / ".daydream" / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
-    (first_source, intents), = observed
-    assert intents["schema_version"] == 1
-    assert sorted(cast(str, intent["relative"]) for intent in intents["intents"]) == sorted(
-        entry.path for entry in seeded if entry.kind == "file")
-    assert str(first_source) in [cast(str, intent["source"]) for intent in intents["intents"]]
+    parked, = owner.artifact_state_root.glob("transactions/detach-competing-*/parked")
+    assert f"{source / '.daydream'} (kept in the checkout) and {parked / '.daydream'}" in str(caught.value)
+    assert concurrent.read_bytes() == b"unique concurrent bytes"
+    assert _manifest(parked) == tuple(entry for entry in expected if entry.path != ".review-output.md")
+    assert (frozen.root / ".daydream" / "runs" / "competing" / RUN_DOCUMENT_NAME).is_file()
+    # Every open refuses the same way until the competing tree is moved away; then the prior tree returns exactly.
+    with pytest.raises(ArtifactVisibilityError, match="both are kept"):
+        async with open_artifact_session(_work(source), session_id="still-competing", owner=owner):
+            pass
+    shutil.rmtree(concurrent.parent)
+    async with open_artifact_session(_work(source), session_id="after-competing", owner=owner):
+        pass
+    assert _manifest(source) == expected
+
+    # A parked tree changed during the run returns as it now is; the run's own outputs stay in its frozen copy.
+    changed_source = tmp_path / "changed-source"
+    _init_repo(changed_source)
+    _seed_public_artifacts(changed_source)
+    changed_owner = _owner(changed_source)
+    async with open_artifact_session(_work(changed_source), session_id="changed", owner=changed_owner) as session:
+        frozen = _freeze_run(session, "changed")
+        changed_parked, = changed_owner.artifact_state_root.glob("transactions/detach-changed-*/parked")
+        (changed_parked / ".daydream" / "deep" / "prior.md").write_bytes(b"edited while parked\n")
+        with pytest.raises(ArtifactVisibilityError, match="changed during the run"):
+            _publish(session, frozen)
+    assert (changed_source / ".daydream" / "deep" / "prior.md").read_bytes() == b"edited while parked\n"
+    assert not (changed_source / ".daydream" / "runs" / "changed").exists()
+    assert (frozen.root / ".daydream" / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
 
 
 async def test_publication_preparation_failure_restores_source_without_orphan_state(
@@ -1550,52 +1586,46 @@ async def test_publication_preparation_failure_restores_source_without_orphan_st
 async def test_recoverable_detach_failure_restores_before_unlock_and_preserves_primary(
     tmp_path: Path, source: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    exception_kind = "cancel"
+    """A failure once the tree is parked unparks it byte-exact before unlock; an interrupted unpark resumes."""
     expected = _seed_public_artifacts(source)
     primary: BaseException = anyio.get_cancelled_exc_class()()
-    observed = False
 
-    def fail_after_transfer(_path: Path, _moved: Path) -> None:
-        nonlocal observed
-        if observed:
-            return
-        observed = True
-        raise primary
+    def stop_parked(state: str) -> None:
+        if state == "PUBLIC_PARKED":
+            raise primary
 
-    monkeypatch.setattr(artifact_transfer, "_transfer_post_observer", fail_after_transfer)
-    caught: BaseException | None = None
-    try:
-        async with open_artifact_session(_work(source), session_id=f"primary-{exception_kind}"):
+    monkeypatch.setattr(artifact_transactions, "_transition_observer", stop_parked)
+    with pytest.raises(BaseException) as caught:
+        async with open_artifact_session(_work(source), session_id="parked-primary"):
             pass
-    except BaseException as exc:
-        caught = exc
-    assert observed is True
-    assert caught is primary
+    assert caught.value is primary
     assert _manifest(source) == expected
-
-    monkeypatch.setattr(artifact_transfer, "_transfer_post_observer", None)
-    async with open_artifact_session(_work(source), session_id=f"after-primary-{exception_kind}"):
+    monkeypatch.setattr(artifact_transactions, "_transition_observer", None)
+    async with open_artifact_session(_work(source), session_id="after-parked-primary"):
         assert not (source / ".daydream").exists()
 
-    # An interrupt once detach is staged, before any canonical copy exists, restores from the staged tree.
-    staged_source = tmp_path / "staged-source"
-    _init_repo(staged_source)
-    staged_expected = _seed_public_artifacts(staged_source)
-    interrupt = KeyboardInterrupt("staged primary")
+    # An unpark interrupted after linking .review-output.md back, before dropping its parked name, resumes next open.
+    link_source = tmp_path / "link-source"
+    _init_repo(link_source)
+    link_expected = _seed_public_artifacts(link_source)
+    unlink = Path.unlink
+    interrupted: list[Path] = []
 
-    def stop_staged(state: str) -> None:
-        if state == "DETACH_STAGED":
-            raise interrupt
+    def stop_after_link(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path.name == ".review-output.md" and path.parent.name == "parked" and not interrupted:
+            interrupted.append(path)
+            raise OSError("interrupted after link")
+        unlink(path, *args, **kwargs)
 
-    monkeypatch.setattr(artifact_transactions, "_transition_observer", stop_staged)
-    with pytest.raises(KeyboardInterrupt) as staged_caught:
-        async with open_artifact_session(_work(staged_source), session_id="staged-primary"):
+    monkeypatch.setattr(Path, "unlink", stop_after_link)
+    with pytest.raises(ArtifactVisibilityError, match="atomic install"):
+        async with open_artifact_session(_work(link_source), session_id="link-primary"):
             pass
-    assert staged_caught.value is interrupt
-    assert _manifest(staged_source) == staged_expected
-    monkeypatch.setattr(artifact_transactions, "_transition_observer", None)
-    async with open_artifact_session(_work(staged_source), session_id="after-staged-primary") as reopened:
+    assert interrupted and interrupted[0].samefile(link_source / ".review-output.md")
+    monkeypatch.setattr(Path, "unlink", unlink)
+    async with open_artifact_session(_work(link_source), session_id="after-link-primary") as reopened:
         assert (reopened.daydream_dir / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
+    assert _manifest(link_source) == link_expected
 
 
 async def test_recoverable_publication_failure_reconciles_before_unlock(
@@ -1603,19 +1633,44 @@ async def test_recoverable_publication_failure_reconciles_before_unlock(
 ) -> None:
     # Each case retains private evidence in its workspace, so every case owns a fresh repository.
     cases = [(transition, exception_kind, loss)
-             for transition, exception_kind in (("PUBLISH_BACKED_UP", "cancel"), ("PUBLISH_INSTALLED", "keyboard"))
+             for transition, exception_kind in (("PUBLIC_STAGED", "keyboard"), ("PUBLIC_CARRIED", "cancel"),
+                                                ("PUBLIC_INSTALLED", "keyboard"), ("PUBLIC_VERIFIED", "cancel"))
              for loss in (False, True)]
-    cases += [("PUBLISH_VERIFIED", "keyboard", False), ("PUBLISH_STAGED", "keyboard", False)]
-    for index, (transition, exception_kind, source_loss) in enumerate(cases):
+    # A failure between installs, after .daydream was renamed in, rolls back from existence checks alone.
+    cases += [("install:.review-output.md", "keyboard", False), ("install:findings.md", "cancel", False)]
+    rows: list[tuple[str, str, bool, str, str | None]] = [(*case, "private", None) for case in cases]
+    # Recovery itself fails once and is rerun: after rolling forward before its session settles, and, with the
+    # tree parked beside the checkout, after rolling back once its stage is gone.
+    rows += [("PUBLIC_INSTALLED", "keyboard", False, "private", "discard"),
+             ("PUBLIC_CARRIED", "cancel", False, "beside", "retire")]
+    for index, (transition, exception_kind, source_loss, park, recovery_fault) in enumerate(rows):
         with monkeypatch.context() as patch:
             await _run_case(_recoverable_publication_failure_reconciles_before_unlock_case,
                             root=tmp_path / f"case-{index}", monkeypatch=patch, transition=transition,
-                            exception_kind=exception_kind, source_loss=source_loss)
+                            exception_kind=exception_kind, source_loss=source_loss, park=park,
+                            recovery_fault=recovery_fault)
+
+
+def _fail_once(monkeypatch: pytest.MonkeyPatch, step: str) -> None:
+    """Fail recovery once: at discarding the replaced shared set, or at retiring the publication."""
+    owner: Any = artifact_publication if step == "discard" else artifact_transactions
+    name = "_discard_parked" if step == "discard" else "_retire_transaction"
+    original = getattr(owner, name)
+    failed: list[str] = []
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        transaction = args[1] if step != "discard" else None
+        if not failed and (transaction is None or transaction.name.startswith("publish-")):
+            failed.append(step)
+            raise ArtifactVisibilityError(f"recovery fault at {step}")
+        original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, name, fail)
 
 
 async def _recoverable_publication_failure_reconciles_before_unlock_case(
     tmp_path: Path, source: Path, monkeypatch: pytest.MonkeyPatch,
-    transition: str, exception_kind: str, source_loss: bool,
+    transition: str, exception_kind: str, source_loss: bool, park: str, recovery_fault: str | None,
 ) -> None:
     """Recovery preserves its primary failure and cannot replay into a new checkout.
 
@@ -1636,7 +1691,12 @@ async def _recoverable_publication_failure_reconciles_before_unlock_case(
             if source_loss:
                 source.rename(tmp_path / "held-source")
                 _init_repo(source)
+            if recovery_fault is not None:
+                _fail_once(monkeypatch, recovery_fault)
             raise primary
+
+    if park == "beside":
+        monkeypatch.setattr(artifact_publication, "_move_out", _cross_device_park(artifact_publication._move_out))
 
     caught: BaseException | None = None
     try:
@@ -1647,18 +1707,32 @@ async def _recoverable_publication_failure_reconciles_before_unlock_case(
             explicit.write_path.write_bytes(b"explicit findings")
             frozen = _freeze_run(session, session_id, payload=payload)
             monkeypatch.setattr(artifact_transactions, "_transition_observer", fail_at_transition)
+            install = artifact_publication._install_staged_path
+            failed: list[Path] = []
+
+            def fail_installing(staged: Path, target: Path, **kwargs: Any) -> None:
+                if transition == f"install:{target.name}" and not failed:
+                    failed.append(target)
+                    raise primary
+                install(staged, target, **kwargs)
+
+            monkeypatch.setattr(artifact_publication, "_install_staged_path", fail_installing)
             _publish(session, frozen)
     except BaseException as exc:
         caught = exc
     assert caught is primary
+    if recovery_fault is not None:
+        assert any("artifact recovery retained" in note for note in primary.__notes__)
+        assert any((owner.artifact_state_root / "transactions").iterdir())
     if source_loss:
         assert _manifest(source) == ()
         assert (source / "source.txt").read_bytes() == b"source canary\n"
         assert _git(source, "status", "--porcelain=v1", "--untracked-files=all") == ""
-        assert _manifest(owner.artifact_state_root / "canonical") == expected
+        assert _copies(_EARLIER_EVIDENCE, tmp_path, owner.artifact_state_root) == 1
         assert (frozen.root / ".daydream" / "runs" / session_id / RUN_DOCUMENT_NAME).read_bytes() == payload
         journals = tuple((owner.artifact_state_root / "transactions").glob("*/journal.json"))
-        assert len(journals) == 2
+        # A failure while staging discards its unstarted publication; the session journal remains.
+        assert len(journals) == (1 if transition == "PUBLIC_STAGED" else 2)
         assert any("artifact recovery retained" in note for note in primary.__notes__)
         monkeypatch.setattr(artifact_transactions, "_transition_observer", None)
         with pytest.raises(ArtifactVisibilityError, match="identity"):
@@ -1668,10 +1742,12 @@ async def _recoverable_publication_failure_reconciles_before_unlock_case(
         assert _manifest(source) == ()
         assert _git(source, "status", "--porcelain=v1", "--untracked-files=all") == ""
         return
-    if transition in {"PUBLISH_INSTALLED", "PUBLISH_VERIFIED"}:
+    if transition in {"PUBLIC_INSTALLED", "PUBLIC_VERIFIED"}:
         # Recovery rolls an installed publication forward, explicit destinations included.
         assert (source / ".daydream" / "runs" / session_id / RUN_DOCUMENT_NAME).read_bytes() == payload
         assert (source / "explicit" / "findings.md").read_bytes() == b"explicit findings"
+        assert _shared(_manifest(source)) == _shared(expected)
+        assert _copies(_EARLIER_EVIDENCE, tmp_path, owner.artifact_state_root) == 1
     else:
         assert _manifest(source) == expected
         assert not (source / "explicit").exists()  # Rolled back, including the parent publication created.
@@ -1824,67 +1900,37 @@ def _restore_stage_leaks(source: Path) -> list[str]:
     return sorted(child.name for child in source.parent.iterdir() if child.name.startswith(prefix))
 
 
-def _open_rolled_back_dump(session: Any, session_id: str, dump: Path) -> Path:
-    """Rollback an absent dump route with an empty finalization stage.
+async def test_session_open_refuses_earlier_format_transactions_and_retires_stale_canonical(source: Path) -> None:
+    """A pending canonical-format transaction is preserved and refused with recovery steps.
 
-    This is the state left when strict archive finalization fails before copying.
-    """
-    session.register_destination(session.layout.source / ".daydream", label=OutputLabel.PUBLIC_DAYDREAM)
-    session.register_destination(session.layout.source / ".review-output.md", label=OutputLabel.PUBLIC_REVIEW_OUTPUT)
-    route = session.register_destination(dump, label=OutputLabel.DUMP_DIRECTORY)
-    frozen = _freeze_run(session, session_id)
-    late = cast(Path, session.finalization_merge_path(route, snapshot=frozen))
-    assert late.is_dir()
-    assert not any(late.iterdir())
-    _publish(session, frozen, artifact_visibility.ArtifactDisposition.ROLLBACK)
-    return late
-
-
-async def test_session_open_heals_a_pre_fix_wedged_dump_transaction(source: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Recover a legacy DETACHED journal and leaked restore stage on the next open.
-
-    The fixture recreates the old failed-restore paths; no on-disk repair is manual.
+    Once it is resolved, the next open deletes the stale canonical copy and proceeds.
     """
     baseline = _seed_public_artifacts(source)
     owner = _owner(source)
-    transactions = owner.artifact_state_root / "transactions"
-    dump = source.parent / "never-existed" / "out"
-    merge = artifact_publication._merge_directory_from_tree
-
-    def pre_fix_merge(tree: Path, record: Any, *, desired: Any, **kwargs: Any) -> None:
-        if not desired:
-            raise ArtifactVisibilityError("dump destination projection is malformed")
-        merge(tree, record, desired=desired, **kwargs)
-
-    with monkeypatch.context() as patched:
-        patched.setattr(artifact_publication, "_merge_directory_from_tree", pre_fix_merge)
-        patched.setattr(artifact_transactions, "_clear_failed_restore", lambda _root, _source, _txn, error: error)
-        patched.setattr(artifact_publication, "_reset_source_stage", lambda *_args, **_kwargs: None)
-
-        with pytest.raises(ArtifactVisibilityError, match="projection is malformed"):
-            async with open_artifact_session(_work(source), session_id="wedge", owner=owner) as session:
-                _open_rolled_back_dump(session, "wedge", dump)
-
-        wedged = [child.name for child in transactions.iterdir()]
-        assert len(wedged) == 1
-        assert _load_json(transactions / wedged[0] / "journal.json")["state"] == "DETACHED"
-
-        # The second open replays the journal, fails identically, and leaks the
-        # restore stage that makes every later open collide instead.
-        with pytest.raises(ArtifactVisibilityError, match="projection is malformed"):
-            async with open_artifact_session(_work(source), session_id="wedged-open", owner=owner):
+    state_root = owner.artifact_state_root
+    canonical = state_root / "canonical"
+    (canonical / ".daydream").mkdir(parents=True)
+    (canonical / ".daydream" / "prior.md").write_bytes(b"canonical bytes")
+    _atomic_json(state_root / "canonical-manifest.json", {"schema_version": 1, "entries": []})
+    for kind, state in (("detach", "DETACHED"), ("publish", "PUBLISH_BACKED_UP")):
+        pending = state_root / "transactions" / f"{kind}-earlier-0123456789abcdef"
+        pending.parent.mkdir(mode=0o700, exist_ok=True)
+        pending.mkdir()
+        _atomic_json(pending / "journal.json",
+                     {"schema_version": 1, "transaction_id": pending.name, "session_id": "earlier", "state": state})
+        with _case_note(state), pytest.raises(ArtifactVisibilityError, match="earlier Daydream") as refused:
+            async with open_artifact_session(_work(source), session_id=f"refused-{kind}", owner=owner):
                 pass
-        assert _restore_stage_leaks(source) == [f".{source.name}.daydream-restore-{wedged[0]}"]
+        assert pending.name in str(refused.value) and str(canonical) in str(refused.value)
+        assert "Run that earlier release once" in str(refused.value)
+        assert _manifest(source) == baseline and (pending / "journal.json").is_file()
+        assert (canonical / ".daydream" / "prior.md").read_bytes() == b"canonical bytes"
+        shutil.rmtree(pending)
 
-    async with open_artifact_session(_work(source), session_id="healed", owner=owner) as healed:
-        assert (healed.daydream_dir / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
-
+    async with open_artifact_session(_work(source), session_id="after-earlier", owner=owner):
+        pass
+    assert not canonical.exists() and not (state_root / "canonical-manifest.json").exists()
     assert _manifest(source) == baseline
-    assert not any(transactions.iterdir())
-    assert _restore_stage_leaks(source) == []
-    assert not dump.exists()
-    assert not (owner.artifact_state_root / "unreconciled").exists()
 
 
 async def test_failed_destination_restore_preserves_the_transaction_and_reopens(
@@ -1936,16 +1982,13 @@ async def test_failed_destination_restore_preserves_the_transaction_and_reopens(
     assert not any(transactions.iterdir())
 
 
-async def test_custom_public_subtree_requires_exact_owner_and_intact_prior_proof(
+async def test_custom_public_subtree_requires_exact_owner_and_unknown_entries_are_carried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Custom public subtrees need their exact public owner, and prior-session ownership rejects mutation or corrupt
-    proof.
-    """
+    """Custom public subtrees need their exact public owner; unknown top-level entries are carried unchanged."""
     cases: tuple[tuple[Callable[..., Any], dict[str, Any]], ...] = (
         (_public_subtree_trajectory_requires_exact_public_owner_case, {}),
-        (_prior_session_owned_nonstatic_subtree_rejects_public_mutation_case, {"mutation": "new-sibling"}),
-        (_nonstatic_subtree_authorization_rejects_corrupt_canonical_proof_case, {"corruption": "canonical-manifest"}),
+        (_unknown_public_entries_are_carried_case, {}),
     )
     for index, (case, extra) in enumerate(cases):
         with monkeypatch.context() as patch:
@@ -1964,49 +2007,19 @@ async def _public_subtree_trajectory_requires_exact_public_owner_case(source: Pa
         assert route.full.write_path.is_relative_to(session.layout.live_root) and not explicit.parent.exists()
 
 
-async def _prior_session_owned_nonstatic_subtree_rejects_public_mutation_case(source: Path, mutation: str,) -> None:
-    _state_root, selected, _payload_bytes = await _publish_custom_public_trajectory(
-        source, session_id=f"custom-mutation-{mutation}",
-    )
-    if mutation == "content":
-        selected.write_bytes(b"changed public bytes")
-    elif mutation == "addition":
-        (selected.parent / "unowned.json").write_bytes(b"new public bytes")
-    elif mutation == "kind":
-        selected.unlink()
-        selected.mkdir()
-    else:
-        sibling = source / ".daydream" / "not-session-owned" / "opaque.bin"
-        sibling.parent.mkdir()
-        sibling.write_bytes(b"unowned bytes")
+async def _unknown_public_entries_are_carried_case(source: Path) -> None:
+    _state_root, selected, payload = await _publish_custom_public_trajectory(source, session_id="custom-carried")
+    sibling = source / ".daydream" / "not-session-owned" / "opaque.bin"
+    sibling.parent.mkdir()
+    sibling.write_bytes(b"unowned bytes")
     expected = _manifest(source)
 
-    with pytest.raises(ArtifactVisibilityError, match="unregistered artifact anchor"):
-        async with open_artifact_session(_work(source), session_id=f"reject-{mutation}"):
-            pass
+    async with open_artifact_session(_work(source), session_id="carry-unknown") as session:
+        assert (session.daydream_dir / "not-session-owned" / "opaque.bin").read_bytes() == b"unowned bytes"
+        session.register_destination(source / ".daydream", label=OutputLabel.PUBLIC_DAYDREAM)
+        _publish(session, _freeze_run(session, "carry-unknown"))
 
-    assert _manifest(source) == expected
-
-
-async def _nonstatic_subtree_authorization_rejects_corrupt_canonical_proof_case(source: Path, corruption: str,) -> None:
-    state_root, selected, payload = await _publish_custom_public_trajectory(
-        source, session_id=f"custom-corrupt-{corruption}",
-    )
-    relative = selected.relative_to(source)
-    if corruption == "canonical-bytes":
-        (state_root / "canonical" / relative).write_bytes(b"corrupt recovery bytes")
-    else:
-        manifest_path = state_root / "canonical-manifest.json"
-        manifest = _load_json(manifest_path)
-        entries = cast(list[dict[str, object]], manifest["entries"])
-        entry = next(item for item in entries if item["path"] == relative.as_posix())
-        entry["sha256"] = "0" * 64
-        _atomic_json(manifest_path, manifest)
-
-    with pytest.raises(ArtifactVisibilityError, match="canonical artifact recovery copy is corrupt"):
-        async with open_artifact_session(_work(source), session_id=f"reject-{corruption}"):
-            pass
-
+    assert _shared(_manifest(source)) == _shared(expected)
     assert selected.read_bytes() == payload
 
 
@@ -2562,12 +2575,23 @@ async def test_findings_delivery_and_finalization_merge_are_closed_host_boundari
 async def test_transfer_conflict_never_replaces_a_second_concurrent_occupant(
     source: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _seed_public_artifacts(source)
-    target = source / ".review-output.md"
-    first = b"first concurrent review bytes"
-    second = b"second concurrent review bytes"
+    """An in-source destination replaced while it transfers out keeps both occupants and blocks reopening.
 
-    def install_first(path: Path, _stage: Path) -> None:
+    Every transfer intent is durable before the first move (#1162).
+    """
+    dump = source / "dump"
+    dump.mkdir()
+    (dump / "other.bin").write_bytes(b"other dump bytes")
+    target = dump / "bundle.json"
+    target.write_bytes(b"prior bundle")
+    first = b"first concurrent bundle bytes"
+    second = b"second concurrent bundle bytes"
+    intents: list[dict[str, Any]] = []
+
+    def install_first(path: Path, moved: Path) -> None:
+        if not intents:
+            stage = next(candidate for candidate in moved.parents if (candidate / "stage-owner.json").is_file())
+            intents.append(_load_json(stage / "intents.json"))
         if path == target:
             path.unlink()
             path.write_bytes(first)
@@ -2580,18 +2604,8 @@ async def test_transfer_conflict_never_replaces_a_second_concurrent_occupant(
         def __getattr__(self, name: str) -> Any:
             return getattr(real_os, name)
 
-        def replace(self, source_path: Any, destination_path: Any, **kwargs: Any) -> None:
-            if Path(destination_path) == target or (
-                kwargs.get("dst_dir_fd") is not None and Path(destination_path) == Path(target.name)
-            ):
-                target.write_bytes(second)
-                self.injected = True
-            real_os.replace(source_path, destination_path, **kwargs)
-
         def link(self, source_path: Any, destination_path: Any, **kwargs: Any) -> None:
-            if Path(destination_path) == target or (
-                kwargs.get("dst_dir_fd") is not None and Path(destination_path) == Path(target.name)
-            ):
+            if Path(destination_path) == Path(target.name) and kwargs.get("dst_dir_fd") is not None:
                 target.write_bytes(second)
                 self.injected = True
             real_os.link(source_path, destination_path, **kwargs)
@@ -2600,19 +2614,21 @@ async def test_transfer_conflict_never_replaces_a_second_concurrent_occupant(
     monkeypatch.setattr(artifact_transfer, "_transfer_observer", install_first)
     monkeypatch.setattr(artifact_transfer, "os", raced_os)
     with pytest.raises(ArtifactVisibilityError, match="changed|conflict"):
-        async with open_artifact_session(_work(source), session_id="double-current-detach"):
-            pass
+        async with open_artifact_session(_work(source), session_id="double-current-transfer") as session:
+            session.register_destination(dump, label=OutputLabel.DUMP_DIRECTORY)
 
     assert raced_os.injected is True
     assert target.read_bytes() == second
-    retained = [path.read_bytes() for path in source.parent.glob(f".daydream-transfer-*/entries/{target.name}")]
+    retained = [path.read_bytes() for path in source.parent.glob(".daydream-transfer-*/entries/dump/bundle.json")]
     assert first in retained
+    (recorded,) = intents
+    assert sorted(cast(str, intent["relative"]) for intent in recorded["intents"]) == [
+        "dump/bundle.json", "dump/other.bin"]
     with pytest.raises(ArtifactVisibilityError, match="conflict"):
         async with open_artifact_session(_work(source), session_id="double-current-reopen"):
             pass
     assert target.read_bytes() == second
-    retained_after = [path.read_bytes() for path in source.parent.glob(f".daydream-transfer-*/entries/{target.name}")]
-    assert first in retained_after
+    assert first in [path.read_bytes() for path in source.parent.glob(".daydream-transfer-*/entries/dump/bundle.json")]
 
 
 async def test_current_entry_replacement_is_preserved_during_publication(
@@ -2651,7 +2667,7 @@ async def test_current_entry_replacement_is_preserved_during_publication(
 
 # ``<action>`` to child entrypoint, with the positions of its non-Path arguments.
 _HELPERS: dict[str, tuple[Callable[..., None], tuple[int, ...]]] = {
-    "production-transaction": (_production_transaction_child, (3,)),
+    "production-transaction": (_production_transaction_child, (3, 4)),
     "production-external": (_production_external_child, (3, 4)),
 }
 

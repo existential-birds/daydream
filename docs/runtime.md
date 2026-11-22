@@ -1201,11 +1201,24 @@ or upload failure preserves completed review outputs and emits safe diagnostics.
 An unavailable expected checkout is distinct from a foreign path, symlink,
 wrong filesystem type, or replacement directory. Publication and restoration
 require the original source directory identity, independently of any surviving
-operational worktree. When restoration is unsafe, retain canonical baselines,
+operational worktree. When restoration is unsafe, retain the parked tree,
 frozen bytes, transaction journals and conflict bytes; never recreate the source
 or install into its replacement. Recovery requires the transaction's captured
 source identity; pending older journals without that proof are preserved and
 refused rather than adopted or migrated.
+
+A run publishes only its own `.daydream/runs/<session id>/`. Every other public
+entry, with `.review-output.md`, is the shared set. Opening a session hashes the
+shared set, renames `.daydream/` and `.review-output.md` out of the checkout into the
+workspace's private state (beside the checkout when no rename reaches it) and copies
+only the shared set into the live tree. Publication checks the parked shared set
+against that baseline, renames the parked `runs/` and this run's evidence into a
+stage on the same filesystem, installs it by rename and deletes the replaced shared
+set; rollback and recovery rename everything back. Earlier evidence is never copied,
+hashed or deleted. A tree that appears in the checkout while one is parked keeps
+both and refuses, naming both paths. Pending transactions of the earlier
+canonical-copy format are preserved and refused with recovery steps; once none is
+pending, the stale `canonical/` copy is deleted.
 `WorkspaceOwnership` holds checkout and Git descriptors from workspace setup
 through cleanup. Its source capability owns strict journal proof and anchored
 publication/restoration operations; its code capability guards live reads and
@@ -1222,7 +1235,7 @@ replacing a primary failure.
 Each run's private directory, `~/.daydream/runtime/<workspace>/runs/<run id>/`, holds
 the `live/` tree, the `frozen/` copy with `frozen-manifest.json`, and the local trace.
 Run directories are created and finalized only under the exclusive workspace lock, and
-recovery reads transactions and the canonical copy, never run directories. So the
+recovery reads transactions, never run directories. So the
 closing session, once it has reconciled and before it releases that lock, bounds the
 workspace's finished runs: it keeps the newest `retained_runs` of them, itself included
 (default `DEFAULT_RETAINED_RUNS` in [config.py](../daydream/config.py), a positive count set
@@ -1234,7 +1247,7 @@ transaction under `transactions/` or `unreconciled/` keeps every byte and does n
 toward the bound. A session whose reconciliation failed applies no retention. Removal
 never follows links and refuses an unsafe tree whole, leaving it in place with a warning;
 retention never fails a run. It touches nothing outside the workspace's `runs/`: not the
-canonical copy, dataset store, archives or other workspaces.
+dataset store, archives or other workspaces.
 
 Evidence documents are written to disk as the run proceeds, never held whole in RAM.
 Every run snapshot names each document by reference: its document id, logical path,

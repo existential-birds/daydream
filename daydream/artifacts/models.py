@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 _SCHEMA_VERSION = 1
 _DAYDREAM = ".daydream"
 _REVIEW_OUTPUT = ".review-output.md"
+#: Public run evidence: each run publishes only its own ``runs/<session id>/``; earlier runs are carried untouched.
+_RUNS = f"{_DAYDREAM}/runs"
 #: Per-run private tree names under ``<state root>/runs/<session id>/``; retention reads them too.
 _LIVE = "live"
 _FROZEN = "frozen"
@@ -33,20 +35,20 @@ class ArtifactSourceUnavailableError(ArtifactVisibilityError):
 
 
 class _Transition(str, Enum):
-    """Journalled in-flight transaction state; ``PUBLISH_*`` members publish."""
+    """Journalled transaction state: a session's detach transaction parks, a publish transaction publishes."""
 
-    DETACH_STAGED = "DETACH_STAGED"
-    DETACH_CANONICAL = "DETACH_CANONICAL"
-    DETACH_REMOVING = "DETACH_REMOVING"
-    DETACHED = "DETACHED"
-    PUBLISH_STAGED = "PUBLISH_STAGED"
-    PUBLISH_BACKED_UP = "PUBLISH_BACKED_UP"
-    PUBLISH_INSTALLED = "PUBLISH_INSTALLED"
-    PUBLISH_VERIFIED = "PUBLISH_VERIFIED"
+    PUBLIC_PARKED = "PUBLIC_PARKED"
+    PUBLIC_STAGED = "PUBLIC_STAGED"
+    PUBLIC_CARRIED = "PUBLIC_CARRIED"
+    PUBLIC_INSTALLED = "PUBLIC_INSTALLED"
+    PUBLIC_VERIFIED = "PUBLIC_VERIFIED"
 
-    @property
-    def is_publish(self) -> bool:
-        return self.name.startswith("PUBLISH_")
+
+#: States of the earlier canonical-copy format, which this build preserves and refuses to recover.
+_EARLIER_FORMAT_STATES = frozenset((
+    "DETACH_STAGED", "DETACH_CANONICAL", "DETACH_REMOVING", "DETACHED",
+    "PUBLISH_STAGED", "PUBLISH_BACKED_UP", "PUBLISH_INSTALLED", "PUBLISH_VERIFIED",
+))
 
 
 class _TerminalState(str, Enum):

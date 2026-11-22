@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import secrets
 import shutil
@@ -10,6 +11,7 @@ from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 from daydream.artifacts import external, filesystem, transfer
 from daydream.artifacts.models import (
@@ -18,6 +20,7 @@ from daydream.artifacts.models import (
     _PUBLIC_ANCHORS,
     _PUBLIC_DIRECTORY_ANCHORS,
     _REVIEW_OUTPUT,
+    _RUNS,
     _SCHEMA_VERSION,
     ArtifactManifestEntry,
     ArtifactVisibilityError,
@@ -29,19 +32,6 @@ from daydream.artifacts.models import (
 )
 from daydream.artifacts.ownership import SourceOwnership
 from daydream.json_utils import _fsync_directory
-
-
-def _validated_canonical_entries(
-    state_root: Path,
-) -> tuple[ArtifactManifestEntry, ...] | None:
-    """Return an attested prior public tree, if this workspace has one."""
-    canonical = state_root / "canonical"
-    if not canonical.exists() and not canonical.is_symlink():
-        return None
-    entries = filesystem._parse_manifest(state_root / "canonical-manifest.json")
-    if filesystem.manifest_tree(canonical) != entries:
-        raise ArtifactVisibilityError("canonical artifact recovery copy is corrupt")
-    return entries
 
 
 def _delete_retired_review_cache(source: SourceOwnership) -> None:
@@ -63,12 +53,11 @@ def _delete_retired_review_cache(source: SourceOwnership) -> None:
         raise ArtifactVisibilityError("stale review cache could not be deleted") from exc
 
 
-def _validate_public_tree(
-    source: Path,
-    *,
-    canonical_entries: tuple[ArtifactManifestEntry, ...] | None,
-) -> tuple[ArtifactManifestEntry, ...]:
-    """Admit current public artifact roots, rejecting operational namespaces and unsafe entries."""
+def _validate_public_tree(source: Path) -> tuple[ArtifactManifestEntry, ...]:
+    """Admit the public roots and return their shared set, rejecting operational namespaces and unsafe entries.
+
+    Earlier run evidence is walked for unsafe entries but never read.
+    """
     daydream = source / _DAYDREAM
     if daydream.exists() or daydream.is_symlink():
         try:
@@ -80,8 +69,7 @@ def _validate_public_tree(
         children = {child.name for child in daydream.iterdir()}
         if children & _OPERATIONAL_NAMES:
             raise ArtifactVisibilityError("unsupported operational workspace blocks artifact detach")
-        anchor_children = children
-        for name in sorted(anchor_children & _PUBLIC_ANCHORS):
+        for name in sorted(children & _PUBLIC_ANCHORS):
             anchor = daydream / name
             try:
                 anchor_metadata = anchor.lstat()
@@ -98,52 +86,45 @@ def _validate_public_tree(
         metadata = review.lstat()
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
             raise ArtifactVisibilityError("artifact roots accept only regular files and directories")
-    public_entries = filesystem.manifest_tree(source, (_DAYDREAM, _REVIEW_OUTPUT))
-    daydream_entry = filesystem._entry_at(public_entries, _DAYDREAM)
+    filesystem.manifest_tree(source, (_DAYDREAM, _REVIEW_OUTPUT), digest=False)
+    shared = _shared_manifest(source)
+    daydream_entry = filesystem._entry_at(shared, _DAYDREAM)
     if daydream_entry is not None and daydream_entry.kind != "directory":
         raise ArtifactVisibilityError("artifact roots accept only regular files and directories")
-    review_entry = filesystem._entry_at(public_entries, _REVIEW_OUTPUT)
+    review_entry = filesystem._entry_at(shared, _REVIEW_OUTPUT)
     if review_entry is not None and review_entry.kind != "file":
         raise ArtifactVisibilityError("artifact roots accept only regular files and directories")
     daydream_prefix = f"{_DAYDREAM}/"
     manifested_children = {
         entry.path.removeprefix(daydream_prefix): entry
-        for entry in public_entries
+        for entry in shared
         if entry.path.startswith(daydream_prefix) and "/" not in entry.path.removeprefix(daydream_prefix)
     }
     if manifested_children.keys() & _OPERATIONAL_NAMES:
         raise ArtifactVisibilityError("unsupported operational workspace blocks artifact detach")
-    anchor_children = set(manifested_children)
-    for name in sorted(anchor_children & _PUBLIC_ANCHORS):
+    for name in sorted(manifested_children.keys() & _PUBLIC_ANCHORS):
         expected_kind = "directory" if name in _PUBLIC_DIRECTORY_ANCHORS else "file"
         if manifested_children[name].kind != expected_kind:
             raise ArtifactVisibilityError("public artifact anchor has the wrong filesystem type")
-    nonstatic_children = anchor_children - _PUBLIC_ANCHORS
-    for name in sorted(nonstatic_children):
-        relative = f"{_DAYDREAM}/{name}"
-        prefix = f"{relative}/"
-        actual = tuple(entry for entry in public_entries if entry.path == relative or entry.path.startswith(prefix))
-        expected = tuple(
-            entry for entry in canonical_entries or () if entry.path == relative or entry.path.startswith(prefix)
-        )
-        if not expected or actual != expected:
-            raise ArtifactVisibilityError("public .daydream tree contains an unregistered artifact anchor")
-    return public_entries
+    return shared
 
 
-def _replace_public_from_tree(
-    source: SourceOwnership, tree: Path, entries: tuple[ArtifactManifestEntry, ...],
-) -> None:
-    """Install a staged public tree onto a source whose own tree is already detached."""
-    with source.operation():
-        if filesystem.manifest_tree(source.path, (_DAYDREAM, _REVIEW_OUTPUT)):
-            raise ArtifactVisibilityError("public artifacts changed before publication")
-        for name in (_DAYDREAM, _REVIEW_OUTPUT):
-            staged = tree / name
-            if staged.exists() or staged.is_symlink():
-                _install_staged_path(staged, source.path / name, source=source)
-        if filesystem.manifest_tree(source.path, (_DAYDREAM, _REVIEW_OUTPUT)) != entries:
-            raise ArtifactVisibilityError("public artifact publication verification failed")
+def _shared_manifest(root: Path) -> tuple[ArtifactManifestEntry, ...]:
+    """The shared set: every public entry outside ``.daydream/runs/``, hashed, and the ``runs`` directory itself."""
+    return filesystem.manifest_tree(root, (_DAYDREAM, _REVIEW_OUTPUT), prune=_RUNS)
+
+
+def _public_view(root: Path, session_id: str) -> tuple[ArtifactManifestEntry, ...]:
+    """The shared set plus one run's evidence, the only public bytes a publication writes or verifies."""
+    evidence = filesystem.manifest_tree(root, (f"{_RUNS}/{session_id}",))
+    return tuple(sorted((*_shared_manifest(root), *evidence),
+                        key=lambda entry: filesystem._manifest_order_key(entry.path)))
+
+
+def _retire_canonical(state_root: Path) -> None:
+    """Delete the canonical recovery copy an earlier build kept; the caller has recovered every transaction."""
+    filesystem._remove_owned_tree(state_root / "canonical", state_root)
+    (state_root / "canonical-manifest.json").unlink(missing_ok=True)
 
 
 def _install_staged_path(staged: Path, target: Path, *, source: SourceOwnership) -> None:
@@ -199,47 +180,18 @@ def _install_regular_noclobber(
                 os.fsync(parent_fd)
 
 
-def _restore_manifest_noclobber(
-    source: SourceOwnership,
-    canonical: Path,
-    entries: tuple[ArtifactManifestEntry, ...],
-) -> tuple[str, ...]:
-    with source.operation():
-        conflicts: list[str] = []
-        for entry in entries:
-            if entry.kind != "directory":
-                continue
-            target = source.path / entry.path
-            if target.exists() or target.is_symlink():
-                metadata = target.lstat()
-                if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-                    conflicts.append(entry.path)
-                continue
-            source.mkdir(target, mode=entry.mode)
-            with source.parent_descriptor(target) as parent_fd:
-                descriptor = os.open(
-                    target.name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-                    dir_fd=parent_fd,
-                )
-                try:
-                    os.fchmod(descriptor, entry.mode)
-                finally:
-                    os.close(descriptor)
-        for entry in entries:
-            if entry.kind != "file":
-                continue
-            target = source.path / entry.path
-            if target.exists() or target.is_symlink():
-                try:
-                    actual = filesystem.manifest_tree(source.path, (entry.path,))
-                except ArtifactVisibilityError:
-                    conflicts.append(entry.path)
-                    continue
-                if actual != (entry,):
-                    conflicts.append(entry.path)
-                continue
-            _install_regular_noclobber(canonical / entry.path, target, entry, source=source)
-        return tuple(conflicts)
+def _restore_destinations(
+    source: SourceOwnership, transaction: Path, records: Sequence[_DestinationRecord], *, workspace_key: str,
+) -> None:
+    """Restore explicit destinations to their baselines through this transaction's restore stage."""
+    if not records:
+        return
+    _reset_source_stage(source, transaction.name, "restore", workspace_key=workspace_key)
+    stage = _create_source_stage(source, transaction.name, "restore", workspace_key=workspace_key)
+    try:
+        _restore_destination_records(source, transaction, records, stage)
+    finally:
+        _retire_source_stage(source, transaction.name, "restore", workspace_key=workspace_key)
 
 
 def _stage_parent(source: SourceOwnership) -> Path:
@@ -250,7 +202,7 @@ def _source_stage_path(source: SourceOwnership, transaction_id: str, purpose: st
     if (
         not transaction_id
         or any(character in transaction_id for character in ("/", "\\", "\0"))
-        or purpose not in ("publish", "restore")
+        or purpose not in ("park", "publish", "restore")
     ):
         raise ArtifactVisibilityError("artifact source-stage identity is invalid")
     return _stage_parent(source) / f".{source.path.name}.daydream-{purpose}-{transaction_id}"
@@ -310,6 +262,221 @@ def _reset_source_stage(source: SourceOwnership, transaction_id: str, purpose: s
     if filesystem._load_json(owner) != _source_stage_owner(source, transaction_id, purpose, workspace_key):
         return
     filesystem._remove_owned_tree(stage, _stage_parent(source))
+
+
+def _rename(source: Path, destination: Path) -> None:
+    """Rename one private or stage entry, then fsync both parents."""
+    os.rename(source, destination)
+    _fsync_directory(source.parent)
+    _fsync_directory(destination.parent)
+
+
+def _move_out(source: SourceOwnership, name: str, destination: Path) -> None:
+    """Rename one public root out of the original checkout."""
+    with source.parent_descriptor(source.path / name) as parent_fd:
+        os.rename(name, destination, src_dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    _fsync_directory(destination.parent)
+
+
+def _move_roots_in(source: SourceOwnership, root: Path) -> list[str]:
+    """Rename each public root under ``root`` into the checkout; return those a concurrent occupant blocks."""
+    blocked: list[str] = []
+    with source.operation():
+        for name in (_DAYDREAM, _REVIEW_OUTPUT):
+            if os.path.lexists(root / name):
+                if os.path.lexists(source.path / name):
+                    if not os.path.samestat(os.lstat(root / name), os.lstat(source.path / name)):
+                        blocked.append(name)
+                        continue
+                    # A link install interrupted before its staged name was dropped.
+                    os.unlink(root / name)
+                    _fsync_directory(root)
+                else:
+                    _install_staged_path(root / name, source.path / name, source=source)
+    return blocked
+
+
+def _park(source: SourceOwnership, transaction: Path, *, workspace_key: str) -> Path | None:
+    """Hide the public tree by rename, privately when one filesystem allows it, else beside the checkout.
+
+    Return where it waits, if anything was parked. Recovery finds it from the transaction alone.
+    """
+    names = [name for name in (_DAYDREAM, _REVIEW_OUTPUT) if os.path.lexists(source.path / name)]
+    if not names:
+        return None
+    root = transaction / "parked"
+    root.mkdir(mode=0o700)
+    try:
+        _move_out(source, names[0], root / names[0])
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise ArtifactVisibilityError("public artifacts could not be parked") from exc
+        root.rmdir()
+        root = _create_source_stage(source, transaction.name, "park", workspace_key=workspace_key)
+        _move_out(source, names[0], root / names[0])
+    for name in names[1:]:
+        _move_out(source, name, root / name)
+    return root
+
+
+def _parked_root(source: SourceOwnership, transaction: Path, *, workspace_key: str) -> Path | None:
+    """Where this session's public tree waits, if anything was parked."""
+    private = transaction / "parked"
+    beside = _source_stage_path(source, transaction.name, "park")
+    found = [root for root in (private, beside) if os.path.lexists(root)]
+    if not found:
+        return None
+    if len(found) > 1:
+        raise ArtifactVisibilityError("parked public artifacts are ambiguous")
+    root = found[0]
+    if root == beside:
+        if filesystem._load_json(beside / "stage-owner.json") != _source_stage_owner(
+            source, transaction.name, "park", workspace_key,
+        ):
+            raise ArtifactVisibilityError("parked public artifact ownership is malformed")
+    elif root.is_symlink() or not root.is_dir():
+        raise ArtifactVisibilityError("parked public artifacts are unsafe")
+    return root
+
+
+def _remove_parked_root(source: SourceOwnership, transaction: Path, root: Path, *, workspace_key: str) -> None:
+    if root.parent == transaction:
+        filesystem._remove_owned_tree(root, transaction)
+    else:
+        _retire_source_stage(source, transaction.name, "park", workspace_key=workspace_key)
+
+
+def _unpark(source: SourceOwnership, transaction: Path, *, workspace_key: str) -> None:
+    """Return the parked tree to the checkout by rename; a competing tree keeps both and refuses."""
+    root = _parked_root(source, transaction, workspace_key=workspace_key)
+    if root is None:
+        return
+    if blocked := _move_roots_in(source, root):
+        raise ArtifactVisibilityError(
+            "public artifacts appeared in the checkout while the prior tree was parked; both are kept: "
+            + "; ".join(f"{source.path / name} (kept in the checkout) and {root / name} (the parked prior tree)"
+                        for name in blocked)
+        )
+    _remove_parked_root(source, transaction, root, workspace_key=workspace_key)
+
+
+def _discard_parked(source: SourceOwnership, transaction: Path, *, workspace_key: str) -> None:
+    """Delete the parked shared set a verified publication replaced; earlier evidence must already be carried."""
+    root = _parked_root(source, transaction, workspace_key=workspace_key)
+    if root is None:
+        return
+    if os.path.lexists(root / _RUNS):
+        raise ArtifactVisibilityError(f"parked run evidence at {root / _RUNS} was not carried; it is kept")
+    _remove_parked_root(source, transaction, root, workspace_key=workspace_key)
+
+
+def _publication_entries(
+    frozen: Sequence[ArtifactManifestEntry], baseline: tuple[ArtifactManifestEntry, ...], session_id: str,
+) -> tuple[tuple[ArtifactManifestEntry, ...], tuple[ArtifactManifestEntry, ...], tuple[ArtifactManifestEntry, ...]]:
+    """Split the frozen public tree into the staged shared set and this run's evidence.
+
+    Return ``(staged, evidence, expected)``: ``expected`` is the published view after the
+    parked ``runs`` directory, which the baseline names, is carried in.
+    """
+    own = f"{_RUNS}/{session_id}"
+    public = [entry for entry in frozen
+              if entry.path in (_DAYDREAM, _REVIEW_OUTPUT) or entry.path.startswith(f"{_DAYDREAM}/")]
+    if any(entry.path.startswith(f"{_RUNS}/") and not (entry.path == own or entry.path.startswith(f"{own}/"))
+           for entry in public):
+        raise ArtifactVisibilityError(f"a run publishes only its own evidence under {_RUNS}/{session_id}")
+    evidence = tuple(entry for entry in public if entry.path == own or entry.path.startswith(f"{own}/"))
+    carried = filesystem._entry_at(baseline, _RUNS)
+    staged = tuple(entry for entry in public
+                   if entry not in evidence and not (carried is not None and entry.path == _RUNS))
+    expected = [*staged, *evidence]
+    if carried is not None:
+        expected.append(carried)
+        if filesystem._entry_at(staged, _DAYDREAM) is None:
+            expected.append(cast(ArtifactManifestEntry, filesystem._entry_at(baseline, _DAYDREAM)))
+    return staged, evidence, tuple(sorted(expected, key=lambda entry: filesystem._manifest_order_key(entry.path)))
+
+
+def _stage_public(
+    frozen_root: Path, stage: Path, staged: tuple[ArtifactManifestEntry, ...],
+    evidence: tuple[ArtifactManifestEntry, ...],
+) -> None:
+    """Copy the frozen shared set to ``stage/public`` and this run's evidence to ``stage/evidence``."""
+    filesystem._copy_tree(frozen_root, stage / "public", staged)
+    if evidence:
+        filesystem._copy_tree(frozen_root / _RUNS, stage / "evidence", tuple(
+            replace(entry, path=entry.path.removeprefix(f"{_RUNS}/")) for entry in evidence
+        ))
+
+
+def _carry(
+    source: SourceOwnership, parked: Path | None, stage: Path, baseline: tuple[ArtifactManifestEntry, ...],
+    session_id: str,
+) -> None:
+    """Check the parked shared set, then rename earlier evidence and this run's evidence into the stage."""
+    if parked is not None and _shared_manifest(parked) != baseline:
+        raise ArtifactVisibilityError(
+            f"parked public artifacts at {parked} changed during the run; they are restored and this run's "
+            "outputs stay in its frozen copy"
+        )
+    if any(os.path.lexists(source.path / name) for name in (_DAYDREAM, _REVIEW_OUTPUT)):
+        raise ArtifactVisibilityError("public artifacts appeared in the checkout during the run")
+    public = stage / "public"
+    runs = public / _RUNS
+    if filesystem._entry_at(baseline, _RUNS) is not None:
+        assert parked is not None
+        if not os.path.lexists(public / _DAYDREAM):
+            root = cast(ArtifactManifestEntry, filesystem._entry_at(baseline, _DAYDREAM))
+            (public / _DAYDREAM).mkdir(mode=root.mode)
+            os.chmod(public / _DAYDREAM, root.mode)
+        _rename(parked / _RUNS, runs)
+    evidence = stage / "evidence" / session_id
+    if os.path.lexists(evidence):
+        if os.path.lexists(runs / session_id):
+            raise ArtifactVisibilityError(f"public run evidence {_RUNS}/{session_id} already exists")
+        _rename(evidence, runs / session_id)
+
+
+def _roll_back_public(
+    source: SourceOwnership, transaction: Path, session_transaction: Path, *,
+    expected: tuple[ArtifactManifestEntry, ...], session_id: str, workspace_key: str,
+) -> None:
+    """Undo an unverified publication from existence checks: uninstall, then return carried evidence to the park."""
+    stage = (transaction if os.path.lexists(transaction / "public")
+             else _source_stage_path(source, transaction.name, "publish"))
+    public = stage / "public"
+    target = source.path / _DAYDREAM
+    if (filesystem._entry_at(expected, _DAYDREAM) is not None and not os.path.lexists(public / _DAYDREAM)
+            and os.path.lexists(target)):
+        view = tuple(entry for entry in _public_view(source.path, session_id) if entry.path != _REVIEW_OUTPUT)
+        if view != tuple(entry for entry in expected if entry.path != _REVIEW_OUTPUT):
+            raise ArtifactVisibilityError(f"installed public artifacts at {target} changed; they are kept")
+        _move_out(source, _DAYDREAM, public / _DAYDREAM)
+    review, staged_review = source.path / _REVIEW_OUTPUT, public / _REVIEW_OUTPUT
+    review_entry = filesystem._entry_at(expected, _REVIEW_OUTPUT)
+    # Installed by link: while the staged name remains only its inode is ours (a rerun may meet the unparked
+    # prior file, byte-identical); once it is gone, the installed bytes are.
+    if review_entry is not None and os.path.lexists(review) and (
+        os.path.samestat(os.lstat(review), os.lstat(staged_review)) if os.path.lexists(staged_review)
+        else filesystem.manifest_tree(source.path, (_REVIEW_OUTPUT,)) == (review_entry,)
+    ):
+        if os.path.lexists(staged_review):
+            with source.parent_descriptor(review) as parent_fd:
+                os.unlink(review.name, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+        else:
+            _move_out(source, _REVIEW_OUTPUT, staged_review)
+    runs = public / _RUNS
+    evidence = stage / "evidence" / session_id
+    if os.path.lexists(runs / session_id) and not os.path.lexists(evidence):
+        evidence.parent.mkdir(mode=0o700, exist_ok=True)
+        _rename(runs / session_id, evidence)
+    baseline = filesystem._parse_manifest(session_transaction / "shared-manifest.json")
+    if filesystem._entry_at(baseline, _RUNS) is not None and os.path.lexists(runs):
+        parked = _parked_root(source, session_transaction, workspace_key=workspace_key)
+        if parked is None or os.path.lexists(parked / _RUNS):
+            raise ArtifactVisibilityError(f"carried run evidence at {runs} has no parked tree to return to")
+        _rename(runs, parked / _RUNS)
 
 
 def _overlay_destination(

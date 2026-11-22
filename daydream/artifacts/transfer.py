@@ -11,8 +11,6 @@ from typing import Any, cast
 
 from daydream.artifacts import filesystem
 from daydream.artifacts.models import (
-    _DAYDREAM,
-    _REVIEW_OUTPUT,
     _SCHEMA_VERSION,
     ArtifactManifestEntry,
     ArtifactVisibilityError,
@@ -21,7 +19,6 @@ from daydream.artifacts.ownership import SourceOwnership
 from daydream.json_utils import _fsync_directory
 
 _transfer_observer: Any | None = None
-_transfer_post_observer: Any | None = None
 
 
 def _stage_registry(transaction: Path) -> list[dict[str, object]]:
@@ -281,9 +278,6 @@ def _transfer_entry(
         _fsync_directory(moved.parent)
     except OSError as exc:
         raise ArtifactVisibilityError("artifact entry changed during ownership transfer") from exc
-    post_observer = _transfer_post_observer
-    if post_observer is not None:
-        post_observer(path, moved)
     observed_entries = filesystem.manifest_tree(stage / "entries", (relative,))
     observed = next((entry for entry in observed_entries if entry.path == relative), None)
     if observed != expected:
@@ -310,14 +304,14 @@ def _transfer_entry(
 def _remove_manifested(
     root: Path,
     entries: tuple[ArtifactManifestEntry, ...],
-    names: Sequence[str] = (_DAYDREAM, _REVIEW_OUTPUT),
+    names: Sequence[str],
     *,
     transaction: Path,
     workspace_key: str,
     purpose: str,
-    record_id: str = "public",
+    record_id: str,
     remove_directories: bool = True,
-    changed_message: str = "public artifacts changed during detach",
+    changed_message: str = "explicit artifact destination changed",
     source: SourceOwnership,
 ) -> None:
     """Stage every manifested file out of ``root``, then drop its directories."""
