@@ -1051,6 +1051,14 @@ async def test_artifact_session_rejects_existing_session_and_malformed_transacti
     with pytest.raises(ArtifactVisibilityError, match="session id already exists"):
         async with open_artifact_session(_work(source), session_id="fixed-session"):
             pass
+    # Public evidence whose private run directory retention dropped still claims its id.
+    earlier = source / ".daydream" / "runs" / "public-only" / RUN_DOCUMENT_NAME
+    earlier.parent.mkdir(parents=True)
+    earlier.write_bytes(b"earlier evidence")
+    with pytest.raises(ArtifactVisibilityError, match="session id already exists"):
+        async with open_artifact_session(_work(source), session_id="public-only"):
+            pass
+    assert earlier.read_bytes() == b"earlier evidence"
 
     state_root = artifact_runtime_root / _workspace_key(source)
     residue = state_root / "transactions" / "malformed"

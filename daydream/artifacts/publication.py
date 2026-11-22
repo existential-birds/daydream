@@ -468,7 +468,8 @@ def _roll_back_public(
             _move_out(source, _REVIEW_OUTPUT, staged_review)
     runs = public / _RUNS
     evidence = stage / "evidence" / session_id
-    if os.path.lexists(runs / session_id) and not os.path.lexists(evidence):
+    staged_evidence = filesystem._entry_at(expected, f"{_RUNS}/{session_id}") is not None
+    if staged_evidence and os.path.lexists(runs / session_id) and not os.path.lexists(evidence):
         evidence.parent.mkdir(mode=0o700, exist_ok=True)
         _rename(runs / session_id, evidence)
     baseline = filesystem._parse_manifest(session_transaction / "shared-manifest.json")

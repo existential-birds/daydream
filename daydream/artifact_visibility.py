@@ -45,6 +45,7 @@ from daydream.artifacts.models import (
     _DAYDREAM,
     _PUBLIC_LABELS,
     _REVIEW_OUTPUT,
+    _RUNS,
     _TRAJECTORY_LABELS,
     ArtifactDisposition as ArtifactDisposition,
     ArtifactEvidenceProvenance as ArtifactEvidenceProvenance,
@@ -1114,7 +1115,8 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
             filesystem._create_private_directory(runs)
             filesystem._create_private_directory(transactions_root)
             run_root = runs / session_id
-            if run_root.exists() or run_root.is_symlink():
+            # Retention may have dropped an earlier run's private directory while its public evidence stays.
+            if os.path.lexists(run_root) or os.path.lexists(source / _RUNS / session_id):
                 raise ArtifactVisibilityError("artifact session id already exists")
             run_root.mkdir(mode=0o700)
             transaction_id = f"detach-{session_id}-{secrets.token_hex(8)}"
