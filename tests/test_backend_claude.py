@@ -899,35 +899,43 @@ async def test_retired_host_callbacks_change_nothing_and_uncorrelated_calls_fail
     binding.configure_schema(_VERDICT)
     start = {"tool_name": "mcp__daydream__structured_output", "tool_input": {"verdict": "clean"}}
 
-    async def call(endpoint: Any, call_id: str | None) -> mcp_types.CallToolResult:
-        meta = {"claudecode/toolUseId": call_id} if call_id is not None else None
-        request = mcp_types.CallToolRequest(params=mcp_types.CallToolRequestParams.model_validate(
-            {"name": "structured_output", "arguments": {"verdict": "clean"}, "_meta": meta}))
-        result = await endpoint.server.request_handlers[mcp_types.CallToolRequest](request)
-        return cast(mcp_types.CallToolResult, result.root)
+    async def call(
+        endpoint: Any, call_id: str | None, *, empty_meta: bool = False,
+    ) -> mcp_types.CallToolResult:
+        payload: dict[str, Any] = {"name": "structured_output", "arguments": {"verdict": "clean"}}
+        if call_id is not None:
+            payload["_meta"] = {"claudecode/toolUseId": call_id}
+        elif empty_meta:
+            payload["_meta"] = {}
+        entry = endpoint.server.get_request_handler("tools/call")
+        assert entry is not None
+        params = entry.params_type.model_validate(payload, by_name=False)
+        result = await entry.handler(None, params)
+        return cast(mcp_types.CallToolResult, result)
 
     async with binding.attempt(claude_backend._ClaudeHostEndpoint) as first:
         assert await first.admit(start, "early", {}) == {}
     async with binding.attempt(claude_backend._ClaudeHostEndpoint) as second:
         assert _is_denied(await first.admit(start, "late", {}))
-        assert (await call(first, "early")).isError
+        assert (await call(first, "early")).is_error
         assert (ledger.charged, ledger.observed, binding.fatal_error, binding.authority_open) == (1, 1, None, True)
         assert await second.admit(start, "fresh", {}) == {}
         assert await second.admit(start, "sibling", {}) == {}
-        assert not (await call(second, "fresh")).isError and binding.accepted and not binding.authority_open
+        assert not (await call(second, "fresh")).is_error and binding.accepted and not binding.authority_open
         # A sibling admitted before acceptance is refused without failing the accepted assignment.
-        assert (await call(second, "sibling")).isError and binding.fatal_error is None
+        assert (await call(second, "sibling")).is_error and binding.fatal_error is None
         assert _is_denied(await second.admit(start, "overshoot", {}))
     assert (ledger.charged, ledger.observed, installed, binding.cleanup_complete) == (3, 4, [{"verdict": "clean"}],
                                                                                        True)
-    # An MCP call without the CLI's tool identity cannot be correlated with its charged start.
-    uncorrelated = HostToolBinding(deadline=clock.monotonic() + 30, accept=accept)
-    uncorrelated.configure_schema(_VERDICT)
-    async with uncorrelated.attempt(claude_backend._ClaudeHostEndpoint) as endpoint:
-        assert await endpoint.admit(start, "admitted", {}) == {}
-        assert (await call(endpoint, None)).isError
-    assert uncorrelated.fatal_error is not None and uncorrelated.fatal_error.code == "native_correlation"
-    assert len(installed) == 1 and not uncorrelated.accepted
+    # An MCP call without the CLI's tool identity (omitted or empty _meta) cannot correlate with its charged start.
+    for empty_meta in (False, True):
+        uncorrelated = HostToolBinding(deadline=clock.monotonic() + 30, accept=accept)
+        uncorrelated.configure_schema(_VERDICT)
+        async with uncorrelated.attempt(claude_backend._ClaudeHostEndpoint) as endpoint:
+            assert await endpoint.admit(start, "admitted", {}) == {}
+            assert (await call(endpoint, None, empty_meta=empty_meta)).is_error
+        assert uncorrelated.fatal_error is not None and uncorrelated.fatal_error.code == "native_correlation"
+        assert len(installed) == 1 and not uncorrelated.accepted
     broken = HostToolBinding(deadline=clock.monotonic() + 30, accept=accept)
     broken.configure_schema(_VERDICT)
 
@@ -937,7 +945,7 @@ async def test_retired_host_callbacks_change_nothing_and_uncorrelated_calls_fail
     monkeypatch.setattr(broken, "submit", unexpected)
     monkeypatch.setattr(broken, "admit", unexpected)
     async with broken.attempt(claude_backend._ClaudeHostEndpoint) as endpoint:
-        assert (await call(endpoint, "submitted")).isError
+        assert (await call(endpoint, "submitted")).is_error
         assert broken.fatal_error is not None and broken.fatal_error.code == "callback_failed"
         assert _is_denied(await endpoint.admit(start, "next", {}))
     assert len(installed) == 1 and not broken.accepted

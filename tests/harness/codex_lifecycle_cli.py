@@ -184,8 +184,9 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
     and judges nothing until a challenge supersedes the unsubmitted one. Otherwise the user prompt
     is the JSON submission, followed by as many Codex-owned shell starts as its ``shells`` asks.
     """
+    import httpx2
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client.streamable_http import streamable_http_client
     from mcp.types import TextContent
 
     url = overrides["mcp_servers.daydream.url"]
@@ -204,7 +205,10 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
                status(data=b"{}", method="POST", headers={"Authorization": "Bearer " + token[::-1]}),
                status(headers={"Authorization": "Bearer " + token})]
     calls: list[list[Any]] = []
-    async with streamablehttp_client(url, headers={"Authorization": "Bearer " + token}) as (read, write, _):
+    async with (
+        httpx2.AsyncClient(headers={"Authorization": "Bearer " + token}, timeout=30.0) as http_client,
+        streamable_http_client(url, http_client=http_client) as (read, write),
+    ):
         async with ClientSession(read, write) as session:
             await session.initialize()
             host = {
@@ -212,7 +216,7 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
                 "instructions": instructions, "prompt": prompt, "output_schema": "--output-schema" in sys.argv,
                 "token_exposed": any(token in text for text in (*sys.argv, prompt)),
                 "no_proxy": [os.environ.get(name) for name in ("NO_PROXY", "no_proxy")], "refused": refused,
-                "tools": {tool.name: tool.inputSchema for tool in (await session.list_tools()).tools},
+                "tools": {tool.name: tool.input_schema for tool in (await session.list_tools()).tools},
                 "calls": calls, "token": token}
             # Published before any call: the host may stop this process at any later point.
             _observe("listed", mode=mode, host=host)
@@ -226,10 +230,10 @@ async def _host_tools(overrides: dict[str, Any], prompt: str, mode: str) -> None
                 result = await session.call_tool(name, arguments)
                 texts = [block.text for block in result.content if isinstance(block, TextContent)]
                 _emit({"type": "item.completed", "item": {
-                    **item, "status": "failed" if result.isError else "completed",
+                    **item, "status": "failed" if result.is_error else "completed",
                     "result": {"content": [{"type": "text", "text": text} for text in texts],
                                "structured_content": None}}})
-                calls.append([name, result.isError, [text[:160] for text in texts]])
+                calls.append([name, result.is_error, [text[:160] for text in texts]])
                 return texts
 
             def shell(name: str) -> None:
