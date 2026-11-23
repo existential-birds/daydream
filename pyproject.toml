@@ -4,7 +4,7 @@ version = "0.37.0"
 description = "Automated code review and fix loop using Claude"
 requires-python = ">=3.14"
 dependencies = [
-    "claude-agent-sdk==0.2.185",
+    "claude-agent-sdk==0.2.186",
     # Claude and Codex host tools serve lowlevel MCP 2.x Server constructor handlers (`on_list_tools`/`on_call_tool`)
     # and read per-call `params.meta` for Claude tool-call correlation.
     "mcp>=2.3.0,<3",
