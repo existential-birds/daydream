@@ -54,16 +54,29 @@ REPOSITORY_SEARCH_GUIDANCE = (
     "Never derive search roots from shared Git metadata or follow links into another checkout."
 )
 
-READ_ONLY_PI_SEARCH_GUIDANCE = (
-    "Repository searches: the only search tools are read, find, ls and grep, plus review_source "
+# Read-only profiles without a shell share everything but their tool names and stock limits.
+_NO_SHELL_SEARCH_GUIDANCE = (
+    "Repository searches: the only search tools are {tools}, plus review_source "
     "when it is granted. There is no shell, Git or `daydream search`. Start with assigned files and "
     "their relevant source roots, plus named callers/tests/configuration needed for the concrete "
     "question, and keep every search within the captured working directory and those relevant roots. "
-    "Stock grep respects .gitignore and caps output at 100 matches, 500-character lines and 50 KB; "
-    "find and ls are similarly bounded. read caps output at 2000 lines or 50 KB per call; page with "
-    "offset/limit. A single line over 50 KB is reachable only through review_source fragments. "
+    "{limits}"
     "A limited or truncated search is not proof of absence; narrow the question rather than blindly "
     "retrying. Never follow links into another checkout."
+)
+
+READ_ONLY_PI_SEARCH_GUIDANCE = _NO_SHELL_SEARCH_GUIDANCE.format(
+    tools="read, find, ls and grep",
+    limits=(
+        "Stock grep respects .gitignore and caps output at 100 matches, 500-character lines and 50 KB; "
+        "find and ls are similarly bounded. read caps output at 2000 lines or 50 KB per call; page with "
+        "offset/limit. A single line over 50 KB is reachable only through review_source fragments. "
+    ),
+)
+
+READ_ONLY_ANTIGRAVITY_SEARCH_GUIDANCE = _NO_SHELL_SEARCH_GUIDANCE.format(
+    tools="view_file, grep_search, find_by_name and list_dir",
+    limits="Host tools named in these instructions are served by the MCP server `daydream`. ",
 )
 
 REVIEW_STOPPING_GUIDANCE = (

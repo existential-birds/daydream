@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import platform
-import re
 import shlex
 import shutil
 from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator
@@ -63,6 +62,7 @@ from daydream.backends import (
     TurnEndEvent,
     fanout_concurrency_from_environment,
 )
+from daydream.backends._command_guards import is_dangerous_command
 from daydream.backends.lifecycle import current_backend_lifecycle
 from daydream.config import TEST_WALL_BUDGET_S
 from daydream.host_tools import HostToolBinding, HostToolEndpoint, HostToolFatal, HostToolRejected, UnsubmittedTurn
@@ -83,17 +83,6 @@ _GIT_WRITE_OPTIONS: tuple[str, ...] = ("--output",)
 # ``.*`` fires the guard for EVERY tool call so it can fail-closed (allow only
 # the safe set); a deny-list of mutating tools was fail-open.
 _READ_ONLY_HOOK_MATCHER = ".*"
-
-# Catastrophic Bash commands denied in ALL phases (always-on guard, #177). These
-# are the runaway-turn pathologies: full-filesystem-root scans that take hours,
-# plus an unrecoverable wipe. Matched on the raw command via regex.
-_DANGEROUS_COMMAND_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"^\s*find\s+/(\s|$)"),       # find / ...  (root-anchored scan)
-    re.compile(r"^\s*grep\b.*\s/\s*$"),      # grep ... /  (root is the sole trailing path)
-    # Match recursive rm flags in any order plus a standalone / or /* target.
-    # Subpaths such as /home are outside this catastrophic-wipe backstop.
-    re.compile(r"^\s*rm\b(?=.*(?:^|\s)(?:-\w*[rR]\w*|--recursive)\b)(?=.*(?:^|\s)/\*?(?:\s|$)).*$"),
-)
 
 # Tools unconditionally permitted under the read-only profile (Bash handled
 # separately via the command allowlist).
@@ -713,17 +702,12 @@ async def _read_only_guard(input_data: Any, tool_use_id: Any, context: Any) -> H
     )
 
 
-def _is_dangerous_command(cmd: str) -> bool:
-    """Match catastrophic root scans/wipes; scoped paths and unmatched commands pass."""
-    return any(pattern.search(cmd) for pattern in _DANGEROUS_COMMAND_PATTERNS)
-
-
 async def _dangerous_command_guard(input_data: Any, tool_use_id: Any, context: Any) -> HookJSONOutput:
     """Deny catastrophic Bash commands in every phase; allow other calls."""
     command = _bash_command(input_data)
     if command is None:
         return {}
-    if _is_dangerous_command(command):
+    if is_dangerous_command(command):
         return _read_only_deny(f"dangerous command blocked (always-on guard): {command!r}")
     return {}
 

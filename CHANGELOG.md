@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entries. It never moves an existing tag; when that tag's release is missing, it publishes it from
   the tagged commit's CHANGELOG, so a dispatch on `main` retries a failed publish even after later
   merges ([#1964](https://github.com/existential-birds/daydream/issues/1964)).
+- `--backend antigravity` runs reviews and the fix/test phases through Google's `agy` CLI
+  (1.5.15 or newer) in headless stream-json mode, with a Daydream-owned agent, a
+  deny-by-default tool hook and host tools over the loopback MCP server Codex uses. Set
+  `DAYDREAM_ANTIGRAVITY_HOME` for a dedicated `agy` home. Improve stays Claude-only, and the
+  README states the account-terms caveat for consumer sign-in
+  ([#1966](https://github.com/existential-birds/daydream/issues/1966)).
 
 ### Changed
 

@@ -44,6 +44,7 @@ from daydream.observability.spans import agent_scope, attempt_scope, record_stop
 from daydream.outage_circuit import CIRCUIT_CLOSED, CIRCUIT_HALF_OPEN
 from daydream.prompt_budget import PreparedSanctionedInputs
 from daydream.prompts.grounding import (
+    READ_ONLY_ANTIGRAVITY_SEARCH_GUIDANCE,
     READ_ONLY_PI_SEARCH_GUIDANCE,
     REPOSITORY_SEARCH_GUIDANCE,
     REVIEW_STOPPING_GUIDANCE,
@@ -352,9 +353,12 @@ async def run_agent(
         DaydreamPhase.CHALLENGE,
     }:
         # The only insertion of the guidance: composed text can quote either variant as untrusted data.
-        # Read-only Pi has only its stock bounded tools: no shell, Git or helper.
-        search_guidance = (READ_ONLY_PI_SEARCH_GUIDANCE if read_only and is_adapter_instance(backend, "PiBackend")
-                           else REPOSITORY_SEARCH_GUIDANCE)
+        # Read-only Pi and Antigravity have only their bounded native tools: no shell, Git or helper.
+        search_guidance = REPOSITORY_SEARCH_GUIDANCE
+        if read_only and is_adapter_instance(backend, "PiBackend"):
+            search_guidance = READ_ONLY_PI_SEARCH_GUIDANCE
+        elif read_only and is_adapter_instance(backend, "AntigravityBackend"):
+            search_guidance = READ_ONLY_ANTIGRAVITY_SEARCH_GUIDANCE
         prompt += "\n\n" + search_guidance
         if review_instructions:
             review_instructions += "\n\n" + search_guidance

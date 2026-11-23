@@ -57,7 +57,7 @@ sys.modules["claude_agent_sdk"] = None
 sys.modules["mcp"] = sys.modules["uvicorn"] = None
 # ATIF export is benchmark-only: recording and every evidence consumer must run without it.
 sys.modules["daydream.benchmarks"] = sys.modules["harbor"] = None
-ADAPTERS = {f"daydream.backends.{name}" for name in ("claude", "codex", "pi", "osprey")}
+ADAPTERS = {f"daydream.backends.{name}" for name in ("antigravity", "claude", "codex", "pi", "osprey")}
 
 def loaded():
     return ADAPTERS & set(sys.modules)
@@ -79,7 +79,7 @@ from daydream.runner import _load_selected_adapters, _resolve_backend, run
 
 target = Path(sys.argv[1])
 backends = {}
-for name in ("codex", "osprey", "pi"):
+for name in ("codex", "antigravity", "osprey", "pi"):
     before = loaded()
     # Run start loads what a Codex run with this review override can select, and nothing else.
     config = RunConfig(target=str(target), backend="codex", review_backend=name, review_model="fixture-model")

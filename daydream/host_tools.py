@@ -1,6 +1,6 @@
 """Synchronous admission for one live native review assignment.
 
-The native agent (Pi, Claude through the Agent SDK, or the Codex CLI) owns ordinary
+The native agent (Pi, Claude through the Agent SDK, or the Codex or Antigravity CLI) owns ordinary
 reads and tool execution. This binding owns one domain callback and charges the
 invocation's budget ledger (its absolute deadline and tool-call count) across
 short-lived per-attempt endpoints. Acceptance runs on the event-loop thread

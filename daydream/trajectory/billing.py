@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 #: Generic backend labels replaced by the first native model name.
-GENERIC_MODEL_LABELS: frozenset[str] = frozenset({"claude", "codex", "osprey", "unknown", ""})
+GENERIC_MODEL_LABELS: frozenset[str] = frozenset({"antigravity", "claude", "codex", "osprey", "unknown", ""})
 
 _DIMENSIONS = (
     ("prompt", "prompt_tokens", "total_prompt_tokens"),
