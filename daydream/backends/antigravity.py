@@ -303,7 +303,7 @@ class AntigravityBackend:
 
         try:
             run = create_run_directory(
-                read_only=read_only, review_instructions=review_instructions,
+                cwd, read_only=read_only, review_instructions=review_instructions,
                 mcp_url=host.url if host is not None else None, mcp_token=host.token if host is not None else None)
             args = [_AGY, "--input-format", "stream-json", "--output-format", "stream-json"]
             if self._model:

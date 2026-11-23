@@ -21,8 +21,9 @@ _BEARER = "callback-secret-123"
 def mutating(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     """A mutating run directory with host tools, the widest policy the generator writes."""
     monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    (tmp_path / "ws").mkdir()
     created = run_directory.create_run_directory(
-        read_only=False, review_instructions=None, mcp_url="http://127.0.0.1:1/mcp", mcp_token=_BEARER)
+        tmp_path / "ws", read_only=False, review_instructions=None, mcp_url="http://127.0.0.1:1/mcp", mcp_token=_BEARER)
     yield created
     created.remove()
 
@@ -35,6 +36,8 @@ def _payload(name: Any, args: Any, cwd: Any) -> dict[str, Any]:
     # Recorded hook alias of a registered tool, and the MCP descriptor read that precedes a host call.
     ("read_file", {"Path": "/agy-home/.gemini/antigravity-cli/mcp/daydream/structured_output.json"}, None),
     ("grep_search", {"Query": "needle", "SearchPath": "."}, None),
+    ("read_file", {"Path": "{ws}/calc.py", "toolSummary": "Read calc.py"}, None),
+    ("run_command", {"CommandLine": 'echo "test"'}, None),
     ("ask_permission", {}, "not allowed"),
     ("unknown_alias", {"Path": "calc.py"}, "not allowed"),
     # Path confinement: absolute, relative to the hook cwd, through a symlink, and nested in a list.
@@ -68,22 +71,27 @@ def test_guard_decides_each_tool_call_under_the_generated_policy(
     """Regression: a tool outside the policy, a path into the run directory (which holds the bearer and
     the guard's own policy), another MCP server, or a dangerous/background command is allowed."""
     workspace = tmp_path / "ws"
-    workspace.mkdir()
     (workspace / "link").symlink_to(mutating.path)
     policy = json.loads((mutating.path / "guard-policy.json").read_text())
     resolved = json.loads(json.dumps(args).replace("{root}", str(mutating.path)).replace(
-        "{root_name}", mutating.path.name))
+        "{root_name}", mutating.path.name).replace("{ws}", str(workspace)))
 
-    reason = decide(_payload(name, resolved, str(workspace)), policy)
+    # agy reports one of its workspace roots as the hook cwd, and the run directory is one of them:
+    # relative strings must resolve against the invocation's working directory from the policy instead.
+    reason = decide(_payload(name, resolved, str(mutating.path)), policy)
 
     assert (reason is None) if denied is None else (reason is not None and denied in reason), reason
 
 
 @pytest.mark.parametrize("policy", [
-    None, {"allowed_tools": "read_file", "protected_root": "/r", "mcp_server": None, "denied_commands": []},
-    {"allowed_tools": ["run_command"], "protected_root": "/r", "mcp_server": None,
+    None,
+    {"allowed_tools": "read_file", "protected_root": "/r", "working_directory": "/ws", "mcp_server": None,
+     "denied_commands": []},
+    {"allowed_tools": ["run_command"], "protected_root": "/r", "working_directory": "/ws", "mcp_server": None,
      "denied_commands": [{"pattern": "(", "reason": "x"}]},
-    {"allowed_tools": ["read_file"], "protected_root": "", "mcp_server": None, "denied_commands": []},
+    {"allowed_tools": ["read_file"], "protected_root": "", "working_directory": "/ws", "mcp_server": None,
+     "denied_commands": []},
+    {"allowed_tools": ["read_file"], "protected_root": "/r", "mcp_server": None, "denied_commands": []},
 ])
 def test_guard_denies_under_a_policy_it_cannot_apply(policy: Any) -> None:
     """Regression: a truncated or hand-edited policy file (wrong types, an uncompilable rule, no
@@ -126,10 +134,10 @@ def test_run_directory_files_match_the_invocation_profile(monkeypatch: pytest.Mo
     bearer lands outside the private MCP config."""
     monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
     review = run_directory.create_run_directory(
-        read_only=True, review_instructions="Review policy: cite lines.\n# Output\nUse #7 style.")
+        tmp_path, read_only=True, review_instructions="Review policy: cite lines.\n# Output\nUse #7 style.")
     hosted = run_directory.create_run_directory(
-        read_only=True, review_instructions=None, mcp_url="http://127.0.0.1:9/mcp", mcp_token=_BEARER)
-    edit = run_directory.create_run_directory(read_only=False, review_instructions=None)
+        tmp_path, read_only=True, review_instructions=None, mcp_url="http://127.0.0.1:9/mcp", mcp_token=_BEARER)
+    edit = run_directory.create_run_directory(tmp_path, read_only=False, review_instructions=None)
 
     def files(created: Any) -> dict[str, str]:
         return {path.relative_to(created.path).as_posix(): path.read_text()
@@ -162,7 +170,8 @@ def test_run_directory_files_match_the_invocation_profile(monkeypatch: pytest.Mo
     review_policy = json.loads(files(review)["guard-policy.json"])
     assert review_policy == {
         "allowed_tools": ["view_file", "grep_search", "find_by_name", "list_dir", "read_file"],
-        "protected_root": str(review.path), "mcp_server": None, "denied_commands": []}
+        "protected_root": str(review.path), "working_directory": str(tmp_path.resolve()), "mcp_server": None,
+        "denied_commands": []}
     hosted_policy = json.loads(files(hosted)["guard-policy.json"])
     assert hosted_policy["mcp_server"] == "daydream" and "call_mcp_tool" in hosted_policy["allowed_tools"]
     edit_policy = json.loads(files(edit)["guard-policy.json"])

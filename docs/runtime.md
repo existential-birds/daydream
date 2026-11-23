@@ -1171,9 +1171,12 @@ environment becomes the child's `HOME`.
   `init.agent` must name it before any model step is trusted. The same directory holds a
   deny-by-default `PreToolUse` hook: a packaged script, run by the running interpreter,
   that reads this invocation's policy file. It allows only the policy's tool names, denies
-  any path argument that resolves inside the per-run directory, and allows `call_mcp_tool`
+  any argument that names the per-run directory or resolves inside it (relative to the
+  invocation's working directory from the policy, never the hook payload's `cwd`, which
+  is one of `agy`'s workspace roots), and allows `call_mcp_tool`
   only for server `daydream`. It never silently allows: an internal error denies or exits
-  non-zero. It is a tool-call filter, not a sandbox: a search rooted above the per-run
+  non-zero. The agent's `tools:` list alone is not the boundary: the model also reaches for
+  `agy` built-ins outside it, and the hook denies those. It is a tool-call filter, not a sandbox: a search rooted above the per-run
   directory, or a mutating turn's shell, is not confined by it.
 - Profiles: read-only offers `view_file`, `grep_search`, `find_by_name` and `list_dir`,
   with no shell and without `--dangerously-skip-permissions`. Mutating turns add

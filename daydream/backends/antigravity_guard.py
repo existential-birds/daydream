@@ -44,13 +44,17 @@ def _decide(payload: object, policy: object) -> str | None:
         return "the guard policy is malformed"
     allowed, root_text = policy.get("allowed_tools"), policy.get("protected_root")
     mcp_server, denied_commands = policy.get("mcp_server"), policy.get("denied_commands")
+    # Relative strings resolve against the invocation's own working directory. The payload's ``cwd`` is one
+    # of agy's workspace roots, which can be the run directory itself, so it is never used.
+    base = policy.get("working_directory")
     if (not isinstance(allowed, list) or not isinstance(root_text, str) or not root_text
+            or not isinstance(base, str) or not base
             or not isinstance(denied_commands, list) or not (mcp_server is None or isinstance(mcp_server, str))):
         return "the guard policy is malformed"
     if not isinstance(payload, dict) or not isinstance(call := payload.get("toolCall"), dict):
         return "the hook payload is malformed"
-    name, args, cwd = call.get("name"), call.get("args", {}), payload.get("cwd")
-    if not isinstance(name, str) or not isinstance(args, dict) or not isinstance(cwd, str):
+    name, args = call.get("name"), call.get("args", {})
+    if not isinstance(name, str) or not isinstance(args, dict):
         return "the hook payload is malformed"
     if name not in allowed:
         return f"tool {name!r} is not allowed in this invocation"
@@ -61,7 +65,7 @@ def _decide(payload: object, policy: object) -> str | None:
     for text in _strings(args):
         if root_text in text or str(root) in text:  # any spelling that names it, such as a file:// URL
             return "the invocation's private run directory is not accessible"
-        candidate = Path(cwd, os.path.expanduser(text)).resolve()
+        candidate = Path(base, os.path.expanduser(text)).resolve()
         if candidate == root or root in candidate.parents:
             return "the invocation's private run directory is not accessible"
 

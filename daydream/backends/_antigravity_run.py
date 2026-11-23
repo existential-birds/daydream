@@ -63,7 +63,7 @@ def _write_private(path: Path, text: str) -> None:
         handle.write(text)
 
 
-def create_run_directory(*, read_only: bool, review_instructions: str | None,
+def create_run_directory(cwd: Path, *, read_only: bool, review_instructions: str | None,
                          mcp_url: str | None = None, mcp_token: str | None = None) -> RunDirectory:
     """Write the agent, guard hook and policy (and MCP config, given a URL and bearer) to a fresh 0700 directory."""
     host_tools = mcp_url is not None and mcp_token is not None
@@ -98,6 +98,7 @@ def create_run_directory(*, read_only: bool, review_instructions: str | None,
             "allowed_tools": [*tools, *(_HOOK_ALIASES[tool] for tool in tools if tool in _HOOK_ALIASES),
                               *((_MCP_TOOL,) if host_tools else ())],
             "protected_root": str(root),
+            "working_directory": str(cwd.resolve()),
             "mcp_server": HOST_SERVER if host_tools else None,
             "denied_commands": denied_commands,
         }, indent=2))
