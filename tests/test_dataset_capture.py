@@ -122,7 +122,7 @@ async def test_terminal_failure_retains_owned_trace_and_partial_evidence(
     assert raw["outcome"] == "failed"
     coverage = raw["findings"]["value"]["terminal_coverage"]
     assert [scope["status"] for scope in coverage["stack_outcomes"]] == ["incomplete"]
-    assert coverage["stack_outcomes"][0]["reason_codes"] == ["backend_failure", "evidence_incomplete"]
+    assert coverage["stack_outcomes"][0]["reason_codes"] == ["backend_failure"]
     assert raw["findings"]["value"]["items"] == []
     sealed = json.loads((repo / ".daydream/deep/committed-review.json").read_text())
     assert sealed["terminal_result"]["analysis_state"] == "failed" and sealed["run_id"] == raw["run_id"]

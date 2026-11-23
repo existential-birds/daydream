@@ -95,12 +95,18 @@ class HostToolFatal(Exception):
                   " Acceptance may already have occurred; do not resubmit.")
         super().__init__(_bounded_message(message, limit=768) + suffix)
         self.code = code
+        # Its stop's backend category; the binding's deadline is the ledger's own limit.
+        self.category = code.upper()
+        if code == "deadline_expired":
+            self.reason_code = "host_wall_budget_exhaustion"
         self.preacceptance = preacceptance
         self.outcome: Literal["fatal", "indeterminate"] = "fatal" if preacceptance else "indeterminate"
 
 
 class HostToolCallBudgetExceeded(HostToolFatal):
     """The ledger's tool-call allocation cannot authorize further work."""
+
+    reason_code = "host_tool_budget_exhaustion"
 
     def __init__(self, message: str, *, preacceptance: bool = True) -> None:
         super().__init__(message, code="capacity_exhausted", preacceptance=preacceptance)

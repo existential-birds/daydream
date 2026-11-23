@@ -106,8 +106,6 @@ class Manifest:
     pipeline_status: str = "unknown"
     # Phase states carry ran/status; legacy manifests omit them.
     phase_states: dict[str, Any] | None = None
-    # Frozen agent_budget_stop summary; omitted when no retry ladder stopped.
-    retry_summary: dict[str, Any] | None = None
     # Executable identity remains separate from reviewed-repository provenance.
     daydream: Any | None = None
 
@@ -184,7 +182,6 @@ class Manifest:
             **_omit_falsy(
                 daydream=self.daydream.to_dict() if self.daydream is not None else None,
                 phase_states=self.phase_states,
-                retry_summary=self.retry_summary,
             ),
             "run": {
                 "flow": self.run_flow,
@@ -253,7 +250,6 @@ def build_manifest_from_snapshot(
     recommended_capture: str | None = None,
     pipeline_status: str = "unknown",
     phase_states: Mapping[str, Any] | None = None,
-    retry_summary: Mapping[str, Any] | None = None,
     provenance: ExecutableProvenance | None = None,
 ) -> Manifest:
     """Construct a manifest from captured identity and the frozen run's document summaries."""
@@ -281,7 +277,6 @@ def build_manifest_from_snapshot(
         archive_status=status,
         pipeline_status=pipeline_status,
         phase_states=dict(phase_states) if phase_states is not None else None,
-        retry_summary=dict(retry_summary) if retry_summary is not None else None,
         daydream=provenance,
         review_only=identity.review_only,
         fix_failures=(dict(fix_failures) or None) if runs_fix and fix_failures is not None else None,

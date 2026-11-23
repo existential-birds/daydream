@@ -14,7 +14,8 @@ from daydream.immutable_review import IMMUTABLE_REVIEW_INPUT_SCHEMA, validate_im
 from daydream.json_utils import canonical_json, validate_json_schema
 from daydream.output_schema import severity_enum_schema, strict_object
 from daydream.repository_paths import REPOSITORY_FILE_PATH_MAX_LENGTH
-from daydream.review_result import TERMINAL_RESULT_SCHEMA, ReasonCode, validate_terminal_result
+from daydream.review_budget import STOP_SCHEMA
+from daydream.review_result import TERMINAL_RESULT_SCHEMA, validate_terminal_result
 from daydream.review_source_refs import (
     SOURCE_REF_SCHEMA,
     SOURCE_REFS_SCHEMA,
@@ -125,7 +126,8 @@ def host_decision(part: dict[str, Any]) -> dict[str, Any]:
 
 # Work records, attribution, per-execution capacity evidence, the cross_assignment phase (#1628) and claim severity.
 # A committed result over tracked uncommitted edits (#1828) is its own variant, as a captured local source is.
-RESULT_VERSIONS = {"committed": 10, "immutable": 11, "local": 12, "worktree": 13}
+# Each execution entry carries its stop record and the terminal result its cause (#1959).
+RESULT_VERSIONS = {"committed": 14, "immutable": 15, "local": 16, "worktree": 17}
 REQUIRED_PHASES = ["challenge", "cross_assignment"]
 # Investigation kinds decide owned targets and propose new concerns; challenge judges claim revisions.
 INVESTIGATION_KINDS = frozenset({"discovery", "follow_up", "cross_assignment"})
@@ -189,7 +191,7 @@ COMMITTED_RESULT_SCHEMA = strict_object({
     "execution": {"type": "array", "items": strict_object({
         "assignment": _TEXT, "work_id": {"type": ["string", "null"], "maxLength": 512},
         **{key: {"type": "boolean"} for key in ("accepted", "settled", "cleanup_complete")},
-        "reason": {"enum": [None, *[reason.value for reason in ReasonCode]]},
+        "stop": {"anyOf": [{"type": "null"}, STOP_SCHEMA]},
         # Dispatch allocation, every observed native start, and starts beyond the charged allocation.
         **{key: _COUNT for key in ("allocation", "observed_starts", "overshoot")},
     })},
@@ -323,8 +325,14 @@ def validate_committed_result(value: dict[str, Any]) -> None:
         raise ValueError("findings differ from challenged publication claims")
     native_assignments = {e["assignment"] for e in value["execution"]}
     superseded = {wid for wid, record in work.items() if record["state"] == "superseded"}
+    # A dispatch the schedule refused stays evidence once later work finished what it held, as superseded work does.
+    refused = {index for index, e in enumerate(value["execution"]) if e["work_id"] is None
+               and e["assignment"] in WORK_KINDS}
     if any(e["work_id"] is not None and e["work_id"] not in work for e in value["execution"]):
         raise ValueError("execution evidence differs from retained work")
+    if terminal["cause"] is not None and terminal["cause"] not in [
+            e["stop"] for e in value["execution"] if e["work_id"] not in superseded]:
+        raise ValueError("terminal cause is not a retained execution stop")
     # Current accepted work decides completion; superseded attempts remain evidence only.
     if terminal["analysis_state"] == "complete" and (
         any(not part.get("binary") for part in assignments) and not native_assignments & INVESTIGATION_KINDS
@@ -332,8 +340,8 @@ def validate_committed_result(value: dict[str, Any]) -> None:
         or any(c["disposition"] == "unresolved" for c in claims)
         or any(record["state"] != "accepted" for wid, record in work.items() if wid not in superseded)
         or any(
-            not e["settled"] or not e["accepted"] or not e["cleanup_complete"] or e["reason"] is not None
-            for e in value["execution"] if e["work_id"] not in superseded
+            not e["settled"] or not e["accepted"] or not e["cleanup_complete"] or e["stop"] is not None
+            for index, e in enumerate(value["execution"]) if e["work_id"] not in superseded and index not in refused
         )
     ):
         raise ValueError("unfinished obligations/native execution cannot be complete")

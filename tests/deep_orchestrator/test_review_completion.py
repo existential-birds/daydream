@@ -24,7 +24,6 @@ from daydream.deep import review_terminal
 from daydream.findings import FindingsValidationError, load_findings_artifact
 from daydream.host_tools import HostToolRejected
 from daydream.pr_review import ReviewEvent, post_findings_from_artifact
-from daydream.review_result import ReviewCoverage
 from daydream.trajectory import RUN_DOCUMENT_NAME
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.console import collapse_panel_text
@@ -129,8 +128,7 @@ async def test_comment_pins_pr_head_independently_and_excludes_local_edits(
     assert plan.pr.head_sha == review.pr.head_sha != local_head
     assert plan.pr.base_sha == review.pr.base_sha and plan.pr.pr_base_sha == review.pr.base_sha
     assert plan.event is ReviewEvent.COMMENT
-    coverage = ReviewCoverage.from_dict(json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text()))
-    terminal = coverage.finalize('completed')
+    terminal = json.loads((review.repo / '.daydream/deep/committed-review.json').read_text())['terminal_result']
     assert terminal['analysis_state'] == 'incomplete'
     assert 'evidence_incomplete' in terminal['reason_codes']
     patch = (review.repo / '.daydream/diff.patch').read_text()
@@ -248,12 +246,16 @@ async def test_snapshot_boundaries(
                      '{0}reviewer_tool_call_budget{1} and {0}reviewer_investigation_budget_s{1} by the '
                      '{0}scale{1} its {0}settings.limits{1} record.')
         assert collapse_panel_text(capsys).count(
-            'Review incomplete: 1 confirmed finding. Not finished: challenge: evidence_incomplete; '
-            'committed:00000: evidence_incomplete, host_tool_budget_exhaustion. '
+            'Review incomplete: 1 confirmed finding. Not finished: challenge: host_tool_budget_exhaustion; '
+            'committed:00000: host_tool_budget_exhaustion. '
             + allowance.format('', '')) == 1
         assert (review.repo / '.review-output.md').read_text().count(allowance.format('<code>', '</code>')) == 1
         exported = json.loads(partial.read_text())
         assert exported['terminal_result']['analysis_state'] == 'incomplete'
+        # The cause is the discovery dispatch's own stop, not the unfinished work it left behind.
+        cause = exported['terminal_result']['cause']
+        assert (cause['code'], cause['owner'], cause['attempts']) == (
+            'host_tool_budget_exhaustion', 'committed:discovery', 1)
         # The summary beside the sealed review counts the undecided target and the dispatch's budget stop.
         summary = json.loads((review.repo / '.daydream/deep/review-summary.json').read_text())
         assert summary['counts']['targets'] == {'planned': 5, 'reviewed': 4, 'not_reviewed': 1}
@@ -263,7 +265,8 @@ async def test_snapshot_boundaries(
         notice = fake_gh.calls('POST', 'repos/o/r/pulls/7/reviews')[-1].payload
         assert notice['event'] == 'COMMENT' and len(notice['comments']) == 1
         body = notice['body']
-        assert '**Review incomplete.**\n\n- committed:00000: evidence_incomplete, host_tool_budget_exhaustion' in body
+        assert '**Review incomplete.**\n\n- committed:00000: host_tool_budget_exhaustion' in body
+        assert '- challenge: host_tool_budget_exhaustion' in body
         assert body.count(allowance.format('<code>', '</code>')) == 1
         # A delivery GitHub does not confirm is reported as unconfirmed, never as posted.
         fake_gh.set_response('POST', 'repos/o/r/pulls/7/reviews', {'__error__': 'HTTP 422: unprocessable'})
@@ -481,10 +484,10 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
             await review.run()
         sealed = json.loads((review.repo / '.daydream/deep/committed-review.json').read_text())
         result = sealed['terminal_result']
-        assert (result['analysis_state'], result['reason_codes']) == (
-            'incomplete', ['backend_failure', 'evidence_incomplete'])
-        assert [(entry['assignment'], entry.get('reason')) for entry in sealed['execution']][-1] == (
-            'pipeline', 'backend_failure')
+        assert (result['analysis_state'], result['reason_codes']) == ('incomplete', ['backend_failure'])
+        # The failed step is the cause: its run-wide entry's stop, with its exception type and no message.
+        assert (result['cause']['owner'], result['cause']['error']['type']) == ('pipeline', 'RuntimeError')
+        assert sealed['execution'][-1]['stop'] == result['cause']
         assert [finding['title'] for finding in sealed['findings']] == ['Grounded defect']
         # No allowance was spent, so neither the console, the report nor the notice names a key to raise.
         panel = collapse_panel_text(capsys)
@@ -547,8 +550,8 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
     if fault == 'projection':
         data = review.load()
         result = data['terminal_result']
-        assert data['findings'] == [] and result['reason_codes'] == [
-            'evidence_incomplete', 'host_tool_budget_exhaustion', 'malformed_artifact']
+        assert data['findings'] == []
+        assert result['reason_codes'] == ['host_tool_budget_exhaustion', 'malformed_artifact']
         # The spent challenge fails the pipeline and alone leaves the analysis incomplete; the unreadable
         # findings make it failed.
         assert (result['pipeline_state'], result['analysis_state'], result['projection_valid']) == (

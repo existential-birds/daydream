@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 import daydream
 from daydream import timeutil, ui
@@ -57,6 +57,9 @@ from daydream.trajectory.view import (
     SUBTRAJECTORY_EVENT,
 )
 from daydream.ui import create_console, print_error
+
+if TYPE_CHECKING:
+    from daydream.review_budget import StopRecord
 
 _console = create_console()
 
@@ -236,8 +239,6 @@ class EvidenceRecorder:
     # appended as records; a fork's summary on its parent flattens them.
     _phase_events: list[PhaseEvent] = field(default_factory=list)
     _subtrajectories: list[dict[str, Any]] = field(default_factory=list)
-    #: Reason codes of host schedule refusals, which no dispatch or sealed execution entry records.
-    schedule_budget_stops: list[str] = field(default_factory=list)
     _aborted: bool = False
     on_write: TrajectoryWriteCallback | None = None
     _trajectory_id: str = ""
@@ -383,7 +384,6 @@ class EvidenceRecorder:
         *,
         execution_id: str,
         outcome: str,
-        abort_reason: str | None,
         repair_reason_code: str | None,
         changed_paths: tuple[str, ...] = (),
     ) -> None:
@@ -395,7 +395,7 @@ class EvidenceRecorder:
         """
         self._emit_phase_event(
             DaydreamPhase.TEST, "repair_outcome", execution_id=execution_id, outcome=outcome,
-            abort_reason=abort_reason, repair_reason_code=repair_reason_code, changed_paths=list(changed_paths),
+            repair_reason_code=repair_reason_code, changed_paths=list(changed_paths),
         )
 
     def emit_file_group_budget_exceeded(
@@ -415,36 +415,9 @@ class EvidenceRecorder:
             metadata["elapsed_s"] = elapsed_s
         self._emit_phase_event(DaydreamPhase.FIX, "file_group_budget_exceeded", **metadata)
 
-    def emit_agent_budget_stop(
-        self,
-        phase: DaydreamPhase,
-        *,
-        limit_expired: str,
-        elapsed_s: float,
-        backend_s: float,
-        backoff_s: float,
-        attempts: int,
-        cleanup_elapsed_s: float | None = None,
-        retry_stop_reason: str | None = None,
-        circuit_state: str | None = None,
-        partial_edit_handling: str | None = None,
-    ) -> None:
-        """Record an invocation stop once, using durations instead of monotonic deadlines.
-
-        Retry stops carry retry-only attempts, backend time, backoff, reason and circuit
-        state. Initial useful work is excluded. Partial edits are
-        kept for an interrupted attempt and discarded when stopping before dispatch."""
-        self._emit_phase_event(
-            phase, "agent_budget_stop", limit_expired=limit_expired, elapsed_s=elapsed_s, backend_s=backend_s,
-            backoff_s=backoff_s, attempts=attempts, cleanup_elapsed_s=cleanup_elapsed_s,
-            retry_stop_reason=retry_stop_reason, circuit_state=circuit_state,
-            partial_edit_handling=partial_edit_handling,
-        )
-
-    def emit_schedule_budget_stop(self, phase: DaydreamPhase, *, reason: str, **facts: Any) -> None:
-        """Record and retain a host schedule refusal: its public reason code and the stop's durations/counts."""
-        self.schedule_budget_stops.append(reason)
-        self._emit_phase_event(phase, "schedule_budget_stop", budget_reason=reason, **facts)
+    def emit_stop(self, phase: DaydreamPhase, stop: StopRecord) -> None:
+        """Record one stop's content-free record once, as the sealed result carries it."""
+        self._emit_phase_event(phase, "stop", **stop.to_dict())
 
     def emit_tool_veto(self, tool_name: str, reason: str, *, phase: DaydreamPhase = DaydreamPhase.FIX) -> None:
         """Record a tool-supervisor veto in the firing phase."""

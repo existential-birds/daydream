@@ -22,12 +22,12 @@ from daydream.immutable_review import IMMUTABLE_REVIEW_INPUT_SCHEMA, validate_im
 from daydream.json_utils import atomic_write_bytes, validate_json_schema
 from daydream.output_schema import strict_object
 from daydream.pr_review import ParsedIssue, PRInfo
+from daydream.review_budget import ReasonCode
 from daydream.review_rationale import valid_review_context
 from daydream.review_reporting import REVIEW_CONTEXT_SCHEMA
 from daydream.review_result import (
     RUN_TARGET_DECISIONS_MAX_BYTES,
     TERMINAL_RESULT_SCHEMA,
-    ReasonCode,
     published_attribution_bytes,
     validate_terminal_result,
 )

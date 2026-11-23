@@ -22,8 +22,8 @@ from daydream.phases.schemas import MERGED_ITEMS_SCHEMA
 from daydream.pr_review import PRInfo, parsed_issues_from_items, resolve_review_renderers
 from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
 from daydream.repository_paths import git_observed_path_is_confined
-from daydream.review_budget import render_review_warnings, review_warnings
-from daydream.review_result import ReasonCode, deliver_finalized_review
+from daydream.review_budget import ReasonCode, StopRecord, render_review_warnings, review_warnings
+from daydream.review_result import deliver_finalized_review
 from daydream.trajectory import DaydreamPhase, get_current_recorder, phase_scope, run_usage
 from daydream.ui import print_info, print_warning
 
@@ -87,7 +87,7 @@ def refresh_review_report(ctx: FlowContext, *, no_diff: bool = False) -> dict[st
     blocks = (state.diagrams or {}).get('blocks')
     if blocks:
         existing = insert_diagrams_section(existing, blocks)
-    warning = render_review_warnings(review_warnings(state.dd))
+    warning = render_review_warnings(review_warnings(result))
     if warning:
         existing = warning + '\n\n' + existing
     rendered = insert_review_context(existing, context, result, findings_count=len(items)).encode('utf-8')
@@ -192,7 +192,7 @@ async def _step_committed_review(ctx: FlowContext) -> None:
         publish_items()
 
 
-def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode | None = None) -> int:
+def finalize_review(ctx: FlowContext, pipeline_state: str, *, stop: StopRecord | None = None) -> int:
     """Seal validated coverage and findings once, without dispatching a model.
 
     A failed pipeline is retained as run-wide unfinished evidence. Extension steps may
@@ -207,7 +207,7 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
     program = ctx.data["committed_review"]
     no_diff = not program.review.assignments
     if pipeline_state == "failed":
-        program.fail("pipeline", reason or ReasonCode.UNEXPECTED_ANALYSIS_FAILURE)
+        program.fail(stop or StopRecord(ReasonCode.UNEXPECTED_ANALYSIS_FAILURE, "pipeline"))
     items: list[dict[str, Any]] = []
     projection_valid = no_diff
     path = DeepArtifact.MERGED_ITEMS.at(state.dd)
@@ -229,7 +229,7 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
     if result["analysis_state"] == "complete":
         print_info(console, outcome)
     else:
-        unfinished = "; ".join(review_warnings(state.dd)) or ", ".join(result["reason_codes"])
+        unfinished = "; ".join(review_warnings(result)) or ", ".join(result["reason_codes"])
         allowance = allowance_sentence(result["reason_codes"], str)
         print_warning(console, f"{outcome} Not finished: {unfinished}." + (f" {allowance}" if allowance else ""))
     # A cancelled run hands nothing over, to its embedder or to a poster: the published files hold the sealed result.
@@ -267,7 +267,7 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
     write_findings = partial(
         _write_findings_for_parsed,
         ctx.work.repo, ctx.config, parsed_issues_from_items(items), run_info=info.markdown,
-        review_warnings=review_warnings(state.dd), renderers=resolve_review_renderers(ctx.registry),
+        review_warnings=review_warnings(result), renderers=resolve_review_renderers(ctx.registry),
         diagrams=(state.diagrams or {}).get("payload"), auth=ctx.github_execution.auth,
         captured_pr=pr, terminal_result=result, snapshot_diff=ctx.data["snapshot_diff"],
         review_context=context,

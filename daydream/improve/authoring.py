@@ -20,6 +20,7 @@ from daydream.improve.plan_diagnostics import (
 )
 from daydream.improve.prompts import PLAN_AUTHOR_SCHEMA, build_plan_writer_repair_prompt
 from daydream.redaction import redact_value
+from daydream.review_budget import StopRecord
 from daydream.trajectory import DaydreamPhase, phase_scope
 
 
@@ -57,7 +58,7 @@ def failed_plan_result(
 
 async def _generate_once(
     ctx: FlowContext, backend: Backend, prompt: str,
-) -> tuple[Any, str | None]:
+) -> tuple[Any, StopRecord | None]:
     async with phase_scope(DaydreamPhase.PLAN_WRITE):
         # The assembler, rather than run_agent, owns fail-closed schema validation
         # and exposes invalid structured output to the single repair pass.
@@ -71,7 +72,7 @@ async def _generate_once(
 
 async def _generate_with_crash_retry(
     ctx: FlowContext, backend: Backend, prompt: str,
-) -> tuple[Any, str | None]:
+) -> tuple[Any, StopRecord | None]:
     """Retry one crash without resetting an exhausted backend retry budget.
 
     Tool-supervisor vetoes always propagate. This replaces only the crashed
@@ -102,11 +103,7 @@ async def author_plan(
         output, aborted = await _generate_with_crash_retry(ctx, backend, generation_prompt)
         output = redact_value(output)
         if aborted is not None:
-            code = {
-                "tool_call_budget_exceeded": "TOOL_CALL_BUDGET_EXCEEDED",
-                "wall_budget_exceeded": "WALL_BUDGET_EXCEEDED",
-            }.get(aborted, "TOOL_VETOED" if aborted.startswith("tool_vetoed:") else "AGENT_ABORTED")
-            return failed_plan_result(finding, attempt, (code,), received=output)
+            return failed_plan_result(finding, attempt, (aborted.code.upper(),), received=output)
         if isinstance(output, dict):
             assembled, issues = assemble_plan(
                 output, repo=_audit_repo(ctx), recon_commands=_verification_commands(ctx.data["recon"]),

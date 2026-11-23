@@ -13,7 +13,7 @@ import threading
 import tracemalloc
 import urllib.request
 import zlib
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from dataclasses import replace
@@ -29,7 +29,8 @@ from rich.console import Console
 
 from daydream import agent, clock, committed_review, git_ops, json_utils
 from daydream.artifact_visibility import ArtifactSession, artifact_session_active, open_artifact_session
-from daydream.backends import MetricsEvent, TextEvent, claude as claude_backend
+from daydream.backends import AgentEvent, MetricsEvent, RetryPolicy, TextEvent, ToolStartEvent, claude as claude_backend
+from daydream.backends.lifecycle import current_backend_lifecycle
 from daydream.backends.pi import PiBackend, PiError
 from daydream.committed_review import CommittedReviewRequest, Review, run_committed_review
 from daydream.committed_review_model import (
@@ -42,11 +43,11 @@ from daydream.committed_review_model import (
 from daydream.committed_review_output import render_committed_review
 from daydream.committed_review_summary import build_review_summary, validate_review_summary
 from daydream.deep.detection import StackAssignment
-from daydream.extensions import get_registry, set_registry
+from daydream.extensions import ToolDecision, get_registry, set_registry
 from daydream.extensions.registry import Registry
 from daydream.findings import MAX_ARTIFACT_BYTES, committed_export_bytes
 from daydream.git_ops.captured_source import capture_source
-from daydream.host_tools import HostToolBinding, HostToolFatal, HostToolRejected
+from daydream.host_tools import HostToolBinding, HostToolFatal, HostToolRejected, UnsubmittedTurn
 from daydream.hosted_review import HostedReviewPolicy, UnsupportedHostedPolicy
 from daydream.hunk_index import write_hunk_index
 from daydream.immutable_review import ImmutableReviewInput
@@ -54,15 +55,17 @@ from daydream.observability.config import ObservabilityConfig
 from daydream.pr_review import post_findings_from_artifact
 from daydream.prompt_budget import SanctionedInputUnavailable
 from daydream.prompts.grounding import REPOSITORY_SEARCH_GUIDANCE
-from daydream.review_budget import BudgetLedger, BudgetStop
+from daydream.review_budget import BudgetLedger, ReasonCode, StopRecord
 from daydream.review_profile import ResolvedProfile, build_default_profile
 from daydream.review_result import validate_terminal_result
 from daydream.review_source_refs import source_options
 from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
 from daydream.run_config import FrozenAuthorDescription, RunConfig
 from daydream.trajectory import RUN_DOCUMENT_NAME, get_current_recorder
+from tests.harness.backend import ScriptedBackend
 from tests.harness.claude_provider import LoopbackProvider, Turn, claude_cli_env, tool
 from tests.harness.codex_lifecycle_cli import install_codex_lifecycle_cli
+from tests.harness.fake_clock import FakeClock
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import (
     commit,
@@ -193,7 +196,7 @@ def _forge_completion(value: dict[str, Any]) -> None:
         for decision in outcome["target_decisions"]:
             decision["status"] = "reviewed"
     terminal["phase_outcomes"][0].update(status="complete", reason_codes=[])
-    terminal.update(analysis_state="complete", pipeline_state="completed", reason_codes=[],
+    terminal.update(analysis_state="complete", pipeline_state="completed", reason_codes=[], cause=None,
                     completed_stacks=[outcome["scope_id"] for outcome in terminal["stack_outcomes"]],
                     uncovered_stacks=[])
     validate_terminal_result(terminal)
@@ -286,7 +289,7 @@ async def _challenge_case(review_inputs: StageInputFactory, change: str) -> None
         assert summary["counts"]["claims"] == {"proposed": 1, "confirmed": 0, "rejected": 1, "unresolved": 0}
         assert (summary["profile"], summary["counts"]["assignments"], summary["budget_stops"], summary["retries"],
                 {phase["wall_seconds"] for phase in summary["phases"].values()}) == (
-            {"name": "", "source_kind": None, "digest": None}, None, None, {"total": None, "by_reason": None}, {None})
+            {"name": "", "source_kind": None, "digest": None}, None, {}, {"total": None, "by_reason": None}, {None})
         # Only the current summary version validates.
         with pytest.raises(ValueError, match="invalid committed review summary"):
             validate_review_summary({**summary, "schema_version": 2})
@@ -608,8 +611,8 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         interrupted = value["execution"][-1]
         assert interrupted == {
             "assignment": "challenge", "work_id": "work:2", "accepted": False, "settled": False,
-            "cleanup_complete": True, "reason": "interruption", "allocation": 5, "observed_starts": 0,
-            "overshoot": 0,
+            "cleanup_complete": True, "stop": StopRecord(ReasonCode.INTERRUPTION, "committed:challenge").to_dict(),
+            "allocation": 5, "observed_starts": 0, "overshoot": 0,
         }
         assert all(not binding.authority_open and binding.cleanup_complete for binding in bindings)
         report = (repo / ".review-output.md").read_text()
@@ -665,7 +668,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     # Persisted success flags cannot erase the actual retained execution failure.
     corrupted = deepcopy(value)
     corrupted["execution"][1]["settled"] = True
-    assert corrupted["execution"][1]["reason"] == "backend_failure"
+    assert _code(corrupted["execution"][1]) == "backend_failure"
     _forge_completion(corrupted)
     with pytest.raises(ValueError, match="native execution"):
         validate_committed_result(corrupted)
@@ -735,8 +738,9 @@ async def test_local_capture_corruption_retains_challenged_findings_and_unfinish
     assert [call['kind'] for call in calls] == ['discovery', 'challenge']
     # A blank author description is not supplied: no assignment carries it and nothing records it.
     assert not any('historical_context' in record for record in (value['settings'], *(c['profile'] for c in calls)))
-    # Deliberate bumps (#1628's work records and capacity evidence, then claim severity) are restart-only.
-    assert RESULT_VERSIONS == {'committed': 10, 'immutable': 11, 'local': 12, 'worktree': 13}
+    # Deliberate bumps (#1628's work records and capacity evidence, claim severity, then stop records) are
+    # restart-only.
+    assert RESULT_VERSIONS == {'committed': 14, 'immutable': 15, 'local': 16, 'worktree': 17}
     assert value['schema_version'] == RESULT_VERSIONS['local'] and value['terminal_result']['schema_version'] == 2
     validate_committed_result(value)
     relabeled = deepcopy(value)
@@ -1955,9 +1959,9 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
     local = [row for row in value["execution"] if row["assignment"] == "discovery"]
     assert value["settings"]["assignment_policy"] == {"name": "broad", "decomposed": True,
                                                      "planned_assignments": len(local), "cross_assignment": "required"}
-    stopped = [row for row in local if row["reason"]]
+    stopped = [row for row in local if row["stop"]]
     assert len(stopped) >= len(local) // 3 and all(
-        (row["reason"], row["accepted"]) == ("backend_failure", False) for row in stopped)
+        (_code(row), row["accepted"]) == ("backend_failure", False) for row in stopped)
     progressed = sum(record["kind"] == "discovery" and record["state"] == "superseded"
                      and bool(record["admitted_targets"] or record["admitted_claims"]) for record in value["work"])
     assert 20 <= progressed <= len(stopped)
@@ -2185,7 +2189,7 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
     binding.close_authority()  # A binding that failed closed, or a stopped backend, revokes authority first.
     for _ in range(2):  # Closing again keeps nothing twice.
         review.close(work_id)
-    _clean(review, work_id, "host_tool_budget_exhaustion")
+    _clean(review, work_id, ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION)
     claim, = review.pending()
     judge = _assign(review, "challenge")
     judged = {"verdicts": [{**_verdict(inputs, claim), "uid": "domain:claim:9"}, _verdict(inputs, claim)],
@@ -2197,7 +2201,7 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(
             judge.submit("final", judged)
         assert review.pending() == [claim]
     review.close("work:2")
-    _clean(review, "work:2", "host_wall_budget_exhaustion")
+    _clean(review, "work:2", ReasonCode.HOST_WALL_BUDGET_EXHAUSTION)
     value = review.seal({})
     # Neither work was accepted: its retained items are partial evidence of an incomplete review. The batch
     # lost a claim, so its reviewed decision is not kept either: that target stays for later work.
@@ -2263,9 +2267,8 @@ async def test_denied_over_limit_discovery_start_cannot_spend_protected_challeng
                 binding.admit("terminal", "structured_output", value, terminal=True)
                 accepted = binding.submit("terminal", value)
             binding.native_settled = True
-        if kind == "discovery":
-            budget.stop("tool_calls")  # run_agent records the budget stop it returns
-        return accepted, None, "tool_call_budget_exceeded" if kind == "discovery" else None
+        # run_agent records the stop it returns.
+        return accepted, None, budget.stop(ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION) if kind == "discovery" else None
 
     monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=execute, console=agent.console))
     exporter = InMemorySpanExporter()
@@ -2289,7 +2292,7 @@ async def test_denied_over_limit_discovery_start_cannot_spend_protected_challeng
                       for resource in json.loads(line)["resourceSpans"]
                       for scope in resource["scopeSpans"] for span in scope["spans"]]
     assert local_root["spanId"] == format(root.context.span_id, "016x")
-    assert "daydream.budget.stop" in [event["name"] for event in local_root["events"]]
+    assert "daydream.stop" in [event["name"] for event in local_root["events"]]
     assert allocations == [("discovery", 5), ("challenge", 5)] and result.output_installed
     # The report names the one profile key that raises the allowance discovery ran out of.
     assert ("\nThe review used up its allowance before it finished; raise <code>reviewer_tool_call_budget</code> "
@@ -2299,11 +2302,191 @@ async def test_denied_over_limit_discovery_start_cannot_spend_protected_challeng
             ) in (review_inputs.work.source / ".review-output.md").read_text()
     discovery = result.to_dict()["execution"][0]
     assert (discovery["allocation"], discovery["observed_starts"], discovery["overshoot"]) == (5, 6, 1)
-    refused = BudgetStop("committed", "tool_calls", limit=10, spent=10, remaining_at_dispatch=0, reserved=0)
+    # The refused challenge re-dispatch is the whole review ledger's stop, retained as its execution entry.
+    refused = StopRecord(ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION, "committed", bound="committed", limit=10, spent=10)
     assert [dict(event.attributes or {}) for span in exporter.get_finished_spans() for event in span.events
-            if event.name == "daydream.budget.stop"] == [refused.attributes()]
+            if event.name == "daydream.stop"] == [refused.attributes()]
+    assert result.to_dict()["execution"][-1]["stop"] == refused.to_dict()
     # The summary counts that refusal beside discovery's dispatch-level stop.
     assert result.summary is not None and result.summary["budget_stops"] == {"host_tool_budget_exhaustion": 2}
+
+
+_WINDOW = 2_700.0
+_PROVIDER_ERROR = {"type": "PiError", "failure_class": "SERVER_ERROR", "category": "SERVER_ERROR", "status": 503,
+                   "retryable": True}
+_OUTPUT_ARRIVING = {"idle_s": 3.0, "active_tools": 0, "generation_open": True}
+# How each kind of work ends, and the sealed cause it must produce: one row per way a step stops.
+_STOP_PATHS: dict[str, tuple[str, dict[str, str], dict[str, Any] | None]] = {
+    # The f2fcb690 shape: an unsplit discovery admits nothing and runs out its local share, window / 2.
+    "incident": ("unsplit", {"discovery": "deadline"}, {
+        "code": "host_wall_budget_exhaustion", "owner": "committed:discovery", "bound": "committed:local",
+        "limit": _WINDOW / 2, "spent": _WINDOW / 2, "attempts": 1, "error": None, "progress": _OUTPUT_ARRIVING}),
+    "cross-assignment-deadline": ("split", {"cross_assignment": "deadline"}, {
+        "code": "host_wall_budget_exhaustion", "owner": "committed:cross_assignment",
+        "bound": "committed:investigation", "limit": _WINDOW / 2, "spent": _WINDOW / 2, "attempts": 1,
+        "error": None, "progress": _OUTPUT_ARRIVING}),
+    "whole-review-deadline": ("unsplit", {"challenge": "deadline"}, {
+        "code": "host_wall_budget_exhaustion", "owner": "committed:challenge", "bound": "committed",
+        "limit": _WINDOW, "spent": _WINDOW, "attempts": 1, "error": None, "progress": _OUTPUT_ARRIVING}),
+    # A follow-up refused at the local deadline is evidence once the cross-assignment finishes its targets.
+    "recovered-refusal": ("split", {"discovery": "partial"}, None),
+    "tool-allocation": ("unsplit", {"discovery": "exhaust"}, {
+        "code": "host_tool_budget_exhaustion", "owner": "committed:discovery", "bound": "committed:local",
+        "limit": 5, "spent": 4, "attempts": 1, "error": None, "progress": _OUTPUT_ARRIVING | {"idle_s": 0.0}}),
+    "retryable-error-then-expiry": ("unsplit", {"discovery": "fail-after-deadline"}, {
+        "code": "host_wall_budget_exhaustion", "owner": "committed:discovery", "bound": "committed:local",
+        "limit": _WINDOW / 2, "spent": _WINDOW / 2 + 1, "attempts": 1, "error": _PROVIDER_ERROR,
+        "progress": _OUTPUT_ARRIVING | {"idle_s": 4.0}}),
+    "final-backend-error": ("unsplit", {"discovery": "fail"}, {
+        "code": "backend_failure", "owner": "committed:discovery", "bound": None, "limit": None, "spent": None,
+        "attempts": 2, "error": _PROVIDER_ERROR, "progress": _OUTPUT_ARRIVING}),
+    "unsubmitted-turn": ("unsplit", {"discovery": "unsubmitted"}, {
+        "code": "missing_output", "owner": "committed:discovery", "bound": None, "limit": None, "spent": None,
+        "attempts": 2, "error": {"type": "UnsubmittedTurn", "failure_class": "TRANSPORT",
+                                 "category": "STREAM_TRUNCATION", "status": None, "retryable": True},
+        "progress": _OUTPUT_ARRIVING}),
+    "host-tool-fatal": ("unsplit", {"discovery": "fatal"}, {
+        "code": "backend_failure", "owner": "committed:discovery", "bound": None, "limit": None, "spent": None,
+        "attempts": 1, "error": {"type": "HostToolFatal", "failure_class": "NOT_RETRYABLE",
+                                 "category": "NATIVE_CORRELATION", "status": None, "retryable": False},
+        "progress": _OUTPUT_ARRIVING}),
+    "policy-veto": ("unsplit", {"discovery": "veto"}, {
+        "code": "policy_veto", "owner": "committed:discovery", "bound": None, "limit": None, "spent": None,
+        "attempts": 1, "error": None, "progress": _OUTPUT_ARRIVING}),
+    # The run recorded the interruption itself, while the generation was open with no output yet.
+    "interruption": ("unsplit", {"discovery": "interrupt"}, {
+        "code": "interruption", "owner": "committed:discovery", "bound": None, "limit": None, "spent": None,
+        "attempts": 1, "error": None, "progress": {"idle_s": None, "active_tools": 0, "generation_open": True}}),
+    # A run-wide failure is the cause even when a change with no diff has no outcome to name it.
+    "no-diff-run-wide-failure": ("no-diff", {"cleanup": "fail"}, {
+        "code": "backend_failure", "owner": "cleanup", "bound": None, "limit": None, "spent": None,
+        "attempts": 0, "error": None, "progress": None}),
+}
+
+
+@pytest.mark.parametrize("path", list(_STOP_PATHS))
+async def test_each_stop_path_seals_one_cause_with_its_bound_and_observed_facts(
+    review_inputs: StageInputFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str,
+) -> None:
+    """Every way a step stops reaches the sealed ``cause`` unchanged, from the real ladder and ledgers.
+
+    The stop is described once where it is observed: the ledger names the bound that applied, the
+    ladder keeps the last backend failure and the attempt's progress, and nothing downstream relabels it.
+    """
+    shape, ends, expected = _STOP_PATHS[path]
+    inputs, tool_calls = review_inputs, 10
+    if shape == "split":
+        # Enough batches that local discovery is split and the cross-assignment carve applies.
+        names = [f"m{index:02d}.py" for index in range(21)]
+        repo = tmp_path / "split"
+        seed_feature_branch(repo, base=dict.fromkeys(names, "VALUE = 1\n"), feature=dict.fromkeys(names, "VALUE = 0\n"))
+        inputs, tool_calls = _inputs(repo, tmp_path / "split-inputs", names), 40
+    elif shape == "no-diff":
+        inputs = _inputs(review_inputs.work.source, tmp_path / "no-diff-inputs", [], patch="")
+    fake = FakeClock(monotonic_value=10_000.0).install(monkeypatch)
+    files = {part["target_id"]: part["file"] for batch in inputs.assignment_batches for part in batch}
+    interrupted = anyio.Event()
+
+    def decided(targets: list[str]) -> dict[str, Any]:
+        return {"targets": [{"target_id": target, "status": "reviewed", "reason": "Inspected.",
+                             "evidence_refs": _selectors(inputs, files[target])} for target in targets],
+                "claims": [_proposal(inputs)] if shape == "unsplit" and targets else []}
+
+    async def stream(_cwd: Path, prompt: str, *_args: Any, host_tools: HostToolBinding,
+                     **_kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
+        assignment = _assignment(prompt)
+        end = ends.get(assignment["kind"], "submit")
+        targets = assignment["work"]["targets"]["ids"]
+        lifecycle = current_backend_lifecycle()
+        assert lifecycle is not None
+        lifecycle.activate(response_idle_timeout_s=None, tool_idle_timeout_s=None)
+        lifecycle.generation_started()
+        async with host_tools.session():
+            if end == "submit":
+                value = ({"verdicts": [_verdict(inputs, claim) for claim in assignment["claims"]], "claims": []}
+                         if assignment["kind"] == "challenge" else decided(targets))
+                host_tools.admit("terminal", "structured_output", value, terminal=True)
+                host_tools.submit("terminal", value)
+                host_tools.native_settled = True
+                yield TextEvent(text="submitted")
+                return
+            if end == "interrupt":
+                interrupted.set()
+                await anyio.sleep_forever()
+            if end == "partial" and not host_tools.budget.expired():
+                # Progress on one target, so the unfinished rest asks for a follow-up the local deadline refuses.
+                host_tools.admit("admit", "review_admit", decided(targets[:1]))
+                host_tools.call("admit", "review_admit", decided(targets[:1]))
+            # Model output arrives until 3 s before the stop, so it can tell a working model from a stall.
+            remaining = host_tools.budget.remaining_s() or 0.0
+            spend = remaining if end in {"deadline", "partial", "fail-after-deadline"} else 10.0
+            fake.advance(spend - 3)
+            lifecycle.progress("text")
+            fake.advance(3)
+            if end in {"deadline", "partial"}:
+                try:
+                    yield TextEvent(text="still investigating")
+                finally:
+                    fake.advance(5)  # Slow cleanup after the stop is no part of what the stop observed.
+            elif end == "exhaust":
+                lifecycle.progress("text")
+                while True:
+                    with suppress(HostToolRejected):
+                        host_tools.admit(f"read-{host_tools.calls}", "read", {})
+            elif end == "veto":
+                yield ToolStartEvent(id="read-0", name="read", input={})
+            elif end == "unsubmitted":
+                raise UnsubmittedTurn("no accepted submission")
+            elif end == "fatal":
+                raise PiError("native stream failed", category="HOST_TOOLS") from host_tools.fail(
+                    HostToolFatal("lost tool correlation", code="native_correlation"))
+            else:
+                fake.advance(1 if end == "fail-after-deadline" else 0)
+                raise PiError("provider overloaded", retryable=True, category="SERVER_ERROR", status=503)
+
+    async def cancel() -> None:
+        if ends.get("cleanup") == "fail":
+            raise RuntimeError("native context did not stop")
+
+    backend = ScriptedBackend(model="mock-model", supports_host_tools=True, fanout_concurrency=4,
+                              retry_policy=RetryPolicy(attempts=1, base_delay_s=0.0, max_delay_s=0.0))
+    monkeypatch.setattr(backend, "execute", stream)
+    monkeypatch.setattr(backend, "cancel", cancel)
+    registry = Registry()
+    registry.register_tool_supervisor(lambda *_args, **_kwargs: ToolDecision(veto=True, reason="reads are vetoed"))
+    previous_registry = get_registry()
+    if end_is_veto := "veto" in ends.values():
+        set_registry(registry)
+    review = Review(inputs, "stops")
+    settings = committed_review.review_settings(RunConfig(backend="pi", output_mode="review", review_profile=(
+        _profile_with_pipeline(reviewer_investigation_budget_s=int(_WINDOW), reviewer_tool_call_budget=tool_calls))))
+    backends: dict[str, Any] = {"discovery": backend, "challenge": backend}
+    schedule = committed_review._Schedule(review, backends, tool_calls, settings,
+                                          started=fake.monotonic(), deadline=fake.monotonic() + _WINDOW)
+    program = committed_review.ReviewProgram(review, schedule, settings, backends, fake.monotonic() + _WINDOW)
+    assert schedule.decompose is (shape == "split")
+    try:
+        async with anyio.create_task_group() as group:
+            group.start_soon(program.dispatch, None)
+            if "interrupt" in ends.values():
+                await interrupted.wait()
+                group.cancel_scope.cancel()
+    finally:
+        if end_is_veto:
+            set_registry(previous_registry)
+    await program.quiesce()
+    sealed = program.seal()
+    terminal = sealed["terminal_result"]
+    # Sealing validates that the cause is a retained execution stop and that its code is a reason.
+    assert terminal["cause"] == expected
+    if path == "incident":
+        # The unfinished scope and the challenge it blocked name that stop, not a consequence of it.
+        assert [scope["reason_codes"] for scope in terminal["stack_outcomes"]] == [["host_wall_budget_exhaustion"]]
+        assert terminal["reason_codes"] == ["host_wall_budget_exhaustion"]
+    if path == "recovered-refusal":
+        refusal = next(entry for entry in sealed["execution"] if entry["work_id"] is None)
+        assert (refusal["assignment"], refusal["stop"]["bound"]) == ("follow_up", "committed:local")
+        assert terminal["analysis_state"] == "complete"
 
 
 async def test_claim_lines_inside_continuation_fragments_use_summarized_spans(tmp_path: Path) -> None:
@@ -2789,7 +2972,7 @@ async def test_split_review_transfers_unfinished_work_and_investigates_across_as
         assert cross["parents"] == ["work:1"] and cross["targets"] == work["work:1"]["targets"]
         # The failed work's row is written whatever went wrong while its rejected final batch was kept.
         row = next(entry for entry in value["execution"] if entry["work_id"] == "work:1")
-        assert (row["accepted"], row["reason"]) == (False, "backend_failure")
+        assert (row["accepted"], _code(row)) == (False, "backend_failure")
         if scenario == "salvage-fails":
             # A late call on that handle is answered with the recorded failure, as after a live callback's.
             with pytest.raises(HostToolFatal, match="failed unexpectedly Acceptance may already have occurred"):
@@ -2872,11 +3055,17 @@ async def test_supersession_transfers_exactly_the_unfinished_targets_of_closed_w
     assert work[sibling_id]["state"] == "planned" and work[sibling_id]["admitted_targets"] == []
 
 
-def _clean(review: Review, work_id: str, reason: str | None = None) -> None:
+def _code(entry: dict[str, Any]) -> str | None:
+    """An execution entry's stop code, or None for work that ended on its own."""
+    return entry["stop"]["code"] if entry["stop"] is not None else None
+
+
+def _clean(review: Review, work_id: str, code: ReasonCode | None = None) -> None:
     """Execution evidence the scheduler would retain for one dispatched work item."""
+    stop = StopRecord(code, f"committed:{review.work[work_id].kind}").to_dict() if code is not None else None
     review.execution.append({"assignment": review.work[work_id].kind, "work_id": work_id,
-                             "accepted": reason is None, "settled": reason is None, "cleanup_complete": True,
-                             "reason": reason, "allocation": 4, "observed_starts": 1, "overshoot": 0})
+                             "accepted": code is None, "settled": code is None, "cleanup_complete": True,
+                             "stop": stop, "allocation": 4, "observed_starts": 1, "overshoot": 0})
 
 
 async def test_unfinished_challenge_revisions_transfer_to_a_fresh_challenge(
@@ -2898,7 +3087,7 @@ async def test_unfinished_challenge_revisions_transfer_to_a_fresh_challenge(
             review_inputs, claim, verdict="unresolved", grounds="Counterevidence search is unfinished.")],
             "claims": []})
     failed.close_authority()
-    _clean(review, "work:2", "host_wall_budget_exhaustion")
+    _clean(review, "work:2", ReasonCode.HOST_WALL_BUDGET_EXHAUSTION)
     reviser = _assign(review, "challenge")
     revised = {key: deepcopy(claim[key]) for key in ("uid", "revision", "source_uids", "title", "payload")}
     # The challenge corrects only the claim's severity, which is a revision like any other.
@@ -2950,7 +3139,7 @@ async def test_failed_revising_challenge_is_superseded_by_the_challenge_that_jud
     async with reviser.session():
         _charged(reviser, "review_admit", {"verdicts": [], "claims": [revised]})
     reviser.close_authority()
-    _clean(review, "work:2", "host_wall_budget_exhaustion")
+    _clean(review, "work:2", ReasonCode.HOST_WALL_BUDGET_EXHAUSTION)
     judge = _assign(review, "challenge")
     async with judge.session():
         value = {"verdicts": [_verdict(review_inputs, review.pending()[0])], "claims": []}
@@ -3099,14 +3288,14 @@ async def test_committed_review_completes_through_native_host_tools(
     assert {kind: (context["backend"], context["phase"]) for kind, context in contexts.items()} == {
         "discovery": (backend, "review"), "challenge": (backend, "arbiter")}
     assert all(len(context["configuration_identity"]) == 64 for context in contexts.values())
-    assert [{key: entry[key] for key in ("assignment", "accepted", "settled", "cleanup_complete", "reason",
+    assert [{key: entry[key] for key in ("assignment", "accepted", "settled", "cleanup_complete", "stop",
                                          "observed_starts", "overshoot")} for entry in value["execution"]] == [
         # The first attempt ended unsubmitted after four starts (five on Codex), which the retry's dispatch
         # refunded. Codex also starts two tools of its own and admits a batch, each counted once, and its one
         # host call after acceptance is observed without being charged.
-        {"assignment": "discovery", "accepted": True, "settled": True, "cleanup_complete": True, "reason": None,
+        {"assignment": "discovery", "accepted": True, "settled": True, "cleanup_complete": True, "stop": None,
          "observed_starts": 6 if backend == "claude" else 12, "overshoot": 0 if backend == "claude" else 1},
-        {"assignment": "challenge", "accepted": True, "settled": True, "cleanup_complete": True, "reason": None,
+        {"assignment": "challenge", "accepted": True, "settled": True, "cleanup_complete": True, "stop": None,
          "observed_starts": 1, "overshoot": 0}]
     trajectory = root_trajectory(repo)
     assert trajectory["session_id"] == value["run_id"]
@@ -3135,12 +3324,13 @@ async def test_committed_review_completes_through_native_host_tools(
         with quiet.serving():
             incomplete = (await run_committed_review(request)).to_dict()
         fresh = [all(message["role"] != "assistant" for message in body["messages"]) for body in quiet.requests]
-        assert fresh == [True, True] and [(entry["assignment"], entry["accepted"], entry["reason"]) for entry in
+        assert fresh == [True, True] and [(entry["assignment"], entry["accepted"], _code(entry)) for entry in
                                           incomplete["execution"]] == [("discovery", False, "missing_output")]
+        # Local evidence writes the dispatch's one stop record, which the sealed entry carries unchanged.
+        stop = incomplete["execution"][0]["stop"]
+        assert (stop["attempts"], stop["error"]["type"]) == (2, "UnsubmittedTurn")
         events = read_trajectory((repo / ".daydream/runs" / incomplete["run_id"] / RUN_DOCUMENT_NAME))
-        assert [(event["metadata"]["retry_stop_reason"], event["metadata"]["attempts"],
-                 event["metadata"]["circuit_state"]) for event in events["extra"]["phase_events"]
-                if event["event"] == "agent_budget_stop"] == [("retry_attempts_exhausted", 1, "closed")]
+        assert [event["metadata"] for event in events["extra"]["phase_events"] if event["event"] == "stop"] == [stop]
     else:
         # One process per attempt, each registered with this attempt's server and nothing weaker. The
         # first discovery process ended its turn unsubmitted, so the host retried it once in a fresh one.
@@ -3207,7 +3397,7 @@ async def test_committed_review_completes_through_native_host_tools(
         incomplete = (await run_committed_review(request)).to_dict()
         assert sorted(_assignment(row["host"]["prompt"])["kind"] for row in silent.observations()) == [
             "challenge", "challenge", "challenge", "discovery", "discovery"]
-        assert [(entry["assignment"], entry["accepted"], entry["reason"]) for entry in incomplete["execution"]] == [
+        assert [(entry["assignment"], entry["accepted"], _code(entry)) for entry in incomplete["execution"]] == [
             ("discovery", False, "missing_output"), ("challenge", False, "missing_output"), ("challenge", True, None)]
         assert [finding["title"] for finding in incomplete["findings"]] == ["Zero divides the caller"]
         assert incomplete["terminal_result"]["analysis_state"] == "incomplete"
@@ -3227,7 +3417,7 @@ async def test_committed_review_completes_through_native_host_tools(
             wide, git(wide, "rev-parse", "main"), config=RunConfig(backend="codex", output_mode="review")))).to_dict()
         assert sealed["settings"]["assignment_policy"] == {"name": "broad", "decomposed": True,
                                                           "planned_assignments": 5, "cross_assignment": "required"}
-        assert sorted((e["assignment"], e["accepted"], e["reason"], e["allocation"]) for e in sealed["execution"]) == [
+        assert sorted((e["assignment"], e["accepted"], _code(e), e["allocation"]) for e in sealed["execution"]) == [
             ("challenge", True, None, 104), ("challenge", True, None, 105), ("cross_assignment", True, None, 90),
             *[("discovery", True, None, 18)] * 5]
         assert sealed["terminal_result"]["analysis_state"] == "complete" and len(sealed["findings"]) == 5

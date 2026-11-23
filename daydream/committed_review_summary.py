@@ -18,7 +18,8 @@ from daydream.committed_review_model import RESULT_VERSIONS
 from daydream.json_utils import validate_json_schema
 from daydream.output_schema import strict_object
 from daydream.retry_policy import FailureClass
-from daydream.review_result import BUDGET_REASON_CODES, TERMINAL_RESULT_SCHEMA
+from daydream.review_budget import BUDGET_REASON_CODES
+from daydream.review_result import TERMINAL_RESULT_SCHEMA
 from daydream.run_config import RunConfig, resolved_phase_settings
 from daydream.trajectory.timing import phase_wall_seconds
 from daydream.trajectory.types import DaydreamPhase
@@ -83,7 +84,8 @@ def build_review_summary(
     decisions = Counter(decision["status"] for outcome in terminal["stack_outcomes"]
                         for decision in outcome.get("target_decisions", []))
     dispositions = Counter(claim["disposition"] for claim in sealed["claims"])
-    stops = [entry["reason"] for entry in sealed["execution"] if entry["reason"] in BUDGET_REASON_CODES]
+    stops = [entry["stop"]["code"] for entry in sealed["execution"]
+             if entry["stop"] is not None and entry["stop"]["code"] in BUDGET_REASON_CODES]
     retried = [] if recorder is None else [
         summary["retry_failure_class"] for summary in recorder.invocation_summaries()
         if summary.get("phase") in SUMMARY_PHASES.values() and "retry_failure_class" in summary]
@@ -110,7 +112,7 @@ def build_review_summary(
                                                              for key in ("confirmed", "rejected", "unresolved")}},
             "findings": {"confirmed": len(sealed["findings"]), "delivered": delivered},
         },
-        "budget_stops": None if recorder is None else dict(Counter([*stops, *recorder.schedule_budget_stops])),
+        "budget_stops": dict(Counter(stops)),
         "retries": {"total": None if recorder is None else len(retried),
                     "by_reason": None if recorder is None else dict(Counter(retried))},
         "phases": phases,

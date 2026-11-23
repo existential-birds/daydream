@@ -42,7 +42,7 @@ from daydream.extensions import Registry, ToolDecision, set_registry
 from daydream.host_tools import HostToolBinding
 from daydream.phases.schemas import FIX_VERIFY_VERDICTS_SCHEMA
 from daydream.retry_policy import FailureClass, classify_failure
-from daydream.review_budget import BudgetLedger
+from daydream.review_budget import BudgetLedger, ReasonCode
 from daydream.trajectory import DaydreamPhase
 from tests.harness.codex_replay import (
     make_mock_process,
@@ -644,7 +644,7 @@ class TestUnwrapShellCommand:
         with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
             _, _, budget_reason = await run_agent(backend, Path("/tmp"), "run", phase=DaydreamPhase.REVIEW)
         assert seen["command"] == "make test"
-        assert budget_reason == "tool_vetoed:shell"
+        assert budget_reason is not None and budget_reason.code is ReasonCode.POLICY_VETO
 
 # Parser correlation and diagnostics.
 

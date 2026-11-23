@@ -43,7 +43,7 @@ from daydream.backends.pi import (
     PiError,
 )
 from daydream.host_tools import HostToolBinding, UnsubmittedTurn
-from daydream.review_budget import BudgetExhausted, BudgetLedger
+from daydream.review_budget import BudgetExhausted, BudgetLedger, ReasonCode, StopRecord
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import DaydreamPhase
 from tests.harness.fake_cli_process import (
@@ -123,7 +123,11 @@ async def _interrupted_pi_updates_retain_only_admitted_progress_case(
                 clock.advance(0.05)
                 wall_scopes[0].deadline = anyio.current_time()
                 output, _, reason = await turn
-    assert reason == "wall_budget_exceeded"
+    # The stop's progress facts tell a running tool from a generation still open when the deadline cut it.
+    assert reason == StopRecord(ReasonCode.HOST_WALL_BUDGET_EXHAUSTION, "review", bound="review", limit=0.05,
+                                spent=0.05, attempts=1, progress={
+                                    "idle_s": None if kind == "diagnostic" else 0.05,
+                                    "active_tools": int(kind == "tool"), "generation_open": kind != "tool"})
     assert output == ""
     trajectory = read_trajectory(recorder.path)
     evidence = trajectory["extra"]["subtrajectories"][0]["backend_lifecycle"]

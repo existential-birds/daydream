@@ -24,7 +24,7 @@ from daydream.prompt_budget import (
 from daydream.repository_paths import (
     git_observed_path_is_confined,
 )
-from daydream.review_budget import BudgetLedger
+from daydream.review_budget import BudgetLedger, StopRecord
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.trajectory import (
     DaydreamPhase,
@@ -402,7 +402,7 @@ async def _fix_findings(
     test_map: dict[str, str] | None = None,
     run_context: RunContext | None = None,
     deadline: float | None = None,
-) -> str | None:
+) -> StopRecord | None:
     run_context = resolve_run_context(run_context)
     if edit_scope is None or read_scope is None:
         raise TypeError("Fix phases require explicit edit_scope and read_scope")
@@ -436,7 +436,7 @@ async def _fix_findings(
         prompt = append_extended_facts(prompt, _recipe_for_work(work))
 
     # Scale the per-finding wall allowance; the shared group deadline still bounds the whole call.
-    _, _, budget_reason = await agent.run_agent(
+    _, _, stop = await agent.run_agent(
         backend, work.repo, prompt,
         phase=DaydreamPhase.FIX,
         budget=BudgetLedger("fix", wall_s=phase_config.DEFAULT_WALL_BUDGET_S * count, deadline=deadline),
@@ -444,24 +444,24 @@ async def _fix_findings(
         sanctioned_inputs=sanctioned_inputs,
         run_context=run_context,
     )
-    if count > 1 and budget_reason is not None:
+    if count > 1 and stop is not None:
         raise RuntimeError(
-            f"Batched fix turn budget exhausted ({budget_reason}); "
+            f"Batched fix turn budget exhausted ({stop.code}); "
             f"falling back to per-finding fixes for {file_ref}"
         )
     async with lock:
         for number in item_nums:
             # Only post-fix verification can report the terminal outcome.
             ui.print_fix_complete(agent.console, number, total, outcome=None)
-    return budget_reason
+    return stop
 
 
 @bind_resolved_run_context
 async def phase_fix(
     backend: Backend, work: WorkContext, item: dict[str, Any], item_num: int, total: int,
     **options: Unpack[FixOptions],
-) -> str | None:
-    """Fix one authorized finding and return any exhausted turn-budget reason."""
+) -> StopRecord | None:
+    """Fix one authorized finding and return the turn's stop, if any."""
     return await _fix_findings(backend, work, [item], [item_num], total, **options)
 
 

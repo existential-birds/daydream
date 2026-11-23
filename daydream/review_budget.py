@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
-import json
-from collections.abc import Iterator
+import re
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
-from pathlib import Path
-from typing import Any, Literal
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any
 
 from daydream import clock
 from daydream.config import REVIEWER_TOOL_CALL_BUDGET
+from daydream.output_schema import strict_object
+from daydream.retry_policy import FailureClass, classify_failure
+
+if TYPE_CHECKING:
+    from daydream.backends.lifecycle import BackendLifecycleSnapshot
 
 
 @dataclass(frozen=True)
@@ -86,23 +91,116 @@ def review_deadline(*, discovery: bool) -> float | None:
     return deadlines[0 if discovery else 1] if deadlines is not None else None
 
 
-BudgetDimension = Literal["time", "tool_calls"]
+class ReasonCode(StrEnum):
+    """The one public cause vocabulary: every stop's ``code`` and every outcome's reasons."""
+
+    BACKEND_FAILURE = 'backend_failure'
+    AUTHENTICATION_FAILURE = 'authentication_failure'
+    MALFORMED_OUTPUT = 'malformed_output'
+    MISSING_OUTPUT = 'missing_output'
+    MALFORMED_ARTIFACT = 'malformed_artifact'
+    MISSING_ARTIFACT = 'missing_artifact'
+    EVIDENCE_INCOMPLETE = 'evidence_incomplete'
+    HOST_WALL_BUDGET_EXHAUSTION = 'host_wall_budget_exhaustion'
+    HOST_TOOL_BUDGET_EXHAUSTION = 'host_tool_budget_exhaustion'
+    SYNTHESIS_FAILURE = 'synthesis_failure'
+    INTERRUPTION = 'interruption'
+    UNEXPECTED_ANALYSIS_FAILURE = 'unexpected_analysis_failure'
+    COVERAGE_UNKNOWN = 'coverage_unknown'
+    POLICY_VETO = 'policy_veto'
+    DIRTY_SNAPSHOT = 'dirty_snapshot'
+
+
+#: The codes a ledger limit assigns; their stops name the ledger whose limit applied.
+BUDGET_REASON_CODES = frozenset({ReasonCode.HOST_WALL_BUDGET_EXHAUSTION, ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION})
+
+
+def reason_for_exception(exc: BaseException) -> ReasonCode:
+    """The one exception-to-code mapping: a declared code, else the retry policy's failure class."""
+    try:
+        return ReasonCode(str(getattr(exc, 'reason_code', None)))
+    except ValueError:
+        pass
+    return {
+        FailureClass.AUTH_CONFIG: ReasonCode.AUTHENTICATION_FAILURE,
+        FailureClass.SCHEMA: ReasonCode.MALFORMED_OUTPUT,
+        FailureClass.TOOL_POLICY: ReasonCode.POLICY_VETO,
+    }.get(classify_failure(exc).failure_class, ReasonCode.BACKEND_FAILURE)
+
+
+# Host-chosen identifiers only: ledger owners, exception type names and backend categories.
+_NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_.:-]{0,127}')
+_CATEGORY = re.compile(r'[A-Z][A-Z0-9_]{0,63}')
+_NAME_SCHEMA = {'type': 'string', 'pattern': f'^{_NAME.pattern}$'}
+_SECONDS = {'type': ['number', 'null'], 'minimum': 0}
+STOP_SCHEMA = strict_object({
+    'code': {'enum': [code.value for code in ReasonCode]},
+    'owner': _NAME_SCHEMA,
+    'bound': {**_NAME_SCHEMA, 'type': ['string', 'null']},
+    'limit': _SECONDS, 'spent': _SECONDS,
+    'attempts': {'type': 'integer', 'minimum': 0},
+    'error': {'anyOf': [{'type': 'null'}, strict_object({
+        'type': _NAME_SCHEMA,
+        'failure_class': {'enum': [member.value for member in FailureClass]},
+        'category': {'type': ['string', 'null'], 'pattern': f'^{_CATEGORY.pattern}$'},
+        'status': {'type': ['integer', 'null'], 'minimum': 100, 'maximum': 599},
+        'retryable': {'type': 'boolean'},
+    })]},
+    'progress': {'anyOf': [{'type': 'null'}, strict_object({
+        'idle_s': _SECONDS, 'active_tools': {'type': 'integer', 'minimum': 0}, 'generation_open': {'type': 'boolean'},
+    })]},
+})
+
+
+def _error_facts(exc: BaseException) -> dict[str, Any]:
+    """A backend failure's content-free facts; a value that is not a bounded identifier is not recorded."""
+    decision = classify_failure(exc)
+    category, status = getattr(exc, 'category', None), getattr(exc, 'status', None)
+    return {
+        'type': name if _NAME.fullmatch(name := type(exc).__name__) else 'Exception',
+        'failure_class': decision.failure_class.value,
+        'category': category if isinstance(category, str) and _CATEGORY.fullmatch(category) else None,
+        'status': status if type(status) is int and 100 <= status <= 599 else None,
+        'retryable': decision.retries_allowed,
+    }
 
 
 @dataclass(frozen=True)
-class BudgetStop:
-    """Facts of one budget stop: durations and counts only, never monotonic values."""
+class StopRecord:
+    """One stop, described where it is observed and carried unchanged to the sealed result.
 
+    Content-free and observed only: ``owner`` is the work that stopped and ``bound`` the ledger
+    whose limit applied, with that ledger's ``limit`` and ``spent`` (seconds or tool calls).
+    ``attempts`` counts dispatched attempts. ``error`` keeps the last backend failure even when a
+    deadline ended the call, and ``progress`` the last attempt's native progress, when its
+    backend observes it. Reason codes, span status and every rendered text are projections of it.
+    """
+
+    code: ReasonCode
     owner: str
-    dimension: BudgetDimension
-    limit: float
-    spent: float
-    remaining_at_dispatch: float
-    reserved: int
+    bound: str | None = None
+    limit: float | None = None
+    spent: float | None = None
+    attempts: int = 0
+    error: dict[str, Any] | None = None
+    progress: dict[str, Any] | None = None
+
+    @classmethod
+    def of(cls, exc: BaseException, owner: str) -> StopRecord:
+        """A host failure that no invocation ledger observed."""
+        return cls(reason_for_exception(exc), owner, error=_error_facts(exc))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**asdict(self), 'code': self.code.value}
 
     def attributes(self) -> dict[str, Any]:
-        """The ``daydream.budget.*`` trace attributes (agent span or ``daydream.budget.stop`` event)."""
-        return {f"daydream.budget.{key}": value for key, value in asdict(self).items()}
+        """The ``daydream.stop.*`` trace attributes: nested facts flattened one level, absent facts omitted."""
+        flat: dict[str, Any] = {}
+        for key, value in self.to_dict().items():
+            for name, item in (value.items() if isinstance(value, dict) else [(None, value)]):
+                if item is not None:
+                    flat[f"daydream.stop.{key}" + (f".{name}" if name else "")] = item
+        return flat
 
 
 @dataclass(eq=False)
@@ -114,7 +212,8 @@ class BudgetLedger:
     counts authorized tool starts against ``limit``; ``observed`` also counts refused
     and over-limit starts. A retry after a retryable provider failure refunds that
     attempt's charges; elapsed time and compaction never renew anything. A carved child
-    charges and refunds its ancestors too, so parallel siblings never share a count.
+    charges and refunds its ancestors too, so parallel siblings never share a count, and
+    remembers which ledger set its deadline, so a stop names the limit that applied.
     ``reserved`` records calls already withheld from ``limit`` for later work.
     ``start_floor`` refuses a dispatch whose remaining calls cannot fit minimum work.
     ``investigation`` marks a reviewer's cumulative ledger, whose dispatch-time
@@ -128,14 +227,15 @@ class BudgetLedger:
     start_floor: int = 0
     reserved: int = 0
     investigation: bool = False
-    shared_deadline: float | None = None
     parent: BudgetLedger | None = field(default=None, repr=False)
     charged: int = 0
     observed: int = 0
     refunded: int = 0
     started: float | None = None
-    stopped: BudgetStop | None = field(default=None, init=False)
-    _dispatched: tuple[float, int] | None = field(default=None, init=False, repr=False)
+    attempts: int = field(default=0, init=False)
+    stopped: StopRecord | None = field(default=None, init=False)
+    _deadline_owner: BudgetLedger | None = field(default=None, init=False, repr=False)
+    _limit_owner: BudgetLedger | None = field(default=None, init=False, repr=False)
 
     def _chain(self) -> Iterator[BudgetLedger]:
         ledger: BudgetLedger | None = self
@@ -150,14 +250,15 @@ class BudgetLedger:
             self.started = now
         if self.wall_s is not None:
             bound = now + self.wall_s
-            self.deadline = bound if self.deadline is None else min(self.deadline, bound)
+            if self.deadline is None or bound <= self.deadline:
+                self.deadline, self._deadline_owner = bound, None
             self.wall_s = None
         return self
 
     def begin(self) -> BudgetLedger:
-        """Start one invocation: a reused ledger forgets the previous dispatch and stop."""
+        """Start one invocation: a reused ledger forgets the previous attempts and stop."""
         self.stopped = None
-        self._dispatched = None
+        self.attempts = 0
         return self
 
     def carve(self, owner: str, *, limit: int | None = None, deadline: float | None = None,
@@ -165,15 +266,22 @@ class BudgetLedger:
         """Allocate a child within this ledger's remaining calls and deadline."""
         self.anchor()
         remaining = self.remaining_tool_calls
+        # The child's own limit or deadline applies when it is at least as tight as the inherited one.
+        inherits_limit = remaining is not None and (limit is None or remaining < limit)
         if remaining is not None:
             limit = remaining if limit is None else min(limit, remaining)
-        bounds = [bound for bound in (self.deadline, deadline) if bound is not None]
-        return BudgetLedger(
-            owner, deadline=min(bounds) if bounds else None, limit=limit, reserved=reserved,
+        child = BudgetLedger(
+            owner, deadline=self.deadline, limit=limit, reserved=reserved,
             start_floor=self.start_floor if start_floor is None else start_floor,
-            investigation=self.investigation, shared_deadline=self.shared_deadline, parent=self,
-            started=clock.monotonic(),
+            investigation=self.investigation, parent=self, started=clock.monotonic(),
         )
+        if deadline is not None and (self.deadline is None or deadline <= self.deadline):
+            child.deadline = deadline
+        else:
+            child._deadline_owner = self._deadline_owner or self
+        if inherits_limit:
+            child._limit_owner = self._limit_owner or self
+        return child
 
     @property
     def remaining_tool_calls(self) -> int | None:
@@ -204,8 +312,8 @@ class BudgetLedger:
             ledger.observed += 1
 
     def dispatch(self) -> int:
-        """Snapshot one attempt's dispatch; the returned count is its refund point."""
-        self._dispatched = (clock.monotonic(), self.charged)
+        """Count one dispatched attempt; the returned count is its refund point."""
+        self.attempts += 1
         return self.charged
 
     def refund(self, since: int) -> None:
@@ -215,41 +323,46 @@ class BudgetLedger:
             ledger.charged -= amount
             ledger.refunded += amount
 
-    def stop(self, dimension: BudgetDimension) -> BudgetStop:
-        """Record the facts of the limit that stopped this owner; a dispatch-free stop reports now."""
-        now = clock.monotonic()
-        dispatched_at, charged_at = self._dispatched or (now, self.charged)
-        if dimension == "time":
-            started = self.started if self.started is not None else dispatched_at
-            deadline = self.deadline if self.deadline is not None else now
-            self.stopped = BudgetStop(
-                self.owner, dimension, round(max(0.0, deadline - started), 3), round(max(0.0, now - started), 3),
-                round(max(0.0, deadline - dispatched_at), 3), self.reserved)
-        else:
-            limit = self.limit if self.limit is not None else self.charged
-            self.stopped = BudgetStop(self.owner, dimension, limit, self.charged, max(0, limit - charged_at),
-                                      self.reserved)
+    def stop(self, code: ReasonCode, *, error: BaseException | None = None,
+             progress: BackendLifecycleSnapshot | None = None) -> StopRecord:
+        """Record this owner's one stop; a ledger limit names the ledger whose limit applied."""
+        bound: BudgetLedger | None = None
+        limit = spent = None
+        if code is ReasonCode.HOST_WALL_BUDGET_EXHAUSTION and self.deadline is not None:
+            bound = self._deadline_owner or self
+            started = bound.started if bound.started is not None else clock.monotonic()
+            limit = round(max(0.0, bound.deadline - started), 3) if bound.deadline is not None else None
+            spent = round(max(0.0, clock.monotonic() - started), 3)
+        elif code is ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION:
+            capped = [ledger for ledger in self._chain() if ledger.limit is not None]
+            if capped:
+                tightest = min(capped, key=lambda ledger: max(0, (ledger.limit or 0) - ledger.charged))
+                bound = tightest._limit_owner or tightest
+                limit, spent = bound.limit, bound.charged
+        self.stopped = StopRecord(code, self.owner, bound.owner if bound is not None else None, limit, spent,
+                            self.attempts, _error_facts(error) if error is not None else None,
+                            progress.progress_facts() if progress is not None else None)
         return self.stopped
+
+    def fail(self, exc: BaseException, *, progress: BackendLifecycleSnapshot | None = None) -> StopRecord:
+        """Record a failure that ended this owner's work: the one exception-to-code mapping and its facts."""
+        return self.stop(reason_for_exception(exc), error=exc, progress=progress)
 
 
 class BudgetExhausted(Exception):
     """The ledger deadline, not a liveness failure, ended a backend read."""
 
     retryable = False
+    reason_code = ReasonCode.HOST_WALL_BUDGET_EXHAUSTION.value
 
 
-def review_warnings(deep_dir: Path) -> tuple[str, ...]:
-    """Render checked unfinished coverage; freeform diagnostics cannot establish status."""
-    from daydream.deep.artifacts import DeepArtifact
-    from daydream.review_result import ReviewCoverage
-
-    path = DeepArtifact.REVIEW_COVERAGE.at(deep_dir)
-    if not path.exists():
+def review_warnings(terminal: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Name each unfinished phase, then scope, of a sealed terminal result by its reason codes."""
+    if not terminal:
         return ()
-    coverage = ReviewCoverage.from_dict(json.loads(path.read_text()))
-    return tuple(f"{key}: {coverage.diagnostics[kind].get(key, ', '.join(outcome['reason_codes']))}"
-                 for kind, outcomes in [('phases', coverage.phases), ('scopes', coverage.scopes)]
-                 for key, outcome in sorted(outcomes.items()) if outcome['status'] != 'complete')
+    return tuple(f"{outcome[key]}: {', '.join(outcome['reason_codes'])}"
+                 for outcomes, key in ((terminal['phase_outcomes'], 'phase'), (terminal['stack_outcomes'], 'scope_id'))
+                 for outcome in outcomes if outcome['status'] != 'complete')
 
 
 def render_review_warnings(warnings: tuple[str, ...]) -> str:

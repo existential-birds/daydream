@@ -102,12 +102,10 @@ too; absence from the tool list is not proof that an action did not happen.
   is within completion. Zero observed cost is not evidence of free execution.
 - Token/cost metrics may occur only on the last step of an invocation. Do not
   assign them to its final tool or combine step, root and fork totals.
-- `agent_budget_stop` can describe retry-only cost, excluding initial useful
-  work. Read `retry_stop_reason`, `circuit_state` and earlier failures. Retry
-  overhead is backoff plus backend retry time; entire invocation duration is not
-  retry waste. A budget stop's owner, dimension, limit, spend and remainder are
-  on the trace (`daydream.budget.*` agent-span attributes or a
-  `daydream.budget.stop` span event), not in this event.
+- A `stop` phase event is an invocation's one stop record: its code, the ledger
+  whose limit applied, attempts, the last backend failure and the last attempt's
+  progress facts. The trace carries the same record as `daydream.stop.*` agent-span
+  attributes or a `daydream.stop` span event.
 
 ## Beyond the embedded capture
 

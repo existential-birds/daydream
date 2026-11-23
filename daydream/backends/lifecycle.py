@@ -165,6 +165,14 @@ class BackendLifecycleSnapshot:
             if not valid:
                 raise ValueError("invalid backend lifecycle scalar")
 
+    def progress_facts(self) -> dict[str, Any] | None:
+        """Whether native output was still arriving: only Pi reports generations and progress to the collector."""
+        if self.backend != "pi":
+            return None
+        age = self.last_progress_age_s
+        return {"idle_s": None if age is None else round(age, 3), "active_tools": self.active_tool_count,
+                "generation_open": self.generation_open}
+
     def to_dict(self) -> dict[str, str | bool | int | float | None]:
         """Serialize only this fixed schema, including missing observations."""
         return asdict(self)

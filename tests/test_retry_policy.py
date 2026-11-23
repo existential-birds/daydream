@@ -5,7 +5,6 @@ from daydream.retry_policy import (
     FailureClass,
     classify_failure,
     decode_retry_seconds,
-    derive_retry_summary,
     parse_message_retry_hint,
 )
 
@@ -28,11 +27,7 @@ def test_host_attributes_win_over_transient_message_and_are_never_retryable() ->
         assert decision.retries_allowed is False
 
 
-def test_retry_hints_allowances_and_summaries_refuse_invalid_evidence() -> None:
-    # No retry-ladder stop means no summary, so a legacy manifest stays byte-identical.
-    events = [{"event": "agent_budget_stop",
-               "metadata": {"retry_stop_reason": None, "attempts": 1, "backend_s": 1_700.0, "backoff_s": 0.0}}]
-    assert derive_retry_summary(events) is None
+def test_retry_hints_refuse_invalid_evidence() -> None:
     # One decode rule: numeric strings accepted, everything invalid refused.
     for raw in (True, "nonsense", None):
         assert decode_retry_seconds(raw) is None

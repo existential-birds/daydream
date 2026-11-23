@@ -967,7 +967,6 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
                     recorder.emit_repair_outcome(
                         execution_id=repair.execution_id,
                         outcome=repair.outcome.value,
-                        abort_reason=repair.abort_reason,
                         repair_reason_code=code.value if code is not None else None,
                         changed_paths=repair.changed_paths,
                     )

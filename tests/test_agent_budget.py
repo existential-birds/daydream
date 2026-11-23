@@ -36,16 +36,20 @@ from daydream.host_tools import (
     UnsubmittedTurn,
 )
 from daydream.prompt_budget import prepare_sanctioned_inputs
-from daydream.retry_policy import derive_retry_summary
-from daydream.review_budget import BudgetExhausted, BudgetLedger, BudgetStop
+from daydream.review_budget import BudgetExhausted, BudgetLedger, ReasonCode, StopRecord
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.supervision import RuleBasedToolSupervisor
 from daydream.trajectory import DaydreamPhase, RunWriteSnapshot
+from daydream.ui.agent_stream import AgentDisplay
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_cli_process import FakeCliScript, install_fake_cli_process
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 from tests.harness.pi_replay import make_mock_process, make_mock_process_from_fixture
 from tests.harness.trajectory import make_recorder, read_trajectory
+
+WALL, TOOL = ReasonCode.HOST_WALL_BUDGET_EXHAUSTION, ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION
+_RETRYABLE_FACTS = {"type": "_RetryableBackendError", "failure_class": "SERVER_ERROR", "category": None,
+                    "status": None, "retryable": True}
 
 
 class _RetryableBackendError(RuntimeError):
@@ -76,14 +80,14 @@ def _agent_step_with_stop_reason(traj: dict[str, Any]) -> dict[str, Any]:
 
 
 def _budget_stop(recorder: Any) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Recorded trajectory plus the single ``agent_budget_stop`` metadata."""
+    """Recorded trajectory plus its single ``stop`` record."""
     traj = read_trajectory(recorder.path)
-    stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "agent_budget_stop"]
+    stops = [e for e in traj["extra"]["phase_events"] if e["event"] == "stop"]
     assert len(stops) == 1
     return traj, stops[0]["metadata"]
 
 
-async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
+async def test_run_agent_tool_call_ceiling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A close fault cannot replace a budget stop or lose its already received tool evidence."""
     closed = False
 
@@ -104,12 +108,12 @@ async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
         async with recorder:
             output, continuation, reason = await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.FIX,
                                                            budget=ledger)
-    assert (output, continuation, reason) == ("partial output", None, "tool_call_budget_exceeded")
-    assert ledger.stopped == BudgetStop("fix", "tool_calls", limit=5, spent=5, remaining_at_dispatch=5, reserved=0)
+    stop = StopRecord(TOOL, "fix", bound="fix", limit=5, spent=5, attempts=1)
+    assert (output, continuation, reason) == ("partial output", None, stop) and ledger.stopped == stop
     assert closed and backend.cancel_calls == 0
     trajectory = read_trajectory(recorder.path)
     step = _agent_step_with_stop_reason(trajectory)
-    assert step["extra"]["stop_reason"] == "tool_call_budget_exceeded"
+    assert step["extra"]["stop_reason"] == "host_tool_budget_exhaustion"
     assert step["message"] == "partial output"
 
     # A native result that arrived in a turn the budget then cut is discarded with the turn.
@@ -123,10 +127,23 @@ async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
     cut = await run_agent(ScriptedBackend(responder=late_result, model="mock-model"), tmp_path, "go",
                           phase=DaydreamPhase.FIX, output_schema={"type": "object"},
                           budget=BudgetLedger("fix", limit=5))
-    assert cut == ("", None, "tool_call_budget_exceeded")
+    assert cut == ("", None, StopRecord(TOOL, "fix", bound="fix", limit=5, spent=5, attempts=1))
     # The received over-limit start is retained as evidence even though it is not displayed or executed further.
     assert [call["tool_call_id"] for call in step["tool_calls"]] == [f"tool-{index}" for index in range(6)]
     assert trajectory["extra"]["partial"] is True
+
+    # A retryable failure that escapes one attempt's abort is retried; the retry that finishes owns no earlier stop.
+    async def abort_once(_display: AgentDisplay, _reason: str) -> None:
+        monkeypatch.undo()
+        raise _RetryableBackendError("display failed while aborting")
+
+    monkeypatch.setattr(AgentDisplay, "aborted", abort_once)
+    retried = ScriptedBackend(
+        model="mock-model", retry_policy=RetryPolicy(attempts=1, base_delay_s=0.0, max_delay_s=0.0),
+        script=[[ToolStartEvent(id=f"over-{index}", name="Bash", input={}) for index in range(2)],
+                [TextEvent(text="recovered")]])
+    assert await run_agent(retried, tmp_path, "go", phase=DaydreamPhase.FIX,
+                           budget=BudgetLedger("fix", limit=1)) == ("recovered", None, None)
 
 async def test_run_agent_abort_records_reason_and_turn_end(tmp_path: Path) -> None:
     snapshots: list[RunWriteSnapshot] = []
@@ -144,13 +161,13 @@ async def test_run_agent_abort_records_reason_and_turn_end(tmp_path: Path) -> No
             backend, tmp_path, "go", phase=DaydreamPhase.FIX, budget=BudgetLedger("fix", limit=0),
             progress_callback=lambda _: None,
         )
-    assert reason == "tool_call_budget_exceeded"
+    assert reason is not None and reason.code is TOOL
     partial = next(snapshot for snapshot in snapshots if snapshot.status == "partial")
     cleanup_document = partial.documents[0].validated_payload(recorder.session_id)
     final_document = read_trajectory(recorder.path)
     for document in (cleanup_document, final_document):
         step = _agent_step_with_stop_reason(document)
-        assert step["extra"]["stop_reason"] == "tool_call_budget_exceeded"
+        assert step["extra"]["stop_reason"] == "host_tool_budget_exhaustion"
         assert "partial_step" not in step["extra"]
         assert [tool["tool_call_id"] for tool in step["tool_calls"]] == ["tool-0"]
         interruption, = step["observation"]["results"]
@@ -186,8 +203,7 @@ async def test_expiry_cleanup_is_shielded_and_bounded_by_the_grace(
     with anyio.fail_after(5):
         output, _, reason = await run_agent(_HangingCloseBackend(), tmp_path, "go", phase=DaydreamPhase.FIX,
                                             budget=ledger)
-    assert reason == "wall_budget_exceeded"
-    assert ledger.stopped == BudgetStop("fix", "time", limit=5.0, spent=10.0, remaining_at_dispatch=5.0, reserved=0)
+    assert reason == ledger.stopped == StopRecord(WALL, "fix", bound="fix", limit=5.0, spent=10.0, attempts=1)
     assert "partial-output-sentinel" in output
     assert anyio.current_time() - start < 3.0  # bounded by the grace, not the teardown
 
@@ -310,7 +326,7 @@ async def test_host_admitted_starts_stay_charged_unless_a_retry_refunds_them(
                         backend, tmp_path, "review", phase=DaydreamPhase.REVIEW, budget=ledger,
                         output_schema=schema, host_tools=bindings[-1],
                     )
-                    assert reason == ("tool_call_budget_exceeded" if index == 2 else None)
+                    assert (reason.code if reason else None) == (TOOL if index == 2 else None)
                     if index == 1:
                         assert isinstance(output, StructuredOutputFailure) and output.reason == "missing_output"
     assert residual == [2, 2, 1]  # the retry regained the failed attempt's call
@@ -325,16 +341,16 @@ async def test_host_admitted_starts_stay_charged_unless_a_retry_refunds_them(
         None, "SERVER_ERROR", None]
 
 
-@pytest.mark.parametrize(("failure", "reason"), [
-    ("deadline-read", "wall_budget_exceeded"), ("host-deadline", "wall_budget_exceeded"),
-    ("host-allocation", "tool_call_budget_exceeded"), ("after-acceptance", None),
+@pytest.mark.parametrize(("failure", "code", "returned"), [
+    ("deadline-read", WALL, True), ("host-deadline", WALL, True),
+    ("host-allocation", TOOL, True), ("after-acceptance", WALL, False),
 ])
 async def test_ledger_failures_end_the_attempt_as_budget_stops(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, reason: str | None,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, code: ReasonCode, returned: bool,
 ) -> None:
     """A ledger limit that ends the native stream is an in-flight budget stop, never a retry.
 
-    A host failure after possible acceptance keeps its own handling and is never relabelled.
+    A host failure after possible acceptance still raises, and its stop keeps the binding's failure.
     """
     ledger = BudgetLedger("review", deadline=anyio.current_time() + 60, limit=3)
     attempts: list[int] = []
@@ -352,13 +368,14 @@ async def test_ledger_failures_end_the_attempt_as_budget_stops(
                               retry_policy=RetryPolicy(attempts=2, base_delay_s=0.0, max_delay_s=0.0))
     monkeypatch.setattr(backend, "execute", stream)
     binding = HostToolBinding(budget=ledger, accept=lambda payload: payload)
-    with anyio.fail_after(5), (contextlib.nullcontext() if reason else pytest.raises(_RetryableBackendError)):
+    with anyio.fail_after(5), (contextlib.nullcontext() if returned else pytest.raises(_RetryableBackendError)):
         output, _, stopped = await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW,
                                              host_tools=binding)
-        assert (output, stopped) == ("partial", reason)
+        assert (output, stopped) == ("partial", ledger.stopped)
     assert len(attempts) == 1
-    assert (ledger.stopped.dimension if ledger.stopped else None) == (
-        None if reason is None else "time" if reason == "wall_budget_exceeded" else "tool_calls")
+    assert ledger.stopped is not None and (ledger.stopped.code, ledger.stopped.bound) == (code, "review")
+    # Only the failure that raised is a backend failure; a ledger limit that ended the stream is not.
+    assert (ledger.stopped.error or {}).get("type") == (None if returned else "HostToolFatal")
 
 
 @pytest.mark.parametrize("retry", [False, True], ids=["one-attempt", "retry-after-denial"])
@@ -411,10 +428,10 @@ async def test_protected_submission_denials_do_not_trip_the_stream_ceiling(
     assert (ledger.charged, ledger.refunded) == ((1, 2) if retry else (3, 0))
 
 
-async def test_a_deadline_that_cuts_the_ladder_during_backoff_is_still_a_ladder_stop(
+async def test_a_deadline_that_cuts_the_ladder_during_backoff_keeps_the_failure_on_its_stop(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Backoff is retry overhead even when the deadline prevents the retry from dispatching.
+    """The deadline that prevents a retry is the stop, and the failure before it stays on the record.
 
     A retry that never dispatches refunds nothing: the failed attempt's call stays charged.
     """
@@ -429,29 +446,17 @@ async def test_a_deadline_that_cuts_the_ladder_during_backoff_is_still_a_ladder_
     with anyio.fail_after(5):
         async with recorder:
             _, _, reason = await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.FIX, budget=ledger)
-    assert reason == "wall_budget_exceeded"
+    assert reason == StopRecord(WALL, "fix", bound="fix", limit=400.0, spent=400.0, attempts=1,
+                                error=_RETRYABLE_FACTS)
     assert backend.call_count == 1                  # the retry never got to dispatch
     assert (ledger.charged, ledger.refunded) == (1, 0)
-    traj, meta = _budget_stop(recorder)
-    assert meta["retry_stop_reason"] == "retry_deadline_exhausted"
-    assert meta["attempts"] == 0               # no retry attempt was dispatched
-    assert meta["backend_s"] == 0.0
-    assert meta["backoff_s"] == 100.0          # the sleep is the retry overhead
-    assert meta["partial_edit_handling"] == "discarded"
-    events = traj["extra"]["phase_events"]
-    summary = derive_retry_summary(events)
-    assert summary is not None
-    # A repeated stop folds counts once per stop without repeating its circuit state.
-    stop = next(event for event in events if event.get("event") == "agent_budget_stop"
-                and event.get("metadata", {}).get("retry_stop_reason"))
-    assert derive_retry_summary([stop, stop]) == derive_retry_summary([stop, {**stop, "metadata": {
-        **stop["metadata"], "circuit_state": None}}])
+    assert _budget_stop(recorder)[1] == reason.to_dict()  # local evidence writes the same record once
 
 
-async def test_initial_failed_attempt_deadline_records_discarded_stop(
+async def test_initial_failed_attempt_that_spends_the_deadline_keeps_its_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """An initial failed attempt spending the wall budget has no retry stop reason."""
+    """An initial failed attempt that spends the wall budget is a deadline stop that keeps its failure."""
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     run_context = RunContext(InteractionPolicy(interactive=False))
     backend = _retryable_failing_backend(advance=fake.advance, advance_s=1_800.0)
@@ -462,14 +467,11 @@ async def test_initial_failed_attempt_deadline_records_discarded_stop(
                 backend, tmp_path, "go", phase=DaydreamPhase.FIX, budget=BudgetLedger("fix", wall_s=1_800.0),
                 run_context=run_context,
             )
-    assert output == "" and reason == "wall_budget_exceeded"
+    assert output == "" and reason == StopRecord(WALL, "fix", bound="fix", limit=1_800.0, spent=1_800.0,
+                                                  attempts=1, error=_RETRYABLE_FACTS)
     assert backend.call_count == 1
     assert fake.monotonic_value == 2_800.0
-    _traj, meta = _budget_stop(recorder)
-    assert meta["retry_stop_reason"] is None
-    assert meta["partial_edit_handling"] == "discarded"
-    assert meta["circuit_state"] == "closed"
-    assert set(meta) >= {"attempts", "backend_s", "backoff_s", "elapsed_s"}
+    assert _budget_stop(recorder)[1] == reason.to_dict()
     assert str(fake.monotonic_value) not in recorder.path.read_text(encoding="utf-8")  # no reusable monotonic
 
 
@@ -548,13 +550,11 @@ async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_prob
                 await run_agent(
                     probe_ladder, tmp_path, "go", phase=DaydreamPhase.FIX, run_context=run_context,
                 )
-    traj, meta = _budget_stop(recorder)
+    _traj, meta = _budget_stop(recorder)
     assert probe_ladder.call_count == 2
-    assert meta["retry_stop_reason"] == "retry_attempts_exhausted"
+    assert (meta["code"], meta["attempts"], meta["error"]["retryable"]) == ("backend_failure", 2, True)
     # The probe remains outstanding after dispatch; its own grant cannot reopen the circuit.
-    assert meta["circuit_state"] == "half_open"
-    assert meta["partial_edit_handling"] == "discarded"
-    assert set(meta) >= {"attempts", "backend_s", "backoff_s", "elapsed_s"}
+    assert run_context.outage_circuit.state() == "half_open"
     assert str(fake.monotonic_value) not in recorder.path.read_text(encoding="utf-8")
     # While that probe is outstanding, a second ladder gets no probe of its own.
     sibling = _retryable_failing_backend(advance=fake.advance, advance_s=0.0)
@@ -567,10 +567,8 @@ async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_prob
                     sibling, tmp_path, "go", phase=DaydreamPhase.FIX, run_context=run_context,
                 )
     _sibling_traj, sibling_meta = _budget_stop(sibling_recorder)
-    assert sibling_meta["retry_stop_reason"] == "circuit_open"
-    assert sibling_meta["partial_edit_handling"] == "discarded"
-    assert sibling_meta["circuit_state"] == "open"
-    assert set(sibling_meta) >= {"attempts", "backend_s", "backoff_s", "elapsed_s"}
+    assert (sibling_meta["code"], sibling_meta["attempts"]) == ("backend_failure", 1)
+    assert run_context.outage_circuit.state() == "open"
     assert str(fake.monotonic_value) not in sibling_recorder.path.read_text(encoding="utf-8")
     assert sibling.call_count == 1  # suppressed before its own probe could dispatch
 
@@ -663,14 +661,13 @@ async def test_sanctioned_input_preparation_expiry_never_dispatches_pi(
         assert (await run_agent(backend, tmp_path, "Earlier work", phase=DaydreamPhase.DEEP))[2] is None
         result, _, reason = await run_agent(backend, tmp_path, "Assigned work", phase=DaydreamPhase.DEEP,
             read_only=True, sanctioned_inputs=prepared, budget=ledger)
-    assert reason == "wall_budget_exceeded" and result == ""
-    # The pre-dispatch stop still records its facts: nothing remained when it would have dispatched.
-    assert ledger.stopped == BudgetStop("deep", "time", limit=5.0, spent=5.0, remaining_at_dispatch=0.0, reserved=0)
+    # The pre-dispatch stop still records its facts: the whole allowance was spent before dispatch.
+    assert result == "" and reason == ledger.stopped == StopRecord(WALL, "deep", bound="deep", limit=5.0,
+                                                                   spent=5.0, attempts=0)
     assert len(prompts) == 1  # Only the completed earlier invocation launched Pi.
     trajectory, stop = _budget_stop(recorder)
     assert [step["message"] for step in trajectory["steps"] if step["source"] == "user"] == ["Earlier work"]
-    assert stop["attempts"] == 0 and stop["backend_s"] == 0
-    assert stop["partial_edit_handling"] == "discarded"
+    assert stop == reason.to_dict()
 
 
 def test_rule_based_tool_supervision_vetoes_denied_writes_and_commands() -> None:

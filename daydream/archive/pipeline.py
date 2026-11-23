@@ -135,7 +135,6 @@ def _manifest_state(
     raise on absent or malformed artifacts, so this can never abort an archive.
     """
     from daydream.deep.artifacts import DeepArtifact
-    from daydream.retry_policy import derive_retry_summary
 
     recorder_provenance = run.recorder_provenance
     phases = run.identity.phases
@@ -184,7 +183,6 @@ def _manifest_state(
         ),
         "recommended_capture": (recommended or {}).get("capture_point"),
         "phase_states": phase_states,
-        "retry_summary": derive_retry_summary(frozen_extra.get("phase_events")),
         "pipeline_status": derive_pipeline_status(
             status,
             fix_failures,
