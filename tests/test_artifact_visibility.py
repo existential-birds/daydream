@@ -776,7 +776,7 @@ async def test_closing_session_bounds_finished_runs_and_drops_finalized_live_cop
     assert sorted(path.name for path in (runs / "latest").iterdir()) == ["frozen", "frozen-manifest.json"]
     assert sorted(path.name for path in held.iterdir()) == ["frozen", "frozen-manifest.json", "live"]
     assert (unsafe / "fifo").exists() and (outside / "keep").read_bytes() == b"not runtime state"
-    assert capsys.readouterr().out.count("could not be cleaned") == 2
+    assert " ".join(capsys.readouterr().out.replace("│", " ").split()).count("could not be cleaned") == 2
     assert sorted(path.name for path in public.iterdir()) == ["held", "latest", "newer", "public-unsafe"]
     assert (public / "latest" / RUN_DOCUMENT_NAME).is_file() and (public / "newer/evidence").read_bytes() == b"newer"
     assert (public / "public-unsafe/fifo").exists()
@@ -796,7 +796,7 @@ async def test_closing_session_bounds_finished_runs_and_drops_finalized_live_cop
     await finish("linked", freeze=False, retained_runs=1,
                  during=lambda: (source / ".daydream").symlink_to(elsewhere / ".daydream", target_is_directory=True))
     assert sorted(path.name for path in (elsewhere / ".daydream/runs").iterdir()) == ["held", "latest", "old"]
-    assert "could not be cleaned" in capsys.readouterr().out
+    assert "could not be cleaned" in " ".join(capsys.readouterr().out.replace("│", " ").split())
 
 
 async def test_bound_routing_propagates_to_tasks_and_rejects_wrong_or_aliased_repo(tmp_path: Path, source: Path,

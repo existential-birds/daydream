@@ -570,23 +570,28 @@ class _CodexHostEndpoint(HostToolEndpoint):
         from mcp.server.lowlevel import Server
         from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
-        tools = [types.Tool(name=name, description=self.description(name), inputSchema=schema)
+        tools = [types.Tool(name=name, description=self.description(name), input_schema=schema)
                  for name, schema in self.schemas().items()]
 
-        async def list_tools(_request: types.ListToolsRequest) -> types.ServerResult:
+        async def list_tools(
+            _ctx: Any, _params: types.PaginatedRequestParams | None,
+        ) -> types.ListToolsResult:
             self.ready = True
-            return types.ServerResult(types.ListToolsResult(tools=tools))
+            return types.ListToolsResult(tools=tools)
 
-        async def call_tool(request: types.CallToolRequest) -> types.ServerResult:
-            name = request.params.name
-            failed, blocks = await self.admitted(name, lambda: self._call(name, request.params.arguments or {}))
-            return types.ServerResult(types.CallToolResult(
-                content=[types.TextContent(type="text", text=text) for text in blocks], isError=failed))
+        async def call_tool(
+            _ctx: Any, params: types.CallToolRequestParams,
+        ) -> types.CallToolResult:
+            name = params.name
+            failed, blocks = await self.admitted(name, lambda: self._call(name, params.arguments or {}))
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=text) for text in blocks], is_error=failed)
 
-        server: Server[Any, Any] = Server(_HOST_SERVER)
-        server.request_handlers[types.ListToolsRequest] = list_tools
-        server.request_handlers[types.CallToolRequest] = call_tool
-        manager = StreamableHTTPSessionManager(app=server, json_response=True)
+        server: Server[Any] = Server(_HOST_SERVER, on_list_tools=list_tools, on_call_tool=call_tool)
+        # Opt out of MCP's default global-provider OTel middleware; Daydream owns per-run tracing.
+        server.middleware.clear()
+        # Disable MCP's 30-minute idle timeout; the binding deadline and manager.run() own session lifetime.
+        manager = StreamableHTTPSessionManager(app=server, json_response=True, session_idle_timeout=None)
         authorization = b"Bearer " + self.token.encode()
 
         async def app(scope: Any, receive: Any, send: Any) -> None:

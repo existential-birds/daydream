@@ -130,7 +130,10 @@ _TOOL_USE_ID_META = "claudecode/toolUseId"
 # Offer host tools directly, never deferred behind tool search, and keep every
 # bounded result inline: without the size hint the CLI saves large MCP results to
 # a file and shows the model only a preview.
-_HOST_TOOL_META = {"anthropic/alwaysLoad": True, "anthropic/maxResultSizeChars": host_policy._MAX_RESULT_BYTES}
+_HOST_TOOL_META: dict[str, Any] = {
+    "anthropic/alwaysLoad": True,
+    "anthropic/maxResultSizeChars": host_policy._MAX_RESULT_BYTES,
+}
 
 
 def _audit_cli_env(
@@ -781,9 +784,9 @@ class _ClaudeHostEndpoint(HostToolEndpoint):
         super().__init__(binding)
         self._listed = False
         self._sessions = 0
-        tools = [mcp_types.Tool.model_validate({
-            "name": name, "description": self.description(name), "inputSchema": schema, "_meta": _HOST_TOOL_META,
-        }) for name, schema in self.schemas().items()]
+        tools = [mcp_types.Tool(
+            name=name, description=self.description(name), input_schema=schema, _meta=_HOST_TOOL_META,
+        ) for name, schema in self.schemas().items()]
 
         @asynccontextmanager
         async def serving(_server: Any) -> AsyncIterator[dict[str, Any]]:
@@ -793,17 +796,26 @@ class _ClaudeHostEndpoint(HostToolEndpoint):
             finally:
                 self._sessions -= 1
 
-        async def list_tools(_request: mcp_types.ListToolsRequest) -> mcp_types.ServerResult:
+        async def list_tools(
+            _ctx: Any, _params: mcp_types.PaginatedRequestParams | None,
+        ) -> mcp_types.ListToolsResult:
             # Readiness requires that this exact instance, not a same-named server, was listed.
             self._listed = True
-            return mcp_types.ServerResult(mcp_types.ListToolsResult(tools=tools))
+            return mcp_types.ListToolsResult(tools=tools)
 
-        async def call_tool(request: mcp_types.CallToolRequest) -> mcp_types.ServerResult:
-            return mcp_types.ServerResult(self._call(request.params))
+        async def call_tool(
+            _ctx: Any, params: mcp_types.CallToolRequestParams,
+        ) -> mcp_types.CallToolResult:
+            return self._call(params)
 
-        self.server: McpServer[Any, Any] = McpServer(_HOST_SERVER, lifespan=serving)
-        self.server.request_handlers[mcp_types.ListToolsRequest] = list_tools
-        self.server.request_handlers[mcp_types.CallToolRequest] = call_tool
+        self.server: McpServer[Any] = McpServer(
+            _HOST_SERVER,
+            lifespan=serving,
+            on_list_tools=list_tools,
+            on_call_tool=call_tool,
+        )
+        # Opt out of MCP's default global-provider OTel middleware; Daydream owns per-run tracing.
+        self.server.middleware.clear()
 
     async def confirm_ready(self, client: ClaudeSDKClient) -> None:
         """Before any provider request, require this server's tools/list and its connected registration."""
@@ -859,10 +871,9 @@ class _ClaudeHostEndpoint(HostToolEndpoint):
     def _call(self, params: mcp_types.CallToolRequestParams) -> mcp_types.CallToolResult:
         """Serve one admitted, correlated native call; failures become native tool errors."""
         binding = self.binding
-        meta = params.meta.model_extra if params.meta is not None else None
-        call_id = (meta or {}).get(_TOOL_USE_ID_META)
-        arguments = params.arguments if params.arguments is not None else {}
         try:
+            call_id = params.meta.get(_TOOL_USE_ID_META) if params.meta is not None else None
+            arguments = params.arguments if params.arguments is not None else {}
             if not self.current():
                 raise HostToolRejected("This attempt's host-tool authority is closed; the call was not served",
                                        code="authority_closed")
@@ -885,7 +896,7 @@ class _ClaudeHostEndpoint(HostToolEndpoint):
                                     preacceptance=not binding.possibly_accepted)
             failure.__cause__ = exc
             error = str(self.fail(failure))
-        return mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=error)], isError=True)
+        return mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=error)], is_error=True)
 
     async def close(self) -> None:
         await super().close()

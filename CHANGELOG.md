@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Updated Claude Agent SDK to 0.2.185, Traceloop SDK to 0.63.1, and MCP Python SDK to
+  2.3.0 (`mcp>=2.3.0,<3`), migrating Claude and Codex host-tool MCP servers to the MCP
+  2.x lowlevel `Server` handler API alongside runtime (`pydantic>=2.14.4`) and development
+  dependency updates (`grpcio`, `ruff`, `types-pyyaml`, `types-psutil`) (#1962).
+
 ## [0.37.0] - 2026-11-23
 
 ### Changed
