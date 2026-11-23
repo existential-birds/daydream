@@ -570,6 +570,8 @@ async def _run_agent(
                 refund_point = budget.charged
                 if review_evidence is not None:
                     review_evidence.reset()
+                # A retried attempt starts with no stop: one observed before an escaped failure is not its own.
+                stop_code, stop, budget.stopped = None, None, None
                 # Never dispatch an attempt once the deadline is spent: the
                 # ladder stops here with the reset state.
                 if budget.expired():

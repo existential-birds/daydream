@@ -40,6 +40,7 @@ from daydream.review_budget import BudgetExhausted, BudgetLedger, ReasonCode, St
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.supervision import RuleBasedToolSupervisor
 from daydream.trajectory import DaydreamPhase, RunWriteSnapshot
+from daydream.ui.agent_stream import AgentDisplay
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_cli_process import FakeCliScript, install_fake_cli_process
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
@@ -86,7 +87,7 @@ def _budget_stop(recorder: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     return traj, stops[0]["metadata"]
 
 
-async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
+async def test_run_agent_tool_call_ceiling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A close fault cannot replace a budget stop or lose its already received tool evidence."""
     closed = False
 
@@ -130,6 +131,19 @@ async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
     # The received over-limit start is retained as evidence even though it is not displayed or executed further.
     assert [call["tool_call_id"] for call in step["tool_calls"]] == [f"tool-{index}" for index in range(6)]
     assert trajectory["extra"]["partial"] is True
+
+    # A retryable failure that escapes one attempt's abort is retried; the retry that finishes owns no earlier stop.
+    async def abort_once(_display: AgentDisplay, _reason: str) -> None:
+        monkeypatch.undo()
+        raise _RetryableBackendError("display failed while aborting")
+
+    monkeypatch.setattr(AgentDisplay, "aborted", abort_once)
+    retried = ScriptedBackend(
+        model="mock-model", retry_policy=RetryPolicy(attempts=1, base_delay_s=0.0, max_delay_s=0.0),
+        script=[[ToolStartEvent(id=f"over-{index}", name="Bash", input={}) for index in range(2)],
+                [TextEvent(text="recovered")]])
+    assert await run_agent(retried, tmp_path, "go", phase=DaydreamPhase.FIX,
+                           budget=BudgetLedger("fix", limit=1)) == ("recovered", None, None)
 
 async def test_run_agent_abort_records_reason_and_turn_end(tmp_path: Path) -> None:
     snapshots: list[RunWriteSnapshot] = []

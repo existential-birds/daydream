@@ -21,7 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tool_vetoed:<name>`; an Improve plan blocked by a stop names its code (such as
   `HOST_WALL_BUDGET_EXHAUSTION`). A retryable failure after the deadline keeps its facts on the deadline stop
   on every attempt. `PiError` carries `status` and `retry_after` from Pi's last provider response.
-  The trace records stops as `daydream.stop.*`; the `daydream.budget.*` and `daydream.retry.stop`
+  The trace records stops as `daydream.stop.*`; the `daydream.budget.*` attributes, the
+  `daydream.budget.stop` and `daydream.retry.stop` span events with their `daydream.retry.*`
   attributes, the `agent_budget_stop` and `schedule_budget_stop` events, the archive manifest's
   `retry_summary`, review coverage `diagnostics`, the repair record's `abort_reason` and
   `reason_code` (its `stop` replaces them) and the unproduced `host_pipeline_budget_exhaustion`
