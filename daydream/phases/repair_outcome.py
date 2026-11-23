@@ -24,7 +24,7 @@ from pathlib import Path
 
 from daydream.redaction import redact_text
 from daydream.repository_paths import InvalidRepositoryFilePath, canonicalize_repository_file_path
-from daydream.review_result import BUDGET_REASON_CODES, ReasonCode, reason_for_budget
+from daydream.review_budget import BUDGET_REASON_CODES, StopRecord
 
 
 class RepairOutcome(StrEnum):
@@ -40,36 +40,16 @@ class RepairOutcome(StrEnum):
     SCOPE_BLOCKED = "scope_blocked"
 
 
-def repair_reason_code(reason: str | None) -> ReasonCode | None:
-    """Map a repair turn's host abort reason onto the existing public reason vocabulary.
+def classify_repair_outcome(stop: StopRecord | None, output: str) -> RepairOutcome:
+    """Classify a turn the host stopped or let run to its own end.
 
-    The budget table is delegated, never re-implemented: an unrecognised reason
-    is reported as the generic backend failure rather than a budget the host
-    cannot prove. ``None`` — a turn that ended on its own — stays ``None``.
+    A host stop always wins over whatever the turn said: prose claiming a fix
+    inside an interrupted turn is partial diagnosis, not completion. Absent a
+    stop, no turn can read success out of its own text — the host validates
+    completion separately — so every unstopped turn is an unresolved diagnosis.
     """
-    if reason is None:
-        return None
-    try:
-        return reason_for_budget(reason)
-    except KeyError:
-        pass
-    try:
-        return ReasonCode(reason)
-    except ValueError:
-        return ReasonCode.BACKEND_FAILURE
-
-
-def classify_repair_outcome(abort_reason: str | None, output: str) -> RepairOutcome:
-    """Classify a turn the host aborted or let run to its own end.
-
-    A host abort always wins over whatever the turn said: prose claiming a fix
-    inside an interrupted turn is partial diagnosis, not completion. Absent an
-    abort, no turn can read success out of its own text — the host validates
-    completion separately — so every non-aborted turn is an unresolved diagnosis.
-    """
-    if abort_reason is not None:
-        code = repair_reason_code(abort_reason)
-        if code in BUDGET_REASON_CODES:
+    if stop is not None:
+        if stop.code in BUDGET_REASON_CODES:
             return RepairOutcome.BUDGET_INTERRUPTED
         return RepairOutcome.EXECUTION_ERROR
     # The host never reads success out of a turn's prose: a blank turn and a
@@ -148,6 +128,5 @@ __all__ = [
     "RepairOutcome",
     "ScopeRequest",
     "classify_repair_outcome",
-    "repair_reason_code",
     "repair_scope_request",
 ]

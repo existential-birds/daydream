@@ -22,6 +22,7 @@ from daydream.phases.fix import (
     _preflight_finding_file_refs,
     group_items_by_footprint,
 )
+from daydream.review_budget import ReasonCode
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.trajectory import (
     DaydreamPhase,
@@ -185,7 +186,7 @@ async def phase_fix_parallel(
             if budget_reason is not None:
                 await _record_budget_stop(fkey, budget_reason, len(grp), budget)
                 return
-            turn_reason = await fixing.phase_fix(
+            turn_stop = await fixing.phase_fix(
                 backend, group_work, item, item_num, total,
                 edit_scope=edit_scope,
                 read_scope=footprint.run_allowed_paths,
@@ -195,7 +196,7 @@ async def phase_fix_parallel(
                 run_context=run_context,
                 deadline=budget.deadline,
             )
-            if turn_reason == "wall_budget_exceeded":
+            if turn_stop is not None and turn_stop.code is ReasonCode.HOST_WALL_BUDGET_EXHAUSTION:
                 _restore_group_or_raise("after its turn wall budget cut", edit_scope, group_work, group_snapshot)
                 if group_max_wall_s > phase_config.DEFAULT_WALL_BUDGET_S and budget.remaining() > 0:
                     # The shorter per-turn limit fired while the group still has time.

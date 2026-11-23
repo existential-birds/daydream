@@ -55,7 +55,7 @@ from daydream.prompt_budget import (
     truncate_utf8_to_budget,
 )
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
-from daydream.review_budget import BudgetLedger, review_deadline
+from daydream.review_budget import BudgetLedger, StopRecord, review_deadline
 from daydream.trajectory import (
     DaydreamPhase,
     LifecycleReasonCode,
@@ -320,7 +320,7 @@ async def _diagram_turn(
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     advisory: dict[str, Any] | None = None,
     deadline: float | None = None,
-) -> tuple[Any, Any, str | None] | DiagramResult:
+) -> tuple[Any, Any, StopRecord | None] | DiagramResult:
     """Run an author/repair turn and return output, continuation, and budget reason.
 
     SanctionedInputUnavailable propagates to the caller's failure path. Other errors
@@ -472,7 +472,7 @@ async def _run_diagram_kind(
     if budget_reason:
         # A truncated author turn did not really answer: recording it as an
         # omission would claim the model looked and found nothing to draw.
-        return _diagram_result("failed", f"budget exhausted: {budget_reason}", advisory=advisory)
+        return _diagram_result("failed", f"budget exhausted: {budget_reason.code}", advisory=advisory)
     if not isinstance(structured, dict):
         return _diagram_result("failed", "no structured output produced", advisory=advisory)
 

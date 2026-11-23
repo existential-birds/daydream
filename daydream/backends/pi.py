@@ -77,7 +77,7 @@ from daydream.backends.lifecycle import current_backend_lifecycle
 from daydream.config import DEFAULT_PI_MODEL
 from daydream.host_tools import HostToolBinding, UnsubmittedTurn
 from daydream.redaction import _PEM_HEADER, _PEM_KEY_REDACTED_MARKER, redact_structured_text
-from daydream.retry_policy import classify_failure, parse_message_retry_hint
+from daydream.retry_policy import classify_failure, decode_retry_seconds, parse_message_retry_hint
 from daydream.review_budget import BudgetExhausted
 
 # Mirror Codex's generous stdout cap so large JSONL events (big file reads,
@@ -454,7 +454,11 @@ def _pi_retryable_for(*, category: str, message: str) -> bool:
 
 
 class PiError(Exception):
-    """Raised when a Pi turn fails (e.g. ``stopReason == "error"``)."""
+    """Raised when a Pi turn fails (e.g. ``stopReason == "error"``).
+
+    ``status`` and ``retry_after`` are the HTTP status and ``Retry-After`` seconds of the
+    attempt's last provider response, when Pi observed one, as fields rather than message text.
+    """
 
     def __init__(
         self,
@@ -463,11 +467,13 @@ class PiError(Exception):
         retryable: bool = False,
         category: str = "UNKNOWN",
         retry_after: float | None = None,
+        status: int | None = None,
     ):
         super().__init__(message)
         self.retryable = retryable
         self.category = category
         self.retry_after = retry_after
+        self.status = status
 
 
 def _render_tool_result(result: Any) -> str:
@@ -1003,6 +1009,7 @@ class PiBackend:
         stderr_lines: deque[str] = deque(maxlen=20)
         diagnostic_tail_truncated = False
         pending_response: DiagnosticEvent | None = None
+        last_response: dict[str, Any] | None = None
         pem_end: str | None = None
 
         def capture_diagnostic(line: str) -> None:
@@ -1359,6 +1366,7 @@ class PiBackend:
                     if pending_response is not None:
                         yield pending_response
                     response_metadata = _pi_response_metadata(event)
+                    last_response = response_metadata or last_response
                     pending_response = (DiagnosticEvent(
                         code="pi_provider_response", message="Provider HTTP response", metadata={
                             **response_metadata, "generation_id": None, "observed_at_unix_ns": time.time_ns(),
@@ -1701,11 +1709,14 @@ class PiBackend:
                     if stop_reason == "error" and not (host_tools is not None and host_tools.fatal_error is not None):
                         for terminal in terminal_events():
                             yield terminal
+                        headers = last_response["headers"] if last_response is not None else {}
+                        retry_after = decode_retry_seconds(headers.get("retry-after"))
                         raise PiError(
                             error_msg,
                             retryable=retryable,
                             category=category,
-                            retry_after=parse_message_retry_hint(error_msg),
+                            retry_after=retry_after if retry_after is not None else parse_message_retry_hint(error_msg),
+                            status=last_response["status"] if last_response is not None else None,
                         )
 
                 elif event_type in {"compaction_start", "compaction_end"}:

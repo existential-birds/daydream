@@ -6,12 +6,8 @@ from typing import Any
 
 import pytest
 
-from daydream.review_result import (
-    ReasonCode,
-    ReviewCoverage,
-    reason_for_exception,
-    validate_terminal_result,
-)
+from daydream.review_budget import ReasonCode, StopRecord, reason_for_exception
+from daydream.review_result import ReviewCoverage, validate_terminal_result
 from tests.harness.review_result import review_coverage
 
 
@@ -175,4 +171,13 @@ def test_exception_classification_uses_host_attributes() -> None:
     assert reason_for_exception(error) == ReasonCode.BACKEND_FAILURE
     error.reason_code = None
     error.category = "AUTH_CONFIG"  # type: ignore[attr-defined]
-    assert reason_for_exception(error) == ReasonCode.AUTHENTICATION_FAILURE
+    error.status = 401  # type: ignore[attr-defined]
+    # The one exception-to-code mapping also records the failure's content-free facts.
+    assert StopRecord.of(error, "pipeline").to_dict() == {
+        "code": "authentication_failure", "owner": "pipeline", "bound": None, "limit": None, "spent": None,
+        "attempts": 0, "progress": None, "error": {"type": "ProviderError", "failure_class": "AUTH_CONFIG",
+                                                   "category": "AUTH_CONFIG", "status": 401, "retryable": False}}
+    # A value outside its bounded vocabulary is not recorded, so no free text reaches the result.
+    error.category, error.status = "invalid api key sk-123", 99  # type: ignore[attr-defined]
+    facts = StopRecord.of(error, "pipeline").error
+    assert facts is not None and (facts["category"], facts["status"]) == (None, None)

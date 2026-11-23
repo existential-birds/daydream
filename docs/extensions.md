@@ -76,7 +76,7 @@ existing issues before creation.
 
 ### Repair jobs (`test` step)
 
-Consume all three `run_agent` return values; abort reasons outrank model claims.
+Consume all three `run_agent` return values; a host [stop](runtime.md#budget-ledger) outranks model claims.
 Only budget-interrupted turns may continue, and only completed jobs authorize
 green results/commits. Preserve consumed bounds, prior execution evidence,
 authorized-tree checkpoints captured before restoration, and exclusive job
@@ -191,7 +191,7 @@ real `diff_path` / adjacent `hunk-index.json` semantics retain their contracts.
 
 Register one synchronous `(name, tool_input, *, phase) -> ToolDecision` callable.
 Vetoes need nonblank reasons and close only the current invocation, retain its
-partial trajectory, and return `tool_vetoed:<name>`. Exceptions are extension
+partial trajectory, and return a stop with code `policy_veto`. Exceptions are extension
 failures, not retryable backend failures. Supervision observes `ToolStartEvent`;
 backend dispatch timing remains host-owned. Extension tool supervision conflicts
 with built-in `tool_supervisor = "rules"`; Claude's always-on guards still apply.

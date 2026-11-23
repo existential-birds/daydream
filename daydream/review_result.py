@@ -9,16 +9,15 @@ import copy
 import json
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field as dataclass_field
-from enum import StrEnum
 from typing import Any
 
 import jsonschema
 
 from daydream.json_utils import validate_json_schema
 from daydream.output_schema import strict_object
-from daydream.redaction import redact_structured_text, redact_text
+from daydream.redaction import redact_structured_text
 from daydream.repository_paths import REPOSITORY_FILE_PATH_MAX_LENGTH
-from daydream.retry_policy import FailureClass, classify_failure
+from daydream.review_budget import STOP_SCHEMA, ReasonCode
 from daydream.review_source_refs import SOURCE_REFS_MAX_BYTES, SOURCE_REFS_SCHEMA, source_revision
 from daydream.run_context import current_run_context
 
@@ -48,62 +47,6 @@ def deliver_finalized_review(result: dict[str, Any], items: list[dict[str, Any]]
         validate_terminal_result(result)
         handler(FinalizedReview(copy.deepcopy(result), copy.deepcopy(items), copy.deepcopy(usage or {}),
                                 copy.deepcopy(summary or {})))
-
-
-class ReasonCode(StrEnum):
-    """Bounded public reasons assigned at trusted host boundaries."""
-
-    BACKEND_FAILURE = 'backend_failure'
-    AUTHENTICATION_FAILURE = 'authentication_failure'
-    MALFORMED_OUTPUT = 'malformed_output'
-    MISSING_OUTPUT = 'missing_output'
-    MALFORMED_ARTIFACT = 'malformed_artifact'
-    MISSING_ARTIFACT = 'missing_artifact'
-    EVIDENCE_INCOMPLETE = 'evidence_incomplete'
-    HOST_WALL_BUDGET_EXHAUSTION = 'host_wall_budget_exhaustion'
-    HOST_TOOL_BUDGET_EXHAUSTION = 'host_tool_budget_exhaustion'
-    HOST_PIPELINE_BUDGET_EXHAUSTION = 'host_pipeline_budget_exhaustion'
-    SYNTHESIS_FAILURE = 'synthesis_failure'
-    INTERRUPTION = 'interruption'
-    UNEXPECTED_ANALYSIS_FAILURE = 'unexpected_analysis_failure'
-    COVERAGE_UNKNOWN = 'coverage_unknown'
-    POLICY_VETO = 'policy_veto'
-    DIRTY_SNAPSHOT = 'dirty_snapshot'
-
-
-def reason_for_exception(exc: BaseException) -> ReasonCode:
-    """Classify trusted exception attributes without guessing auth from prose."""
-    declared = getattr(exc, 'reason_code', None)
-    if isinstance(declared, str):
-        try:
-            return ReasonCode(declared)
-        except ValueError:
-            pass
-    return {
-        FailureClass.AUTH_CONFIG: ReasonCode.AUTHENTICATION_FAILURE,
-        FailureClass.SCHEMA: ReasonCode.MALFORMED_OUTPUT,
-        FailureClass.TOOL_POLICY: ReasonCode.POLICY_VETO,
-    }.get(classify_failure(exc).failure_class, ReasonCode.BACKEND_FAILURE)
-
-
-#: The host exhaustion reasons :func:`reason_for_budget` assigns; any other reason is not a budget stop.
-BUDGET_REASON_CODES = frozenset({
-    ReasonCode.HOST_WALL_BUDGET_EXHAUSTION,
-    ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION,
-    ReasonCode.HOST_PIPELINE_BUDGET_EXHAUSTION,
-})
-
-
-def reason_for_budget(reason: str) -> ReasonCode:
-    """Classify the canonical host stop vocabulary at its trusted boundary."""
-    if reason.startswith('tool_vetoed'):
-        return ReasonCode.POLICY_VETO
-    return {
-        'evidence_incomplete': ReasonCode.EVIDENCE_INCOMPLETE,
-        'wall_budget_exceeded': ReasonCode.HOST_WALL_BUDGET_EXHAUSTION,
-        'tool_call_budget_exceeded': ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION,
-        'pipeline_budget_exceeded': ReasonCode.HOST_PIPELINE_BUDGET_EXHAUSTION,
-    }[reason]
 
 
 _TEXT = {'type': 'string', 'minLength': 1, 'maxLength': 512}
@@ -153,17 +96,14 @@ TERMINAL_RESULT_SCHEMA: dict[str, Any] = strict_object({
         **{key: {'type': 'array', 'uniqueItems': True, 'items': _TEXT}
            for key in ('completed_stacks', 'failed_stacks', 'uncovered_stacks')},
         'projection_valid': {'type': 'boolean'},
+        # The stop that made the pipeline fail: the first in execution order, never a consequence.
+        'cause': {'anyOf': [{'type': 'null'}, STOP_SCHEMA]},
 })
 
 
 _COVERAGE_FIELDS = ('schema_version', 'run_id', 'analyzed_revision', 'planned_scopes',
                     'required_phases', 'stack_outcomes', 'phase_outcomes')
-_COVERAGE_SCHEMA = strict_object({
-    **{key: TERMINAL_RESULT_SCHEMA['properties'][key] for key in _COVERAGE_FIELDS},
-    'diagnostics': strict_object({kind: {'type': 'object', 'maxProperties': 10000,
-        'additionalProperties': {'type': 'string', 'minLength': 1, 'maxLength': 1024}}
-        for kind in ('scopes', 'phases')}),
-})
+_COVERAGE_SCHEMA = strict_object({key: TERMINAL_RESULT_SCHEMA['properties'][key] for key in _COVERAGE_FIELDS})
 
 
 def _revision_version(revision: Mapping[str, Any]) -> int | None:
@@ -366,6 +306,9 @@ def validate_terminal_result(data: Any, *, expected_head_sha: str | None = None)
     state, reasons = _derive(data)
     if data['analysis_state'] != state or data['reason_codes'] != reasons:
         raise ValueError('aggregate state or reasons disagree with coverage evidence')
+    cause = data['cause']
+    if cause is not None and (data['pipeline_state'] == 'completed' or cause['code'] not in reasons):
+        raise ValueError('a cause requires a failed pipeline and one of its reasons')
     for field, identity in [('planned_scopes', 'scope_id'), ('stack_outcomes', 'scope_id'),
                             ('phase_outcomes', 'phase')]:
         if [o[identity] for o in data[field]] != sorted(o[identity] for o in data[field]):
@@ -393,7 +336,6 @@ class ReviewCoverage:
             phase: {'phase': phase, 'status': 'uncovered',
                     'reason_codes': [ReasonCode.COVERAGE_UNKNOWN.value], 'noop': False, 'usable_evidence': False}
             for phase in self.required_phases}
-        self.diagnostics: dict[str, dict[str, str]] = {"scopes": {}, "phases": {}}
         self._terminal: dict[str, Any] | None = None
         self._frozen_evidence: dict[str, Any] | None = None
         # Reserve empty fields up front so a later rejected scope can always
@@ -413,7 +355,7 @@ class ReviewCoverage:
             raise ValueError('review coverage is frozen')
 
     def _record(self, outcomes: dict[str, dict[str, Any]], key: str, status: str,
-                reasons: Iterable[str], diagnostic: str | None, **fields: Any) -> None:
+                reasons: Iterable[str], **fields: Any) -> None:
         self._mutable()
         if key not in outcomes:
             raise ValueError(f'unknown planned scope or required phase: {key}')
@@ -422,12 +364,6 @@ class ReviewCoverage:
         phase = outcomes is self.phases
         validate_json_schema(outcome, _PHASE_SCHEMA if phase else _STACK_SCHEMA)
         _validate_outcome(outcome, phase=phase)
-        if diagnostic is not None and not isinstance(diagnostic, str):
-            raise TypeError('review diagnostic must be a string or None')
-        diagnostics = self.diagnostics['phases' if phase else 'scopes']
-        diagnostics.pop(key, None)
-        if status != 'complete' and diagnostic:
-            diagnostics[key] = redact_text(diagnostic)[:1024]
         outcomes[key] = outcome
 
     def check_target_decisions_budget(self, scope_id: str, decisions: list[dict[str, Any]]) -> int:
@@ -465,20 +401,20 @@ class ReviewCoverage:
         self._target_decision_bytes[scope_id] = self.check_target_decisions_budget(scope_id, decisions)
 
     def record_scope(self, scope_id: str, status: str, *, reasons: Iterable[str] = (),
-                     partial_evidence: bool = False, diagnostic: str | None = None,
+                     partial_evidence: bool = False,
                      target_decisions: list[dict[str, Any]] | None = None) -> None:
         fields: dict[str, Any] = {'partial_evidence': partial_evidence}
         if target_decisions is not None:
             validate_target_decisions(target_decisions, analyzed_revision=self.revision.to_dict())
             fields['target_decisions'] = preserved_target_decisions(target_decisions)
             self.check_target_decisions_budget(scope_id, fields['target_decisions'])
-        self._record(self.scopes, scope_id, status, reasons, diagnostic, **fields)
+        self._record(self.scopes, scope_id, status, reasons, **fields)
         if 'target_decisions' in fields:
             self.admit_target_decisions(scope_id, fields['target_decisions'])
 
     def record_phase(self, phase: str, status: str, *, reasons: Iterable[str] = (), noop: bool = False,
-                     usable_evidence: bool = False, diagnostic: str | None = None) -> None:
-        self._record(self.phases, phase, status, reasons, diagnostic, noop=noop, usable_evidence=usable_evidence)
+                     usable_evidence: bool = False) -> None:
+        self._record(self.phases, phase, status, reasons, noop=noop, usable_evidence=usable_evidence)
 
     def to_dict(self) -> dict[str, Any]:
         """Persist checked evidence, retaining the exact snapshot after finalization."""
@@ -491,8 +427,7 @@ class ReviewCoverage:
             'planned_scopes': sorted((s.to_dict() for s in self.planned_scopes), key=lambda s: s['scope_id']),
             'required_phases': sorted(self.required_phases),
             'stack_outcomes': [self.scopes[key] for key in sorted(self.scopes)],
-            'phase_outcomes': [self.phases[key] for key in sorted(self.phases)],
-            'diagnostics': self.diagnostics})
+            'phase_outcomes': [self.phases[key] for key in sorted(self.phases)]})
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ReviewCoverage:
@@ -508,34 +443,29 @@ class ReviewCoverage:
                 data['required_phases'])
         c.scopes = {s['scope_id']: copy.deepcopy(s) for s in data['stack_outcomes']}
         c.phases = {p['phase']: copy.deepcopy(p) for p in data['phase_outcomes']}
-        c.diagnostics = copy.deepcopy(data['diagnostics'])
-        for kind, outcomes in [('scopes', c.scopes), ('phases', c.phases)]:
-            for key, diagnostic in c.diagnostics[kind].items():
-                if (key not in outcomes or outcomes[key]['status'] == 'complete'
-                        or redact_text(diagnostic) != diagnostic):
-                    raise ValueError('diagnostics require unfinished known outcomes and redacted text')
         # Validate the supplied inventory order too, before canonical serialization.
-        validate_terminal_result(c._snapshot(dict(data), 'completed', True))
+        validate_terminal_result(c._snapshot(dict(data), 'completed', True, None))
         for scope_id, outcome in c.scopes.items():
             if 'target_decisions' in outcome:
                 outcome['target_decisions'] = preserved_target_decisions(outcome['target_decisions'])
                 c.admit_target_decisions(scope_id, outcome['target_decisions'])
         return c
 
-    def _snapshot(self, data: dict[str, Any], pipeline_state: str, projection_valid: bool) -> dict[str, Any]:
-        data.pop('diagnostics', None)
-        result = {**data, 'pipeline_state': pipeline_state, 'projection_valid': projection_valid,
+    def _snapshot(self, data: dict[str, Any], pipeline_state: str, projection_valid: bool,
+                  cause: dict[str, Any] | None) -> dict[str, Any]:
+        result = {**data, 'pipeline_state': pipeline_state, 'projection_valid': projection_valid, 'cause': cause,
                   'completed_stacks': sorted(k for k, o in self.scopes.items() if o['status'] == 'complete'),
                   'failed_stacks': sorted(k for k, o in self.scopes.items() if o['status'] == 'failed'),
                   'uncovered_stacks': sorted(k for k, o in self.scopes.items() if o['status'] != 'complete')}
         result['analysis_state'], result['reason_codes'] = _derive(result)
         return result
 
-    def finalize(self, pipeline_state: str, *, projection_valid: bool = True) -> dict[str, Any]:
+    def finalize(self, pipeline_state: str, *, projection_valid: bool = True,
+                 cause: dict[str, Any] | None = None) -> dict[str, Any]:
         """Freeze exactly once after all scope writers join and projection is validated."""
         if self._terminal is not None:
             raise ValueError('review coverage is already frozen')
-        result = self._snapshot(self.to_dict(), pipeline_state, projection_valid)
+        result = self._snapshot(self.to_dict(), pipeline_state, projection_valid, cause)
         validate_terminal_result(result)
         self._frozen_evidence = self.to_dict()
         self._terminal = copy.deepcopy(result)

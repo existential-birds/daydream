@@ -15,8 +15,8 @@ from daydream.deep.evidence_reuse import (
     ReuseTarget,
 )
 from daydream.git_ops import GitError
-from daydream.phases.repair_outcome import RepairOutcome, repair_reason_code
-from daydream.review_result import ReasonCode
+from daydream.phases.repair_outcome import RepairOutcome
+from daydream.review_budget import ReasonCode, StopRecord
 from daydream.run_context import RunContext, bind_resolved_run_context
 from daydream.test_execution import (
     FactSource,
@@ -194,7 +194,7 @@ class RepairAttemptEvidence:
     execution_id: str
     run_id: str
     outcome: RepairOutcome
-    abort_reason: str | None
+    stop: StopRecord | None
     backend_name: str
     model: str
     execution_elapsed_s: float
@@ -214,8 +214,8 @@ class RepairAttemptEvidence:
 
     @property
     def reason_code(self) -> ReasonCode | None:
-        """The converged public stop reason for this turn, or ``None`` if it ended on its own."""
-        return repair_reason_code(self.abort_reason)
+        """The turn's stop code, or ``None`` if it ended on its own."""
+        return self.stop.code if self.stop is not None else None
 
     def payload(self) -> dict[str, Any]:
         """JSON-serializable form, naming the converged public reason for the stop.
@@ -228,8 +228,8 @@ class RepairAttemptEvidence:
             "execution_id": self.execution_id,
             "run_id": self.run_id,
             "outcome": self.outcome.value,
-            "reason_code": repair_reason_code(self.abort_reason),
-            "abort_reason": self.abort_reason,
+            "reason_code": self.reason_code,
+            "stop": self.stop.to_dict() if self.stop is not None else None,
             "backend_name": self.backend_name,
             "model": self.model,
             "execution_elapsed_s": self.execution_elapsed_s,

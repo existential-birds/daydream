@@ -49,6 +49,7 @@ from daydream.phases.repair_outcome import (
 from daydream.phases.testing import (
     _reject_test_healing_generated_file_edits,
 )
+from daydream.review_budget import ReasonCode, StopRecord
 from daydream.test_execution import TestExecutionIdentity, TestExecutionResult, resolve_test_recipe, run_test_command
 from daydream.trajectory import (
     DOCUMENT_SUFFIX,
@@ -523,7 +524,8 @@ async def test_failing_confinement_blocks_the_repair_and_records_the_failure(
 
 def test_host_interruption_outranks_model_claim_of_success() -> None:
     """A nonbudget stop maps to execution error even when the phase caller raises."""
-    assert classify_repair_outcome("backend_failure", "") is RepairOutcome.EXECUTION_ERROR
+    stop = StopRecord(ReasonCode.BACKEND_FAILURE, "test-repair")
+    assert classify_repair_outcome(stop, "") is RepairOutcome.EXECUTION_ERROR
 
 
 async def test_grouped_fix_delivers_scopes_verdicts_evidence_and_test_map_then_retains_both_patches(
@@ -756,8 +758,8 @@ async def test_fix_entrypoints_reject_invalid_finding_file_refs(
     from daydream.config import DEFAULT_WALL_BUDGET_S
     from daydream.phases import fix as fixing
 
-    async def wall_cut(*_a: Any, **_k: Any) -> str:
-        return "wall_budget_exceeded"
+    async def wall_cut(*_a: Any, **_k: Any) -> StopRecord:
+        return StopRecord(ReasonCode.HOST_WALL_BUDGET_EXHAUSTION, "fix")
 
     monkeypatch.setattr(fixing, "phase_fix", wall_cut)
     confined = [valid[0]]

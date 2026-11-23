@@ -14,7 +14,7 @@ import uuid
 from collections.abc import Callable, Iterable
 from contextlib import AsyncExitStack
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +46,7 @@ from daydream.committed_review_model import (
     LOOKUP_TOOL,
     REQUIRED_PHASES,
     RESULT_VERSIONS,
+    WORK_KINDS,
     CommittedReviewResult,
     assignment_schema,
     coverage_shards,
@@ -70,7 +71,6 @@ from daydream.host_tools import (
     _MAX_REJECTION_BYTES,
     HostTool,
     HostToolBinding,
-    HostToolCallBudgetExceeded,
     HostToolFatal,
     HostToolRejected,
     NativeCapacityRequirement,
@@ -81,20 +81,12 @@ from daydream.immutable_review import HISTORICAL_CONTEXT_MAX_BYTES, ImmutableRev
 from daydream.json_utils import canonical_json, validate_json_schema
 from daydream.observability.config import resolve_observability_config
 from daydream.observability.runtime import record_local_trace, trace_run
-from daydream.observability.spans import record_budget_stop
+from daydream.observability.spans import record_stop
 from daydream.prompt_budget import SanctionedInputUnavailable, truncate_utf8_to_budget
 from daydream.redaction import redact_text
-from daydream.review_budget import BudgetDimension, BudgetLedger, BudgetStop, review_scale_for_diff
+from daydream.review_budget import BudgetLedger, ReasonCode, StopRecord, review_scale_for_diff
 from daydream.review_profile import ResolvedProfile, build_default_profile, resolve_from_runconfig
-from daydream.review_result import (
-    AnalyzedRevision,
-    PlannedScope,
-    ReasonCode,
-    ReviewCoverage,
-    preserved_target_decisions,
-    reason_for_budget,
-    reason_for_exception,
-)
+from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage, preserved_target_decisions
 from daydream.review_source_refs import SOURCE_SELECTORS_SCHEMA, SourceSelectorRejected, _SubmissionSources
 from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
 from daydream.run_config import FrozenAuthorDescription, RunConfig, resolved_backend_name, retained_runs
@@ -854,65 +846,76 @@ class Review:
         self._sealed = True
         coverage = self._coverage
         records = [work.record() for work in self.work.values()]
-        failures: dict[str, set[str]] = {}
-        global_reasons: set[str] = set()
-        for entry in self.execution:
-            if entry["work_id"] is None:
-                global_reasons.update([entry["reason"]] if entry["reason"] is not None else [])
-            elif entry["reason"] is not None:
-                failures.setdefault(entry["work_id"], set()).add(entry["reason"])
+        # Scopes and phases name the stops that left them unfinished (indices into execution);
+        # evidence_incomplete (-1) marks only unfinished work with no stop behind it.
+        incomplete = -1
+        failures: dict[str, set[int]] = {}
+        refused: dict[str, set[int]] = {}
+        global_stops: set[int] = set()
+        for index, entry in enumerate(self.execution):
+            if entry["stop"] is None:
+                continue
+            if entry["work_id"] is not None:
+                failures.setdefault(entry["work_id"], set()).add(index)
+            elif entry["assignment"] in WORK_KINDS:
+                refused.setdefault(entry["assignment"], set()).add(index)
+            else:
+                global_stops.add(index)
         for record in records:
             if record["state"] not in {"accepted", "superseded"} and record["work_id"] not in failures:
                 # Planned, abandoned or closed-without-acceptance work is unfinished, never success.
-                failures[record["work_id"]] = {ReasonCode.EVIDENCE_INCOMPLETE.value}
+                failures[record["work_id"]] = {incomplete}
         current = [record for record in records if record["state"] != "superseded"]
+        behind: set[int] = set()
 
-        kinds = {entry["assignment"] for entry in self.execution if entry["work_id"] is not None}
-        if self.inputs.assignment_batches and not kinds & INVESTIGATION_KINDS:
-            global_reasons.add(ReasonCode.EVIDENCE_INCOMPLETE.value)
+        def outcome(writer: Callable[..., None], key: str, stops: set[int], **fields: Any) -> None:
+            behind.update(stops)
+            codes = {ReasonCode.EVIDENCE_INCOMPLETE.value if index == incomplete
+                     else self.execution[index]["stop"]["code"] for index in stops}
+            writer(key, "incomplete" if stops else "complete", reasons=sorted(codes), **fields)
+
+        def owned(kinds: Iterable[str], targets: set[str] | None = None) -> set[int]:
+            return set(global_stops).union(*(
+                failures.get(r["work_id"], set()) for r in current
+                if r["kind"] in kinds and (targets is None or targets & set(r["targets"]))))
+
+        executed = {entry["assignment"] for entry in self.execution if entry["work_id"] is not None}
+        if self.inputs.assignment_batches and not executed & INVESTIGATION_KINDS and not global_stops:
+            global_stops.add(incomplete)
         if self.assignments:
-            scopes_complete = True
+            refused_investigation = set().union(*(refused.get(kind, set()) for kind in INVESTIGATION_KINDS))
+            upstream: set[int] = set()
             for index, shard in enumerate(self._shards):
                 identifiers = {part["target_id"] for part in shard}
-                contributing = [record for record in current if record["kind"] in INVESTIGATION_KINDS
-                                and identifiers & set(record["targets"])]
-                reasons = set(global_reasons).union(*(failures.get(r["work_id"], set()) for r in contributing))
+                stops = owned(INVESTIGATION_KINDS, identifiers)
                 if not all(self._decisions.get(t, {}).get("status") == "reviewed" for t in identifiers):
-                    reasons.add(ReasonCode.EVIDENCE_INCOMPLETE.value)
-                scopes_complete &= not reasons
-                coverage.record_scope(
-                    shard_scope_id(index), "incomplete" if reasons else "complete", reasons=sorted(reasons),
-                    partial_evidence=bool(reasons)
-                    and bool((identifiers - self._host_decided) & self._decisions.keys()),
-                    target_decisions=self._shard_decisions(index, self._decisions),
-                )
+                    stops |= refused_investigation or (set() if stops else {incomplete})
+                upstream |= stops
+                outcome(coverage.record_scope, shard_scope_id(index), stops,
+                       partial_evidence=bool(stops)
+                       and bool((identifiers - self._host_decided) & self._decisions.keys()),
+                       target_decisions=self._shard_decisions(index, self._decisions))
             if self.decomposed:
                 cross = [r for r in current if r["kind"] == "cross_assignment"]
-                cross_reasons = set(global_reasons).union(*(failures.get(r["work_id"], set()) for r in cross))
-                if not cross:
-                    cross_reasons.add(ReasonCode.EVIDENCE_INCOMPLETE.value)
-                coverage.record_phase("cross_assignment", "incomplete" if cross_reasons else "complete",
-                                      reasons=sorted(cross_reasons),
-                                      usable_evidence=any(r["state"] == "accepted" for r in cross))
+                stops = owned({"cross_assignment"}) or (set() if cross else {incomplete})
+                upstream |= stops
+                outcome(coverage.record_phase, "cross_assignment", stops,
+                       usable_evidence=any(r["state"] == "accepted" for r in cross))
             else:
                 # A single broad assignment has no assignment boundary to investigate across.
-                cross_reasons = set()
                 coverage.record_phase("cross_assignment", "complete", noop=True)
-            challenges = [r for r in current if r["kind"] == "challenge"]
-            challenge_reasons = set(global_reasons).union(*(failures.get(r["work_id"], set()) for r in challenges))
-            if self._claims and "challenge" not in kinds or self.pending() or not scopes_complete or cross_reasons:
-                challenge_reasons.add(ReasonCode.EVIDENCE_INCOMPLETE.value)
-            coverage.record_phase(
-                "challenge", "incomplete" if challenge_reasons else "complete", reasons=sorted(challenge_reasons),
-                usable_evidence=bool(self._claims),
-            )
+            stops = owned({"challenge"}) | refused.get("challenge", set())
+            if self._claims and "challenge" not in executed or self.pending() or upstream:
+                stops |= upstream or (set() if stops else {incomplete})
+            outcome(coverage.record_phase, "challenge", stops, usable_evidence=bool(self._claims))
         else:
             coverage.record_phase("no_diff", "complete", noop=True)
-        attempted = {e["reason"] for e in self.execution if e["reason"] is not None}
-        unfinished = global_reasons.union(*(failures.get(r["work_id"], set()) for r in current))
-        pipeline = ("cancelled" if ReasonCode.INTERRUPTION.value in attempted
-                    else "failed" if unfinished else "completed")
-        terminal = coverage.finalize(pipeline, projection_valid=projection_valid)
+        interrupted = any(entry["stop"] is not None and entry["stop"]["code"] == ReasonCode.INTERRUPTION.value
+                          for entry in self.execution)
+        pipeline = "cancelled" if interrupted else "failed" if behind | global_stops else "completed"
+        first = min(behind - {incomplete}, default=None)
+        cause = self.execution[first]["stop"] if first is not None else None
+        terminal = coverage.finalize(pipeline, projection_valid=projection_valid, cause=cause)
         result = {
             "schema_version": RESULT_VERSIONS["committed"],
             "run_id": self.run_id,
@@ -1135,12 +1138,12 @@ class ReviewProgram:
                 try:
                     await backend.cancel()
                 except Exception:
-                    self.review.execution.append(_host_entry("cleanup", ReasonCode.BACKEND_FAILURE.value,
-                                                             cleanup_complete=False))
+                    self.review.execution.append(_host_entry(
+                        "cleanup", StopRecord(ReasonCode.BACKEND_FAILURE, "cleanup"), cleanup_complete=False))
 
-    def fail(self, assignment: str, reason: ReasonCode) -> None:
+    def fail(self, stop: StopRecord) -> None:
         """Retain a run-wide host failure; every scope it could affect stays unfinished."""
-        self.review.execution.append(_host_entry(assignment, reason.value))
+        self.review.execution.append(_host_entry(stop.owner, stop))
 
     def seal(self, *, projection_valid: bool = True) -> dict[str, Any]:
         """Freeze coverage once; a reviewed source that changed makes every scope unfinished."""
@@ -1150,7 +1153,7 @@ class ReviewProgram:
             try:
                 check()
             except (git_ops.GitError, OSError):
-                self.fail("source_integrity", ReasonCode.EVIDENCE_INCOMPLETE)
+                self.fail(StopRecord(ReasonCode.EVIDENCE_INCOMPLETE, "source_integrity"))
         return self.review.seal(self.settings, projection_valid=projection_valid)
 
 
@@ -1481,22 +1484,11 @@ def _remove_capture(capture: CapturedSource) -> None:
         print_warning(agent.console, 'Captured source cleanup skipped: storage ownership changed; source retained.')
 
 
-def _host_entry(assignment: str, reason: str, *, cleanup_complete: bool = True) -> dict[str, Any]:
-    """Run-wide host evidence that is not owned by any work item."""
+def _host_entry(assignment: str, stop: StopRecord, *, cleanup_complete: bool = True) -> dict[str, Any]:
+    """Host evidence that no dispatched work owns: a run-wide failure or a refused dispatch of ``assignment``."""
     return {"assignment": assignment, "work_id": None, "accepted": False, "settled": cleanup_complete,
-            "cleanup_complete": cleanup_complete, "reason": reason,
+            "cleanup_complete": cleanup_complete, "stop": stop.to_dict(),
             "allocation": None, "observed_starts": None, "overshoot": None}
-
-
-_SCHEDULE_STOP_REASONS = {"time": ReasonCode.HOST_WALL_BUDGET_EXHAUSTION,
-                          "tool_calls": ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION}
-
-
-def _record_schedule_stop(recorder: Any, phase: DaydreamPhase, stop: BudgetStop) -> None:
-    """A refused dispatch has no execution entry: trace it and retain it in local evidence."""
-    record_budget_stop(stop)
-    if recorder is not None:
-        recorder.emit_schedule_budget_stop(phase, reason=_SCHEDULE_STOP_REASONS[stop.dimension].value, **asdict(stop))
 
 
 def _split(total: int, count: int) -> list[int]:
@@ -1572,12 +1564,12 @@ class _Schedule:
         elif self.decompose:
             await self._round(review.plan("discovery", self.batches), recorder, self.local, self.local_reserves)
             while groups := self._follow_ups():
-                # A refused follow-up records the local ledger's stop on the trace.
-                dimension: BudgetDimension | None = (
-                    "time" if self.local.expired() else
-                    "tool_calls" if _remaining(self.local) < _MIN_WORK_CALLS * len(groups) else None)
-                if dimension is not None:
-                    _record_schedule_stop(recorder, DaydreamPhase.REVIEW, self.local.stop(dimension))
+                # A refused follow-up is the local ledger's stop.
+                code = (ReasonCode.HOST_WALL_BUDGET_EXHAUSTION if self.local.expired() else
+                        ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION
+                        if _remaining(self.local) < _MIN_WORK_CALLS * len(groups) else None)
+                if code is not None:
+                    self._refuse("follow_up", self.local.stop(code))
                     break
                 await self._round(review.plan("follow_up", groups), recorder, self.local, self.local_reserves)
             # Required regardless of local results; it inherits every still-unfinished target.
@@ -1588,12 +1580,12 @@ class _Schedule:
         retried = False
         while pending := {(claim["uid"], claim["revision"]) for claim in review.pending()}:
             if (exhausted := _remaining(self.ledger) < 1) or self.ledger.expired():
-                _record_schedule_stop(recorder, DaydreamPhase.CHALLENGE,
-                                      self.ledger.stop("tool_calls" if exhausted else "time"))
+                self._refuse("challenge", self.ledger.stop(ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION if exhausted
+                                                           else ReasonCode.HOST_WALL_BUDGET_EXHAUSTION))
                 break
             fresh = not pending <= attempted
             progressed = any(review.work[work_id].progress > 0 for work_id in last)
-            failed = any(entry["reason"] is not None for entry in review.execution if entry["work_id"] in last)
+            failed = any(entry["stop"] is not None for entry in review.execution if entry["work_id"] in last)
             # Re-dispatch only for new revisions, after progress, or once after a failure.
             if not (fresh or progressed or failed and not retried):
                 break
@@ -1605,6 +1597,11 @@ class _Schedule:
                 await self._dispatch(last[0], self.ledger, {"finalization_s": _FINALIZATION_S})
             else:
                 await self._round(last, recorder, self.ledger, {"finalization_s": _FINALIZATION_S})
+
+    def _refuse(self, assignment: str, stop: StopRecord) -> None:
+        """A dispatch the schedule refuses: its ledger's stop is retained as that work's execution entry."""
+        record_stop(stop)
+        self.review.execution.append(_host_entry(assignment, stop))
 
     def _follow_ups(self) -> list[tuple[str, ...]]:
         """Closed local work keeps unfinished targets; follow up only after admitted progress."""
@@ -1683,7 +1680,7 @@ class _Schedule:
         prompt = (f"{token} Begin the committed review {kind} assignment. Navigate with review_source, admit "
                   "batches with review_admit and finish with structured_output."
                   f"\n{token} Committed review assignment: {_instruction_json(assignment)}\n")
-        reason: str | None = None
+        stop: StopRecord | None = None
         settled = False
         try:
             await anyio.to_thread.run_sync(review.check)
@@ -1696,7 +1693,7 @@ class _Schedule:
             phase = DaydreamPhase.CHALLENGE if kind == "challenge" else DaydreamPhase.REVIEW
             # Each work item is its own phase interval, so its invocation's time is attributed to its phase.
             async with phase_scope(phase, stage=f"committed-{kind}"):
-                _, _, stopped = await agent.run_agent(
+                _, _, stop = await agent.run_agent(
                     backend,
                     repo,
                     prompt,
@@ -1710,34 +1707,28 @@ class _Schedule:
                     review_stage_scope_id=work_id,
                     host_tools=binding,
                 )
-            settled = stopped is None and binding.native_settled
-            if stopped is not None:
-                try:
-                    reason = reason_for_budget(stopped).value
-                except KeyError:
-                    reason = ReasonCode.EVIDENCE_INCOMPLETE.value
-            elif not binding.accepted:
-                reason = ReasonCode.MISSING_OUTPUT.value
+            settled = stop is None and binding.native_settled
+            if stop is None and not binding.accepted:
+                stop = budget.stop(ReasonCode.MISSING_OUTPUT)
         except asyncio.CancelledError:
-            reason = ReasonCode.INTERRUPTION.value
-            raise
-        except UnsupportedHostedPolicy:
-            reason = ReasonCode.BACKEND_FAILURE.value
+            stop = budget.stop(ReasonCode.INTERRUPTION)
             raise
         except Exception as exc:
-            exhausted = isinstance(binding.fatal_error, HostToolCallBudgetExceeded)
-            reason = (ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION if exhausted else reason_for_exception(exc)).value
+            # The invocation recorded the stop of an exception it raised; anything earlier is a host failure.
+            stop = budget.stopped or budget.fail(exc)
+            if isinstance(exc, UnsupportedHostedPolicy):
+                raise
         finally:
             review.close(work_id)
+            if stop is None and (not settled or not binding.cleanup_complete):
+                stop = budget.stop(ReasonCode.BACKEND_FAILURE)
             entry = {
                 "assignment": kind,
                 "work_id": work_id,
                 "accepted": binding.accepted,
                 "settled": settled,
                 "cleanup_complete": binding.cleanup_complete,
-                "reason": reason
-                if reason is not None
-                else (ReasonCode.BACKEND_FAILURE.value if not settled or not binding.cleanup_complete else None),
+                "stop": stop.to_dict() if stop is not None else None,
                 "allocation": budget.limit,
                 "observed_starts": budget.observed,
                 # Denied and over-limit starts are observed overshoot, never charged to later reserves;

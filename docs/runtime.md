@@ -188,7 +188,7 @@ the rejection and served after it, so a replaced batch is never kept and a rejec
 `review_admit` batch never is. Two later submissions do not replace it, because the
 binding refuses them before it counts a start: one made after the deadline, and one that
 repeats a call id. No receipt is produced and the sealed result does not mark such
-items: the work stays not accepted (`closed`, with its execution reason) and the kept
+items: the work stays not accepted (`closed`, with its execution stop) and the kept
 items count as its admitted progress, which a follow-up may complete. An unexpected
 failure during that installation is recorded on the binding as `callback_failed`, as a
 live callback's is, and the work's execution entry is still written.
@@ -294,7 +294,7 @@ recorded is `null`, never `0`; without a recorder every evidence-derived value i
 | `counts.targets` | `planned` targets, and `reviewed` / `not_reviewed` target decisions |
 | `counts.claims` | Claims `proposed`, then by disposition: `confirmed`, `rejected` (by the challenge) and `unresolved` |
 | `counts.findings` | Sealed `confirmed` findings and the items `delivered`; an extension step that rewrites the `deep` flow's items can make them differ, and a run that is cancelled or raises (such as an unsupported hosted policy) delivers none |
-| `budget_stops` | Count by host exhaustion reason code of sealed execution stops plus the schedule's [retained refusals](observability.md#budget-stops) |
+| `budget_stops` | Count by host exhaustion code of the sealed execution stops, refused dispatches included |
 | `retries` | `total` retried attempts and their count `by_reason`, the recorded [`FailureClass`](../daydream/retry_policy.py) that admitted each |
 | `phases.review`, `phases.arbiter` | The `[phases.review]` (discovery, follow-up, cross-assignment) and `[phases.arbiter]` (challenge) work: config-resolved `backend`, `model` and `reasoning_effort`; `prompt_tokens`, `cached_tokens`, `completion_tokens` and `cost_usd`; and `wall_seconds`, the union of the phase's intervals |
 
@@ -468,6 +468,17 @@ allowance: `reviewer_tool_call_budget`, or `reviewer_investigation_budget_s` wit
 `review_wall_budget_s`, which caps the review window. A second sentence says that the
 review multiplies the first two by the `scale` recorded in `settings.limits` and, for
 spent time, that `review_wall_budget_s` grows with the diff in the default profile only.
+
+Each execution entry carries its dispatch's `stop`, the [stop record](#budget-ledger), or
+`null`. A dispatch the schedule refuses is an entry of its kind with no `work_id`; a run-wide
+host failure (`pipeline`, `cleanup`, `source_integrity`) is an entry owned by that name. A
+scope or phase left unfinished names the stops behind it: those of the current work
+responsible for it, of a refused dispatch of that work and of run-wide failures, and for
+challenge those that left investigation unfinished. `evidence_incomplete` marks only
+unfinished work with no stop behind it. The terminal result's `cause` is the first of those
+stops in execution order: `null` when the pipeline completed or no stop is behind its
+failure. `reason_codes` remains the sorted projection. Result versions 14 to 17 carry
+stops; earlier versions are refused, not converted.
 They appear once in each place that reports the outcome: under "Unfinished work" in
 `run_committed_review`'s report, and on the `deep` flow in the console outcome line,
 the report's "Review outcome" and the pull request notice.
@@ -857,14 +868,30 @@ are refunded with the rest of the attempt. The retry's first message ends with a
 of what earlier attempts of that work admitted: its undecided targets, its claims and its
 verdicts, bounded as its assignment's context is.
 
-Every budget stop records its owner, dimension (`time` or `tool_calls`), limit, amount
-spent, amount remaining at dispatch and calls reserved for later work, as durations and
-counts only, and appears on the trace once
-([observability](observability.md#budget-stops)), including a finalization turn's stop
-and a dispatch refused before any agent runs. A read cut short by the ledger deadline and a binding's
-deadline or allocation failure are budget stops (`wall_budget_exceeded`,
-`tool_call_budget_exceeded`), not `StreamStalledError`; idle, setup, drain and cleanup
-timeouts remain liveness checks.
+A stop is described once, where it is observed, and carried unchanged to the sealed result
+as a [`StopRecord`](../daydream/review_budget.py). Its reason code, span status
+([observability](observability.md#stops)) and every rendered text are projections of it.
+Only the ledger (an expired deadline, a spent allocation or a refused dispatch), the retry
+ladder (a vetoed tool, a failed or unsubmitted attempt) and `reason_for_exception`, the one
+exception-to-code mapping, build one. Its facts are content-free and observed:
+
+- `code`: the `ReasonCode`, the one public cause vocabulary.
+- `owner`: the work that stopped. `bound`: the ledger whose limit applied; a child that
+  inherits its parent's deadline or remaining calls names that parent. `limit` and `spent`
+  are that ledger's allowance and use, in seconds or tool calls.
+- `attempts`: attempts dispatched.
+- `error`: the last backend failure's exception type, `FailureClass`, backend category,
+  HTTP status and retry decision, kept when a deadline then ended the call. A category or
+  status outside its bounded form is not recorded.
+- `progress`: the last attempt's seconds since native progress, active tool count and
+  whether a generation was open, where the backend observes them (Pi).
+
+`run_agent` returns the record, or `None` for a turn that ended on its own; an invocation
+that raises leaves it on the ledger's `stopped`. A read cut short by the ledger deadline and
+a binding's deadline or allocation failure before possible acceptance are ledger stops
+(`host_wall_budget_exhaustion`, `host_tool_budget_exhaustion`), not `StreamStalledError`;
+idle, setup, drain and cleanup timeouts remain liveness checks. A retryable failure that
+finds the deadline spent is a deadline stop that keeps the failure, on any attempt.
 
 ## Pi host-tool lifetime and limits
 

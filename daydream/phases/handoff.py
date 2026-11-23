@@ -438,7 +438,7 @@ def _build_minimal_handoff(
 def _render_repair_record_section(repairs: tuple[RepairAttemptEvidence, ...]) -> str:
     """Render the host's repair records as facts and names, never as model prose.
 
-    Each entry names the outcome, the host abort reason, the git-observed paths
+    Each entry names the outcome, the host stop code, the git-observed paths
     the turn actually changed, and the bounded redacted excerpt of the partial
     diagnosis. An empty record renders nothing at all.
     """
@@ -446,7 +446,7 @@ def _render_repair_record_section(repairs: tuple[RepairAttemptEvidence, ...]) ->
         return ""
     lines = ["", "## Test repair attempts (host record)", ""]
     for index, repair in enumerate(repairs, start=1):
-        reason = repair.abort_reason or repair.reason_code
+        reason = repair.reason_code
         lines.extend([
             f"{index}. outcome: {repair.outcome.value}",
             f"   reason: {reason if reason is not None else '(none: the turn ended on its own)'}",

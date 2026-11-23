@@ -204,22 +204,17 @@ total. A retried attempt's invocation summary records `retry_failure_class`, the
 `FailureClass` that admitted the retry. The [review summary](runtime.md#committed-review-summary)
 reads them.
 
-## Budget stops
+## Stops
 
-Every [budget stop](runtime.md#budget-ledger) appears on the trace once, as
-`daydream.budget.owner`, `daydream.budget.dimension` (`time` or `tool_calls`),
-`daydream.budget.limit`, `daydream.budget.spent`, `daydream.budget.remaining_at_dispatch`
-and `daydream.budget.reserved`. The stop that ends an agent invocation is recorded as
-attributes on its agent span, including one that ends in an exception (a provider retry
-hint longer than the remaining deadline). Every other stop is a `daydream.budget.stop`
-event with the same attributes on the active span: a review-finalization turn's stop on
-its agent span, and a dispatch the host refuses before any agent runs on the enclosing
-step or run span. Values are counts or durations in seconds, never monotonic timestamps.
-A retry-ladder stop is a `daydream.retry.stop` event on its agent span carrying the evidence
-`agent_budget_stop` fields as `daydream.retry.*`, with or without a recorder.
-A committed-review dispatch the host schedule refuses is also retained in local evidence as a
-`schedule_budget_stop` phase event with the same facts and its public `budget_reason`:
-`host_wall_budget_exhaustion` for `time` and `host_tool_budget_exhaustion` for `tool_calls`.
+Every [stop record](runtime.md#budget-ledger) appears on the trace once as `daydream.stop.*`
+attributes, nested facts flattened one level (`daydream.stop.error.status`) and absent facts
+omitted. The stop that ends an agent invocation is recorded on its agent span, including one
+that ends in an exception; a review-finalization turn's stop and a dispatch the host refuses
+before any agent runs are `daydream.stop` events with the same attributes on the active span.
+A span a stop ended carries its code as status. Local evidence writes each invocation's
+record once, as a `stop` phase event, and a committed review's sealed execution entries
+carry the same records. Values are counts or durations in seconds, never monotonic
+timestamps.
 
 ## Codex lifecycle evidence
 

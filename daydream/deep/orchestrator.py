@@ -498,13 +498,13 @@ async def run_deep(
 
         # Finalization stays inside the recorder so frozen public/archive evidence agrees.
         from daydream.deep.review_terminal import finalize_review, refresh_review_report
-        from daydream.review_result import ReasonCode, reason_for_exception
+        from daydream.review_budget import ReasonCode, StopRecord
 
         if dirty_snapshot:
             # Diagram runs carry no coverage record, so the reject is reported
             # without a phase entry there; the gate itself is mode-independent.
             if coverage is not None:
-                finalize_review(ctx, "failed", reason=ReasonCode.DIRTY_SNAPSHOT)
+                finalize_review(ctx, "failed", stop=StopRecord(ReasonCode.DIRTY_SNAPSHOT, "pipeline"))
             print_error(console, "Findings Artifact", "Commit-bound export requires a clean analyzed checkout")
             return 1
         if no_diff and coverage is not None:
@@ -523,7 +523,7 @@ async def run_deep(
             if coverage is not None and not coverage.is_finalized:
                 try:
                     if isinstance(exc, Exception):
-                        finalize_review(ctx, "failed", reason=reason_for_exception(exc))
+                        finalize_review(ctx, "failed", stop=StopRecord.of(exc, "pipeline"))
                     else:
                         # A cancelled review seals what it admitted before the cancellation escapes;
                         # the reviewer holds admissions in memory until then.

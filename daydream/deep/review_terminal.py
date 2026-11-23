@@ -22,8 +22,8 @@ from daydream.phases.schemas import MERGED_ITEMS_SCHEMA
 from daydream.pr_review import PRInfo, parsed_issues_from_items, resolve_review_renderers
 from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
 from daydream.repository_paths import git_observed_path_is_confined
-from daydream.review_budget import render_review_warnings, review_warnings
-from daydream.review_result import ReasonCode, deliver_finalized_review
+from daydream.review_budget import ReasonCode, StopRecord, render_review_warnings, review_warnings
+from daydream.review_result import deliver_finalized_review
 from daydream.trajectory import DaydreamPhase, get_current_recorder, phase_scope, run_usage
 from daydream.ui import print_info, print_warning
 
@@ -192,7 +192,7 @@ async def _step_committed_review(ctx: FlowContext) -> None:
         publish_items()
 
 
-def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode | None = None) -> int:
+def finalize_review(ctx: FlowContext, pipeline_state: str, *, stop: StopRecord | None = None) -> int:
     """Seal validated coverage and findings once, without dispatching a model.
 
     A failed pipeline is retained as run-wide unfinished evidence. Extension steps may
@@ -207,7 +207,7 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, reason: ReasonCode
     program = ctx.data["committed_review"]
     no_diff = not program.review.assignments
     if pipeline_state == "failed":
-        program.fail("pipeline", reason or ReasonCode.UNEXPECTED_ANALYSIS_FAILURE)
+        program.fail(stop or StopRecord(ReasonCode.UNEXPECTED_ANALYSIS_FAILURE, "pipeline"))
     items: list[dict[str, Any]] = []
     projection_valid = no_diff
     path = DeepArtifact.MERGED_ITEMS.at(state.dd)

@@ -16,7 +16,7 @@ from daydream.backends.pi import PiBackend, PiError
 from daydream.extensions.registry import Registry
 from daydream.observability.config import ObservabilityConfig
 from daydream.observability.runtime import trace_run
-from daydream.review_budget import BudgetLedger, BudgetStop
+from daydream.review_budget import BudgetLedger, ReasonCode, StopRecord
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import DaydreamPhase
 from tests.conftest import capture_agent_console
@@ -33,6 +33,8 @@ _ERROR_LINES = (
     '{"type":"session","sessionId":"pi_ses_429"}',
     '{"type":"agent_start"}',
     '{"type":"turn_start"}',
+    # The provider response Pi observed: its status and Retry-After become the error's fields.
+    '{"type":"daydream_provider_response","status":429,"headers":{"retry-after":"12"}}',
     json.dumps({
         "type": "turn_end",
         "message": {
@@ -96,7 +98,7 @@ async def test_contradictory_retry_budgets_refuse_before_any_dispatch(tmp_path: 
 async def test_run_agent_stops_on_a_server_hint_longer_than_the_deadline(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """An unfittable hint (10.5 s > the 5 s deadline) stops after one attempt with its error intact.
+    """An unfittable hint (12 s > the 5 s deadline) stops after one attempt with its error intact.
 
     The exception path still records its one stop on the agent span.
     """
@@ -127,16 +129,15 @@ async def test_run_agent_stops_on_a_server_hint_longer_than_the_deadline(
         run.finish(1)
     agent_span = next(span for span in exporter.get_finished_spans()
                       if (span.attributes or {}).get("daydream.span.kind") == "agent")
-    assert (agent_span.attributes or {})["daydream.budget.dimension"] == "time"
-    assert [dict(event.attributes or {}) for event in agent_span.events if event.name == "daydream.retry.stop"] == [{
-        "daydream.retry.limit_expired": "retry_ladder", "daydream.retry.elapsed_s": 0.0,
-        "daydream.retry.backend_s": 0.0, "daydream.retry.backoff_s": 0.0, "daydream.retry.attempts": 0,
-        "daydream.retry.retry_stop_reason": "retry_hint_exceeds_budget", "daydream.retry.circuit_state": "closed",
-        "daydream.retry.partial_edit_handling": "discarded",
-    }]
-    assert ledger.stopped == BudgetStop("fix", "time", limit=5.0, spent=0.0, remaining_at_dispatch=5.0, reserved=0)
+    # The deadline that refused the hinted wait is the stop; the provider failure stays on it.
+    assert ledger.stopped == StopRecord(
+        ReasonCode.HOST_WALL_BUDGET_EXHAUSTION, "fix", bound="fix", limit=5.0, spent=0.0, attempts=1,
+        error={"type": "PiError", "failure_class": "RATE_LIMIT", "category": "RATE_LIMIT", "status": 429,
+               "retryable": True}, progress={"idle_s": None, "active_tools": 0, "generation_open": False})
+    assert {key: value for key, value in (agent_span.attributes or {}).items()
+            if key.startswith("daydream.stop.")} == ledger.stopped.attributes()
     assert len(spawned) == 1  # no further attempt dispatched after the stop
-    assert failure.value.retry_after == 10.5
+    assert (failure.value.status, failure.value.retry_after) == (429, 12.0)  # the header outranks message text
     assert failure.value.category == "RATE_LIMIT" and failure.value.retryable is True
     assert slept == []  # no shortened wait in place of the hint
     assert [notice for notice in notices if notice.startswith("[retry]")] == []

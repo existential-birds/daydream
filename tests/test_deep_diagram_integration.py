@@ -33,6 +33,7 @@ from daydream.exploration import _BOUNDARY_BLOCKQUOTE
 from daydream.extensions import Registry
 from daydream.flows.engine import FlowContext
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, SanctionedInputTransport, SanctionedInputUnavailable
+from daydream.review_budget import ReasonCode, StopRecord
 from daydream.review_profile import build_default_profile
 from daydream.run_config import RunConfig
 from daydream.runner import run
@@ -300,7 +301,7 @@ async def test_disposable_clone_flowchart_repairs_a_stray_root_once_and_fails_a_
     candidate = CandidateRoot(file="a.py", name="run", line=1, end_line=5, branch_points=4)
     stray = {"root": {"file": "a.py", "name": "other", "line": 1}, "nodes": [], "edges": []}
     prompts: list[str] = []
-    budget: list[str | None] = [None]
+    budget: list[StopRecord | None] = [None]
 
     class _Wall:
         """Fake disposable-clone backend."""
@@ -329,9 +330,9 @@ async def test_disposable_clone_flowchart_repairs_a_stray_root_once_and_fails_a_
     assert "A `ROOT_NOT_CANDIDATE` verdict" in prompts[1] and "- `run` in a.py, lines 1-5" in prompts[1]
     assert (result["status"], result["reason"]) == ("omitted", "ROOT_NOT_CANDIDATE")
     assert result["spec_final"]["root"] == stray["root"]
-    budget[0] = "wall_budget"
+    budget[0] = StopRecord(ReasonCode.HOST_WALL_BUDGET_EXHAUSTION, "diagram")
     truncated = await author()
-    assert (truncated["status"], truncated["reason"]) == ("failed", "budget exhausted: wall_budget")
+    assert (truncated["status"], truncated["reason"]) == ("failed", "budget exhausted: host_wall_budget_exhaustion")
     assert len(prompts) == 3, "a truncated author turn gets no repair turn"
 
 # --- Issue #1214: transport-aware advisory-input budgeting -------------------

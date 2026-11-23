@@ -51,7 +51,7 @@ from daydream.trajectory.generation import _GenerationLedger
 
 if TYPE_CHECKING:
     from daydream.observability.runtime import TraceSession
-    from daydream.review_budget import BudgetStop
+    from daydream.review_budget import StopRecord
 
 _logger = logging.getLogger(__name__)
 _scope_attributes: ContextVar[dict[str, Any]] = ContextVar("daydream_trace_attributes", default={})
@@ -117,20 +117,10 @@ def associate_trajectory_identity(session_id: str) -> None:
 
 
 def _reason_code(reason: str | None) -> str:
-    candidate = (reason or "error").split(":", 1)[0]
-    return (
-        candidate
-        if candidate
-        in {
-            "error",
-            "cancelled",
-            "interrupted",
-            "tool_vetoed",
-            "wall_budget_exceeded",
-            "tool_call_budget_exceeded",
-        }
-        else "error"
-    )
+    """A bounded status description: a stop's public code or a fixed outcome, never free text."""
+    from daydream.review_budget import ReasonCode
+
+    return reason if reason is not None and reason in {"error", "cancelled", "interrupted", *ReasonCode} else "error"
 
 
 def _record_failure(
@@ -338,19 +328,14 @@ def _record_active_event(name: str, attributes: dict[str, Any]) -> None:
         _logger.warning("Trace event %s could not be recorded", name)
 
 
-def record_budget_stop(stop: BudgetStop) -> None:
-    """Add a budget stop that no agent span carries as an event on the active span.
+def record_stop(stop: StopRecord) -> None:
+    """Add a stop that no agent span carries as an event on the active span.
 
-    ``run_agent`` writes the stop that ends an invocation as ``daydream.budget.*``
+    ``run_agent`` writes the stop that ends an invocation as ``daydream.stop.*``
     attributes on its agent span; a finalization turn's stop and a dispatch the host
-    refuses before any agent runs are ``daydream.budget.stop`` events with those keys.
+    refuses before any agent runs are ``daydream.stop`` events with those keys.
     """
-    _record_active_event("daydream.budget.stop", stop.attributes())
-
-
-def record_retry_stop(stop: dict[str, Any]) -> None:
-    """Add the retry-ladder stop that ends an invocation as an event on its agent span."""
-    _record_active_event("daydream.retry.stop", {f"daydream.retry.{key}": value for key, value in stop.items()})
+    _record_active_event("daydream.stop", stop.attributes())
 
 
 def agent_scope(phase: str, *, backend: str, model: str | None = None) -> SpanScope:
@@ -826,8 +811,8 @@ class AttemptObserver:
         span.end()
 
     def abort(self, reason: str) -> None:
-        self.reason = "tool_vetoed" if reason.startswith("tool_vetoed:") else reason
-        self.scope.finish(1, reason=self.reason)
+        self.reason = reason
+        self.scope.finish(1, reason=reason)
 
     def finish(self, exc: BaseException | None) -> None:
         try:

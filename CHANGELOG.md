@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking (0.y.z):** a review step's stop is described once, where it is observed, and carried
+  unchanged to the sealed result ([#1959](https://github.com/existential-birds/daydream/issues/1959)).
+  Each committed-review execution entry's `reason` is replaced by `stop`, a content-free record of
+  the code, the work that stopped, the ledger whose limit applied with its limit and use, attempts,
+  the last backend failure (exception type, failure class, category, HTTP status, retry decision)
+  and the last attempt's progress facts. The terminal result gains `cause`, the first stop behind
+  the failure; `evidence_incomplete` now marks only unfinished work with no stop behind it, and a
+  dispatch the schedule refuses is an execution entry. Result versions move to 14 to 17; earlier
+  results, and terminal results without `cause`, are refused. `run_agent` returns a `StopRecord`
+  instead of a stop string, and a policy veto is code `policy_veto` rather than
+  `tool_vetoed:<name>`. A retryable failure after the deadline keeps its facts on the deadline stop
+  on every attempt. `PiError` carries `status` and `retry_after` from Pi's last provider response.
+  The trace records stops as `daydream.stop.*`; the `daydream.budget.*` and `daydream.retry.stop`
+  attributes, the `agent_budget_stop` and `schedule_budget_stop` events, the archive manifest's
+  `retry_summary`, review coverage `diagnostics`, the repair record's `abort_reason` and the
+  unproduced `host_pipeline_budget_exhaustion` code are removed. See
+  [budget ledger](docs/runtime.md#budget-ledger).
 - `.daydream/` and `.review-output.md` stay visible in the checkout during report-only,
   comment, `--branch`/`--worktree` and Improve runs
   ([#1947](https://github.com/existential-birds/daydream/issues/1947)). They are hidden only

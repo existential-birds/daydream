@@ -53,7 +53,7 @@ output, _, aborted = await run_agent(
     {controls}
 )
 (ctx.data["daydream_dir"] / "trace-failure-result.json").write_text(
-    json.dumps({{"output": output, "aborted": aborted}})
+    json.dumps({{"output": output, "aborted": aborted and aborted.code}})
 )
 return Stop(1) if aborted else None
 """
@@ -155,7 +155,7 @@ async def test_runner_partial_outcome_preserves_the_budget_stop_record(
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A tool-call stop keeps its partial output and records one stop on the agent span."""
-    reason = "tool_call_budget_exceeded"
+    reason = "host_tool_budget_exhaustion"
     _flow(ext_dir, controls="budget=BudgetLedger('review:sample', limit=0),")
     backend = _ActiveToolBackend()
     install_backend(backend)
@@ -181,10 +181,9 @@ async def test_runner_partial_outcome_preserves_the_budget_stop_record(
     assert finalization["status"]["code"] == "STATUS_CODE_OK"
     assert attributes(tool)["daydream.outcome"] == reason
     assert tool["status"]["message"] == reason
-    assert {key: value for key, value in attributes(agent).items() if key.startswith("daydream.budget.")} == {
-        "daydream.budget.owner": "review:sample", "daydream.budget.dimension": "tool_calls",
-        "daydream.budget.limit": 0, "daydream.budget.spent": 0, "daydream.budget.remaining_at_dispatch": 0,
-        "daydream.budget.reserved": 0,
+    assert {key: value for key, value in attributes(agent).items() if key.startswith("daydream.stop.")} == {
+        "daydream.stop.code": reason, "daydream.stop.owner": "review:sample", "daydream.stop.bound": "review:sample",
+        "daydream.stop.limit": 0, "daydream.stop.spent": 0, "daydream.stop.attempts": 1,
     }
     assert tool["events"][-1]["name"] == "exception"
     assert attributes(attempt)["gen_ai.usage.input_tokens"] == 5

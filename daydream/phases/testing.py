@@ -68,7 +68,7 @@ from daydream.phases.test_evidence import (
     test_command_fact,
 )
 from daydream.redaction import redact_text
-from daydream.review_budget import BudgetLedger
+from daydream.review_budget import BudgetLedger, StopRecord
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.test_execution import (
     TestRecipe,
@@ -117,7 +117,7 @@ def _capture_repair_checkpoint(
     base_ref: str,
     failure_output: str,
     turn_output: str,
-    abort_reason: str | None,
+    stop: StopRecord | None,
     base_tree_key: str,
     retained_tree_key: str,
     footprint: AuthorizedFixFootprint,
@@ -138,7 +138,7 @@ def _capture_repair_checkpoint(
     checkpoint cannot be persisted or verified — an uncaptured repair is a repair
     that never happened, so the caller must treat it as blocking.
     """
-    outcome = classify_repair_outcome(abort_reason, turn_output)
+    outcome = classify_repair_outcome(stop, turn_output)
     deep_path = (
         artifact_dir_for(work.repo, session=artifact_session, allow_standalone=allow_standalone) / "deep"
     )
@@ -612,7 +612,7 @@ async def phase_test_and_heal(
         input_tree_key = capture_tree_key()
         started = time.monotonic()
         try:
-            partial_output, continuation_token, abort_reason = await agent.run_agent(
+            partial_output, continuation_token, stop = await agent.run_agent(
                 repair_instance, work.repo, fix_prompt, phase=DaydreamPhase.FIX,
                 budget=BudgetLedger("test-repair", wall_s=wall_budget_s),
                 run_context=run_context,
@@ -627,7 +627,7 @@ async def phase_test_and_heal(
                 _capture_repair_checkpoint(
                     work, job_id=job_id, execution_id=f"{job_id}:execution:{retries_used + 1}",
                     base_ref=snapshot or "HEAD", failure_output=output, turn_output="",
-                    abort_reason=None, base_tree_key=input_tree_key,
+                    stop=None, base_tree_key=input_tree_key,
                     retained_tree_key=capture_tree_key(), footprint=footprint,
                     repair_instance=repair_instance, wall_budget_s=wall_budget_s,
                     elapsed_s=time.monotonic() - started,
@@ -640,7 +640,7 @@ async def phase_test_and_heal(
                 )
             _confine_repaired_tree(confinement)
             raise
-        # The host, not the turn, decides what happened: the abort reason outranks
+        # The host, not the turn, decides what happened: the stop outranks
         # whatever the partial prose claimed. `output` is the failing test output
         # the turn worked from; `partial_output` is the turn's own unfinished text.
         turn_output = partial_output if isinstance(partial_output, str) else ""
@@ -660,7 +660,7 @@ async def phase_test_and_heal(
                 # Without a pre-turn stash the honest base is HEAD; the capture is
                 # still confined to the authorized paths either way.
                 base_ref=snapshot or "HEAD", failure_output=output, turn_output=turn_output,
-                abort_reason=abort_reason, base_tree_key=input_tree_key,
+                stop=stop, base_tree_key=input_tree_key,
                 retained_tree_key=capture_tree_key(), footprint=footprint,
                 repair_instance=repair_instance, wall_budget_s=wall_budget_s,
                 elapsed_s=time.monotonic() - started,
@@ -725,9 +725,9 @@ async def phase_test_and_heal(
             # blocked it, whatever the turn claimed.
             outcome=(
                 RepairOutcome.SCOPE_BLOCKED if confinement_error is not None
-                else classify_repair_outcome(abort_reason, turn_output)
+                else classify_repair_outcome(stop, turn_output)
             ),
-            abort_reason=abort_reason,
+            stop=stop,
             backend_name=type(repair_instance).__name__.removesuffix("Backend").lower(),
             model=repair_instance.model,
             execution_elapsed_s=time.monotonic() - started,
@@ -770,13 +770,13 @@ async def phase_test_and_heal(
                 "tests against the unconverged tree.",
             )
             return False
-        if abort_reason is not None:
+        if stop is not None:
             # An aborted turn left a tree the host cannot vouch for, exactly like a
             # failed restoration: stop here rather than rerun the suite against it.
             # The record above is what a resuming job reads.
             ui.print_warning(
                 agent.console,
-                f"Test-healing repair turn aborted ({abort_reason}); not rerunning tests "
+                f"Test-healing repair turn aborted ({stop.code}); not rerunning tests "
                 "against the unconverged tree.",
             )
             return False

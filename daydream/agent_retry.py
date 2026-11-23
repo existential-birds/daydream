@@ -3,7 +3,6 @@
 import math
 import os
 import random
-from dataclasses import dataclass
 
 from daydream.backends import Backend, RetryPolicy, retry_policy_from_environment
 from daydream.diagnostics import exception_text
@@ -61,76 +60,25 @@ def _plan_retry_delay(
     max_delay_s: float,
     deadline_remaining_s: float | None,
     hint: float | None,
-) -> tuple[float, str | None]:
-    """Return a bounded hint/jitter delay, or retry_hint_exceeds_budget.
+) -> float | None:
+    """Return a bounded hint/jitter delay, or None when a server hint outlasts the deadline.
 
     A server hint is evaluated against the remaining deadline only; an admitted
     hint is waited in full and never shortened by the exponential cap or
     configured maximum jitter delay. A hint longer than the remaining deadline
-    stops the ladder with ``retry_hint_exceeds_budget``. The exponential cap and
-    maximum delay bound the fallback jitter path only.
+    stops the ladder. The exponential cap and maximum delay bound the fallback
+    jitter path only.
     """
     if hint is not None:
         if deadline_remaining_s is not None and hint > deadline_remaining_s:
-            return 0.0, "retry_hint_exceeds_budget"
+            return None
         # A spent-but-not-none bound cannot turn an admitted hint negative.
-        return max(hint, 0.0), None
+        return max(hint, 0.0)
     cap = min(base_delay_s * (2 ** attempt), max_delay_s)
     if deadline_remaining_s is not None:
         cap = min(cap, deadline_remaining_s)
     cap = max(cap, 0.0)
-    return min(_sample_retry_delay(cap), cap), None
-
-
-@dataclass
-class _RetryTelemetry:
-    """Account for dispatched attempts separately from retry overhead.
-
-    The opening useful-work attempt contributes to backend_s only. Retries
-    charge retry_backend_s and backoff_s; cleanup is excluded from backend time.
-    This keeps backend_s + backoff_s within elapsed invocation time.
-    """
-
-    attempts_dispatched: int = 0
-    retry_attempts: int = 0
-    backend_s: float = 0.0
-    retry_backend_s: float = 0.0
-    backoff_s: float = 0.0
-    attempt_started_at: float | None = None
-    attempt_is_retry: bool = False
-
-    def start_attempt(self, now: float, *, retry: bool) -> None:
-        """Record one dispatched attempt; *retry* marks it as retry overhead."""
-        self.attempts_dispatched += 1
-        self.attempt_is_retry = retry
-        if retry:
-            self.retry_attempts += 1
-        self.attempt_started_at = now
-
-    def charge_attempt(self, now: float, *, cleanup_elapsed_s: float = 0.0) -> None:
-        """Close an in-flight attempt, excluding bounded cleanup time."""
-        if self.attempt_started_at is None:
-            return
-        delta = now - self.attempt_started_at - cleanup_elapsed_s
-        self.backend_s += delta
-        if self.attempt_is_retry:
-            self.retry_backend_s += delta
-        self.attempt_started_at = None
-
-    def pending_s(self, now: float) -> float:
-        """The in-flight attempt's elapsed time, or ``0.0`` when none is running."""
-        if self.attempt_started_at is None:
-            return 0.0
-        return max(now - self.attempt_started_at, 0.0)
-
-    def pending_retry_s(self, now: float) -> float:
-        """The in-flight attempt's elapsed time when it is a retry, else ``0.0``."""
-        return self.pending_s(now) if self.attempt_is_retry else 0.0
-
-    @property
-    def spent_retry_overhead(self) -> bool:
-        """Count backoff as recovery even when the deadline prevents its retry from dispatching."""
-        return self.retry_attempts > 0 or self.backoff_s > 0.0
+    return float(min(_sample_retry_delay(cap), cap))
 
 
 def _retry_hint(exc: BaseException) -> float | None:

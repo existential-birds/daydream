@@ -16,6 +16,7 @@ from daydream.observability.runtime import trace_run
 from daydream.prompt_budget import SanctionedInputUnavailable, inline_context_file, prepare_sanctioned_inputs
 from daydream.review_budget import (
     BudgetLedger,
+    ReasonCode,
     ReviewLimits,
     review_deadline_scope,
     review_limits_for_scope,
@@ -62,7 +63,7 @@ async def test_checkpoint_survives_hung_stream_without_finalizer(
         review_limits=ReviewLimits(investigation_s=0.02, finalization_s=0.02, tool_calls=5),
         )
     assert result == {"findings": ["confirmed defect"]}
-    assert reason == "wall_budget_exceeded"
+    assert reason is not None and reason.code is ReasonCode.HOST_WALL_BUDGET_EXHAUSTION
     assert backend.call_count == 1
     assert backend.cancel_calls == 0
 
@@ -99,14 +100,14 @@ async def _hung_finalizer_is_bounded_without_canceling_sibling(tmp_path: Path) -
                 )
         run.finish(0)
     assert sibling_finished.is_set()
-    assert results["bounded"][2] == "tool_call_budget_exceeded"
+    assert results["bounded"][2] is not None and results["bounded"][2].code is ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION
     # Both stops reach the trace: the investigation's as the agent span's record, the
     # timed-out finalization turn's as an event on the same span.
     (bounded,) = [span for span in exporter.get_finished_spans()
-                  if "daydream.budget.dimension" in (span.attributes or {})]
-    assert (bounded.attributes or {})["daydream.budget.dimension"] == "tool_calls"
-    assert [(event.attributes or {})["daydream.budget.dimension"]
-            for event in bounded.events if event.name == "daydream.budget.stop"] == ["time"]
+                  if "daydream.stop.code" in (span.attributes or {})]
+    assert (bounded.attributes or {})["daydream.stop.code"] == "host_tool_budget_exhaustion"
+    assert [(event.attributes or {})["daydream.stop.code"]
+            for event in bounded.events if event.name == "daydream.stop"] == ["host_wall_budget_exhaustion"]
     assert results["sibling"][0] == "sibling survived"
     assert backend.cancel_calls == 0
 
@@ -248,7 +249,8 @@ async def test_finalization_is_bounded_and_invocation_local_with_shared_backend(
             result = await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.DEEP, output_schema=SCHEMA,
                 review_limits=ReviewLimits(10, 1, 0), progress_callback=lambda _: None,
             )
-    assert result == ({"findings": []}, None, "tool_call_budget_exceeded")
+    assert result[:2] == ({"findings": []}, None)
+    assert result[2] is not None and result[2].code is ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION
     assert backend.reasoning_effort == "high"
     assert sum(finalization for _, finalization in flags) == 1
     assert ("sibling", False) in flags

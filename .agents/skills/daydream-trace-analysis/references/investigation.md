@@ -62,7 +62,7 @@ Start with host evidence, then narrow the causal window:
   `backend_lifecycle`.
 - Step `extra.backend_diagnostics`, budget-stop/retry metadata, tool results,
   terminal output, and `verification.value` explain the relevant phase. Retrieve
-  enclosing objects for keys such as `retry_stop_reason`, `schema_rejection`,
+  enclosing objects for keys such as `idle_s`, `schema_rejection`,
   or `expiry_stage`; `search` matches values rather than field names.
 
 Distinguish a reviewed-code defect, recovered tool error, rejected finding,
