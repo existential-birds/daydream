@@ -473,15 +473,16 @@ They appear once in each place that reports the outcome: under "Unfinished work"
 the report's "Review outcome" and the pull request notice.
 
 Each execution entry carries its dispatch's `stop`, the [stop record](#budget-ledger), or
-`null`. A dispatch the schedule refuses is an entry of its kind with no `work_id`; a run-wide
-host failure (`pipeline`, `cleanup`, `source_integrity`) is an entry owned by that name. A
-scope or phase left unfinished names the stops behind it: those of the current work
-responsible for it, of a refused dispatch of that work and of run-wide failures, and for
-challenge those that left investigation unfinished. `evidence_incomplete` marks only
-unfinished work with no stop behind it. The terminal result's `cause` is the first of those
-stops in execution order: `null` when the pipeline completed or no stop is behind its
-failure. `reason_codes` remains the sorted projection. Result versions 14 to 17 carry
-stops; earlier versions are refused, not converted.
+`null`. A dispatch the schedule refuses is an entry of its kind with no `work_id`, which stays
+evidence once later work finishes what it held; a run-wide host failure (`pipeline`,
+`cleanup`, `source_integrity`) is an entry owned by that name. A scope or phase left
+unfinished names the stops behind it: those of the current work responsible for it, of a
+refused dispatch of that work and of run-wide failures, and for challenge those that left
+investigation unfinished. `evidence_incomplete` marks only unfinished work with no stop
+behind it. The terminal result's `cause` is the first of those stops and run-wide failures in
+execution order, `null` when the pipeline completed or no stop is behind its failure; its
+code is always one of `reason_codes`, which remains the sorted projection. Result versions
+14 to 17 carry stops; earlier versions are refused, not converted.
 
 The reviewer's assignments come from one canonical change: the full diff and its hunk
 index are captured once with their identities, revalidated before every admission,

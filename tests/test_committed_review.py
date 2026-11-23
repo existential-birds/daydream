@@ -2316,44 +2316,51 @@ _PROVIDER_ERROR = {"type": "PiError", "failure_class": "SERVER_ERROR", "category
                    "retryable": True}
 _OUTPUT_ARRIVING = {"idle_s": 3.0, "active_tools": 0, "generation_open": True}
 # How each kind of work ends, and the sealed cause it must produce: one row per way a step stops.
-_STOP_PATHS: dict[str, tuple[bool, dict[str, str], dict[str, Any]]] = {
+_STOP_PATHS: dict[str, tuple[str, dict[str, str], dict[str, Any] | None]] = {
     # The f2fcb690 shape: an unsplit discovery admits nothing and runs out its local share, window / 2.
-    "incident": (False, {"discovery": "deadline"}, {
+    "incident": ("unsplit", {"discovery": "deadline"}, {
         "code": "host_wall_budget_exhaustion", "owner": "committed:discovery", "bound": "committed:local",
         "limit": _WINDOW / 2, "spent": _WINDOW / 2, "attempts": 1, "error": None, "progress": _OUTPUT_ARRIVING}),
-    "cross-assignment-deadline": (True, {"cross_assignment": "deadline"}, {
+    "cross-assignment-deadline": ("split", {"cross_assignment": "deadline"}, {
         "code": "host_wall_budget_exhaustion", "owner": "committed:cross_assignment",
         "bound": "committed:investigation", "limit": _WINDOW / 2, "spent": _WINDOW / 2, "attempts": 1,
         "error": None, "progress": _OUTPUT_ARRIVING}),
-    "whole-review-deadline": (False, {"challenge": "deadline"}, {
+    "whole-review-deadline": ("unsplit", {"challenge": "deadline"}, {
         "code": "host_wall_budget_exhaustion", "owner": "committed:challenge", "bound": "committed",
         "limit": _WINDOW, "spent": _WINDOW, "attempts": 1, "error": None, "progress": _OUTPUT_ARRIVING}),
-    "tool-allocation": (False, {"discovery": "exhaust"}, {
+    # A follow-up refused at the local deadline is evidence once the cross-assignment finishes its targets.
+    "recovered-refusal": ("split", {"discovery": "partial"}, None),
+    "tool-allocation": ("unsplit", {"discovery": "exhaust"}, {
         "code": "host_tool_budget_exhaustion", "owner": "committed:discovery", "bound": "committed:local",
         "limit": 5, "spent": 4, "attempts": 1, "error": None, "progress": _OUTPUT_ARRIVING | {"idle_s": 0.0}}),
-    "retryable-error-then-expiry": (False, {"discovery": "fail-after-deadline"}, {
+    "retryable-error-then-expiry": ("unsplit", {"discovery": "fail-after-deadline"}, {
         "code": "host_wall_budget_exhaustion", "owner": "committed:discovery", "bound": "committed:local",
         "limit": _WINDOW / 2, "spent": _WINDOW / 2 + 1, "attempts": 1, "error": _PROVIDER_ERROR,
         "progress": _OUTPUT_ARRIVING | {"idle_s": 4.0}}),
-    "final-backend-error": (False, {"discovery": "fail"}, {
+    "final-backend-error": ("unsplit", {"discovery": "fail"}, {
         "code": "backend_failure", "owner": "committed:discovery", "bound": None, "limit": None, "spent": None,
         "attempts": 2, "error": _PROVIDER_ERROR, "progress": _OUTPUT_ARRIVING}),
-    "unsubmitted-turn": (False, {"discovery": "unsubmitted"}, {
+    "unsubmitted-turn": ("unsplit", {"discovery": "unsubmitted"}, {
         "code": "missing_output", "owner": "committed:discovery", "bound": None, "limit": None, "spent": None,
         "attempts": 2, "error": {"type": "UnsubmittedTurn", "failure_class": "TRANSPORT",
                                  "category": "STREAM_TRUNCATION", "status": None, "retryable": True},
         "progress": _OUTPUT_ARRIVING}),
-    "host-tool-fatal": (False, {"discovery": "fatal"}, {
+    "host-tool-fatal": ("unsplit", {"discovery": "fatal"}, {
         "code": "backend_failure", "owner": "committed:discovery", "bound": None, "limit": None, "spent": None,
         "attempts": 1, "error": {"type": "HostToolFatal", "failure_class": "NOT_RETRYABLE",
                                  "category": "NATIVE_CORRELATION", "status": None, "retryable": False},
         "progress": _OUTPUT_ARRIVING}),
-    "policy-veto": (False, {"discovery": "veto"}, {
+    "policy-veto": ("unsplit", {"discovery": "veto"}, {
         "code": "policy_veto", "owner": "committed:discovery", "bound": None, "limit": None, "spent": None,
         "attempts": 1, "error": None, "progress": _OUTPUT_ARRIVING}),
-    "interruption": (False, {"discovery": "interrupt"}, {
+    # The run recorded the interruption itself, while the generation was open with no output yet.
+    "interruption": ("unsplit", {"discovery": "interrupt"}, {
         "code": "interruption", "owner": "committed:discovery", "bound": None, "limit": None, "spent": None,
-        "attempts": 1, "error": None, "progress": None}),
+        "attempts": 1, "error": None, "progress": {"idle_s": None, "active_tools": 0, "generation_open": True}}),
+    # A run-wide failure is the cause even when a change with no diff has no outcome to name it.
+    "no-diff-run-wide-failure": ("no-diff", {"cleanup": "fail"}, {
+        "code": "backend_failure", "owner": "cleanup", "bound": None, "limit": None, "spent": None,
+        "attempts": 0, "error": None, "progress": None}),
 }
 
 
@@ -2366,35 +2373,38 @@ async def test_each_stop_path_seals_one_cause_with_its_bound_and_observed_facts(
     The stop is described once where it is observed: the ledger names the bound that applied, the
     ladder keeps the last backend failure and the attempt's progress, and nothing downstream relabels it.
     """
-    decomposed, ends, expected = _STOP_PATHS[path]
+    shape, ends, expected = _STOP_PATHS[path]
     inputs, tool_calls = review_inputs, 10
-    if decomposed:
+    if shape == "split":
         # Enough batches that local discovery is split and the cross-assignment carve applies.
         names = [f"m{index:02d}.py" for index in range(21)]
         repo = tmp_path / "split"
         seed_feature_branch(repo, base=dict.fromkeys(names, "VALUE = 1\n"), feature=dict.fromkeys(names, "VALUE = 0\n"))
         inputs, tool_calls = _inputs(repo, tmp_path / "split-inputs", names), 40
+    elif shape == "no-diff":
+        inputs = _inputs(review_inputs.work.source, tmp_path / "no-diff-inputs", [], patch="")
     fake = FakeClock(monotonic_value=10_000.0).install(monkeypatch)
     files = {part["target_id"]: part["file"] for batch in inputs.assignment_batches for part in batch}
     interrupted = anyio.Event()
+
+    def decided(targets: list[str]) -> dict[str, Any]:
+        return {"targets": [{"target_id": target, "status": "reviewed", "reason": "Inspected.",
+                             "evidence_refs": _selectors(inputs, files[target])} for target in targets],
+                "claims": [_proposal(inputs)] if shape == "unsplit" and targets else []}
 
     async def stream(_cwd: Path, prompt: str, *_args: Any, host_tools: HostToolBinding,
                      **_kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
         assignment = _assignment(prompt)
         end = ends.get(assignment["kind"], "submit")
+        targets = assignment["work"]["targets"]["ids"]
         lifecycle = current_backend_lifecycle()
         assert lifecycle is not None
         lifecycle.activate(response_idle_timeout_s=None, tool_idle_timeout_s=None)
         lifecycle.generation_started()
         async with host_tools.session():
             if end == "submit":
-                value: dict[str, Any] = (
-                    {"verdicts": [_verdict(inputs, claim) for claim in assignment["claims"]], "claims": []}
-                    if assignment["kind"] == "challenge" else {"targets": [
-                        {"target_id": target, "status": "reviewed", "reason": "Inspected.",
-                         "evidence_refs": _selectors(inputs, files[target])}
-                        for target in assignment["work"]["targets"]["ids"]],
-                        "claims": [_proposal(inputs)] if assignment["kind"] == "discovery" and not decomposed else []})
+                value = ({"verdicts": [_verdict(inputs, claim) for claim in assignment["claims"]], "claims": []}
+                         if assignment["kind"] == "challenge" else decided(targets))
                 host_tools.admit("terminal", "structured_output", value, terminal=True)
                 host_tools.submit("terminal", value)
                 host_tools.native_settled = True
@@ -2403,13 +2413,21 @@ async def test_each_stop_path_seals_one_cause_with_its_bound_and_observed_facts(
             if end == "interrupt":
                 interrupted.set()
                 await anyio.sleep_forever()
+            if end == "partial" and not host_tools.budget.expired():
+                # Progress on one target, so the unfinished rest asks for a follow-up the local deadline refuses.
+                host_tools.admit("admit", "review_admit", decided(targets[:1]))
+                host_tools.call("admit", "review_admit", decided(targets[:1]))
             # Model output arrives until 3 s before the stop, so it can tell a working model from a stall.
-            spend = (host_tools.budget.remaining_s() or 0.0) if end in {"deadline", "fail-after-deadline"} else 10.0
+            remaining = host_tools.budget.remaining_s() or 0.0
+            spend = remaining if end in {"deadline", "partial", "fail-after-deadline"} else 10.0
             fake.advance(spend - 3)
             lifecycle.progress("text")
             fake.advance(3)
-            if end == "deadline":
-                yield TextEvent(text="still investigating")
+            if end in {"deadline", "partial"}:
+                try:
+                    yield TextEvent(text="still investigating")
+                finally:
+                    fake.advance(5)  # Slow cleanup after the stop is no part of what the stop observed.
             elif end == "exhaust":
                 lifecycle.progress("text")
                 while True:
@@ -2426,9 +2444,14 @@ async def test_each_stop_path_seals_one_cause_with_its_bound_and_observed_facts(
                 fake.advance(1 if end == "fail-after-deadline" else 0)
                 raise PiError("provider overloaded", retryable=True, category="SERVER_ERROR", status=503)
 
+    async def cancel() -> None:
+        if ends.get("cleanup") == "fail":
+            raise RuntimeError("native context did not stop")
+
     backend = ScriptedBackend(model="mock-model", supports_host_tools=True, fanout_concurrency=4,
                               retry_policy=RetryPolicy(attempts=1, base_delay_s=0.0, max_delay_s=0.0))
     monkeypatch.setattr(backend, "execute", stream)
+    monkeypatch.setattr(backend, "cancel", cancel)
     registry = Registry()
     registry.register_tool_supervisor(lambda *_args, **_kwargs: ToolDecision(veto=True, reason="reads are vetoed"))
     previous_registry = get_registry()
@@ -2437,26 +2460,33 @@ async def test_each_stop_path_seals_one_cause_with_its_bound_and_observed_facts(
     review = Review(inputs, "stops")
     settings = committed_review.review_settings(RunConfig(backend="pi", output_mode="review", review_profile=(
         _profile_with_pipeline(reviewer_investigation_budget_s=int(_WINDOW), reviewer_tool_call_budget=tool_calls))))
-    schedule = committed_review._Schedule(review, {"discovery": backend, "challenge": backend}, tool_calls, settings,
+    backends: dict[str, Any] = {"discovery": backend, "challenge": backend}
+    schedule = committed_review._Schedule(review, backends, tool_calls, settings,
                                           started=fake.monotonic(), deadline=fake.monotonic() + _WINDOW)
-    assert schedule.decompose is decomposed
+    program = committed_review.ReviewProgram(review, schedule, settings, backends, fake.monotonic() + _WINDOW)
+    assert schedule.decompose is (shape == "split")
     try:
         async with anyio.create_task_group() as group:
-            group.start_soon(schedule.run, None)
+            group.start_soon(program.dispatch, None)
             if "interrupt" in ends.values():
                 await interrupted.wait()
                 group.cancel_scope.cancel()
     finally:
         if end_is_veto:
             set_registry(previous_registry)
-    sealed = review.seal(settings)
+    await program.quiesce()
+    sealed = program.seal()
     terminal = sealed["terminal_result"]
-    # Sealing validates that the cause is a retained execution stop and one of the reasons it names.
+    # Sealing validates that the cause is a retained execution stop and that its code is a reason.
     assert terminal["cause"] == expected
     if path == "incident":
         # The unfinished scope and the challenge it blocked name that stop, not a consequence of it.
         assert [scope["reason_codes"] for scope in terminal["stack_outcomes"]] == [["host_wall_budget_exhaustion"]]
         assert terminal["reason_codes"] == ["host_wall_budget_exhaustion"]
+    if path == "recovered-refusal":
+        refusal = next(entry for entry in sealed["execution"] if entry["work_id"] is None)
+        assert (refusal["assignment"], refusal["stop"]["bound"]) == ("follow_up", "committed:local")
+        assert terminal["analysis_state"] == "complete"
 
 
 async def test_claim_lines_inside_continuation_fragments_use_summarized_spans(tmp_path: Path) -> None:

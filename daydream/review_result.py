@@ -175,6 +175,8 @@ def _derive(data: Mapping[str, Any]) -> tuple[str, list[str]]:
         reasons.add(ReasonCode.MALFORMED_ARTIFACT.value)
     if data['pipeline_state'] == 'cancelled':
         reasons.add(ReasonCode.INTERRUPTION.value)
+    if data['cause'] is not None:
+        reasons.add(data['cause']['code'])
     if data['pipeline_state'] == 'failed' and not reasons:
         reasons.add(ReasonCode.UNEXPECTED_ANALYSIS_FAILURE.value)
     if not data['projection_valid'] or not usable:
@@ -301,9 +303,8 @@ def validate_terminal_result(data: Any, *, expected_head_sha: str | None = None)
     state, reasons = _derive(data)
     if data['analysis_state'] != state or data['reason_codes'] != reasons:
         raise ValueError('aggregate state or reasons disagree with coverage evidence')
-    cause = data['cause']
-    if cause is not None and (data['pipeline_state'] == 'completed' or cause['code'] not in reasons):
-        raise ValueError('a cause requires a failed pipeline and one of its reasons')
+    if data['cause'] is not None and data['pipeline_state'] == 'completed':
+        raise ValueError('a completed pipeline has no cause')
     for field, identity in [('planned_scopes', 'scope_id'), ('stack_outcomes', 'scope_id'),
                             ('phase_outcomes', 'phase')]:
         if [o[identity] for o in data[field]] != sorted(o[identity] for o in data[field]):

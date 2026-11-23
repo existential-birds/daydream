@@ -790,6 +790,8 @@ async def _run_agent(
                         if stop_code is None and wall_cancelled:
                             stop_code = ReasonCode.HOST_WALL_BUDGET_EXHAUSTION
                         if stop_code is not None:
+                            # The stop is described when observed, before cleanup can add time.
+                            stop = budget.stop(stop_code, error=last_error, progress=last_progress())
                             if host_tools is not None:
                                 host_tools.close_authority()
                             observed.abort(stop_code)
@@ -916,8 +918,10 @@ async def _run_agent(
                     raise
                 finally:
                     primary_error = sys.exception()
-                    # Every failure that ends the ladder is its stop, unless a deadline stop was recorded first.
-                    if isinstance(primary_error, Exception) and budget.stopped is None:
+                    # Every failure or cancellation that ends the ladder is its stop, unless one was recorded first.
+                    if isinstance(primary_error, asyncio.CancelledError) and budget.stopped is None:
+                        budget.stop(ReasonCode.INTERRUPTION, error=last_error, progress=last_progress())
+                    elif isinstance(primary_error, Exception) and budget.stopped is None:
                         budget.fail(_observed_failure(primary_error, host_tools), progress=last_progress())
                     try:
                         display.finish_log_text()
@@ -926,7 +930,7 @@ async def _run_agent(
                             raise
                         primary_error.add_note(f"Log text unavailable ({type(exc).__name__[:64]})")
 
-            if stop_code is not None:
+            if stop_code is not None and stop is None:  # a stop before any attempt dispatched
                 stop = budget.stop(stop_code, error=last_error, progress=last_progress())
 
         except _ToolSupervisorFailure as exc:

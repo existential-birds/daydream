@@ -325,6 +325,9 @@ def validate_committed_result(value: dict[str, Any]) -> None:
         raise ValueError("findings differ from challenged publication claims")
     native_assignments = {e["assignment"] for e in value["execution"]}
     superseded = {wid for wid, record in work.items() if record["state"] == "superseded"}
+    # A dispatch the schedule refused stays evidence once later work finished what it held, as superseded work does.
+    refused = {index for index, e in enumerate(value["execution"]) if e["work_id"] is None
+               and e["assignment"] in WORK_KINDS}
     if any(e["work_id"] is not None and e["work_id"] not in work for e in value["execution"]):
         raise ValueError("execution evidence differs from retained work")
     if terminal["cause"] is not None and terminal["cause"] not in [
@@ -338,7 +341,7 @@ def validate_committed_result(value: dict[str, Any]) -> None:
         or any(record["state"] != "accepted" for wid, record in work.items() if wid not in superseded)
         or any(
             not e["settled"] or not e["accepted"] or not e["cleanup_complete"] or e["stop"] is not None
-            for e in value["execution"] if e["work_id"] not in superseded
+            for index, e in enumerate(value["execution"]) if e["work_id"] not in superseded and index not in refused
         )
     ):
         raise ValueError("unfinished obligations/native execution cannot be complete")

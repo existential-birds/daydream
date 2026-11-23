@@ -914,7 +914,8 @@ class Review:
         interrupted = any(entry["stop"] is not None and entry["stop"]["code"] == ReasonCode.INTERRUPTION.value
                           for entry in self.execution)
         pipeline = "cancelled" if interrupted else "failed" if behind | global_stops else "completed"
-        first = min(behind - {incomplete}, default=None)
+        # A run-wide failure is behind the result even with no outcome to name it, as for a change with no diff.
+        first = min((behind | global_stops) - {incomplete}, default=None)
         cause = self.execution[first]["stop"] if first is not None else None
         terminal = coverage.finalize(pipeline, projection_valid=projection_valid, cause=cause)
         result = {
@@ -1712,7 +1713,7 @@ class _Schedule:
             if stop is None and not binding.accepted:
                 stop = budget.stop(ReasonCode.MISSING_OUTPUT)
         except asyncio.CancelledError:
-            stop = budget.stop(ReasonCode.INTERRUPTION)
+            stop = budget.stopped or budget.stop(ReasonCode.INTERRUPTION)
             raise
         except Exception as exc:
             # The invocation recorded the stop of an exception it raised; anything earlier is a host failure.
