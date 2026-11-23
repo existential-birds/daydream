@@ -15,10 +15,10 @@ package-check:
 	bash scripts/check-packaged-runtimes.sh
 
 lint:
-	uv run ruff check daydream tests scripts/ci_*.py scripts/measure_finalization_memory.py
+	uv run ruff check daydream tests scripts/ci_*.py scripts/measure_finalization_memory.py scripts/release.py
 
 typecheck:
-	uv run mypy daydream tests scripts/ci_*.py scripts/measure_finalization_memory.py
+	uv run mypy daydream tests scripts/ci_*.py scripts/measure_finalization_memory.py scripts/release.py
 
 # Whole-project dead-code detection (#935), configured in [tool.vulture].
 deadcode:

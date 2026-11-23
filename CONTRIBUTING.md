@@ -166,6 +166,12 @@ versioned section with an ISO date (`YYYY-MM-DD`), newest release first, and
 update comparison links. If a PR has no notable change, explain why the changelog
 checklist item is N/A.
 
+A release is one PR that sets the version and dates its CHANGELOG section. Merging
+it publishes the release: [release.yml](.github/workflows/release.yml) runs
+`scripts/release.py`, which tags the merge commit `v<version>` and publishes that
+section as the GitHub release. Don't push release tags or create releases by hand.
+If publishing fails, dispatch the workflow on `main` to retry.
+
 ## Pull request requirements
 
 Before creating a PR, including a draft, that changes more than 5 files or adds more
