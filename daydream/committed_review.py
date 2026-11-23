@@ -883,7 +883,8 @@ class Review:
         if self.inputs.assignment_batches and not executed & INVESTIGATION_KINDS and not global_stops:
             global_stops.add(incomplete)
         if self.assignments:
-            refused_investigation = set().union(*(refused.get(kind, set()) for kind in INVESTIGATION_KINDS))
+            # Only a follow-up is refused among investigation work.
+            refused_investigation = refused.get("follow_up", set())
             upstream: set[int] = set()
             for index, shard in enumerate(self._shards):
                 identifiers = {part["target_id"] for part in shard}
@@ -1638,7 +1639,7 @@ class _Schedule:
             raise unsupported[0]
 
     async def _dispatch(self, work_id: str, parent: BudgetLedger, reserves: dict[str, Any], *,
-                        allocation: int | None = None) -> dict[str, Any]:
+                        allocation: int | None = None) -> None:
         """Run one work item on its own ledger carved from ``parent`` (its remaining calls by default)."""
         review, profile = self.review, self.settings
         kind = review.work[work_id].kind
@@ -1736,4 +1737,3 @@ class _Schedule:
                 "overshoot": max(0, budget.observed - budget.refunded - budget.charged),
             }
             review.execution.append(entry)
-        return entry

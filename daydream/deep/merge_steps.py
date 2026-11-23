@@ -87,7 +87,7 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
         if ctx.config.pr_number is not None
         else {}
     )
-    warnings = review_warnings(deep_state.dd)
+    warnings = review_warnings(ctx.data.get("terminal_review_result"))
     if warnings:
         pr_kwargs["review_warnings"] = warnings
     from daydream.review_reporting import render_github_review_context, render_review_run_id

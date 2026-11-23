@@ -468,6 +468,9 @@ allowance: `reviewer_tool_call_budget`, or `reviewer_investigation_budget_s` wit
 `review_wall_budget_s`, which caps the review window. A second sentence says that the
 review multiplies the first two by the `scale` recorded in `settings.limits` and, for
 spent time, that `review_wall_budget_s` grows with the diff in the default profile only.
+They appear once in each place that reports the outcome: under "Unfinished work" in
+`run_committed_review`'s report, and on the `deep` flow in the console outcome line,
+the report's "Review outcome" and the pull request notice.
 
 Each execution entry carries its dispatch's `stop`, the [stop record](#budget-ledger), or
 `null`. A dispatch the schedule refuses is an entry of its kind with no `work_id`; a run-wide
@@ -479,9 +482,6 @@ unfinished work with no stop behind it. The terminal result's `cause` is the fir
 stops in execution order: `null` when the pipeline completed or no stop is behind its
 failure. `reason_codes` remains the sorted projection. Result versions 14 to 17 carry
 stops; earlier versions are refused, not converted.
-They appear once in each place that reports the outcome: under "Unfinished work" in
-`run_committed_review`'s report, and on the `deep` flow in the console outcome line,
-the report's "Review outcome" and the pull request notice.
 
 The reviewer's assignments come from one canonical change: the full diff and its hunk
 index are captured once with their identities, revalidated before every admission,

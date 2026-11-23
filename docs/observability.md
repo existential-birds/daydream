@@ -212,9 +212,7 @@ omitted. The stop that ends an agent invocation is recorded on its agent span, i
 that ends in an exception; a review-finalization turn's stop and a dispatch the host refuses
 before any agent runs are `daydream.stop` events with the same attributes on the active span.
 A span a stop ended carries its code as status. Local evidence writes each invocation's
-record once, as a `stop` phase event, and a committed review's sealed execution entries
-carry the same records. Values are counts or durations in seconds, never monotonic
-timestamps.
+record once, as a `stop` phase event.
 
 ## Codex lifecycle evidence
 

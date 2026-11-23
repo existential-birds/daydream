@@ -186,9 +186,12 @@ class _EventStreamScope:
             except StopAsyncIteration:
                 return
             except Exception as exc:
-                self.ledger_stop = _ledger_stop(exc, self._host_tools)
-                if self.ledger_stop is None:
+                # Only a ledger limit, never a backend failure; a binding failure only before possible acceptance.
+                failure = _observed_failure(exc, self._host_tools)
+                code = reason_for_exception(failure)
+                if code not in BUDGET_REASON_CODES or not getattr(failure, "preacceptance", True):
                     raise
+                self.ledger_stop = code
                 return
             self._lifecycle.consumer_event()
             yield event
@@ -213,17 +216,6 @@ def _observed_failure(exc: BaseException, host_tools: HostToolBinding | None) ->
     """The binding's fatal error when it caused ``exc``: the failure the host observed, not its wrapper."""
     fatal = host_tools.fatal_error if host_tools is not None else None
     return fatal if fatal is not None and fatal in (exc, exc.__cause__) else exc
-
-
-def _ledger_stop(exc: Exception, host_tools: HostToolBinding | None) -> ReasonCode | None:
-    """The ledger code when a ledger limit, not a backend failure, ended the stream, else None.
-
-    A binding failure counts only before any possible acceptance; every other failure
-    keeps its own handling.
-    """
-    failure = _observed_failure(exc, host_tools)
-    code = reason_for_exception(failure)
-    return code if code in BUDGET_REASON_CODES and getattr(failure, "preacceptance", True) else None
 
 
 class _LogRedactingConsole(Console):
@@ -830,8 +822,7 @@ async def _run_agent(
                         run_context.outage_circuit.record_success()
                     break  # success — exit the retry loop
 
-                except _ToolSupervisorFailure as exc:
-                    budget.fail(exc, progress=last_progress())
+                except _ToolSupervisorFailure:
                     raise
                 except Exception as exc:
                     await display.flush()
@@ -877,7 +868,6 @@ async def _run_agent(
                             else run_context.outage_circuit.record_failure(circuit_now)
                         )
                         if not admission.allowed:
-                            budget.fail(failure, progress=last_progress())
                             raise
                         # The delay and the ladder's remaining bound are decided by
                         # one pure callable: a server hint replaces jitter but never
@@ -917,17 +907,18 @@ async def _run_agent(
                                 clock.monotonic()
                             ).allowed
                         ):
-                            budget.fail(failure, progress=last_progress())
                             raise
                         # Every gate passed. This attempt's calls are refunded only if
                         # the retry dispatches; time is never refunded.
                         pending_refund += budget.charged - refund_point
                         retry_failure_class = classification.failure_class.value
                         continue
-                    budget.fail(failure, progress=last_progress())
                     raise
                 finally:
                     primary_error = sys.exception()
+                    # Every failure that ends the ladder is its stop, unless a deadline stop was recorded first.
+                    if isinstance(primary_error, Exception) and budget.stopped is None:
+                        budget.fail(_observed_failure(primary_error, host_tools), progress=last_progress())
                     try:
                         display.finish_log_text()
                     except Exception as exc:  # noqa: BLE001 - preserve the active attempt failure

@@ -24,7 +24,6 @@ from daydream.deep import review_terminal
 from daydream.findings import FindingsValidationError, load_findings_artifact
 from daydream.host_tools import HostToolRejected
 from daydream.pr_review import ReviewEvent, post_findings_from_artifact
-from daydream.review_result import ReviewCoverage
 from daydream.trajectory import RUN_DOCUMENT_NAME
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.console import collapse_panel_text
@@ -129,8 +128,7 @@ async def test_comment_pins_pr_head_independently_and_excludes_local_edits(
     assert plan.pr.head_sha == review.pr.head_sha != local_head
     assert plan.pr.base_sha == review.pr.base_sha and plan.pr.pr_base_sha == review.pr.base_sha
     assert plan.event is ReviewEvent.COMMENT
-    coverage = ReviewCoverage.from_dict(json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text()))
-    terminal = coverage.finalize('completed')
+    terminal = json.loads((review.repo / '.daydream/deep/committed-review.json').read_text())['terminal_result']
     assert terminal['analysis_state'] == 'incomplete'
     assert 'evidence_incomplete' in terminal['reason_codes']
     patch = (review.repo / '.daydream/diff.patch').read_text()

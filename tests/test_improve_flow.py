@@ -42,6 +42,7 @@ from daydream.prompts.grounding import (
     REPOSITORY_SEARCH_GUIDANCE,
     UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
 )
+from daydream.review_budget import StopRecord
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from daydream.services import Service, enumerate_services
@@ -1104,7 +1105,7 @@ async def test_retryable_plan_writer_failure_is_not_regenerated(monkeypatch: pyt
     class _RateLimited(RuntimeError):
         retryable = True
 
-    async def _generate_once(_ctx: Any, _backend: Any, prompt: str) -> tuple[Any, str | None]:
+    async def _generate_once(_ctx: Any, _backend: Any, prompt: str) -> tuple[Any, StopRecord | None]:
         calls.append(prompt)
         raise _RateLimited("provider rate limit")
 

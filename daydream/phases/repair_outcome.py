@@ -1,9 +1,9 @@
-"""The bounded vocabulary of a single test-repair turn, and how a host abort maps onto it.
+"""The bounded vocabulary of a single test-repair turn, and how a host stop maps onto it.
 
 A repair turn has exactly four possible fates, and the host — not the model —
 decides which one happened. This module is pure vocabulary plus classification:
 no I/O, no state, and no new public stop reason (every interruption converges on
-an existing :class:`~daydream.review_result.ReasonCode`).
+an existing :class:`~daydream.review_budget.ReasonCode`).
 
 It also owns the one parser a repair turn's *scope request* enters through. A
 turn may ask to widen the authorization policy when the failure it worked from
@@ -40,20 +40,16 @@ class RepairOutcome(StrEnum):
     SCOPE_BLOCKED = "scope_blocked"
 
 
-def classify_repair_outcome(stop: StopRecord | None, output: str) -> RepairOutcome:
+def classify_repair_outcome(stop: StopRecord | None) -> RepairOutcome:
     """Classify a turn the host stopped or let run to its own end.
 
-    A host stop always wins over whatever the turn said: prose claiming a fix
-    inside an interrupted turn is partial diagnosis, not completion. Absent a
-    stop, no turn can read success out of its own text — the host validates
-    completion separately — so every unstopped turn is an unresolved diagnosis.
+    The turn's prose never decides: an unstopped turn is an unresolved diagnosis
+    until host validation runs.
     """
     if stop is not None:
         if stop.code in BUDGET_REASON_CODES:
             return RepairOutcome.BUDGET_INTERRUPTED
         return RepairOutcome.EXECUTION_ERROR
-    # The host never reads success out of a turn's prose: a blank turn and a
-    # descriptive one are both unresolved until host validation runs.
     return RepairOutcome.DIAGNOSIS_UNRESOLVED
 
 

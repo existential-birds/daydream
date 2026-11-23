@@ -218,7 +218,7 @@ class RepairAttemptEvidence:
         return self.stop.code if self.stop is not None else None
 
     def payload(self) -> dict[str, Any]:
-        """JSON-serializable form, naming the converged public reason for the stop.
+        """JSON-serializable form, carrying the turn's stop record unchanged.
 
         Nothing is defaulted away: a field the host could not produce must fail
         record construction rather than be invented here.
@@ -228,7 +228,6 @@ class RepairAttemptEvidence:
             "execution_id": self.execution_id,
             "run_id": self.run_id,
             "outcome": self.outcome.value,
-            "reason_code": self.reason_code,
             "stop": self.stop.to_dict() if self.stop is not None else None,
             "backend_name": self.backend_name,
             "model": self.model,

@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from daydream.review_budget import ReasonCode, StopRecord, reason_for_exception
-from daydream.review_result import ReviewCoverage, validate_terminal_result
+from daydream.review_result import validate_terminal_result
 from tests.harness.review_result import review_coverage
 
 
@@ -128,13 +128,11 @@ def test_retained_attribution_bounds_reject_atomically_after_a_valid_control(mon
             corrupt_scope = next(scope for scope in corrupt['stack_outcomes'] if scope['scope_id'] == 'python')
             corrupt_scope['target_decisions'] = invalid
             assert published_size(corrupt) - published_size(without_decisions) == run_limit + 1
-            terminal = ReviewCoverage.from_dict(before).finalize('completed')
+            terminal = copy.deepcopy(c).finalize('completed')
             next(scope for scope in terminal['stack_outcomes'] if scope['scope_id'] == 'python')[
                 'target_decisions'] = invalid
             with pytest.raises(ValueError, match='run source attribution exceeds retained byte limit'):
                 validate_terminal_result(terminal)
-            with pytest.raises(ValueError, match='run source attribution exceeds retained byte limit'):
-                ReviewCoverage.from_dict(corrupt)
             expected = 'run source attribution exceeds retained byte limit'
         else:
             invalid[0]['reason'] += 'é' * 1200
@@ -145,7 +143,6 @@ def test_retained_attribution_bounds_reject_atomically_after_a_valid_control(mon
             c.record_scope('python', 'incomplete', reasons=['backend_failure'], partial_evidence=True,
                            target_decisions=invalid)
         assert c.to_dict() == before
-        assert ReviewCoverage.from_dict(before).to_dict() == before
 
 
 def test_identity_and_invalid_recording_are_rejected() -> None:
@@ -158,9 +155,6 @@ def test_identity_and_invalid_recording_are_rejected() -> None:
         review_coverage().record_scope("extra", "complete")
     with pytest.raises(ValueError, match="usable"):
         review_coverage().record_phase("merge", "failed", reasons=["synthesis_failure"], usable_evidence=True)
-    corrupt: Any = None
-    with pytest.raises(ValueError):
-        ReviewCoverage.from_dict(corrupt)
 
 
 def test_exception_classification_uses_host_attributes() -> None:

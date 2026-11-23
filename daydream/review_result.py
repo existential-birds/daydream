@@ -101,11 +101,6 @@ TERMINAL_RESULT_SCHEMA: dict[str, Any] = strict_object({
 })
 
 
-_COVERAGE_FIELDS = ('schema_version', 'run_id', 'analyzed_revision', 'planned_scopes',
-                    'required_phases', 'stack_outcomes', 'phase_outcomes')
-_COVERAGE_SCHEMA = strict_object({key: TERMINAL_RESULT_SCHEMA['properties'][key] for key in _COVERAGE_FIELDS})
-
-
 def _revision_version(revision: Mapping[str, Any]) -> int | None:
     """Terminal result version of a reviewed subject: commits, a captured working source, or commits plus
     tracked working-tree edits that no commit holds. A revision claiming both kinds has no version."""
@@ -428,28 +423,6 @@ class ReviewCoverage:
             'required_phases': sorted(self.required_phases),
             'stack_outcomes': [self.scopes[key] for key in sorted(self.scopes)],
             'phase_outcomes': [self.phases[key] for key in sorted(self.phases)]})
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> ReviewCoverage:
-        """Restore coverage only after strict structural and semantic validation."""
-        try:
-            validate_json_schema(data, _COVERAGE_SCHEMA)
-        except jsonschema.ValidationError as exc:
-            raise ValueError(f'invalid coverage artifact schema: {exc.message}') from exc
-        if type(data['schema_version']) is not int:
-            raise ValueError('invalid coverage artifact schema version')
-        c = cls(data['run_id'], AnalyzedRevision.from_dict(data['analyzed_revision']),
-                [PlannedScope(**{**s, 'files': tuple(s['files'])}) for s in data['planned_scopes']],
-                data['required_phases'])
-        c.scopes = {s['scope_id']: copy.deepcopy(s) for s in data['stack_outcomes']}
-        c.phases = {p['phase']: copy.deepcopy(p) for p in data['phase_outcomes']}
-        # Validate the supplied inventory order too, before canonical serialization.
-        validate_terminal_result(c._snapshot(dict(data), 'completed', True, None))
-        for scope_id, outcome in c.scopes.items():
-            if 'target_decisions' in outcome:
-                outcome['target_decisions'] = preserved_target_decisions(outcome['target_decisions'])
-                c.admit_target_decisions(scope_id, outcome['target_decisions'])
-        return c
 
     def _snapshot(self, data: dict[str, Any], pipeline_state: str, projection_valid: bool,
                   cause: dict[str, Any] | None) -> dict[str, Any]:

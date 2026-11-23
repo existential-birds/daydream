@@ -116,7 +116,6 @@ def _capture_repair_checkpoint(
     execution_id: str,
     base_ref: str,
     failure_output: str,
-    turn_output: str,
     stop: StopRecord | None,
     base_tree_key: str,
     retained_tree_key: str,
@@ -138,7 +137,7 @@ def _capture_repair_checkpoint(
     checkpoint cannot be persisted or verified — an uncaptured repair is a repair
     that never happened, so the caller must treat it as blocking.
     """
-    outcome = classify_repair_outcome(stop, turn_output)
+    outcome = classify_repair_outcome(stop)
     deep_path = (
         artifact_dir_for(work.repo, session=artifact_session, allow_standalone=allow_standalone) / "deep"
     )
@@ -626,7 +625,7 @@ async def phase_test_and_heal(
             try:
                 _capture_repair_checkpoint(
                     work, job_id=job_id, execution_id=f"{job_id}:execution:{retries_used + 1}",
-                    base_ref=snapshot or "HEAD", failure_output=output, turn_output="",
+                    base_ref=snapshot or "HEAD", failure_output=output,
                     stop=None, base_tree_key=input_tree_key,
                     retained_tree_key=capture_tree_key(), footprint=footprint,
                     repair_instance=repair_instance, wall_budget_s=wall_budget_s,
@@ -659,7 +658,7 @@ async def phase_test_and_heal(
                 work, job_id=job_id, execution_id=f"{job_id}:execution:{retries_used}",
                 # Without a pre-turn stash the honest base is HEAD; the capture is
                 # still confined to the authorized paths either way.
-                base_ref=snapshot or "HEAD", failure_output=output, turn_output=turn_output,
+                base_ref=snapshot or "HEAD", failure_output=output,
                 stop=stop, base_tree_key=input_tree_key,
                 retained_tree_key=capture_tree_key(), footprint=footprint,
                 repair_instance=repair_instance, wall_budget_s=wall_budget_s,
@@ -725,7 +724,7 @@ async def phase_test_and_heal(
             # blocked it, whatever the turn claimed.
             outcome=(
                 RepairOutcome.SCOPE_BLOCKED if confinement_error is not None
-                else classify_repair_outcome(stop, turn_output)
+                else classify_repair_outcome(stop)
             ),
             stop=stop,
             backend_name=type(repair_instance).__name__.removesuffix("Backend").lower(),

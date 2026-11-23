@@ -439,7 +439,7 @@ async def test_a_deadline_that_cuts_the_ladder_during_backoff_keeps_the_failure_
     assert _budget_stop(recorder)[1] == reason.to_dict()  # local evidence writes the same record once
 
 
-async def test_initial_failed_attempt_deadline_records_discarded_stop(
+async def test_initial_failed_attempt_that_spends_the_deadline_keeps_its_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """An initial failed attempt that spends the wall budget is a deadline stop that keeps its failure."""

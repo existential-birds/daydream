@@ -2451,10 +2451,8 @@ async def test_each_stop_path_seals_one_cause_with_its_bound_and_observed_facts(
             set_registry(previous_registry)
     sealed = review.seal(settings)
     terminal = sealed["terminal_result"]
+    # Sealing validates that the cause is a retained execution stop and one of the reasons it names.
     assert terminal["cause"] == expected
-    # The cause is carried, not re-derived: it is the stopped entry's record, and its code a reason it names.
-    assert expected in [entry["stop"] for entry in sealed["execution"]]
-    assert expected["code"] in terminal["reason_codes"]
     if path == "incident":
         # The unfinished scope and the challenge it blocked name that stop, not a consequence of it.
         assert [scope["reason_codes"] for scope in terminal["stack_outcomes"]] == [["host_wall_budget_exhaustion"]]

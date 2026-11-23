@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from daydream import clock
@@ -358,18 +356,13 @@ class BudgetExhausted(Exception):
     reason_code = ReasonCode.HOST_WALL_BUDGET_EXHAUSTION.value
 
 
-def review_warnings(deep_dir: Path) -> tuple[str, ...]:
-    """Render checked unfinished coverage by its reason codes."""
-    from daydream.deep.artifacts import DeepArtifact
-    from daydream.review_result import ReviewCoverage
-
-    path = DeepArtifact.REVIEW_COVERAGE.at(deep_dir)
-    if not path.exists():
+def review_warnings(terminal: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Name each unfinished phase, then scope, of a sealed terminal result by its reason codes."""
+    if not terminal:
         return ()
-    coverage = ReviewCoverage.from_dict(json.loads(path.read_text()))
-    return tuple(f"{key}: {', '.join(outcome['reason_codes'])}"
-                 for outcomes in (coverage.phases, coverage.scopes)
-                 for key, outcome in sorted(outcomes.items()) if outcome['status'] != 'complete')
+    return tuple(f"{outcome[key]}: {', '.join(outcome['reason_codes'])}"
+                 for outcomes, key in ((terminal['phase_outcomes'], 'phase'), (terminal['stack_outcomes'], 'scope_id'))
+                 for outcome in outcomes if outcome['status'] != 'complete')
 
 
 def render_review_warnings(warnings: tuple[str, ...]) -> str:

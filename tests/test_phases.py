@@ -525,7 +525,7 @@ async def test_failing_confinement_blocks_the_repair_and_records_the_failure(
 def test_host_interruption_outranks_model_claim_of_success() -> None:
     """A nonbudget stop maps to execution error even when the phase caller raises."""
     stop = StopRecord(ReasonCode.BACKEND_FAILURE, "test-repair")
-    assert classify_repair_outcome(stop, "") is RepairOutcome.EXECUTION_ERROR
+    assert classify_repair_outcome(stop) is RepairOutcome.EXECUTION_ERROR
 
 
 async def test_grouped_fix_delivers_scopes_verdicts_evidence_and_test_map_then_retains_both_patches(

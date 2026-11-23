@@ -87,7 +87,7 @@ def refresh_review_report(ctx: FlowContext, *, no_diff: bool = False) -> dict[st
     blocks = (state.diagrams or {}).get('blocks')
     if blocks:
         existing = insert_diagrams_section(existing, blocks)
-    warning = render_review_warnings(review_warnings(state.dd))
+    warning = render_review_warnings(review_warnings(result))
     if warning:
         existing = warning + '\n\n' + existing
     rendered = insert_review_context(existing, context, result, findings_count=len(items)).encode('utf-8')
@@ -229,7 +229,7 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, stop: StopRecord |
     if result["analysis_state"] == "complete":
         print_info(console, outcome)
     else:
-        unfinished = "; ".join(review_warnings(state.dd)) or ", ".join(result["reason_codes"])
+        unfinished = "; ".join(review_warnings(result)) or ", ".join(result["reason_codes"])
         allowance = allowance_sentence(result["reason_codes"], str)
         print_warning(console, f"{outcome} Not finished: {unfinished}." + (f" {allowance}" if allowance else ""))
     # A cancelled run hands nothing over, to its embedder or to a poster: the published files hold the sealed result.
@@ -267,7 +267,7 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, stop: StopRecord |
     write_findings = partial(
         _write_findings_for_parsed,
         ctx.work.repo, ctx.config, parsed_issues_from_items(items), run_info=info.markdown,
-        review_warnings=review_warnings(state.dd), renderers=resolve_review_renderers(ctx.registry),
+        review_warnings=review_warnings(result), renderers=resolve_review_renderers(ctx.registry),
         diagrams=(state.diagrams or {}).get("payload"), auth=ctx.github_execution.auth,
         captured_pr=pr, terminal_result=result, snapshot_diff=ctx.data["snapshot_diff"],
         review_context=context,

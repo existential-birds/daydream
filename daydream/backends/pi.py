@@ -77,7 +77,7 @@ from daydream.backends.lifecycle import current_backend_lifecycle
 from daydream.config import DEFAULT_PI_MODEL
 from daydream.host_tools import HostToolBinding, UnsubmittedTurn
 from daydream.redaction import _PEM_HEADER, _PEM_KEY_REDACTED_MARKER, redact_structured_text
-from daydream.retry_policy import classify_failure, decode_retry_seconds, parse_message_retry_hint
+from daydream.retry_policy import classify_failure, decode_retry_seconds
 from daydream.review_budget import BudgetExhausted
 
 # Mirror Codex's generous stdout cap so large JSONL events (big file reads,
@@ -1710,12 +1710,12 @@ class PiBackend:
                         for terminal in terminal_events():
                             yield terminal
                         headers = last_response["headers"] if last_response is not None else {}
-                        retry_after = decode_retry_seconds(headers.get("retry-after"))
                         raise PiError(
                             error_msg,
                             retryable=retryable,
                             category=category,
-                            retry_after=retry_after if retry_after is not None else parse_message_retry_hint(error_msg),
+                            # Without the header, the retry ladder reads a hint from the message.
+                            retry_after=decode_retry_seconds(headers.get("retry-after")),
                             status=last_response["status"] if last_response is not None else None,
                         )
 
