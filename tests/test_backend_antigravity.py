@@ -108,11 +108,12 @@ async def test_recorded_read_only_turn_becomes_events_and_per_step_usage(
         ("step-4", "file does not exist", True, "error", 101.651),
         ("step-6", "2 lines, 32 bytes", False, "done", 97.244),
         ("step-8", "accepted", False, "done", 92.549)]
-    # A response's turn closes after the tool step it requested, so evidence pairs each call with its generation.
-    order = [event.id if isinstance(event, ToolResultEvent) else f"end:{event.message_id}"
-             for event in events if isinstance(event, (ToolResultEvent, TurnEndEvent))]
-    assert order == ["step-2", "end:step-1", "step-4", "end:step-3", "step-6", "end:step-5", "step-8", "end:step-7",
-                     "end:step-9"]
+    # Evidence pairs each generation with its own usage and the tool step it requested: a text-less
+    # response's usage follows the call that opens its turn, and the turn closes after that call's result.
+    order = [f"{type(event).__name__[:-5]}:{event.id if isinstance(event, ToolStartEvent) else event.message_id}"
+             for event in events if isinstance(event, (ToolStartEvent, MetricsEvent, TurnEndEvent))]
+    assert order == [f"{kind}:step-{step}" for step in (1, 3, 5, 7) for kind, step in (
+        ("ToolStart", step + 1), ("Metrics", step), ("TurnEnd", step))] + ["Metrics:step-9", "TurnEnd:step-9"]
     # The final message streamed as deltas, so the terminal response is not repeated.
     assert [event.text for event in events if isinstance(event, TextEvent)] == ["I have", "\n"]
 

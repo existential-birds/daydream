@@ -265,15 +265,19 @@ class AntigravityBackend:
         initialized = False
         pending_turn: str | None = None  # a finished response whose requested tool steps may still follow
         turn_text = False
+        held_usage: MetricsEvent | None = None  # a text-less response's usage, until its turn has an open step
         terminal: dict[str, Any] | None = None
         cleaned_up = False
         run: RunDirectory | None = None
         transport: CliTransport | None = None
 
-        def _turn_end(message_id: str) -> TurnEndEvent:
-            return TurnEndEvent(message_id=message_id, model_name=native_model,
-                                message_id_source="host_generated" if message_id else None,
-                                model_source="native" if native_model else None)
+        def _close_turn(message_id: str) -> list[AgentEvent]:
+            nonlocal held_usage
+            usage, held_usage = held_usage, None
+            return [*([usage] if usage is not None else []),
+                    TurnEndEvent(message_id=message_id, model_name=native_model,
+                                 message_id_source="host_generated" if message_id else None,
+                                 model_source="native" if native_model else None)]
 
         async def _teardown_once(started: CliTransport) -> None:
             nonlocal cleaned_up
@@ -405,8 +409,13 @@ class AntigravityBackend:
                     if step_type == "agent_response" and pending_turn not in (None, step_id):
                         # The previous response's tool steps are over: its turn closes with them inside.
                         assert pending_turn is not None
-                        yield _turn_end(pending_turn)
+                        for closing in _close_turn(pending_turn):
+                            yield closing
                         pending_turn, turn_text = None, False
+                    delta = body.get("text_delta") if step_type == "agent_response" else None
+                    if isinstance(delta, str) and delta:
+                        turn_text = True
+                        yield TextEvent(text=delta)
                     usage = body.get("usage")
                     if isinstance(usage, dict) and index not in metered_steps:
                         prompt_tokens = _token_count(usage.get("input_tokens"))
@@ -416,7 +425,7 @@ class AntigravityBackend:
                         else:
                             # One charge per step. agy reports no cost; cache reads are part of input.
                             metered_steps.add(index)
-                            yield MetricsEvent(
+                            metrics = MetricsEvent(
                                 message_id=step_id, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                                 cached_tokens=_token_count(usage.get("cache_read_tokens")), cost_usd=None,
                                 reasoning_tokens=_token_count(usage.get("thinking_tokens")),
@@ -424,12 +433,13 @@ class AntigravityBackend:
                                 duration_ms=_milliseconds(body.get("duration_seconds")),
                                 measurement_source="message_end",
                             )
+                            if step_type == "agent_response" and not turn_text:
+                                # The recorder would fold usage with no open step into the previous turn.
+                                held_usage = metrics
+                            else:
+                                yield metrics
 
                     if step_type == "agent_response":
-                        delta = body.get("text_delta")
-                        if isinstance(delta, str) and delta:
-                            turn_text = True
-                            yield TextEvent(text=delta)
                         if state == "DONE":
                             pending_turn = step_id
                     elif step_type == "tool":
@@ -451,6 +461,9 @@ class AntigravityBackend:
                                 # agy ran this start itself; the endpoint charges this attempt's own host calls.
                                 host.observe_native_start(step_id, name)
                             yield ToolStartEvent(id=step_id, name=name, input=parameters)
+                            if held_usage is not None:
+                                yield held_usage
+                                held_usage = None
                         if state in _COMPLETED_TOOL_STATES:
                             error = info.get("error")
                             output = info.get("output")
@@ -519,11 +532,13 @@ class AntigravityBackend:
             if isinstance(response, str) and response.strip() and not turn_text:
                 # The final message did not stream as deltas; the terminal response is its only copy.
                 if pending_turn is not None:
-                    yield _turn_end(pending_turn)
+                    for closing in _close_turn(pending_turn):
+                        yield closing
                 yield TextEvent(text=response)
                 pending_turn = ""
             if pending_turn is not None:
-                yield _turn_end(pending_turn)
+                for closing in _close_turn(pending_turn):
+                    yield closing
             result = ResultEvent(
                 structured_output=terminal.get("structured_output") if native_schema else None,
                 continuation=(ContinuationToken(backend="antigravity", data={"conversation_id": conversation_id})
