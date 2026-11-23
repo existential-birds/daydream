@@ -1,0 +1,35 @@
+name: Release
+
+# A merged release PR changes pyproject.toml's version; scripts/release.py then tags that
+# commit v<version> and publishes its CHANGELOG section as the GitHub release. Every other
+# push that touches pyproject.toml finds the version already released and does nothing.
+# Dispatch re-runs it for main's current version, such as after a failed publish.
+on:
+  push:
+    branches: [main]
+    paths: [pyproject.toml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # A dispatch from another branch must not tag that branch's commit.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Tag and publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: python3 scripts/release.py

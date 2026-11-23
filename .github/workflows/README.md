@@ -61,6 +61,13 @@ workflow reaches the default branch. The required check name remains `check`.
 Queue rules must have no bypass actors; administrators use the same verified
 merge path. This workflow never writes repository settings.
 
+## Release publication
+
+`release.yml` tags and publishes a release when its release PR merges; the rule
+lives in [CONTRIBUTING](../../CONTRIBUTING.md#versioning-and-changelog). It runs
+only on `main` pushes that change `pyproject.toml`, and on manual dispatch from
+`main`. Its token has `contents: write` and nothing else.
+
 ## Dependabot dependency updates
 
 `.github/dependabot.yml` keeps dependency updates arriving as small, grouped,
