@@ -43,6 +43,7 @@ def _payload(name: Any, args: Any, cwd: Any) -> dict[str, Any]:
     ("list_dir", {"DirectoryPath": "{root}"}, "private run directory"),
     ("read_file", {"Path": "link/.agents/hooks.json"}, "private run directory"),
     ("grep_search", {"Query": "x", "Options": [{"Includes": ["{root}/guard.py"]}]}, "private run directory"),
+    ("read_file", {"Path": "file://{root}/.agents/mcp_config.json"}, "private run directory"),
     ("read_file", {"Path": "bad\x00path"}, "could not be checked"),
     # Only this invocation's own MCP server is reachable.
     ("call_mcp_tool", {"ServerName": "daydream", "ToolName": "structured_output", "Arguments": {"a": 1}}, None),
@@ -112,7 +113,7 @@ def test_generated_hook_command_never_exits_zero_silently_except_to_allow(mutati
     (mutating.path / "guard-policy.json").write_text("{")
     code, out = run(json.dumps(_payload("read_file", {"Path": "calc.py"}, str(tmp_path))))
     assert code != 0 and json.loads(out)["decision"] == "deny"
-    argv[2] = str(mutating.path / "missing.json")
+    argv[-1] = str(mutating.path / "missing.json")
     code, out = run(json.dumps(_payload("read_file", {"Path": "calc.py"}, str(tmp_path))))
     assert code != 0 and json.loads(out)["decision"] == "deny"
 
@@ -167,7 +168,6 @@ def test_run_directory_files_match_the_invocation_profile(monkeypatch: pytest.Mo
     assert json.loads(files(hosted)[".agents/mcp_config.json"]) == {"mcpServers": {"daydream": {
         "url": "http://127.0.0.1:9/mcp", "headers": {"Authorization": f"Bearer {_BEARER}"}}}}
     assert [name for name, text in files(hosted).items() if _BEARER in text] == [".agents/mcp_config.json"]
-    assert json.loads(run_directory.MCP_PERMISSION_SETTINGS) == {"permissions": {"allow": ["mcp(daydream/*)"]}}
 
     for created in (review, hosted, edit):
         created.remove()

@@ -1,7 +1,7 @@
 """Shell-command rules shared by the adapters that guard a native shell tool.
 
-Pure and import-free: Claude matches these in its SDK hooks, and Antigravity
-serializes the same patterns into its per-run guard policy.
+Pure and import-free: Claude matches the dangerous patterns in its SDK hooks, and
+Antigravity serializes them, with its background rule, into its per-run guard policy.
 """
 
 from __future__ import annotations

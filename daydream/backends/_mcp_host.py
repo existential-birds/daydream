@@ -45,11 +45,10 @@ class McpHostEndpoint(HostToolEndpoint):
     answered ``tools/list``.
     """
 
-    def __init__(self, binding: HostToolBinding, *, call_id_prefix: str, native_owner: str) -> None:
+    def __init__(self, binding: HostToolBinding, *, native_owner: str) -> None:
         super().__init__(binding)
         self.token = secrets.token_urlsafe(32)
         self.url = ""
-        self._call_id_prefix = call_id_prefix
         self._native_owner = native_owner
         self._calls = 0
         self._stop = asyncio.Event()
@@ -126,7 +125,7 @@ class McpHostEndpoint(HostToolEndpoint):
         """Admit and serve one host call synchronously, returning its error flag and text blocks."""
         binding = self.binding
         self._calls += 1
-        call_id = f"{self._call_id_prefix}-{self._calls}"
+        call_id = f"{self._native_owner.lower()}-mcp-{self._calls}"
         try:
             if not self.current():
                 raise HostToolRejected("This attempt's host-tool authority is closed; the call was not served",

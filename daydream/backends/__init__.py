@@ -514,10 +514,7 @@ class CodexRequestConfig(EffectiveRequestConfig):
 class AntigravityRequestConfig(EffectiveRequestConfig):
     """Antigravity effective controls; paths, prompts, the bearer and environment stay absent."""
 
-    custom_agent: bool | None = None
     tools_count: int | None = None
-    guard_hook: bool | None = None
-    skip_permissions: bool | None = None
     native_output_schema: bool | None = None
     host_mcp: bool | None = None
     dedicated_home: bool | None = None

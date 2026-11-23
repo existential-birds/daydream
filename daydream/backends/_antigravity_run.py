@@ -21,8 +21,8 @@ from importlib import resources
 from pathlib import Path
 
 from daydream.backends._command_guards import BACKGROUND_COMMAND_PATTERN, DANGEROUS_COMMAND_PATTERNS
+from daydream.backends._mcp_host import HOST_SERVER
 
-_HOST_SERVER = "daydream"
 _MCP_TOOL = "call_mcp_tool"
 READ_ONLY_TOOLS: tuple[str, ...] = ("view_file", "grep_search", "find_by_name", "list_dir")
 MUTATING_TOOLS: tuple[str, ...] = READ_ONLY_TOOLS + (
@@ -88,14 +88,14 @@ def create_run_directory(*, read_only: bool, review_instructions: str | None,
         _write_private(policy, json.dumps({
             "allowed_tools": [*tools, *(_HOOK_ALIASES[tool] for tool in tools if tool in _HOOK_ALIASES)],
             "protected_root": str(root),
-            "mcp_server": _HOST_SERVER if host_tools else None,
+            "mcp_server": HOST_SERVER if host_tools else None,
             "denied_commands": denied_commands,
         }, indent=2))
-        _write_private(agents / "hooks.json", json.dumps({_HOST_SERVER: {"PreToolUse": [{"matcher": ".*", "hooks": [{
-            "type": "command", "command": shlex.join([sys.executable, str(guard), str(policy)]), "timeout": 10,
+        _write_private(agents / "hooks.json", json.dumps({HOST_SERVER: {"PreToolUse": [{"matcher": ".*", "hooks": [{
+            "type": "command", "command": shlex.join([sys.executable, "-I", str(guard), str(policy)]), "timeout": 10,
         }]}]}}, indent=2))
         if host_tools:
-            _write_private(agents / "mcp_config.json", json.dumps({"mcpServers": {_HOST_SERVER: {
+            _write_private(agents / "mcp_config.json", json.dumps({"mcpServers": {HOST_SERVER: {
                 "url": mcp_url, "headers": {"Authorization": f"Bearer {mcp_token}"}}}}, indent=2))
     except BaseException:
         shutil.rmtree(root, ignore_errors=True)

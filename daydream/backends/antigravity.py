@@ -41,7 +41,7 @@ from daydream.backends import (
 )
 from daydream.backends._antigravity_run import MCP_PERMISSION_SETTINGS, RunDirectory, create_run_directory
 from daydream.backends._mcp_host import HOST_SERVER, McpHostEndpoint, exempt_loopback_from_proxy
-from daydream.backends._subprocess import stream_idle_timeout_s
+from daydream.backends._subprocess import StreamStalledError, stream_idle_timeout_s
 from daydream.backends._transport import CliTransport, process_exit_message, reap, teardown
 from daydream.backends.lifecycle import current_backend_lifecycle
 from daydream.host_tools import HostToolBinding, UnsubmittedTurn
@@ -62,8 +62,7 @@ _HOME_ENV = "DAYDREAM_ANTIGRAVITY_HOME"
 _STDERR_ERROR_PREFIX = "AGY_ERROR:"
 _EXCERPT_MAX_LINES = 20
 _EXCERPT_MAX_CHARS = 256
-_FAILED_TOOL_STATES = frozenset({"ERROR"})
-_COMPLETED_TOOL_STATES = frozenset({"DONE"}) | _FAILED_TOOL_STATES
+_COMPLETED_TOOL_STATES = frozenset({"DONE", "ERROR"})
 
 _logger = logging.getLogger(__name__)
 
@@ -216,7 +215,7 @@ class AntigravityBackend:
             host: McpHostEndpoint | None = None
             if host_tools is not None:
                 host = await attempt.enter_async_context(host_tools.attempt(partial(
-                    McpHostEndpoint, call_id_prefix="antigravity-mcp", native_owner="Antigravity")))
+                    McpHostEndpoint, native_owner="Antigravity")))
             stream = await attempt.enter_async_context(aclosing(self._execute(
                 cwd, prompt, output_schema, continuation, read_only, persist_session, review_instructions,
                 host, environment, version)))
@@ -264,12 +263,17 @@ class AntigravityBackend:
         conversation_id: str | None = None
         native_model: str | None = None
         initialized = False
-        model_work_seen = False
-        step_text = last_turn_text = False
+        pending_turn: str | None = None  # a finished response whose requested tool steps may still follow
+        turn_text = False
         terminal: dict[str, Any] | None = None
         cleaned_up = False
         run: RunDirectory | None = None
         transport: CliTransport | None = None
+
+        def _turn_end(message_id: str) -> TurnEndEvent:
+            return TurnEndEvent(message_id=message_id, model_name=native_model,
+                                message_id_source="host_generated" if message_id else None,
+                                model_source="native" if native_model else None)
 
         async def _teardown_once(started: CliTransport) -> None:
             nonlocal cleaned_up
@@ -278,10 +282,11 @@ class AntigravityBackend:
                 lifecycle.teardown_started()
             try:
                 await teardown(started, self._transports, cleanup_timeout_s=_CLEANUP_TIMEOUT_S)
-            except TimeoutError:
+            except TimeoutError as exc:
                 if lifecycle is not None:
                     lifecycle.expiry("cleanup")
-                raise
+                raise AntigravityError(f"agy process cleanup did not complete within {_CLEANUP_TIMEOUT_S:g}s",
+                                       category="TIMEOUT", retryable=False) from exc
             if lifecycle is not None:
                 lifecycle.teardown_completed()
 
@@ -319,10 +324,7 @@ class AntigravityBackend:
                     persist_session=True,  # agy always stores the conversation in its home
                     continuation_mode="resume" if resumed is not None else "fresh",
                     model_mode="single",
-                    custom_agent=True,
                     tools_count=len(run.tools),
-                    guard_hook=True,
-                    skip_permissions=not read_only,
                     native_output_schema=native_schema,
                     host_mcp=host is not None,
                     dedicated_home=_HOME_ENV in environment and bool(environment[_HOME_ENV]),
@@ -354,6 +356,9 @@ class AntigravityBackend:
             await transport.start()
 
             async for raw_line in transport.lines(lambda: idle_timeout_s):
+                if host is not None and host.binding.fatal_error is not None:
+                    # A terminal host failure stops this conversation; the process is torn down below.
+                    raise host.binding.fatal_error
                 if not raw_line:
                     continue
                 try:
@@ -394,11 +399,14 @@ class AntigravityBackend:
                         coverage["malformed_step"] += 1
                         continue
                     step_id = f"step-{index}"
-                    if step_type in ("agent_response", "tool") and not model_work_seen:
-                        model_work_seen = True
-                        if host is not None and not host.ready:
-                            raise host.fatal("Antigravity did not list the host tools before model work",
-                                             code="native_readiness")
+                    if step_type in ("agent_response", "tool") and host is not None and not host.ready:
+                        raise host.fatal("Antigravity did not list the host tools before model work",
+                                         code="native_readiness")
+                    if step_type == "agent_response" and pending_turn not in (None, step_id):
+                        # The previous response's tool steps are over: its turn closes with them inside.
+                        assert pending_turn is not None
+                        yield _turn_end(pending_turn)
+                        pending_turn, turn_text = None, False
                     usage = body.get("usage")
                     if isinstance(usage, dict) and index not in metered_steps:
                         prompt_tokens = _token_count(usage.get("input_tokens"))
@@ -420,13 +428,10 @@ class AntigravityBackend:
                     if step_type == "agent_response":
                         delta = body.get("text_delta")
                         if isinstance(delta, str) and delta:
-                            step_text = True
+                            turn_text = True
                             yield TextEvent(text=delta)
                         if state == "DONE":
-                            last_turn_text, step_text = step_text, False
-                            yield TurnEndEvent(message_id=step_id, model_name=native_model,
-                                               message_id_source="host_generated",
-                                               model_source="native" if native_model else None)
+                            pending_turn = step_id
                     elif step_type == "tool":
                         info = body.get("tool_info")
                         info = info if isinstance(info, dict) else {}
@@ -453,7 +458,7 @@ class AntigravityBackend:
                                 message = error.get("message") if isinstance(error, dict) else error
                                 output = message if isinstance(message, str) else ""
                             yield ToolResultEvent(
-                                id=step_id, output=output, is_error=state in _FAILED_TOOL_STATES or bool(error),
+                                id=step_id, output=output, is_error=state == "ERROR" or bool(error),
                                 status=state.lower(), duration_ms=_milliseconds(body.get("duration_seconds")))
                     elif step_type not in ("user_input", "finish"):
                         coverage["unknown_step_type"] += 1
@@ -469,9 +474,8 @@ class AntigravityBackend:
                 else:
                     coverage["unknown_event"] += 1
 
-                if host is not None and host.binding.fatal_error is not None:
-                    # A terminal host failure stops this conversation; the process is reaped below.
-                    raise host.binding.fatal_error
+            if host is not None and host.binding.fatal_error is not None:
+                raise host.binding.fatal_error
 
             try:
                 returncode = await reap(transport, timeout_s=_PROCESS_REAP_TIMEOUT_S)
@@ -484,11 +488,7 @@ class AntigravityBackend:
             if host is not None and returncode:
                 host.binding.close_attempt()  # as in finally: no callback is served during teardown
             # Joins the stderr drain, so agy's structured error line is complete before classification.
-            try:
-                await _teardown_once(transport)
-            except TimeoutError as exc:
-                raise AntigravityError(f"agy process cleanup did not complete within {_CLEANUP_TIMEOUT_S:g}s",
-                                       category="TIMEOUT", retryable=False) from exc
+            await _teardown_once(transport)
 
             if coverage:
                 _logger.warning("antigravity parser coverage gaps: %s", dict(coverage))
@@ -498,9 +498,7 @@ class AntigravityBackend:
                     metadata={"reasons": dict(coverage)},
                 )
 
-            succeeded = (terminal is not None and terminal.get("status") == "SUCCESS" and initialized
-                         and returncode == 0)
-            if terminal is None or not succeeded:
+            if terminal is None or terminal.get("status") != "SUCCESS" or not initialized or returncode != 0:
                 raise self._failure(terminal, returncode, stderr_error, list(stderr_excerpt))
 
             denied = terminal.get("denied_actions")
@@ -518,10 +516,14 @@ class AntigravityBackend:
                                            category="TRANSPORT", retryable=False)
 
             response = terminal.get("response")
-            if isinstance(response, str) and response.strip() and not last_turn_text:
+            if isinstance(response, str) and response.strip() and not turn_text:
                 # The final message did not stream as deltas; the terminal response is its only copy.
+                if pending_turn is not None:
+                    yield _turn_end(pending_turn)
                 yield TextEvent(text=response)
-                yield TurnEndEvent(model_name=native_model, model_source="native" if native_model else None)
+                pending_turn = ""
+            if pending_turn is not None:
+                yield _turn_end(pending_turn)
             result = ResultEvent(
                 structured_output=terminal.get("structured_output") if native_schema else None,
                 continuation=(ContinuationToken(backend="antigravity", data={"conversation_id": conversation_id})
@@ -539,6 +541,14 @@ class AntigravityBackend:
                 # Neither accepted nor failed.
                 raise UnsubmittedTurn("Antigravity completed its turn without an accepted structured_output "
                                       "submission")
+        except StreamStalledError as exc:
+            if lifecycle is not None:
+                lifecycle.expiry("terminal_drain" if terminal is not None else "preterminal_stream")
+            if terminal is None:
+                raise
+            # The turn may have completed its work: a fresh attempt could repeat a mutation.
+            raise AntigravityError("agy reported its result but did not close its output; the turn was not "
+                                   "retried", category="TIMEOUT", retryable=False) from exc
         finally:
             primary = sys.exception()
             if host is not None:
@@ -548,11 +558,9 @@ class AntigravityBackend:
                 if transport is not None and not cleaned_up:
                     try:
                         await _teardown_once(transport)
-                    except TimeoutError as exc:
+                    except AntigravityError:
                         if primary is None:
-                            raise AntigravityError(
-                                f"agy process cleanup did not complete within {_CLEANUP_TIMEOUT_S:g}s",
-                                category="TIMEOUT", retryable=False) from exc
+                            raise
             finally:
                 if run is not None:
                     # The bearer and policy leave the disk with the attempt.

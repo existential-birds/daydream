@@ -62,10 +62,7 @@ from daydream.backends.lifecycle import (
     current_backend_lifecycle,
     lifecycle_failure_diagnostic,
 )
-from daydream.host_tools import (
-    HostToolBinding,
-    UnsubmittedTurn,
-)
+from daydream.host_tools import HostToolBinding, UnsubmittedTurn
 from daydream.pricing import ModelPrice, compute_cost_from_totals, load_user_prices, resolve_prices
 from daydream.prompts import grounding
 from daydream.trajectory import redact_structured_text
@@ -616,7 +613,7 @@ class CodexBackend:
                         native_settled=binding.native_settled, cleanup_complete=binding.cleanup_complete,
                         calls=binding.calls, rejections=binding.rejections))
                 host = await attempt.enter_async_context(host_tools.attempt(
-                    partial(McpHostEndpoint, call_id_prefix="codex-mcp", native_owner="Codex")))
+                    partial(McpHostEndpoint, native_owner="Codex")))
             elif review_instructions is not None:
                 raise ValueError("Codex review instructions are served only with host tools")
             # The process is reaped before its endpoint's transport is released.

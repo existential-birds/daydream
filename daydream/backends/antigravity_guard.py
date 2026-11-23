@@ -3,7 +3,7 @@
 Packaged data: the adapter copies this file into the invocation's private run
 directory and ``agy`` runs it there as ``<python> guard.py <policy.json>`` with the
 hook payload on stdin. It uses the standard library only and never imports
-``daydream``, so the hook costs one bare interpreter start.
+``daydream``, so the hook costs one isolated (``-I``) interpreter start.
 
 ``agy`` allows a tool when the hook exits 0 with empty stdout, denies it on a
 ``{"decision": "deny"}`` object, and fails closed on a non-zero exit. Only a positive
@@ -45,8 +45,7 @@ def _decide(payload: object, policy: object) -> str | None:
     if (not isinstance(allowed, list) or not isinstance(root_text, str) or not root_text
             or not isinstance(denied_commands, list) or not (mcp_server is None or isinstance(mcp_server, str))):
         return "the guard policy is malformed"
-    call = payload.get("toolCall") if isinstance(payload, dict) else None
-    if not isinstance(payload, dict) or not isinstance(call, dict):
+    if not isinstance(payload, dict) or not isinstance(call := payload.get("toolCall"), dict):
         return "the hook payload is malformed"
     name, args, cwd = call.get("name"), call.get("args", {}), payload.get("cwd")
     if not isinstance(name, str) or not isinstance(args, dict) or not isinstance(cwd, str):
@@ -58,6 +57,8 @@ def _decide(payload: object, policy: object) -> str | None:
 
     root = Path(root_text).resolve()
     for text in _strings(args):
+        if root_text in text or str(root) in text:  # any spelling that names it, such as a file:// URL
+            return "the invocation's private run directory is not accessible"
         candidate = Path(cwd, os.path.expanduser(text)).resolve()
         if candidate == root or root in candidate.parents:
             return "the invocation's private run directory is not accessible"
@@ -66,8 +67,6 @@ def _decide(payload: object, policy: object) -> str | None:
     if name == _SHELL_TOOL and not isinstance(command, str):
         return "the command line is malformed"
     if isinstance(command, str):
-        if root_text in command or str(root) in command:
-            return "the invocation's private run directory is not accessible"
         for entry in denied_commands:
             if re.compile(entry["pattern"]).search(command):
                 return str(entry["reason"])

@@ -327,7 +327,7 @@ no batch and plans no assignment. No setting selects another rule. The
 `[pipeline] assignment_policy` profile key is removed, and a profile that still sets it is refused before any review work with a
 message naming the key. Split work runs concurrently under
 `anyio.CapacityLimiter(effective_fanout_concurrency(10, backend))`, by default ten at a
-time on Pi and eight on Claude and Codex, each in a forked trajectory;
+time on Pi, eight on Claude and Codex and two on Antigravity, each in a forked trajectory;
 `DAYDREAM_FANOUT_CONCURRENCY` sets a lower or higher hint, up to ten.
 `settings.assignment_policy` records `name` (always `broad`), `decomposed`,
 `planned_assignments` and `cross_assignment` (`required` or `not_applicable`).
@@ -860,8 +860,8 @@ attempt count, the absolute deadline and the outage circuit; a failure after pos
 host acceptance still permits no retry. A Pi, Claude, Codex or Antigravity turn that completes with nothing
 accepted is retried under this rule only as the invocation's first retry, and the outage
 circuit records it as a completed turn, never as a failure
-([Pi](#pi-host-tool-lifetime-and-limits), [Claude](#claude-host-tools) and
-[Codex host tools](#codex-host-tools)).
+([Pi](#pi-host-tool-lifetime-and-limits), [Claude](#claude-host-tools),
+[Codex](#codex-host-tools) and [Antigravity host tools](#antigravity-host-tools)).
 Apart from that rejected submission, paths that do not retry are never refunded,
 including a committed challenge re-dispatch. Committed
 batches admitted before a provider failure stay installed while that attempt's starts
@@ -1173,7 +1173,8 @@ environment becomes the child's `HOME`.
   that reads this invocation's policy file. It allows only the policy's tool names, denies
   any path argument that resolves inside the per-run directory, and allows `call_mcp_tool`
   only for server `daydream`. It never silently allows: an internal error denies or exits
-  non-zero.
+  non-zero. It is a tool-call filter, not a sandbox: a search rooted above the per-run
+  directory, or a mutating turn's shell, is not confined by it.
 - Profiles: read-only offers `view_file`, `grep_search`, `find_by_name` and `list_dir`,
   with no shell and without `--dangerously-skip-permissions`. Mutating turns add
   `write_to_file`, `replace_file_content`, `multi_replace_file_content`, `run_command` and

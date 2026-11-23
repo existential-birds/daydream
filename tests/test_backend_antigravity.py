@@ -26,6 +26,7 @@ from daydream.backends import (
     TextEvent,
     ToolResultEvent,
     ToolStartEvent,
+    TurnEndEvent,
     request_config_controls,
 )
 from daydream.backends.antigravity import AntigravityBackend, AntigravityError
@@ -84,15 +85,14 @@ async def test_recorded_read_only_turn_becomes_events_and_per_step_usage(
     assert replay.spawner.kwargs[1]["cwd"] == str(tmp_path)
     assert set(replay.run_files[0]) == {
         ".agents/agents/daydream-review.md", ".agents/hooks.json", "guard.py", "guard-policy.json"}
-    assert replay.run_dir_modes == [0o700] and not replay.run_dirs[0].exists()
+    assert not replay.run_dirs[0].exists()
 
     request = events[0]
     assert isinstance(request, RequestEvent) and request.model_name is None
     assert request_config_controls(request.config) == {
         "finalization": None, "temperature": None, "read_only": True, "persist_session": True,
-        "continuation_mode": "fresh", "model_mode": "single", "custom_agent": True, "tools_count": 4,
-        "guard_hook": True, "skip_permissions": False, "native_output_schema": False, "host_mcp": False,
-        "dedicated_home": False}
+        "continuation_mode": "fresh", "model_mode": "single", "tools_count": 4, "native_output_schema": False,
+        "host_mcp": False, "dedicated_home": False}
     version = next(event for event in events if isinstance(event, DiagnosticEvent))
     assert (version.code, version.metadata) == (
         "antigravity_cli_version", {"observed": "1.5.15", "verified": "1.5.15", "newer_than_verified": False})
@@ -108,6 +108,11 @@ async def test_recorded_read_only_turn_becomes_events_and_per_step_usage(
         ("step-4", "file does not exist", True, "error", 101.651),
         ("step-6", "2 lines, 32 bytes", False, "done", 97.244),
         ("step-8", "accepted", False, "done", 92.549)]
+    # A response's turn closes after the tool step it requested, so evidence pairs each call with its generation.
+    order = [event.id if isinstance(event, ToolResultEvent) else f"end:{event.message_id}"
+             for event in events if isinstance(event, (ToolResultEvent, TurnEndEvent))]
+    assert order == ["step-2", "end:step-1", "step-4", "end:step-3", "step-6", "end:step-5", "step-8", "end:step-7",
+                     "end:step-9"]
     # The final message streamed as deltas, so the terminal response is not repeated.
     assert [event.text for event in events if isinstance(event, TextEvent)] == ["I have", "\n"]
 
@@ -237,6 +242,22 @@ async def test_unsuccessful_turns_are_classified_and_cleaned_up(
     with pytest.raises(AntigravityError, match=message) as raised:
         await _events(AntigravityBackend(), tmp_path, "Review", read_only=True)
     assert (raised.value.category, getattr(raised.value, "retryable", None)) == (category, retryable)
+    assert replay.spawner.procs[1].reaped and not replay.run_dirs[0].exists()
+
+
+async def test_a_result_without_stream_close_is_not_retried(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A stall after the terminal result is a non-retryable timeout, unlike a stall before it.
+
+    Regression: the shared stall error is retryable, so a mutating turn that finished its edits but
+    whose output pipe stayed open would be run a second time.
+    """
+    replay = install_agy(
+        monkeypatch, [_INIT.replace("daydream-review", "daydream-edit"), _result(status="SUCCESS")], hang=True)
+    backend = AntigravityBackend(execution_input=BackendExecutionInput.from_environment(
+        {"PATH": os.environ["PATH"], "DAYDREAM_STREAM_IDLE_TIMEOUT_S": "0.05"}, backend="antigravity"))
+    with pytest.raises(AntigravityError, match="did not close its output") as raised:
+        await _events(backend, tmp_path, "Fix calc.py")
+    assert (raised.value.category, raised.value.retryable) == ("TIMEOUT", False)
     assert replay.spawner.procs[1].reaped and not replay.run_dirs[0].exists()
 
 

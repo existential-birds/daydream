@@ -8,7 +8,6 @@ teardown; its files are captured when the invocation's process is spawned.
 from __future__ import annotations
 
 import asyncio
-import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -31,7 +30,6 @@ class AgyReplay:
     spawner: FakeCliSpawner
     run_dirs: list[Path] = field(default_factory=list)
     run_files: list[dict[str, str]] = field(default_factory=list)
-    run_dir_modes: list[int] = field(default_factory=list)
 
     @property
     def invocations(self) -> list[tuple[str, ...]]:
@@ -55,7 +53,6 @@ def install_agy(
         if "--add-dir" in args:
             root = Path(args[args.index("--add-dir") + 1])
             replay.run_dirs.append(root)
-            replay.run_dir_modes.append(stat.S_IMODE(root.stat().st_mode))
             replay.run_files.append({path.relative_to(root).as_posix(): path.read_text()
                                      for path in sorted(root.rglob("*")) if path.is_file()})
         return await launch(*args, **kwargs)
