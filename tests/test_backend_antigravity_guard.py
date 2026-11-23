@@ -149,7 +149,10 @@ def test_run_directory_files_match_the_invocation_profile(monkeypatch: pytest.Mo
 
     assert (review.agent, hosted.agent, edit.agent) == ("daydream-review", "daydream-review", "daydream-edit")
     assert review.tools == run_directory.READ_ONLY_TOOLS
-    assert hosted.tools == (*run_directory.READ_ONLY_TOOLS, "call_mcp_tool")
+    # agy's registry has no call_mcp_tool: listing it fails startup, so only the guard policy names it.
+    assert hosted.tools == run_directory.READ_ONLY_TOOLS
+    assert 'Call one as call_mcp_tool with ServerName "daydream"' in files(hosted)[
+        ".agents/agents/daydream-review.md"].split("# System Prompt")[1]
     assert edit.tools == run_directory.MUTATING_TOOLS
     assert files(review)[".agents/agents/daydream-review.md"].endswith(
         "\n# System Prompt\n\nReview policy: cite lines.\n\\# Output\nUse #7 style.\n")

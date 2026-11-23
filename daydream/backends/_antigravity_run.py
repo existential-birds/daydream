@@ -35,6 +35,12 @@ MCP_PERMISSION_SETTINGS = '{"permissions":{"allow":["mcp(daydream/*)"]}}'
 _HOOK_ALIASES = {"view_file": "read_file", "replace_file_content": "edit_file", "write_to_file": "write_file"}
 _DEFAULT_INSTRUCTIONS = "Complete the user's request using only the tools this agent provides."
 # H1 lines delimit the agent file's sections, so one inside the instructions is escaped to stay text.
+# Stable policy text: models otherwise nest the payload and spend several rejected calls recovering.
+_MCP_CALL_SHAPE = (
+    f'Host tools are served by the MCP server "{HOST_SERVER}". Call one as {_MCP_TOOL} with ServerName '
+    f'"{HOST_SERVER}", ToolName set to the bare tool name (for example structured_output), and Arguments set to '
+    "that tool's argument object directly, never wrapped in another Arguments object."
+)
 _H1_LINE = re.compile(r"(?m)^( {0,3})#(?=\s)")
 
 
@@ -62,7 +68,11 @@ def create_run_directory(*, read_only: bool, review_instructions: str | None,
     """Write the agent, guard hook and policy (and MCP config, given a URL and bearer) to a fresh 0700 directory."""
     host_tools = mcp_url is not None and mcp_token is not None
     agent = "daydream-review" if read_only else "daydream-edit"
-    tools = (READ_ONLY_TOOLS if read_only else MUTATING_TOOLS) + ((_MCP_TOOL,) if host_tools else ())
+    # MCP access comes from ``inheritMcp``: agy's registry has no ``call_mcp_tool`` to list and refuses to start.
+    tools = READ_ONLY_TOOLS if read_only else MUTATING_TOOLS
+    instructions = _H1_LINE.sub(r"\1\#", review_instructions or _DEFAULT_INSTRUCTIONS)
+    if host_tools:
+        instructions += "\n\n" + _MCP_CALL_SHAPE
     root = Path(tempfile.mkdtemp(prefix="daydream-antigravity-")).resolve()
     try:
         agents = root / ".agents"
@@ -71,8 +81,7 @@ def create_run_directory(*, read_only: bool, review_instructions: str | None,
             "mainAgent: true", "inheritMcp: true", "tools:", *(f"  - {tool}" for tool in tools), "---",
         ]
         _write_private(agents / "agents" / f"{agent}.md", "\n".join(
-            [*frontmatter, "", "# System Prompt", "",
-             _H1_LINE.sub(r"\1\#", review_instructions or _DEFAULT_INSTRUCTIONS), ""]))
+            [*frontmatter, "", "# System Prompt", "", instructions, ""]))
 
         guard, policy = root / "guard.py", root / "guard-policy.json"
         _write_private(guard, resources.files("daydream.backends").joinpath("antigravity_guard.py").read_text(
@@ -86,7 +95,8 @@ def create_run_directory(*, read_only: bool, review_instructions: str | None,
                        "and wait for it to finish."},
         ]
         _write_private(policy, json.dumps({
-            "allowed_tools": [*tools, *(_HOOK_ALIASES[tool] for tool in tools if tool in _HOOK_ALIASES)],
+            "allowed_tools": [*tools, *(_HOOK_ALIASES[tool] for tool in tools if tool in _HOOK_ALIASES),
+                              *((_MCP_TOOL,) if host_tools else ())],
             "protected_root": str(root),
             "mcp_server": HOST_SERVER if host_tools else None,
             "denied_commands": denied_commands,

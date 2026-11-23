@@ -135,7 +135,10 @@ class McpHostEndpoint(HostToolEndpoint):
                 binding.observe_start(call_id, name)
                 raise HostToolRejected("structured_output was accepted and this assignment has ended; "
                                        "the call was not served", code="authority_closed")
-            binding.admit(call_id, name, arguments, terminal=name == NATIVE_SUBMIT)
+            # A client may forward a name this server never listed: a charged, correctable rejection.
+            unknown = name not in self.schemas() and (
+                f"Unknown host tool {name!r}; call one of these by its exact name: {', '.join(self.schemas())}")
+            binding.admit(call_id, name, arguments, terminal=name == NATIVE_SUBMIT, malformed=unknown)
             if name != NATIVE_SUBMIT:
                 return False, self.result_blocks(binding.call(call_id, name, arguments))
             result = binding.submit(call_id, arguments)

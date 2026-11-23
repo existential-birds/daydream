@@ -1190,11 +1190,15 @@ environment becomes the child's `HOME`.
   child environment. The only permission rule added is `mcp(daydream/*)`, through
   `--settings`. The assignment's system instructions become the agent file's
   `# System Prompt` section, appended to `agy`'s default prompt; an H1 line inside them is
-  escaped so it cannot open another section. As for Codex, host tools
+  escaped so it cannot open another section, and one fixed sentence states the
+  `call_mcp_tool` argument shape. MCP access comes from `inheritMcp`, so the agent's `tools:`
+  list never names `call_mcp_tool`; only the guard policy does. As for Codex, host tools
   need a fresh read-only invocation with a terminal schema and no agents.
 - Readiness: this server must have answered `tools/list` before the first model step,
   else `native_readiness`.
-- Admission: the MCP handler admits, charges and serves host calls. `agy`-owned tool
+- Admission: the MCP handler admits, charges and serves host calls. `agy` forwards any
+  `ToolName`, so a name this server did not list is a charged, correctable rejection that
+  names the listed tools. `agy`-owned tool
   starts cannot be charged before they run and are charged when their step arrives, as
   Codex-owned ones are.
 - Settlement: the result is the host-accepted submission. It settles only after a

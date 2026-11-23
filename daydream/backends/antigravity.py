@@ -37,6 +37,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
+    _admit_runtime_tool_name,
     fanout_concurrency_from_environment,
 )
 from daydream.backends._antigravity_run import MCP_PERMISSION_SETTINGS, RunDirectory, create_run_directory
@@ -74,6 +75,11 @@ def _version_text(version: tuple[int, ...]) -> str:
 def _bounded(value: Any) -> str:
     """Redact one native line or label before applying the excerpt cap."""
     return redact_structured_text(str(value))[:_EXCERPT_MAX_CHARS]
+
+
+def _label(value: Any) -> str:
+    """A native type name safe to record, or a fixed placeholder; never free-form native text."""
+    return _admit_runtime_tool_name(value)[0] or "<unadmitted>"
 
 
 def _token_count(value: Any) -> int | None:
@@ -258,6 +264,7 @@ class AntigravityBackend:
             stderr_excerpt.append(_bounded(line))
 
         coverage: Counter[str] = Counter()  # fixed reasons for shapes outside the recorded contract
+        unrecognized: set[str] = set()  # the admitted names of those shapes, so a live run identifies them
         started_tools: set[str] = set()
         metered_steps: set[int] = set()
         conversation_id: str | None = None
@@ -475,6 +482,7 @@ class AntigravityBackend:
                                 status=state.lower(), duration_ms=_milliseconds(body.get("duration_seconds")))
                     elif step_type not in ("user_input", "finish"):
                         coverage["unknown_step_type"] += 1
+                        unrecognized.add(f"step_type:{_label(step_type)}")
 
                 elif kind == "result":
                     terminal = body
@@ -486,6 +494,7 @@ class AntigravityBackend:
 
                 else:
                     coverage["unknown_event"] += 1
+                    unrecognized.add(f"event:{_label(kind)}")
 
             if host is not None and host.binding.fatal_error is not None:
                 raise host.binding.fatal_error
@@ -508,7 +517,7 @@ class AntigravityBackend:
                 yield DiagnosticEvent(
                     code="antigravity_parser_coverage",
                     message="The agy stream contained shapes outside the recorded contract; they were not interpreted.",
-                    metadata={"reasons": dict(coverage)},
+                    metadata={"reasons": dict(coverage), "unrecognized": sorted(unrecognized)[:16]},
                 )
 
             if terminal is None or terminal.get("status") != "SUCCESS" or not initialized or returncode != 0:

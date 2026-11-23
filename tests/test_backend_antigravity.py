@@ -287,7 +287,8 @@ async def test_shapes_outside_the_recorded_contract_are_reported_not_interpreted
     diagnostics = {event.code: event.metadata for event in events if isinstance(event, DiagnosticEvent)}
     assert diagnostics["antigravity_parser_coverage"] == {"reasons": {
         "non_json_line": 1, "malformed_event": 1, "unknown_event": 1, "unknown_step_type": 1,
-        "unknown_tool_state": 1, "malformed_step": 2, "malformed_usage": 1, "event_after_result": 1}}
+        "unknown_tool_state": 1, "malformed_step": 2, "malformed_usage": 1, "event_after_result": 1},
+        "unrecognized": ["event:notice", "step_type:planning"]}
     # Without host tools an agy-side denial is evidence, not a failed turn.
     assert diagnostics["antigravity_denied_actions"] == {"actions": {"shell": 1}, "total": 1}
     assert [(type(event).__name__, event.id) for event in events
@@ -345,6 +346,9 @@ async def _host_turn(
             await session.initialize()
             assert [tool.name for tool in (await session.list_tools()).tools] == ["structured_output"]
             if submission is not None:
+                # agy forwards any ToolName unvalidated: a wrong name is a correctable rejection, not a fatal.
+                wrong = await session.call_tool("daydream:structured_output", submission)
+                assert wrong.is_error and "call one of these by its exact name: structured_output" in str(wrong.content)
                 assert not (await session.call_tool("structured_output", submission)).is_error
     replay.spawner.procs[1].finish(lines)
     return replay, events, turn
@@ -379,8 +383,8 @@ async def test_host_tool_turn_settles_on_the_accepted_submission(
     result = events[-1]
     assert isinstance(result, ResultEvent) and result.structured_output == {"accepted": True}
     assert accepted == [submission] and binding.native_settled and binding.cleanup_complete
-    # The submission and agy's three own reads; the transcript's host call is not charged again.
-    assert (binding.calls, binding.budget.charged) == (1, 4)
+    # The rejected and accepted host calls and agy's three own reads; the transcript's host call is not charged again.
+    assert (binding.calls, binding.rejections, binding.budget.charged) == (2, 1, 5)
     snapshot = lifecycle.finalize()
     assert snapshot is not None
     assert (snapshot.backend, snapshot.host_native_settled, snapshot.process_returncode) == ("antigravity", True, 0)
@@ -398,7 +402,7 @@ async def test_host_tool_turn_settles_on_the_accepted_submission(
     assert not any(token in text for text in exposed)
     assert "127.0.0.1" in environment["NO_PROXY"].split(",")
     agent = files[".agents/agents/daydream-review.md"]
-    assert agent.endswith("# System Prompt\n\nHOST POLICY\n") and "  - call_mcp_tool\n" in agent
+    assert "# System Prompt\n\nHOST POLICY\n\nHost tools are served" in agent and "  - call_mcp_tool" not in agent
     request = events[0]
     assert isinstance(request, RequestEvent) and request.system_prompt == "HOST POLICY"
     controls = request_config_controls(request.config)
