@@ -52,6 +52,8 @@ def _payload(name: Any, args: Any, cwd: Any) -> dict[str, Any]:
     # Shell: the shared dangerous and background rules, and no route to the run directory by text.
     ("run_command", {"CommandLine": "make test 2>&1 && git commit -m 'fix & tidy'"}, None),
     ("run_command", {"CommandLine": "rm -rf /"}, "dangerous command blocked"),
+    ("run_command", {"CommandLine": "cd / && rm -rf --no-preserve-root /"}, "dangerous command blocked"),
+    ("run_command", {"CommandLine": "make build |& tee log; ls"}, None),
     ("run_command", {"CommandLine": "sleep 600 &"}, "background command blocked"),
     ("run_command", {"CommandLine": "cat $(echo {root})/guard-policy.json"}, "private run directory"),
     ("run_command", {"CommandLine": ["ls"]}, "command line is malformed"),

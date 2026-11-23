@@ -22,6 +22,8 @@ from pathlib import Path
 _MCP_TOOL = "call_mcp_tool"
 _SHELL_TOOL = "run_command"
 _REASON_MAX_CHARS = 512
+# Separators between chained commands. A lone ``|`` or ``&`` is left alone: ``|&`` and ``2>&1`` are not chains.
+_CHAINED = re.compile(r"&&|\|\||[;\n]")
 
 
 def _strings(value: object) -> Iterator[str]:
@@ -67,9 +69,11 @@ def _decide(payload: object, policy: object) -> str | None:
     if name == _SHELL_TOOL and not isinstance(command, str):
         return "the command line is malformed"
     if isinstance(command, str):
-        for entry in denied_commands:
-            if re.compile(entry["pattern"]).search(command):
-                return str(entry["reason"])
+        # The rules anchor at a command's start, so each chained command is checked as well as the whole line.
+        for part in (command, *_CHAINED.split(command)):
+            for entry in denied_commands:
+                if re.compile(entry["pattern"]).search(part):
+                    return str(entry["reason"])
     return None
 
 

@@ -83,7 +83,7 @@ def _token_count(value: Any) -> int | None:
 def _milliseconds(seconds: Any) -> float | None:
     if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds < 0:
         return None
-    return round(float(seconds) * 1000.0, 3)  # agy reports microseconds
+    return round(float(seconds) * 1000.0, 3)  # seconds to ms; agy gives six decimal places
 
 
 class AntigravityError(Exception):

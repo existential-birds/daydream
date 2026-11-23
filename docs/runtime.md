@@ -1179,7 +1179,9 @@ environment becomes the child's `HOME`.
   with no shell and without `--dangerously-skip-permissions`. Mutating turns add
   `write_to_file`, `replace_file_content`, `multi_replace_file_content`, `run_command` and
   `command_status` with `--dangerously-skip-permissions`; the hook stays active and
-  applies the dangerous-command and background-command rules. `--sandbox` is not a
+  applies the dangerous-command and background-command rules, to the whole command line
+  and to each chained command; like Claude's, they are a backstop against known runaway
+  commands, not a shell policy. `--sandbox` is not a
   read-only control and is not used.
 - Host tools: each attempt gets a fresh loopback MCP server named `daydream`, the one
   [Codex](#codex-host-tools) uses (JSON responses to authenticated `POST` only, `405` for
