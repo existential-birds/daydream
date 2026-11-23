@@ -93,26 +93,22 @@ def test_a_merged_release_is_tagged_annotated_and_published_with_its_changelog_s
                       _NOTES)]
 
 
-def test_a_push_that_keeps_a_released_version_tags_and_publishes_nothing(repos: Repos, release: Release) -> None:
-    origin, work = repos
-    tagged = _remote_tags(origin)
-    _commit(work, "0.1.0")
-
-    assert release() == []
-    assert _remote_tags(origin) == tagged
-
-
 @pytest.mark.parametrize("published", [False, True], ids=["release-missing", "release-present"])
-def test_a_tag_on_this_commit_gets_its_release_only_when_missing(
-        repos: Repos, release: Release, published: bool) -> None:
+@pytest.mark.parametrize("earlier", [False, True], ids=["tag-here", "tag-on-earlier-commit"])
+def test_an_existing_tag_is_kept_and_gets_its_tagged_notes_only_when_its_release_is_missing(
+        repos: Repos, release: Release, earlier: bool, published: bool) -> None:
     origin, work = repos
-    head = _commit(work, "0.2.0")
-    _tag(work, "v0.2.0", head)
+    tagged = _commit(work, "0.2.0")
+    _tag(work, "v0.2.0", tagged)
+    if earlier:
+        # A later merge (a dependency bump) keeps the version and rewrites its section.
+        _commit(work, "0.2.0", _CHANGELOG.replace(_NOTES, "### Fixed\n\n- Rewritten later.\n"))
 
     calls = release(published=published)
 
-    assert _remote_tags(origin)["v0.2.0"] == head
-    assert [args[1] for args, _ in calls] == (["view"] if published else ["view", "create"])
+    assert _remote_tags(origin)["v0.2.0"] == tagged
+    assert calls == [(("release", "view", "v0.2.0", "--json", "tagName"), None)] + ([] if published else [
+        (("release", "create", "v0.2.0", "--verify-tag", "--title", "v0.2.0", "--notes-file", "-"), _NOTES)])
 
 
 def test_a_failed_publish_keeps_the_tag_so_a_rerun_publishes(repos: Repos, release: Release) -> None:
@@ -129,8 +125,8 @@ def test_a_failed_publish_keeps_the_tag_so_a_rerun_publishes(repos: Repos, relea
 @pytest.mark.parametrize(("changelog", "declared", "message"), [
     (_CHANGELOG, "0.1.9", r'does not declare __version__ = "0.2.0"'),
     (_CHANGELOG.replace("## [0.2.0] - 2026-11-23", "## [0.2.0]"), None, r"no dated section '## \[0.2.0\]"),
-    (_CHANGELOG.replace(_NOTES, ""), None, "section 0.2.0 has no entries"),
-], ids=["package-version-differs", "section-undated", "section-empty"])
+    (_CHANGELOG.replace(_NOTES, "### Fixed\n"), None, "section 0.2.0 has no entries"),
+], ids=["package-version-differs", "section-undated", "section-with-only-a-heading"])
 def test_an_inconsistent_release_commit_is_refused_before_anything_is_tagged(
         repos: Repos, release: Release, changelog: str, declared: str | None, message: str) -> None:
     origin, work = repos

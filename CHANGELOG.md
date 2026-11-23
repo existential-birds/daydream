@@ -12,9 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Merging a release PR now publishes the release: `.github/workflows/release.yml` runs
   `scripts/release.py`, which tags the merge commit `v<version>` (annotated, `Release v<version>`)
   and publishes the version's CHANGELOG section as the GitHub release. It refuses before tagging
-  when `daydream/__init__.py` or the dated CHANGELOG section disagree with `pyproject.toml`, skips
-  versions already released, and publishes a missing release for an existing tag on re-run
-  ([#1964](https://github.com/existential-birds/daydream/issues/1964)).
+  when `daydream/__init__.py` disagrees with `pyproject.toml` or the dated CHANGELOG section has no
+  entries. It never moves an existing tag; when that tag's release is missing, it publishes it from
+  the tagged commit's CHANGELOG, so a dispatch on `main` retries a failed publish even after later
+  merges ([#1964](https://github.com/existential-birds/daydream/issues/1964)).
 
 ### Changed
 
