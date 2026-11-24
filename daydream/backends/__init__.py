@@ -180,7 +180,7 @@ class BackendExecutionInput:
             DEFAULT_STREAM_IDLE_TIMEOUT_S,
         )
 
-        if backend not in {"pi", "codex", "claude"}:
+        if backend not in {"pi", "codex", "claude", "antigravity"}:
             if backend == "osprey":
                 raise ValueError("explicit BackendExecutionInput is not supported for osprey")
             raise ValueError(f"unsupported backend for execution input: {backend!r}")
@@ -208,7 +208,8 @@ class BackendExecutionInput:
         return cls(
             copied,
             retry_policy_from_environment(copied, backend=backend),
-            fanout_concurrency_from_environment(copied, 10 if backend == "pi" else 8),
+            # Antigravity runs on subscription quotas.
+            fanout_concurrency_from_environment(copied, {"pi": 10, "antigravity": 2}.get(backend, 8)),
             copied.get("PI_PROVIDER") or None,
             copied.get("PI_THINKING") or None,
             pi_agent_dir,
@@ -510,6 +511,16 @@ class CodexRequestConfig(EffectiveRequestConfig):
 
 
 @dataclass(frozen=True)
+class AntigravityRequestConfig(EffectiveRequestConfig):
+    """Antigravity effective controls; paths, prompts, the bearer and environment stay absent."""
+
+    tools_count: int | None = None
+    native_output_schema: bool | None = None
+    host_mcp: bool | None = None
+    dedicated_home: bool | None = None
+
+
+@dataclass(frozen=True)
 class PiRequestConfig(EffectiveRequestConfig):
     """Pi-only effective controls (bounded values; system/prompt content absent)."""
 
@@ -585,7 +596,8 @@ def _config_checks(schema: type[EffectiveRequestConfig]) -> tuple[tuple[str, _Co
 _CONFIG_CHECKS = {
     schema: _config_checks(schema)
     for schema in (
-        EffectiveRequestConfig, ClaudeRequestConfig, CodexRequestConfig, PiRequestConfig, OspreyRequestConfig,
+        EffectiveRequestConfig, ClaudeRequestConfig, CodexRequestConfig, AntigravityRequestConfig, PiRequestConfig,
+        OspreyRequestConfig,
     )
 }
 
@@ -987,8 +999,9 @@ def create_backend(
     """Construct a backend with explicit model, effort, and execution settings.
 
     Claude/Codex apply built-in models; Pi resolves its configured model before its
-    fallback. Effort uses each driver's native control. Only Claude supports an exact
-    audit_root with lexical outward-symlink restrictions. Unknown names raise ValueError.
+    fallback; Antigravity leaves an unset model to agy's own configuration. Effort uses
+    each driver's native control. Only Claude supports an exact audit_root with lexical
+    outward-symlink restrictions. Unknown names raise ValueError.
     """
     from daydream.config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
 
@@ -1002,7 +1015,7 @@ def create_backend(
             audit_outward_symlinks=audit_outward_symlinks,
             execution_input=execution_input,
         )
-    if audit_root is not None and name in {"codex", "pi", "osprey"}:
+    if audit_root is not None and name in {"codex", "pi", "osprey", "antigravity"}:
         raise AuditIsolationError(name, "unsupported_backend")
     if name == "codex":
         from daydream.backends.codex import CodexBackend
@@ -1012,6 +1025,10 @@ def create_backend(
             reasoning_effort=reasoning_effort,
             execution_input=execution_input,
         )
+    if name == "antigravity":
+        from daydream.backends.antigravity import AntigravityBackend
+
+        return AntigravityBackend(model=model, reasoning_effort=reasoning_effort, execution_input=execution_input)
     if name == "pi":
         from daydream.backends.pi import PiBackend
 
@@ -1032,12 +1049,13 @@ def create_backend(
             reasoning_effort=reasoning_effort,
             osprey_binary=osprey_binary,
         )
-    raise ValueError(f"Unknown backend: {name!r}. Expected 'claude', 'codex', 'pi', or 'osprey'.")
+    raise ValueError(f"Unknown backend: {name!r}. Expected 'claude', 'codex', 'pi', 'osprey', or 'antigravity'.")
 
 
-_ADAPTER_MODULES = frozenset({"claude", "codex", "osprey", "pi"})
+_ADAPTER_MODULES = frozenset({"antigravity", "claude", "codex", "osprey", "pi"})
 # Adapter classes consumers recognize without importing their adapter module.
 _RECOGNIZED_ADAPTER_CLASSES: Mapping[str, str] = MappingProxyType({
+    "AntigravityBackend": "antigravity",
     "CodexLifecycleError": "codex",
     "OspreyBackend": "osprey",
     "PiBackend": "pi",
@@ -1055,7 +1073,9 @@ def is_adapter_instance(value: object, class_name: Literal["PiBackend"]) -> Type
 
 
 @overload
-def is_adapter_instance(value: object, class_name: Literal["CodexLifecycleError", "OspreyBackend"]) -> bool: ...
+def is_adapter_instance(
+    value: object, class_name: Literal["AntigravityBackend", "CodexLifecycleError", "OspreyBackend"],
+) -> bool: ...
 
 
 def is_adapter_instance(value: object, class_name: str) -> bool:
@@ -1072,6 +1092,7 @@ __all__ = [
     "AUDIT_ROOT_ISOLATION",
     "AgentEvent",
     "AgentEventStream",
+    "AntigravityRequestConfig",
     "AuditIsolationError",
     "Backend",
     "BackendExecutionInput",

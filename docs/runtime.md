@@ -72,7 +72,7 @@ because a failed replacement may preserve an older complete artifact.
 ## Committed-review request/result
 
 `daydream.committed_review.run_committed_review(CommittedReviewRequest(source, base))`
-reviews a captured committed diff through a native host-tool backend, Pi, Claude or Codex
+reviews a captured committed diff through a native host-tool backend, Pi, Claude, Codex or Antigravity
 ([capabilities](extensions.md#invocation-scoped-host-tools)); discovery and challenge
 backends without host tools are refused before source preparation. `local=True` selects the net
 base-to-final-working change described below. Committed capture excludes working-tree
@@ -327,7 +327,7 @@ no batch and plans no assignment. No setting selects another rule. The
 `[pipeline] assignment_policy` profile key is removed, and a profile that still sets it is refused before any review work with a
 message naming the key. Split work runs concurrently under
 `anyio.CapacityLimiter(effective_fanout_concurrency(10, backend))`, by default ten at a
-time on Pi and eight on Claude and Codex, each in a forked trajectory;
+time on Pi, eight on Claude and Codex and two on Antigravity, each in a forked trajectory;
 `DAYDREAM_FANOUT_CONCURRENCY` sets a lower or higher hint, up to ten.
 `settings.assignment_policy` records `name` (always `broad`), `decomposed`,
 `planned_assignments` and `cross_assignment` (`required` or `not_applicable`).
@@ -857,11 +857,11 @@ provider failure leads to a retry, the failed attempt's tool calls are refunded 
 the retry dispatches, because it is a fresh native conversation that must redo the
 lost work; a retry stopped before dispatch refunds nothing. Elapsed time is never refunded. Retries stay bounded by the
 attempt count, the absolute deadline and the outage circuit; a failure after possible
-host acceptance still permits no retry. A Pi, Claude or Codex turn that completes with nothing
+host acceptance still permits no retry. A Pi, Claude, Codex or Antigravity turn that completes with nothing
 accepted is retried under this rule only as the invocation's first retry, and the outage
 circuit records it as a completed turn, never as a failure
-([Pi](#pi-host-tool-lifetime-and-limits), [Claude](#claude-host-tools) and
-[Codex host tools](#codex-host-tools)).
+([Pi](#pi-host-tool-lifetime-and-limits), [Claude](#claude-host-tools),
+[Codex](#codex-host-tools) and [Antigravity host tools](#antigravity-host-tools)).
 Apart from that rejected submission, paths that do not retry are never refunded,
 including a committed challenge re-dispatch. Committed
 batches admitted before a provider failure stay installed while that attempt's starts
@@ -986,9 +986,9 @@ with `capacity_exhausted`, and the assignment deadline applies throughout; a bin
 without a protected start keeps the fatal outcome for a rejection on its last start.
 `capacity()` reports both counts; the ledger observes denied starts without charging them. Pi and Claude deny prospectively at admission,
 so a denied start is still observed and reported as [overshoot](observability.md#committed-review-evidence)
-that never reduces later reserves. Codex denies its host calls the same way, but the tools
-it runs itself have already run when they are observed
-([Codex host tools](#codex-host-tools)). Osprey serves no host tools and only observes starts.
+that never reduces later reserves. Codex and Antigravity deny their host calls the same way,
+but the tools they run themselves have already run when they are observed
+([Codex host tools](#codex-host-tools), [Antigravity host tools](#antigravity-host-tools)). Osprey serves no host tools and only observes starts.
 
 A binding may also declare charged nonterminal host tools (`HostTool`). Pi registers
 them in the existing extension with `executionMode: "sequential"`, so the supported Pi
@@ -1155,6 +1155,76 @@ startup, readiness, charging of host and Codex-owned calls, settlement and the s
 snapshot. The other rules were exercised offline with a scripted local provider on Linux
 against 0.163.0 and 0.169.0. API-key authentication is not exercised.
 
+### Antigravity host tools
+
+Antigravity runs one `agy --input-format stream-json --output-format stream-json` process
+per invocation, in the invocation's working directory. The prompt is one NDJSON user line
+on standard input followed by EOF, never an argument. `agy --version` runs once per backend
+instance before its first invocation: a build below 1.5.15 or an unreadable version is a
+non-retryable configuration error, a newer build proceeds with a diagnostic, and the
+observed version is recorded in evidence. `DAYDREAM_ANTIGRAVITY_HOME` in the run
+environment becomes the child's `HOME`.
+
+- Tool boundary, on every invocation: the default agent never runs. A private (0700)
+  per-run directory, passed with `--add-dir` and removed at teardown, holds a
+  Daydream-owned agent file with an explicit `tools:` list, selected with `--agent`;
+  `init.agent` must name it before any model step is trusted. The same directory holds a
+  deny-by-default `PreToolUse` hook: a packaged script, run by the running interpreter,
+  that reads this invocation's policy file. It allows only the policy's tool names, denies
+  any argument that names the per-run directory or resolves inside it (relative to the
+  invocation's working directory from the policy, never the hook payload's `cwd`, which
+  is one of `agy`'s workspace roots), and allows `call_mcp_tool`
+  only for server `daydream`. It never silently allows: an internal error denies or exits
+  non-zero. The agent's `tools:` list alone is not the boundary: the model also reaches for
+  `agy` built-ins outside it, and the hook denies those. It is a tool-call filter, not a sandbox: a search rooted above the per-run
+  directory, or a mutating turn's shell, is not confined by it.
+- Profiles: read-only offers `view_file`, `grep_search`, `find_by_name` and `list_dir`,
+  with no shell and without `--dangerously-skip-permissions`. Mutating turns add
+  `write_to_file`, `replace_file_content`, `multi_replace_file_content`, `run_command` and
+  `command_status` with `--dangerously-skip-permissions`; the hook stays active and
+  applies the dangerous-command and background-command rules, to the whole command line
+  and to each chained command; like Claude's, they are a backstop against known runaway
+  commands, not a shell policy. `--sandbox` is not a
+  read-only control and is not used.
+- Host tools: each attempt gets a fresh loopback MCP server named `daydream`, the one
+  [Codex](#codex-host-tools) uses (JSON responses to authenticated `POST` only, `405` for
+  another authenticated method, `403` without the secret). Its URL and bearer are written
+  only to `<per-run directory>/.agents/mcp_config.json`, never to argv, a prompt or the
+  child environment. The only permission rule added is `mcp(daydream/*)`, through
+  `--settings`. The assignment's system instructions become the agent file's
+  `# System Prompt` section, appended to `agy`'s default prompt; an H1 line inside them is
+  escaped so it cannot open another section, and one fixed sentence states the
+  `call_mcp_tool` argument shape. MCP access comes from `inheritMcp`, so the agent's `tools:`
+  list never names `call_mcp_tool`; only the guard policy does. As for Codex, host tools
+  need a fresh read-only invocation with a terminal schema and no agents.
+- Readiness: this server must have answered `tools/list` before the first model step,
+  else `native_readiness`.
+- Admission: the MCP handler admits, charges and serves host calls. `agy` forwards any
+  `ToolName`, so a name this server did not list is a charged, correctable rejection that
+  names the listed tools. `agy`-owned tool
+  starts cannot be charged before they run and are charged when their step arrives, as
+  Codex-owned ones are.
+- Settlement: the result is the host-accepted submission. It settles only after a
+  terminal `result` with `status: "SUCCESS"`, stdout EOF, an observed zero exit and
+  cleanup; a completed turn with nothing accepted or failed is the same retryable
+  truncation as on Codex. A `denied_actions` entry for an MCP call before acceptance
+  fails the turn.
+- Results and usage: without host tools, `--json-schema` supplies the structured result.
+  Each `step_update` that carries `usage` is charged once; `result.usage` is cumulative
+  for the conversation and is not charged. `agy` reports no cost and none is estimated.
+  `conversation_id` is the session id and the `--conversation` continuation token.
+- Failures: `result.error: "interrupted"` is cancellation; `authentication failed or timed
+  out` is a non-retryable configuration error; a stderr `AGY_ERROR: {...}` line supplies
+  `retryable`.
+- Not offered: Improve, `agents`, finalization, an audit root, a budget preamble or a
+  capacity preflight. `persist_session=False` returns no continuation, but `agy` still
+  stores the conversation in its home.
+
+The wire contract was recorded from `agy` 1.5.15 on macOS with a consumer sign-in
+([#1966](https://github.com/existential-birds/daydream/issues/1966)); the gate replays
+those recordings and never runs `agy`. API-key and ADC authentication and Linux are not
+exercised.
+
 ## Replaced reviewer options
 
 Committed review is the only reviewer. It reviews the whole change in one program, so
@@ -1166,8 +1236,8 @@ extension registers them.
   such as the staged reviewer's settings, fails with one message naming each key. Phase
   tables accept extension phases, so tables for retired phases are ignored.
   `[phases.review]` configures discovery and `[phases.arbiter]` configures the challenge.
-- **Refused:** a review or challenge backend without native host tools. Pi, Claude and
-  Codex serve them; Osprey does not and cannot run a review.
+- **Refused:** a review or challenge backend without native host tools. Pi, Claude,
+  Codex and Antigravity serve them; Osprey does not and cannot run a review.
 - **Review profiles:** the former `[pipeline]` keys fail with the generic
   `pipeline: unknown key` error. Strategy names stay open to extension steps, so a former
   strategy such as `strategies.arbitration` loads, counts in the profile digest and steers

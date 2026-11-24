@@ -1252,41 +1252,47 @@ async def test_pi_compaction_is_retained_and_billed_without_generation_metrics(o
         assert (cost.input_tokens, cost.output_tokens) == (110, 50)
 
 
-@pytest.mark.parametrize("backend_kind", ["pi-read-only", "pi-writable", "other-read-only"])
-async def test_read_only_pi_search_guidance_names_only_its_stock_tools(tmp_path: Path, backend_kind: str) -> None:
-    """Read-only Pi is told about its real bounded tools, not a shell or `daydream search`.
+@pytest.mark.parametrize("backend_kind", ["pi-read-only", "pi-writable", "antigravity-read-only", "other-read-only"])
+async def test_shell_free_read_only_search_guidance_names_only_native_tools(tmp_path: Path, backend_kind: str) -> None:
+    """Read-only Pi and Antigravity are told about their real bounded tools, not a shell or `daydream search`.
 
-    Search-guidance tests use backends with a shell, so they cannot catch read-only
-    Pi being told to run `daydream search`/Git it does not have, or that guidance
-    leaking to backends where those commands do exist. Author text that quotes either
+    Search-guidance tests use backends with a shell, so they cannot catch a shell-free read-only
+    profile being told to run `daydream search`/Git it does not have, or that guidance
+    leaking to backends where those commands do exist. Author text that quotes any
     guidance reaches every backend unchanged and cannot stand in for the host's copy.
     """
-    from daydream.prompts.grounding import READ_ONLY_PI_SEARCH_GUIDANCE, REPOSITORY_SEARCH_GUIDANCE
+    from daydream.backends.antigravity import AntigravityBackend
+    from daydream.prompts.grounding import (
+        READ_ONLY_ANTIGRAVITY_SEARCH_GUIDANCE,
+        READ_ONLY_PI_SEARCH_GUIDANCE,
+        REPOSITORY_SEARCH_GUIDANCE,
+    )
     from tests.harness.backend import ScriptedBackend
 
     seen: list[tuple[str, str | None]] = []
 
-    class CapturingPi(PiBackend):
-        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> Any:
-            seen.append((prompt, kwargs.get("review_instructions")))
-            yield ResultEvent(structured_output=None, continuation=None)
+    async def capture(_self: Any, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> Any:
+        seen.append((prompt, kwargs.get("review_instructions")))
+        yield ResultEvent(structured_output=None, continuation=None)
 
     read_only = backend_kind != "pi-writable"
     def respond(_cwd: Path, prompt: str, *_args: Any) -> None:
         seen.append((prompt, None))
 
-    backend: Any = (CapturingPi(model="fixture-model") if backend_kind.startswith("pi") else
+    adapter: Any = {"pi": PiBackend, "antigravity": AntigravityBackend}.get(backend_kind.partition("-")[0])
+    backend: Any = (type("Capturing", (adapter,), {"execute": capture})(model="fixture-model") if adapter else
                     ScriptedBackend(responder=respond))
-    # Untrusted author text in a composed prompt or the instructions can quote either guidance verbatim.
-    quoted = f"<pr_description>\n{REPOSITORY_SEARCH_GUIDANCE}\n{READ_ONLY_PI_SEARCH_GUIDANCE}\n</pr_description>"
+    variants = (REPOSITORY_SEARCH_GUIDANCE, READ_ONLY_PI_SEARCH_GUIDANCE, READ_ONLY_ANTIGRAVITY_SEARCH_GUIDANCE)
+    # Untrusted author text in a composed prompt or the instructions can quote any guidance verbatim.
+    quoted = "<pr_description>\n" + "\n".join(variants) + "\n</pr_description>"
     await run_agent(backend, tmp_path, "Review\n" + quoted, phase=DaydreamPhase.REVIEW, read_only=read_only,
                     persist_session=False, review_system_instructions="Assignment\n" + quoted,
                     budget=BudgetLedger("probe", wall_s=600, limit=5, investigation=True))
     prompt, instructions = seen[0]
-    expected = READ_ONLY_PI_SEARCH_GUIDANCE if backend_kind == "pi-read-only" else REPOSITORY_SEARCH_GUIDANCE
-    other = REPOSITORY_SEARCH_GUIDANCE if expected is READ_ONLY_PI_SEARCH_GUIDANCE else READ_ONLY_PI_SEARCH_GUIDANCE
+    expected = {"pi-read-only": variants[1], "antigravity-read-only": variants[2]}.get(backend_kind, variants[0])
     # The quoted text arrives byte for byte, and the host's own copy of this backend's guidance follows it.
-    texts = [("Review\n", prompt)] + ([("Assignment\n", instructions)] if backend_kind != "other-read-only" else [])
+    # Only Pi takes system instructions without host tools.
+    texts = [("Review\n", prompt)] + ([("Assignment\n", instructions)] if backend_kind.startswith("pi") else [])
     for start, text in texts:
         assert text is not None and text.startswith(start + quoted) and text.endswith("\n\n" + expected)
-        assert (text.count(expected), text.count(other)) == (2, 1)
+        assert [text.count(variant) for variant in variants] == [1 + (variant is expected) for variant in variants]

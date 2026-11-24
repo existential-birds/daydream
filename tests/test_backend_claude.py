@@ -376,7 +376,7 @@ async def test_audit_execute_rejects_unsafe_invocation_before_client(patch_sdk: 
         async for _ in ordinary.execute(root, "audit", review_instructions="Assignment"):
             pass
     # Only Claude has the snapshot-root tool boundary; the factory refuses every other audit backend.
-    for name in ("codex", "pi", "osprey"):
+    for name in ("codex", "pi", "osprey", "antigravity"):
         with pytest.raises(AuditIsolationError) as refused:
             create_backend(name, audit_root=root)
         assert (refused.value.backend_name, refused.value.reason) == (name, "unsupported_backend")

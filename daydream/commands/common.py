@@ -108,8 +108,8 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
     )
     parser.add_argument(
         "--backend", "-b",
-        choices=["claude", "codex", "pi", "osprey"],
-        help="Agent backend: claude, codex, pi, or osprey "
+        choices=["claude", "codex", "pi", "osprey", "antigravity"],
+        help="Agent backend: claude, codex, pi, osprey, or antigravity "
              "(default: config file, then claude)",
     )
     parser.add_argument(
@@ -125,7 +125,7 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         help="Global reasoning-effort override (e.g. low, medium, high). "
              "Consumed by every backend through its native knob: Codex as "
              "-c model_reasoning_effort=<EFFORT>, Claude as --effort, Pi as "
-             "--thinking. Takes precedence over any per-phase config-file override.",
+             "--thinking, Antigravity as --effort. Takes precedence over any per-phase config-file override.",
     )
     parser.add_argument(
         "--non-interactive",

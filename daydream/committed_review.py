@@ -1105,7 +1105,7 @@ REVIEW_PHASES = (("discovery", "review"), ("challenge", "arbiter"))
 
 
 def host_tools_refusal(kind: str, name: str) -> str:
-    return (f"committed review {kind} requires a backend with native host tools (pi, claude or codex); "
+    return (f"committed review {kind} requires a backend with native host tools (pi, claude, codex or antigravity); "
             f"{name!r} does not serve them")
 
 

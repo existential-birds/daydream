@@ -77,6 +77,7 @@ include = [
     "daydream/backends/pi_structured_output.ts",
     "daydream/backends/pi_host_tools.ts",
     "daydream/backends/pi_diagnostics.ts",
+    "daydream/backends/antigravity_guard.py",
     "daydream/training/schema/**",
     "daydream/benchmarks/atif/LICENSE",
     "daydream/benchmarks/atif/NOTICE",

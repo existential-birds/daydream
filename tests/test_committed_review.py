@@ -885,7 +885,7 @@ async def test_backends_without_host_tools_are_refused_before_source_preparation
     repo = review_inputs.work.source
     monkeypatch.setattr(committed_review, "open_workspace", lambda *_args, **_kwargs: pytest.fail("source prepared"))
     before = git(repo, "worktree", "list", "--porcelain")
-    with pytest.raises(ValueError, match=r"native host tools \(pi, claude or codex\); 'osprey' does not"):
+    with pytest.raises(ValueError, match=r"native host tools \(pi, claude, codex or antigravity\); 'osprey' does not"):
         await run_committed_review(CommittedReviewRequest(
             repo, review_inputs.revision["merge_base_sha"], config=RunConfig(backend="osprey", output_mode="review"),
         ))

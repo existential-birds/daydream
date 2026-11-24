@@ -19,7 +19,7 @@ Verify these prerequisites before running the local gate:
 - **Claude Code CLI** ([claude.ai/code](https://claude.ai/code)) — the default review backend for running Daydream; the gate does not need it
 
 `make install` only provisions Python dependencies. Backend CLIs (`gh`, Pi, Codex,
-Osprey) are feature-specific; the gate needs none of them.
+Osprey, Antigravity's `agy`) are feature-specific; the gate needs none of them.
 
 ## Setup
 

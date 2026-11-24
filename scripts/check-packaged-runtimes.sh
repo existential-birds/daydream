@@ -18,7 +18,7 @@ with ZipFile(sys.argv[1]) as archive:
     shipped = set(archive.namelist())
     source = Path(sys.argv[2])
     resources = {path.relative_to(source).as_posix() for pattern in (
-        'daydream/templates/workflows/**/*.yml', 'daydream/backends/pi_*.ts',
+        'daydream/templates/workflows/**/*.yml', 'daydream/backends/pi_*.ts', 'daydream/backends/antigravity_guard.py',
     ) for path in source.glob(pattern) if path.is_file() and '__pycache__' not in path.parts and not path.name.startswith('.')}
     if missing := sorted(resources - shipped):
         sys.exit(f'wheel is missing packaged resources: {missing}')

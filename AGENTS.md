@@ -110,7 +110,7 @@ These boundaries matter across subsystems; module docstrings carry finer detail:
 ### Runtime invariants
 
 - Review/exploration search guidance is shared in `prompts/grounding.py`. `run_agent` appends
-  it to every search turn and chooses read-only Pi's variant there; composed prompts do not
+  it to every search turn and chooses the shell-free read-only variant (Pi, Antigravity) there; composed prompts do not
   embed it, so quoted text cannot displace or rewrite it. Use relevant roots and tracked
   plus nonignored untracked file sets; named ignored-file expansion requires a concrete reason.
   `daydream search` owns the bounded no-rg fallback in `daydream/commands/search.py`; the
@@ -188,6 +188,10 @@ and the relevant contracts below.
   required, authenticated and approved for its own tools only, its secret out of argv and
   prompts and blanked in the shell environment, and the user's proxy exemptions intact.
   Codex-owned tools cannot be denied before they run; keep charging them after acceptance ([Codex host tools](docs/runtime.md#codex-host-tools)).
+- Antigravity never runs `agy`'s default agent: every invocation selects its own agent file and
+  deny-by-default hook from a private per-run directory. The guard never silently allows (it denies
+  or exits non-zero), and the host-tool bearer exists only in that directory
+  ([Antigravity host tools](docs/runtime.md#antigravity-host-tools)).
 - No turn limits; bound invocations with the host ledger's absolute deadline and tool
   limit ([budget ledger](docs/runtime.md#budget-ledger)). Read defaults from
   `config.py` and `retry_policy_from_environment` in `backends/__init__.py`.

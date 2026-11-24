@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from daydream import timeutil, ui
 from daydream.backends import (
     AgentEvent,
+    AntigravityRequestConfig,
     ClaudeRequestConfig,
     CodexRequestConfig,
     CostEvent,
@@ -422,7 +423,7 @@ class Invocation:
     def _observe_request(self, event: RequestEvent) -> None:
         # No prompt, environment, credential or native settings file contents.
         backend = {PiRequestConfig: 'pi', CodexRequestConfig: 'codex', ClaudeRequestConfig: 'claude',
-                   OspreyRequestConfig: 'osprey'}.get(type(event.config))
+                   OspreyRequestConfig: 'osprey', AntigravityRequestConfig: 'antigravity'}.get(type(event.config))
         self._requests.append({"backend": backend,
             "model": event.model_name, "provider": event.provider_name, "reasoning_effort": event.reasoning_effort,
             "controls": request_config_controls(event.config)})
