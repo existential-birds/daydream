@@ -541,9 +541,10 @@ pending claims with bounded host-extracted diff and enclosing source excerpts:
 
 On decomposed reviews with System 1 enabled, opt-in `DAYDREAM_SYSTEM1_GATE_CROSS_ASSIGNMENT=1`
 may record `cross_assignment` as `complete (noop=True)` ONLY when zero local targets remain
-unfinished, zero cross-batch import edges exist, injection checks are clean, and
-`p_cross_needed < threshold` (validated by `validate_committed_result`); when `cross_assignment`
-runs, top-K coupled batch pairs and bounded untrusted excerpts are supplied to focus investigation.
+unfinished, a complete import-graph scan finds zero cross-batch import edges, injection checks
+are clean, and `p_cross_needed < threshold` (validated by `validate_committed_result`); when
+`cross_assignment` runs, top-K coupled batch pairs and bounded untrusted excerpts are supplied
+to focus investigation.
 
 ### Captured local source
 

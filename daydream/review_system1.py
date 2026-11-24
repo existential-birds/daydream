@@ -330,6 +330,12 @@ def resolve_fast_phase_spec(
         return None
     base_backend = resolved_backend_name(config, phase)
     backend_name = eff_backend or base_backend
+    if hosted and backend_name != "pi":
+        from daydream.hosted_review import UnsupportedHostedPolicy
+
+        raise UnsupportedHostedPolicy(
+            "Hosted review supports only Pi; select the supported operator policy without switching harnesses."
+        )
     model = eff_model or (resolved_model(config, phase) if backend_name == base_backend else None)
     effort = eff_effort or resolved_reasoning_effort(config, phase)
     return backend_name, model, effort
@@ -819,23 +825,46 @@ class ChallengeTriagePlan:
     def empty(cls) -> ChallengeTriagePlan:
         return cls()
 
-    def calibrated_severities(self, claim_uids: Sequence[str] | None = None) -> dict[str, str]:
-        uids = self.triages if claim_uids is None else claim_uids
+    def _matching_triage(self, uid: str, revision: int) -> ClaimTriage | None:
+        triage = self.triages.get(uid)
+        if triage is None or triage.revision != revision:
+            return None
+        return triage
+
+    def calibrated_severities(self, claim_revisions: Mapping[str, int] | None = None) -> dict[str, str]:
+        if claim_revisions is None:
+            return {
+                uid: triage.calibrated_severity
+                for uid, triage in self.triages.items()
+                if not triage.injection_flagged
+                and not triage.fallback
+                and triage.calibrated_severity is not None
+            }
         return {
             uid: triage.calibrated_severity
-            for uid in uids
-            if (triage := self.triages.get(uid)) is not None
+            for uid, rev in claim_revisions.items()
+            if (triage := self._matching_triage(uid, rev)) is not None
             and not triage.injection_flagged
             and not triage.fallback
             and triage.calibrated_severity is not None
         }
 
-    def is_fast_challenge_group(self, claim_uids: Sequence[str], *, search_max: float) -> bool:
-        if not self.triages or not claim_uids:
+    def calibrated_severities_by_revision(self) -> dict[tuple[str, int], str]:
+        return {
+            (uid, triage.revision): triage.calibrated_severity
+            for uid, triage in self.triages.items()
+            if not triage.injection_flagged
+            and not triage.fallback
+            and triage.calibrated_severity is not None
+        }
+
+    def is_fast_challenge_group(self, claim_revisions: Mapping[str, int], *, search_max: float) -> bool:
+        if not self.triages or not claim_revisions:
             return False
         return all(
-            (triage := self.triages.get(uid)) is not None and triage.qualifies_for_fast_challenge(search_max=search_max)
-            for uid in claim_uids
+            (triage := self._matching_triage(uid, rev)) is not None
+            and triage.qualifies_for_fast_challenge(search_max=search_max)
+            for uid, rev in claim_revisions.items()
         )
 
     def plan_challenge_groups(
@@ -848,17 +877,21 @@ class ChallengeTriagePlan:
         has_fast_backend: bool,
         search_max: float,
     ) -> list[dict[str, int]]:
-        """Partition pending claims keeping duplicate clusters together and separating fast local groups."""
+        """Partition pending claims keeping matching-revision duplicate clusters together and separating fast groups."""
         if not available:
             return []
         cluster_of: dict[str, tuple[str, ...]] = {}
         for cluster in self.duplicate_clusters:
-            present = tuple(uid for uid in cluster if uid in available)
+            present = tuple(
+                uid
+                for uid in cluster
+                if uid in available and self._matching_triage(uid, available[uid]) is not None
+            )
             if len(present) >= 2:
                 for uid in present:
                     cluster_of[uid] = present
 
-        # Build atomic units: each duplicate cluster stays together; non-clustered claims are singletons.
+        # Build atomic units: each matching duplicate cluster stays together; other claims are singletons.
         units: list[tuple[str, ...]] = []
         seen: set[str] = set()
         for uid in available:
@@ -871,25 +904,33 @@ class ChallengeTriagePlan:
         chunks: dict[tuple[int, int], list[dict[str, int]]] = {}
         sizes: dict[tuple[int, int], int] = {}
         for unit in units:
-            is_fast = int(has_fast_backend and self.is_fast_challenge_group(unit, search_max=search_max))
+            unit_revisions = {uid: available[uid] for uid in unit}
+            is_fast = int(has_fast_backend and self.is_fast_challenge_group(unit_revisions, search_max=search_max))
             base_group = min(allowance_by_uid.get(uid, 0) for uid in unit)
             bucket = (is_fast, base_group)
             unit_size = sum(size_by_uid[uid] for uid in unit)
-            if bucket not in chunks or (chunks[bucket][-1] and sizes[bucket] + unit_size > max_bytes):
-                chunks.setdefault(bucket, []).append({})
-                sizes[bucket] = 1
-            for uid in unit:
-                chunks[bucket][-1][uid] = available[uid]
-            sizes[bucket] += unit_size
+            sub_units: list[tuple[str, ...]] = (
+                [(uid,) for uid in unit] if len(unit) > 1 and 1 + unit_size > max_bytes else [unit]
+            )
+            for sub in sub_units:
+                sub_size = sum(size_by_uid[uid] for uid in sub)
+                if bucket not in chunks or (chunks[bucket][-1] and sizes[bucket] + sub_size > max_bytes):
+                    chunks.setdefault(bucket, []).append({})
+                    sizes[bucket] = 1
+                for uid in sub:
+                    chunks[bucket][-1][uid] = available[uid]
+                sizes[bucket] += sub_size
         return [group for bucket_groups in chunks.values() for group in bucket_groups]
 
-    def work_advisory_hints(self, claim_uids: Sequence[str]) -> dict[str, Any] | None:
-        uid_set = set(claim_uids)
-        severities = self.calibrated_severities(claim_uids)
+    def work_advisory_hints(self, claim_revisions: Mapping[str, int]) -> dict[str, Any] | None:
+        matching_uids = {
+            uid for uid, rev in claim_revisions.items() if self._matching_triage(uid, rev) is not None
+        }
+        severities = self.calibrated_severities(claim_revisions)
         clusters = [
-            list(cluster)
+            present
             for cluster in self.duplicate_clusters
-            if len(uid_set.intersection(cluster)) >= 2
+            if len(present := [uid for uid in cluster if uid in matching_uids]) >= 2
         ]
         hints: dict[str, Any] = {}
         if severities:
@@ -898,11 +939,11 @@ class ChallengeTriagePlan:
             hints["possible_duplicate_clusters"] = clusters
         return hints or None
 
-    def preinlined_context_blocks(self, claim_uids: Sequence[str]) -> list[dict[str, Any]]:
+    def preinlined_context_blocks(self, claim_revisions: Mapping[str, int]) -> list[dict[str, Any]]:
         """Bounded untrusted diff + enclosing source snippets for fast local challenge dispatches."""
         blocks: list[dict[str, Any]] = []
-        for uid in claim_uids:
-            triage = self.triages.get(uid)
+        for uid, rev in claim_revisions.items():
+            triage = self._matching_triage(uid, rev)
             if triage is None:
                 continue
             if triage.cited_diff or triage.enclosing_source:
@@ -1001,6 +1042,29 @@ def _connected_clusters(pairs: Sequence[tuple[str, str]]) -> tuple[tuple[str, ..
     return tuple(clusters)
 
 
+def build_claim_triage_state(
+    claim: Mapping[str, Any],
+    *,
+    cited_diff: str,
+    enclosing_source: str = "",
+) -> dict[str, Any]:
+    """Build the canonical System 1 claim-triage state shared by live triage and shadow calibration."""
+    raw_payload = claim.get("payload")
+    payload: Mapping[str, Any] = raw_payload if isinstance(raw_payload, Mapping) else claim
+    return {
+        "title": claim.get("title") or "",
+        "file": payload.get("file") or "",
+        "line": payload.get("line"),
+        "severity": payload.get("severity"),
+        "claim": payload.get("claim") or "",
+        "trigger": payload.get("trigger") or "",
+        "consequence": payload.get("consequence") or "",
+        "grounds": payload.get("grounds") or "",
+        "cited_diff": truncate_utf8_to_budget(cited_diff, CLAIM_DIFF_EXCERPT_MAX_BYTES),
+        "enclosing_source": enclosing_source,
+    }
+
+
 def _claim_brief(claim: Mapping[str, Any]) -> dict[str, Any]:
     payload = claim["payload"]
     return {
@@ -1044,20 +1108,8 @@ async def prepare_challenge_triage(
 
     items: list[tuple[Any, Mapping[str, DecisionQuestion]]] = []
     for claim, (cited_diff, enclosing) in zip(pending_claims, contexts, strict=True):
-        payload = claim["payload"]
         items.append((
-            {
-                "title": claim.get("title", ""),
-                "file": payload["file"],
-                "line": payload.get("line"),
-                "severity": payload.get("severity"),
-                "claim": payload.get("claim", ""),
-                "trigger": payload.get("trigger", ""),
-                "consequence": payload.get("consequence", ""),
-                "grounds": payload.get("grounds", ""),
-                "cited_diff": cited_diff,
-                "enclosing_source": enclosing,
-            },
+            build_claim_triage_state(claim, cited_diff=cited_diff, enclosing_source=enclosing),
             CLAIM_TRIAGE_QUESTIONS,
         ))
 
@@ -1152,16 +1204,23 @@ class CrossAssignmentPlan:
 
     p_cross_needed: float | None = None
     cross_batch_edge_count: int = 0
+    import_graph_complete: bool = False
     focused_pairs: tuple[CoupledBatchPair, ...] = ()
     injection_flagged: bool = False
     fallback: bool = False
     model: str | None = None
 
     @classmethod
-    def empty(cls, *, cross_batch_edge_count: int = 0) -> CrossAssignmentPlan:
+    def empty(
+        cls,
+        *,
+        cross_batch_edge_count: int = 0,
+        import_graph_complete: bool = False,
+    ) -> CrossAssignmentPlan:
         return cls(
             p_cross_needed=None,
             cross_batch_edge_count=cross_batch_edge_count,
+            import_graph_complete=import_graph_complete,
             focused_pairs=(),
             fallback=True,
         )
@@ -1174,7 +1233,12 @@ class CrossAssignmentPlan:
         unfinished_targets: int,
     ) -> bool:
         """Whether decomposed cross_assignment may safely record host noop=True."""
-        if not gate_enabled or unfinished_targets > 0 or self.cross_batch_edge_count > 0:
+        if (
+            not gate_enabled
+            or not self.import_graph_complete
+            or unfinished_targets > 0
+            or self.cross_batch_edge_count > 0
+        ):
             return False
         if self.injection_flagged or self.fallback or self.p_cross_needed is None:
             return False
@@ -1209,12 +1273,48 @@ def find_cross_batch_edges(
     return edges_by_pair
 
 
+def build_cross_assignment_state(
+    batch_files: Sequence[Sequence[str]],
+    batch_excerpts: Sequence[str],
+    edges_by_pair: Mapping[tuple[int, int], Sequence[tuple[str, str]]],
+    admitted_claims: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Build the canonical PR-level cross-assignment state shared by live gating and shadow calibration."""
+    return {
+        "batches": [
+            {"batch": idx, "files": list(files), "diff_excerpt": batch_excerpts[idx]}
+            for idx, files in enumerate(batch_files)
+        ],
+        "cross_batch_import_edges": [
+            {"batch_a": a, "batch_b": b, "edges": [[src, dst] for src, dst in edges]}
+            for (a, b), edges in sorted(edges_by_pair.items())
+        ],
+        "admitted_local_claims": [
+            {
+                "file": (
+                    claim["payload"].get("file")
+                    if isinstance(claim.get("payload"), Mapping)
+                    else claim.get("file")
+                ),
+                "title": claim.get("title") or "",
+                "severity": (
+                    claim["payload"].get("severity")
+                    if isinstance(claim.get("payload"), Mapping)
+                    else claim.get("severity")
+                ),
+            }
+            for claim in admitted_claims[:24]
+        ],
+    }
+
+
 async def prepare_cross_assignment_plan(
     *,
     client: System1Client,
     batches: Sequence[Sequence[str]],
     target_diffs: Mapping[str, tuple[str, str]],
     import_graph: Mapping[str, set[str]],
+    import_graph_complete: bool = False,
     admitted_claims: Sequence[Mapping[str, Any]],
     session_id: str | None = None,
     remaining_s: float | None = None,
@@ -1229,7 +1329,10 @@ async def prepare_cross_assignment_plan(
 
     ready = client.with_remaining_budget(remaining_s)
     if len(batches) < 2 or ready is None:
-        return CrossAssignmentPlan.empty(cross_batch_edge_count=total_cross_edges)
+        return CrossAssignmentPlan.empty(
+            cross_batch_edge_count=total_cross_edges,
+            import_graph_complete=import_graph_complete,
+        )
 
     batch_excerpts: list[str] = [
         truncate_utf8_to_budget(
@@ -1238,27 +1341,13 @@ async def prepare_cross_assignment_plan(
         )
         for batch in batches
     ]
-    pr_state = {
-        "batches": [
-            {"batch": idx, "files": list(files), "diff_excerpt": batch_excerpts[idx]}
-            for idx, files in enumerate(batch_files)
-        ],
-        "cross_batch_import_edges": [
-            {"batch_a": a, "batch_b": b, "edges": [[src, dst] for src, dst in edges]}
-            for (a, b), edges in sorted(edges_by_pair.items())
-        ],
-        "admitted_local_claims": [
-            {
-                "file": claim.get("payload", {}).get("file"),
-                "title": claim.get("title", ""),
-                "severity": claim.get("payload", {}).get("severity"),
-            }
-            for claim in admitted_claims[:24]
-        ],
-    }
+    pr_state = build_cross_assignment_state(batch_files, batch_excerpts, edges_by_pair, admitted_claims)
 
-    # Prioritize batch pairs with known import edges first, then fill up to MAX_BATCH_PAIR_CHECKS.
-    candidate_pairs: list[tuple[int, int]] = sorted(edges_by_pair)
+    # Prioritize batch pairs with the most known import edges first, capped at MAX_BATCH_PAIR_CHECKS.
+    candidate_pairs: list[tuple[int, int]] = sorted(
+        edges_by_pair,
+        key=lambda pair: (-len(edges_by_pair[pair]), pair),
+    )[:MAX_BATCH_PAIR_CHECKS]
     if len(candidate_pairs) < MAX_BATCH_PAIR_CHECKS:
         candidate_pairs.extend(
             islice(
@@ -1287,7 +1376,10 @@ async def prepare_cross_assignment_plan(
 
     pr_outcome = outcomes[0]
     if not pr_outcome.ok or pr_outcome.response is None:
-        return CrossAssignmentPlan.empty(cross_batch_edge_count=total_cross_edges)
+        return CrossAssignmentPlan.empty(
+            cross_batch_edge_count=total_cross_edges,
+            import_graph_complete=import_graph_complete,
+        )
     pr_injection = injection_detected(pr_outcome)
     p_cross_needed = pr_outcome.noul("cross_boundary_needed")
     model_name = pr_outcome.response.model
@@ -1319,6 +1411,7 @@ async def prepare_cross_assignment_plan(
     return CrossAssignmentPlan(
         p_cross_needed=p_cross_needed,
         cross_batch_edge_count=total_cross_edges,
+        import_graph_complete=import_graph_complete,
         focused_pairs=tuple(ranked_pairs[:MAX_FOCUSED_CROSS_PAIRS]),
         injection_flagged=pr_injection,
         fallback=p_cross_needed is None,

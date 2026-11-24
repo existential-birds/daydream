@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from daydream.deep.dependency import build_import_graph
+from daydream.deep.dependency import build_import_graph, build_import_graph_with_status
 from daydream.deep.detection import detect_stacks
 
 
@@ -307,10 +307,16 @@ def test_build_import_graph_resolves_python_edges(tmp_path: Path) -> None:
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(source)
-    graph = build_import_graph(list(bodies), tmp_path)
+    graph, complete_with_unknown = build_import_graph_with_status(list(bodies), tmp_path)
+    assert complete_with_unknown is False
+    assert build_import_graph(list(bodies), tmp_path) == graph
     assert graph == {
         "a.py": {"b.py"}, "b.py": set(),
         "pkg/mod.py": {"pkg/util.py"}, "pkg/util.py": set(), "notes.txt": set(),
         "a.ts": {"b.ts"}, "b.ts": set(), "a.go": {"b.go"}, "b.go": set(),
         "a.rs": {"b.rs"}, "b.rs": set(),
     }
+    supported_files = [name for name in bodies if name != "notes.txt"]
+    assert build_import_graph_with_status(supported_files, tmp_path)[1] is True
+    assert build_import_graph_with_status([], tmp_path) == ({}, True)
+    assert build_import_graph_with_status(["a.py", "missing.py"], tmp_path)[1] is False

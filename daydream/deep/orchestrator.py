@@ -12,7 +12,7 @@ from daydream.agent import console
 from daydream.artifact_visibility import ArtifactVisibilityError, artifact_dir_for, artifact_session_active
 from daydream.deep import review_steps
 from daydream.deep.artifacts import DeepArtifact, deep_dir, diff_key
-from daydream.deep.dependency import build_import_graph
+from daydream.deep.dependency import build_import_graph_with_status
 from daydream.deep.diagram_steps import _resolved_diagram_mode, _step_diagram, _step_post_diagram
 from daydream.deep.diff import _diff_changed_files, bound_deep_diff
 from daydream.deep.fix_steps import (
@@ -399,11 +399,13 @@ async def run_deep(
         # One changed-file import graph shared by coupling-aware review batching and diagram eligibility.
         # The guard also catches unsafe tree-sitter versions that can escape the fail-open builder.
         import_graph: dict[str, set[str]] = {}
+        import_graph_complete = not changed_files
         if changed_files:
             try:
-                import_graph = build_import_graph(changed_files, target_dir)
+                import_graph, import_graph_complete = build_import_graph_with_status(changed_files, target_dir)
             except Exception:
                 import_graph = {}
+                import_graph_complete = False
         registry = get_registry()
         bounded_diff, bound_info = bound_deep_diff(diff)
         if bound_info.truncated:
@@ -452,6 +454,7 @@ async def run_deep(
                 # diagram step's cross-module rule can read it. ``{}`` simply
                 # denies that rule; it never fails the run.
                 "import_graph": import_graph,
+                "import_graph_complete": import_graph_complete,
             },
             allow_standalone_artifacts=allow_standalone,
         )

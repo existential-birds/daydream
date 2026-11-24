@@ -119,13 +119,15 @@ class StageInputFactory:
 
     def __init__(self, backend: Backend, work: WorkContext, stack: StackAssignment, *,
         change: CanonicalChange, revision: dict[str, Any], read_only: bool,
-        import_graph: Mapping[str, set[str]] | None = None) -> None:
+        import_graph: Mapping[str, set[str]] | None = None,
+        import_graph_complete: bool = False) -> None:
         self.backend, self.work, self.stack = backend, work, stack
         self.captured_source = work.captured_source
         self.revision = revision
         self.import_graph: dict[str, set[str]] = (
             {src: set(dsts) for src, dsts in import_graph.items()} if import_graph else {}
         )
+        self.import_graph_complete: bool = import_graph_complete
         self.transport = inputs.sanctioned_transport_for(backend, work.repo, read_only=read_only)
         self.change = change
         # Identities stay host-only on both transports.
@@ -372,11 +374,17 @@ class StageInputFactory:
         return units
 
     def _batches(self) -> list[list[dict[str, Any]]]:
-        eligible = [
-            part
-            for part in self.parts
-            if not part.assignment.get("binary") and not part.assignment.get("system1_triaged")
-        ]
+        def _is_host_excluded(part: _Part) -> bool:
+            if part.assignment.get("binary"):
+                return True
+            meta = part.assignment.get("system1_triaged")
+            if meta is None:
+                return False
+            from daydream.committed_review_model import is_valid_system1_triaged
+
+            return is_valid_system1_triaged(meta, file_path=part.assignment["file"])
+
+        eligible = [part for part in self.parts if not _is_host_excluded(part)]
 
         def fits(parts: list[_Part]) -> bool:
             return (

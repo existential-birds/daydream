@@ -14,7 +14,8 @@ import httpx
 import pytest
 
 from daydream import agent, committed_review
-from daydream.committed_review import CommittedReviewRequest, run_committed_review
+from daydream.backends import BackendExecutionInput
+from daydream.committed_review import CommittedReviewRequest, bind_optional_fast_backends, run_committed_review
 from daydream.committed_review_model import (
     HOST_SYSTEM1_CHALLENGE_WORK_ID,
     host_decision,
@@ -31,7 +32,9 @@ from daydream.deep.diagram_steps import DiagramInputs, _generate_diagrams
 from daydream.deep.diagram_trigger import CandidateRoot, DiagramThresholds, Eligibility, KindDecision
 from daydream.eval.system1_calibration import (
     CalibrationReport,
+    CrossAssignmentShadowCase,
     ShadowDataset,
+    TargetShadowCase,
     discover_run_dirs,
     load_shadow_cases_from_runs,
     load_shadow_cases_from_store,
@@ -39,6 +42,7 @@ from daydream.eval.system1_calibration import (
 )
 from daydream.extensions import get_registry
 from daydream.flows.engine import FlowContext
+from daydream.hosted_review import UnsupportedHostedPolicy
 from daydream.hunk_index import write_hunk_index
 from daydream.improve import audit as improve_audit
 from daydream.improve.plan_index import load_rejections
@@ -51,6 +55,7 @@ from daydream.review_system1 import (
     FAST_CHALLENGE_CALL_CAP,
     HISTORICAL_CONTEXT_QUESTIONS,
     IMPROVE_VET_TRIAGE_QUESTIONS,
+    MAX_BATCH_PAIR_CHECKS,
     MAX_FOCUSED_CROSS_PAIRS,
     MAX_SUPPORTING_HINTS,
     PRIORITY_MAX_RISK,
@@ -790,10 +795,20 @@ def test_shadow_calibration_runs_store_metrics_and_cli(
             else:
                 ans = _target_ans(non_behavioral=0.05, cross_file=0.60, tier="high_critical", risk=3.8)
         elif qkeys == set(CLAIM_TRIAGE_QUESTIONS):
-            is_nit = state["claim"]["title"] == "Minor doc nit"
+            # Wire shape must match live prepare_challenge_triage (flat fields + cited_diff + enclosing_source).
+            assert set(state) == {
+                "title", "file", "line", "severity", "claim", "trigger", "consequence",
+                "grounds", "cited_diff", "enclosing_source",
+            }
+            assert state["cited_diff"]
+            is_nit = state["title"] == "Minor doc nit"
             ans = _claim_ans(invalid=0.97 if is_nit else 0.04, search=0.05, severity="low" if is_nit else "high")
         else:
             assert qkeys == set(CROSS_ASSIGNMENT_QUESTIONS)
+            # Wire shape must match live prepare_cross_assignment_plan.
+            assert set(state) == {"batches", "cross_batch_import_edges", "admitted_local_claims"}
+            assert state["batches"] and "diff_excerpt" in state["batches"][0]
+            assert state["batches"][0]["diff_excerpt"]
             ans = {"cross_boundary_needed": _noul(0.85), "prompt_injection_attempt": _noul(0.01)}
         return _s1_response(ans, tokens=100, cost=0.0000042)
 
@@ -829,6 +844,117 @@ def test_shadow_calibration_runs_store_metrics_and_cli(
     parity_report = anyio.run(run_shadow_calibration, dataset, _s1_client(strict_parity_handler))
     assert parity_report.target_skip.recommended_threshold is None
     assert parity_report.claim_fast_reject.recommended_threshold is None
+
+    # Cross-assignment cases with unfinished targets or recorded cross-batch edges are ineligible for gating.
+    inelig_root = tmp_path / "inelig_cross"
+    unfin_dir = _seed_archived_run(inelig_root / "unfin", run_id="unfin", decomposed=True)
+    unfin_json = json.loads((unfin_dir / "deep" / "committed-review.json").read_text(encoding="utf-8"))
+    unfin_json["findings"] = []
+    unfin_json["terminal_result"] = {
+        "stack_outcomes": [{"target_decisions": [{"target_id": "README.md", "status": "not_reviewed"}]}],
+    }
+    (unfin_dir / "deep" / "committed-review.json").write_text(json.dumps(unfin_json), encoding="utf-8")
+
+    edged_dir = _seed_archived_run(inelig_root / "edged", run_id="edged", decomposed=True)
+    edged_json = json.loads((edged_dir / "deep" / "committed-review.json").read_text(encoding="utf-8"))
+    edged_json["findings"] = []
+    edged_json["settings"]["system1_cross_assignment"] = {"cross_batch_edges": 2}
+    (edged_dir / "deep" / "committed-review.json").write_text(json.dumps(edged_json), encoding="utf-8")
+
+    inelig_ds = load_shadow_cases_from_runs([inelig_root])
+    by_run = {c.run_id: c for c in inelig_ds.cross_assignments}
+    assert by_run["unfin"].unfinished_targets == 1 and by_run["unfin"].cross_batch_edges == 0
+    assert by_run["edged"].unfinished_targets == 0 and by_run["edged"].cross_batch_edges == 2
+    cross_only_ds = ShadowDataset(
+        run_ids=("unfin", "edged", "pos"),
+        targets=(),
+        claims=(),
+        cross_assignments=(
+            by_run["unfin"],
+            by_run["edged"],
+            CrossAssignmentShadowCase(
+                "pos",
+                ("a.py",),
+                {
+                    "batches": [{"batch": 0, "files": ["a.py"], "diff_excerpt": "+x"}],
+                    "cross_batch_import_edges": [],
+                    "admitted_local_claims": [],
+                },
+                True,
+            ),
+        ),
+    )
+    inelig_report = anyio.run(
+        run_shadow_calibration,
+        cross_only_ds,
+        _s1_client(lambda req: _s1_response({
+            "cross_boundary_needed": _noul(
+                0.85 if json.loads(req.content.decode("utf-8"))["state"]["batches"][0]["files"] == ["a.py"] else 0.01
+            ),
+            "prompt_injection_attempt": _noul(0.01),
+        })),
+    )
+    assert inelig_report.cross_assignment_noop.recommended_threshold is None
+
+    # Chunked replay evaluates more than one chunk cleanly without sharing a single batch_timeout_s.
+    chunk_targets = tuple(
+        TargetShadowCase(f"r{i}", f"f{i}.py", f"+x = {i}\n", has_confirmed_finding=(i == 5), hard_denied=False)
+        for i in range(6)
+    )
+    chunk_ds = ShadowDataset(("chunk",), chunk_targets, (), ())
+
+    async def paced_handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.025)
+        path = json.loads(request.content.decode("utf-8"))["state"]["path"]
+        is_pos = path == "f5.py"
+        return _s1_response(_target_ans(
+            non_behavioral=0.05 if is_pos else 0.99,
+            cross_file=0.01,
+            tier="high_critical" if is_pos else "mechanical",
+            risk=3.5 if is_pos else 0.1,
+        ))
+
+    # max_concurrency=1 -> chunk_size=2; each chunk takes ~0.05s < 0.09s, while all 6 unchunked (~0.15s) would time out.
+    chunk_report = anyio.run(
+        run_shadow_calibration,
+        chunk_ds,
+        _s1_client(paced_handler, max_concurrency=1, batch_timeout_s=0.09, timeout_s=0.5),
+    )
+    assert chunk_report.target_skip.evaluated_cases == 6 and chunk_report.target_skip.fallback_cases == 0
+    assert chunk_report.target_skip.recommended_threshold == pytest.approx(0.99)
+
+    # Unanswered fallback positives cannot inflate recall, and <50% evaluation coverage withholds recommendations.
+    partial_targets = tuple(
+        TargetShadowCase(f"p{i}", f"p{i}.py", f"+x = {i}\n", has_confirmed_finding=(i >= 2), hard_denied=False)
+        for i in range(6)
+    )
+    partial_ds = ShadowDataset(("partial",), partial_targets, (), ())
+
+    def partial_miss_handler(request: httpx.Request) -> httpx.Response:
+        path = json.loads(request.content.decode("utf-8"))["state"]["path"]
+        if path in ("p0.py", "p1.py", "p2.py"):
+            return _s1_response(_target_ans(non_behavioral=0.99, cross_file=0.01, tier="mechanical", risk=0.1))
+        return _s1_503()
+
+    partial_miss_report = anyio.run(run_shadow_calibration, partial_ds, _s1_client(partial_miss_handler))
+    assert partial_miss_report.target_skip.evaluated_cases == 3
+    assert partial_miss_report.target_skip.sweep[-1].total_positives == 1
+    assert partial_miss_report.target_skip.sweep[-1].recall == pytest.approx(0.0)
+    assert partial_miss_report.target_skip.recommended_threshold is None
+
+    def low_coverage_handler(request: httpx.Request) -> httpx.Response:
+        path = json.loads(request.content.decode("utf-8"))["state"]["path"]
+        if path == "p0.py":
+            return _s1_response(_target_ans(non_behavioral=0.99, cross_file=0.01, tier="mechanical", risk=0.1))
+        if path == "p2.py":
+            return _s1_response(_target_ans(non_behavioral=0.05, cross_file=0.01, tier="high_critical", risk=3.5))
+        return _s1_503()
+
+    low_cov_report = anyio.run(run_shadow_calibration, partial_ds, _s1_client(low_coverage_handler))
+    assert low_cov_report.target_skip.evaluated_cases == 2
+    assert low_cov_report.target_skip.sweep[-1].recall == pytest.approx(1.0)
+    assert low_cov_report.target_skip.recommended_threshold is None
+    assert low_cov_report.target_skip.recommended_gated_fraction is None
 
     # Empty dataset & disabled-client fallback accounting behave cleanly.
     empty_report = anyio.run(run_shadow_calibration, ShadowDataset((), (), (), ()), client)
@@ -1087,7 +1213,10 @@ async def test_prepare_review_prefetch_hints_ranking_and_fail_open(tmp_path: Pat
     assert failed.work_advisory_hints(("t_docs", "t_core")) is None
 
 
-def test_mode1_weighted_allocation_fast_tier_routing_and_triage_rules() -> None:
+async def test_mode1_weighted_allocation_fast_tier_routing_and_triage_rules(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Weighted call allocator, fast-tier/skip predicates, fast-phase spec, and host attribution checks."""
     assert allocate_weighted_calls(20, []) == []
     assert allocate_weighted_calls(20, [5.0]) == [20]
@@ -1153,6 +1282,43 @@ def test_mode1_weighted_allocation_fast_tier_routing_and_triage_rules() -> None:
         "pi", "toml-arb-fast", "low",
     )
     assert resolve_fast_phase_spec(base_cfg, System1Config(enabled=True), "arbiter", hosted=True) is None
+    assert resolve_fast_phase_spec(
+        base_cfg, System1Config(enabled=True, fast_review_backend="pi", fast_review_model="env-fast"),
+        "review", hosted=True,
+    ) == ("pi", "env-fast", None)
+    with pytest.raises(UnsupportedHostedPolicy, match="Hosted review supports only Pi"):
+        resolve_fast_phase_spec(
+            base_cfg, System1Config(enabled=True, fast_review_backend="claude", fast_review_model="claude-haiku"),
+            "review", hosted=True,
+        )
+    with pytest.raises(UnsupportedHostedPolicy, match="Hosted review supports only Pi"):
+        resolve_fast_phase_spec(
+            base_cfg, System1Config(enabled=True, fast_arbiter_backend="codex", fast_arbiter_model="gpt-5-mini"),
+            "arbiter", hosted=True,
+        )
+
+    # Hosted bind_optional_fast_backends rejects non-Pi fast overrides before constructing any backend.
+    import daydream.backends as backends_mod
+
+    monkeypatch.setattr(
+        backends_mod,
+        "create_backend",
+        lambda *_a, **_kw: pytest.fail("non-Pi fast backend must not be constructed under hosted policy"),
+    )
+    hosted_exec = BackendExecutionInput.from_environment({}, backend="pi")
+    for env_key, non_pi in (
+        ("DAYDREAM_SYSTEM1_FAST_REVIEW_BACKEND", "claude"),
+        ("DAYDREAM_SYSTEM1_FAST_ARBITER_BACKEND", "codex"),
+    ):
+        with pytest.raises(UnsupportedHostedPolicy, match="Hosted review supports only Pi"):
+            await bind_optional_fast_backends(
+                base_cfg,
+                {"native_contexts": {}},
+                {},
+                tmp_path,
+                env={"DAYDREAM_SYSTEM1_ENABLED": "1", env_key: non_pi},
+                hosted_input=hosted_exec,
+            )
 
     valid_meta = {"model": DEFAULT_SYSTEM1_MODEL, "p_non_behavioral": 0.99, "p_cross_file": 0.01, "threshold": 0.98}
     assert is_valid_system1_triaged(valid_meta, file_path="README.md") is True
@@ -1247,6 +1413,44 @@ async def test_challenge_triage_unit_rules_and_clustering(tmp_path: Path) -> Non
     full_group = next(g for g in groups if "c3" in g)
     assert {"c4", "c5", "c6"} <= set(full_group)
 
+    # Revision-2 claims drop out of rev-1 fast routing, pre-inlined context, clusters, and calibrated severity hints.
+    assert plan.is_fast_challenge_group({"c2": 1}, search_max=0.15) is True
+    assert plan.is_fast_challenge_group({"c2": 2}, search_max=0.15) is False
+    assert plan.calibrated_severities({"c2": 1}) == {"c2": "high"}
+    assert plan.calibrated_severities({"c2": 2}) == {}
+    assert plan.preinlined_context_blocks({"c2": 1}) != []
+    assert plan.preinlined_context_blocks({"c2": 2}) == []
+    assert plan.work_advisory_hints({"c2": 2, "c3": 2, "c4": 1}) == {"calibrated_severity": {"c4": "high"}}
+    rev2_groups = plan.plan_challenge_groups(
+        {"c2": 2, "c3": 2, "c4": 1},
+        allowance_by_uid={"c2": 0, "c3": 0, "c4": 1},
+        size_by_uid={"c2": 200, "c3": 200, "c4": 200},
+        max_bytes=64 * 1024,
+        has_fast_backend=True,
+        search_max=0.15,
+    )
+    assert rev2_groups == [{"c2": 2, "c3": 2}, {"c4": 1}]
+
+    # Oversized duplicate cluster splits into chunks <= max_bytes; fitting cluster stays grouped.
+    oversized_groups = plan.plan_challenge_groups(
+        {"c3": 1, "c4": 1},
+        allowance_by_uid={"c3": 0, "c4": 0},
+        size_by_uid={"c3": 40_000, "c4": 40_000},
+        max_bytes=64 * 1024,
+        has_fast_backend=True,
+        search_max=0.15,
+    )
+    assert oversized_groups == [{"c3": 1}, {"c4": 1}]
+    fitting_groups = plan.plan_challenge_groups(
+        {"c3": 1, "c4": 1},
+        allowance_by_uid={"c3": 0, "c4": 0},
+        size_by_uid={"c3": 20_000, "c4": 20_000},
+        max_bytes=64 * 1024,
+        has_fast_backend=True,
+        search_max=0.15,
+    )
+    assert fitting_groups == [{"c3": 1, "c4": 1}]
+
 
 async def test_import_graph_batching_and_cross_assignment_plan(tmp_path: Path) -> None:
     """Import-graph batching co-locates coupled files deterministically without changing target inventory."""
@@ -1283,6 +1487,27 @@ async def test_import_graph_batching_and_cross_assignment_plan(tmp_path: Path) -
     assert all(len(b) <= 4 for b in batch_sets)
     assert any({"a.py", "z.py"} <= b for b in batch_sets) and any({"e.py", "y.py"} <= b for b in batch_sets)
 
+    # Review.set_system1_calibrated_severities refuses mutation after seal().
+    sealed_review = committed_review.Review(plain, "seal-guard")
+    sealed_review.set_system1_calibrated_severities({("c1", 1): "high"})
+    sealed_review.seal(committed_review.review_settings(RunConfig(backend="pi")))
+    with pytest.raises(ValueError, match="Review is sealed"):
+        sealed_review.set_system1_calibrated_severities({("c1", 1): "low", ("c2", 1): "medium"})
+    assert sealed_review._system1_calibrated_severity == {("c1", 1): "high"}
+
+    # StageInputFactory._batches excludes a part only when system1_triaged metadata is valid.
+    first_part = plain.parts[0]
+    first_tid = first_part.assignment["target_id"]
+    first_part.assignment["system1_triaged"] = {
+        "model": DEFAULT_SYSTEM1_MODEL, "p_non_behavioral": 0.90, "p_cross_file": 0.01, "threshold": 0.98,
+    }
+    assert any(p["target_id"] == first_tid for batch in plain._batches() for p in batch)
+    first_part.assignment["system1_triaged"] = {
+        "model": DEFAULT_SYSTEM1_MODEL, "p_non_behavioral": 0.98004, "p_cross_file": 0.01, "threshold": 0.98003,
+    }
+    assert not any(p["target_id"] == first_tid for batch in plain._batches() for p in batch)
+    first_part.assignment.pop("system1_triaged")
+
     assert find_cross_batch_edges([("a.py", "b.py"), ("c.py", "d.py"), ("e.py",)], {"c.py": {"a.py"}}) == {
         (0, 1): [("c.py", "a.py")],
     }
@@ -1308,7 +1533,7 @@ async def test_import_graph_batching_and_cross_assignment_plan(tmp_path: Path) -
 
     plan_coupled = await prepare_cross_assignment_plan(
         client=client, batches=batches, target_diffs=target_diffs,
-        import_graph={"c.py": {"a.py"}}, admitted_claims=[],
+        import_graph={"c.py": {"a.py"}}, import_graph_complete=True, admitted_claims=[],
     )
     assert plan_coupled.qualifies_for_noop(gate_enabled=True, threshold=0.10, unfinished_targets=0) is False
     assert len(plan_coupled.focused_pairs) == MAX_FOCUSED_CROSS_PAIRS
@@ -1316,13 +1541,47 @@ async def test_import_graph_batching_and_cross_assignment_plan(tmp_path: Path) -
 
     plan_decoupled = await prepare_cross_assignment_plan(
         client=client, batches=batches, target_diffs=target_diffs,
-        import_graph={}, admitted_claims=[],
+        import_graph={}, import_graph_complete=True, admitted_claims=[],
     )
     assert plan_decoupled.qualifies_for_noop(gate_enabled=False, threshold=0.10, unfinished_targets=0) is False
     assert plan_decoupled.qualifies_for_noop(gate_enabled=True, threshold=0.10, unfinished_targets=1) is False
     assert plan_decoupled.qualifies_for_noop(gate_enabled=True, threshold=0.03, unfinished_targets=0) is False
     assert plan_decoupled.qualifies_for_noop(gate_enabled=True, threshold=0.10, unfinished_targets=0) is True
     assert CrossAssignmentPlan.empty().work_advisory_hints() is None
+
+    # Default (unverified/incomplete) import graph fails closed and blocks host noop even with zero edges.
+    plan_incomplete = await prepare_cross_assignment_plan(
+        client=client, batches=batches, target_diffs=target_diffs,
+        import_graph={}, admitted_claims=[],
+    )
+    assert plan_incomplete.import_graph_complete is False
+    assert plan_incomplete.qualifies_for_noop(gate_enabled=True, threshold=0.10, unfinished_targets=0) is False
+
+    # >MAX_BATCH_PAIR_CHECKS edge-bearing batch pairs cap pair calls at MAX_BATCH_PAIR_CHECKS, highest edge count first.
+    many_batches = [(f"b{i}_0.py", f"b{i}_1.py", f"b{i}_2.py") for i in range(7)]
+    many_diffs = {f: (f, f"@@ -1 +1 @@\n+{f}\n") for batch in many_batches for f in batch}
+    many_graph: dict[str, set[str]] = {}
+    # 15 pairs with 1 edge each across batches 0..5, plus pair (5, 6) with 3 edges (last lexicographically).
+    for a in range(6):
+        for b in range(a + 1, 6):
+            many_graph.setdefault(f"b{a}_0.py", set()).add(f"b{b}_0.py")
+    for slot in range(3):
+        many_graph.setdefault(f"b5_{slot}.py", set()).add(f"b6_{slot}.py")
+    seen_pairs: list[tuple[int, int]] = []
+
+    def cap_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        if set(body["questions"]) == set(CROSS_ASSIGNMENT_QUESTIONS):
+            return _s1_response({"cross_boundary_needed": _noul(0.50), "prompt_injection_attempt": _noul(0.01)})
+        seen_pairs.append((body["state"]["batch_a"]["index"], body["state"]["batch_b"]["index"]))
+        return _s1_response({"coupled_boundary": _noul(0.80), "prompt_injection_attempt": _noul(0.01)})
+
+    await prepare_cross_assignment_plan(
+        client=_s1_client(cap_handler), batches=many_batches, target_diffs=many_diffs,
+        import_graph=many_graph, admitted_claims=[],
+    )
+    assert len(seen_pairs) == MAX_BATCH_PAIR_CHECKS
+    assert seen_pairs[0] == (5, 6)
 
 
 # --- End-to-end committed-review System 1 integration (#1970-#1973) ---
@@ -1530,6 +1789,65 @@ async def test_committed_review_system1_single_prefetch_and_challenge_end_to_end
     assert res_rej.summary is not None
     assert res_rej.summary["counts"]["claims"] == {"proposed": 1, "confirmed": 0, "rejected": 1, "unresolved": 0}
 
+    # 4. Revising a fast-triaged rev-1 claim to rev-2 escalates to full arbiter (no fast cap, no pre-inlined context,
+    #    no stale rev-1 calibrated severity normalization).
+    def _propose_local_only(refs: dict[str, str]) -> list[dict[str, Any]]:
+        return [{
+            "uid": "", "revision": 0, "source_uids": [], "title": "Local zero bug",
+            "payload": {
+                "claim": "VALUE=0 causes div0.", "trigger": "Call.", "consequence": "Fail.", "grounds": "Diff.",
+                "file": "pkg/service.py", "line": 2, "severity": "medium",
+                "evidence_refs": [{"source_id": refs["pkg/service.py"], "basis": "supplied_diff",
+                                   "source_range": None}],
+            },
+        }]
+
+    def _revise_then_confirm(
+        claims: list[dict[str, Any]],
+        lookup: Callable[[dict[str, Any]], dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        (c,) = claims
+        sid = lookup({"target_id": "pkg/service.py", "path": None, "historical_context": None,
+                      "cursor": None})["target"]["source_options"][0]["source_id"]
+        ref = [{"source_id": sid, "basis": "supplied_diff", "source_range": None}]
+        if c["revision"] == 1:
+            return [], [{
+                "uid": c["uid"], "revision": 1, "source_uids": [], "title": c["title"],
+                "payload": {**c["payload"], "claim": "Refined: VALUE=0 causes div0.", "evidence_refs": ref},
+            }]
+        if c["revision"] == 2:
+            # Changing severity to rev-1's calibrated "high" on rev-2 must NOT normalize in place.
+            return [{
+                "uid": c["uid"], "revision": 2, "verdict": "confirmed",
+                "grounds": "Verified rev-2; adjust severity.", "evidence_refs": [],
+            }], [{
+                "uid": c["uid"], "revision": 2, "source_uids": [], "title": c["title"],
+                "payload": {**c["payload"], "severity": "high", "evidence_refs": ref},
+            }]
+        return [{
+            "uid": c["uid"], "revision": c["revision"], "verdict": "confirmed",
+            "grounds": "Verified rev-3.", "evidence_refs": [],
+        }], []
+
+    dispatches_rev, exec_rev = _scripted_review_agent(
+        propose_claims_fn=_propose_local_only, challenge_fn=_revise_then_confirm,
+    )
+    monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=exec_rev, console=agent.console))
+    res_rev = await run_committed_review(CommittedReviewRequest(repo, base_sha, config=cfg))
+    val_rev = res_rev.to_dict()
+    validate_committed_result(val_rev)
+    rev_challenges = [d for d in dispatches_rev if d["kind"] == "challenge"]
+    assert len(rev_challenges) == 3
+    assert rev_challenges[0]["backend_model"] == "pi-arbiter-fast"
+    assert rev_challenges[0]["allocation"] <= FAST_CHALLENGE_CALL_CAP
+    assert "Pre-inlined local claim context" in rev_challenges[0]["prompt"]
+    assert rev_challenges[1]["backend_model"] == "pi-full"
+    assert rev_challenges[1]["allocation"] > FAST_CHALLENGE_CALL_CAP
+    assert "Pre-inlined local claim context" not in rev_challenges[1]["prompt"]
+    assert rev_challenges[1]["advisory_hints"] is None
+    assert rev_challenges[2]["backend_model"] == "pi-full"
+    assert val_rev["findings"][0]["revision"] == 3 and val_rev["findings"][0]["payload"]["severity"] == "high"
+
 
 async def test_committed_review_system1_decomposed_modes_and_cross_focus(
     tmp_path: Path,
@@ -1698,15 +2016,17 @@ async def test_committed_review_system1_zero_work_fast_paths(
     monkeypatch.setenv("DAYDREAM_SYSTEM1_ENABLED", "1")
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
 
-    # 1. Mode 2 all-non-behavioral PR completes with 0 System 2 calls and bills System 1 usage.
+    # 1. Mode 2 all-non-behavioral PR completes with 0 System 2 calls, bills System 1 usage,
+    #    and preserves boundary precision (0.98004 >= 0.98003 must not round down to 0.9800).
     docs_repo = tmp_path / "docs_only"
     seed_feature_branch(docs_repo, base={"README.md": "# v1\n"}, feature={"README.md": "# v2\n"})
     docs_base = git(docs_repo, "rev-parse", "main")
     monkeypatch.setenv("DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL", "1")
+    monkeypatch.setenv("DAYDREAM_SYSTEM1_SKIP_THRESHOLD", "0.98003")
     _patch_s1(
         monkeypatch,
         lambda _r: _s1_response(
-            _target_ans(non_behavioral=0.995, cross_file=0.01, tier="mechanical", risk=0.1),
+            _target_ans(non_behavioral=0.98004, cross_file=0.01, tier="mechanical", risk=0.1),
             tokens=80,
             cost=0.00000336,
         ),
@@ -1720,11 +2040,14 @@ async def test_committed_review_system1_zero_work_fast_paths(
     validate_committed_result(val_docs)
     assert res_docs.complete and dispatches_docs == []
     assert val_docs["settings"]["assignment_policy"]["planned_assignments"] == 0
+    assert val_docs["assignments"][0]["system1_triaged"]["p_non_behavioral"] == pytest.approx(0.98004)
     docs_traj = read_trajectory(docs_repo / ".daydream" / "runs" / val_docs["run_id"] / RUN_DOCUMENT_NAME)
     assert docs_traj["final_metrics"]["total_prompt_tokens"] == 80 and docs_traj["final_metrics"]["total_cost_usd"] > 0
 
-    # 2. Decoupled 20-file PR host-noops cross_assignment when opted in; forging noop without metadata fails validation.
+    # 2. Decoupled 20-file PR host-noops cross_assignment when opted in (preserving boundary 0.099996 < 0.10);
+    #    forging noop without metadata fails validation.
     monkeypatch.delenv("DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL", raising=False)
+    monkeypatch.delenv("DAYDREAM_SYSTEM1_SKIP_THRESHOLD", raising=False)
     monkeypatch.setenv("DAYDREAM_SYSTEM1_GATE_CROSS_ASSIGNMENT", "1")
     repo_dec = tmp_path / "decoupled"
     seed_feature_branch(
@@ -1739,7 +2062,7 @@ async def test_committed_review_system1_zero_work_fast_paths(
         if qkeys == set(TARGET_TRIAGE_QUESTIONS):
             return _s1_response(_target_ans(non_behavioral=0.1, cross_file=0.1, tier="medium", risk=2.0))
         if qkeys == set(CROSS_ASSIGNMENT_QUESTIONS):
-            return _s1_response({"cross_boundary_needed": _noul(0.03), "prompt_injection_attempt": _noul(0.01)})
+            return _s1_response({"cross_boundary_needed": _noul(0.099996), "prompt_injection_attempt": _noul(0.01)})
         return _s1_response({"coupled_boundary": _noul(0.05), "prompt_injection_attempt": _noul(0.01)})
 
     _patch_s1(monkeypatch, dec_handler)
@@ -1756,6 +2079,7 @@ async def test_committed_review_system1_zero_work_fast_paths(
     assert res_dec.complete and val_dec["settings"]["assignment_policy"]["decomposed"] is True
     assert not any(d["kind"] == "cross_assignment" for d in dispatches_dec)
     assert val_dec["settings"]["system1_cross_assignment"]["action"] == "host_noop"
+    assert val_dec["settings"]["system1_cross_assignment"]["p_cross_needed"] == pytest.approx(0.099996)
     cross_outcome = next(
         o for o in val_dec["terminal_result"]["phase_outcomes"] if o["phase"] == "cross_assignment"
     )
@@ -1765,6 +2089,23 @@ async def test_committed_review_system1_zero_work_fast_paths(
     del forged["settings"]["system1_cross_assignment"]
     with pytest.raises(ValueError, match="cross_assignment noop requires valid host System 1 metadata"):
         validate_committed_result(forged)
+
+    # 3. Unsupported extension (.js) yields an incomplete import graph, blocking host_noop and running cross_assignment.
+    repo_js = tmp_path / "decoupled_js"
+    base_js = {f"m{i:02d}.py": f"V = {i}\n" for i in range(1, 20)}
+    base_js["m00.js"] = "export const v = 0;\n"
+    feat_js = {f"m{i:02d}.py": f"V = {i + 1}\n" for i in range(1, 20)}
+    feat_js["m00.js"] = "export const v = 1;\n"
+    seed_feature_branch(repo_js, base=base_js, feature=feat_js)
+    js_base = git(repo_js, "rev-parse", "main")
+    dispatches_js, exec_js = _scripted_review_agent()
+    monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=exec_js, console=agent.console))
+    res_js = await run_committed_review(CommittedReviewRequest(repo_js, js_base, config=cfg))
+    val_js = res_js.to_dict()
+    validate_committed_result(val_js)
+    assert res_js.complete and val_js["settings"]["assignment_policy"]["decomposed"] is True
+    assert any(d["kind"] == "cross_assignment" for d in dispatches_js)
+    assert val_js["settings"]["system1_cross_assignment"]["action"] == "focused"
 
 
 # --- Diagram auto semantic gate and Improve vet pre-triage (#1974) ---

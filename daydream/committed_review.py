@@ -216,7 +216,7 @@ class Review:
             part["target_id"]: host_decision(part) for part in self.assignments if is_host_decided_part(part)}
         self._host_decided = frozenset(self._decisions)
         self._claims: dict[str, dict[str, Any]] = {}
-        self._system1_calibrated_severity: dict[str, str] = {}
+        self._system1_calibrated_severity: dict[tuple[str, int], str] = {}
         self._cross_assignment_host_noop: dict[str, Any] | None = None
         self._sealed = False
         self.work: dict[str, _Work] = {}
@@ -449,8 +449,10 @@ class Review:
         """More than one investigation context held local discovery responsibility."""
         return sum(work.kind in {"discovery", "follow_up"} for work in self.work.values()) > 1
 
-    def set_system1_calibrated_severities(self, severities: Mapping[str, str]) -> None:
-        """Record host System 1 calibrated severity estimates for single-round confirmation normalization."""
+    def set_system1_calibrated_severities(self, severities: Mapping[tuple[str, int], str]) -> None:
+        """Record host System 1 calibrated severity estimates keyed by ``(uid, revision)``."""
+        if self._sealed:
+            raise ValueError("Review is sealed")
         self._system1_calibrated_severity.update(severities)
 
     def record_cross_assignment_host_noop(
@@ -470,7 +472,7 @@ class Review:
         meta = {
             "action": "host_noop",
             "model": model,
-            "p_cross_needed": round(p_cross_needed, 4),
+            "p_cross_needed": float(p_cross_needed),
             "threshold": threshold,
             "cross_batch_edges": 0,
         }
@@ -787,7 +789,7 @@ class Review:
                                     {k: v for k, v in change["payload"].items() if k != "severity"}
                                     == {k: v for k, v in existing["payload"].items() if k != "severity"}
                                 )
-                                calibrated_sev = self._system1_calibrated_severity.get(uid)
+                                calibrated_sev = self._system1_calibrated_severity.get((uid, existing["revision"]))
                                 confirming = (
                                     kind == "challenge"
                                     and uid in verdicts
@@ -1277,6 +1279,10 @@ async def bind_optional_fast_backends(
         if spec is None:
             continue
         fast_name, fast_model, fast_effort = spec
+        if hosted_input is not None and fast_name != "pi":
+            raise UnsupportedHostedPolicy(
+                "Hosted review supports only Pi; select the supported operator policy without switching harnesses."
+            )
         try:
             fast_exec_input = (
                 hosted_input
@@ -1347,31 +1353,36 @@ async def plan_review(
     started: float, allowed_tools: frozenset[str] | None = None, immutable_input: ImmutableReviewInput | None = None,
     historical_context: dict[str, str] | None = None, system1_env: Mapping[str, str] | None = None,
     import_graph: Mapping[str, set[str]] | None = None,
+    import_graph_complete: bool | None = None,
 ) -> ReviewProgram:
     """Plan the complete target population, its allowances and its schedule before any model work."""
     profile = config.review_profile
     assert profile is not None
     pipeline = profile.profile.pipeline
     resolved_graph: Mapping[str, set[str]]
+    resolved_graph_complete: bool
     if import_graph is not None:
         resolved_graph = import_graph
+        resolved_graph_complete = bool(import_graph_complete) if import_graph_complete is not None else False
     elif files:
-        def _build_graph() -> dict[str, set[str]]:
+        def _build_graph() -> tuple[dict[str, set[str]], bool]:
             try:
-                from daydream.deep.dependency import build_import_graph
+                from daydream.deep.dependency import build_import_graph_with_status
 
-                return build_import_graph(list(files), work.repo)
+                return build_import_graph_with_status(list(files), work.repo)
             except Exception:
-                return {}
+                return {}, False
 
-        resolved_graph = await anyio.to_thread.run_sync(_build_graph)
+        resolved_graph, resolved_graph_complete = await anyio.to_thread.run_sync(_build_graph)
     else:
         resolved_graph = {}
+        resolved_graph_complete = True
     # Full captured-source checks run off-loop so host-tool timers are never starved.
     inputs = await anyio.to_thread.run_sync(lambda: StageInputFactory(
         backends["discovery"], work, StackAssignment("committed", files),
         change=CanonicalChange.capture(diff_path, index_path, work.captured_source),
         revision=revision, read_only=True, import_graph=resolved_graph,
+        import_graph_complete=resolved_graph_complete,
     ))
     precomputed_triages: Mapping[str, Any] | None = None
     pending_usage: tuple[Any, ...] = ()
@@ -1405,8 +1416,8 @@ async def plan_review(
                     assert triage.p_non_behavioral is not None and triage.p_cross_file is not None
                     part.assignment["system1_triaged"] = {
                         "model": triage.model or sys1_config.model,
-                        "p_non_behavioral": round(triage.p_non_behavioral, 4),
-                        "p_cross_file": round(triage.p_cross_file, 4),
+                        "p_non_behavioral": float(triage.p_non_behavioral),
+                        "p_cross_file": float(triage.p_cross_file),
                         "threshold": sys1_config.skip_threshold,
                     }
                     skipped_targets.append(tid)
@@ -1881,6 +1892,7 @@ class _Schedule:
                 batches=ordered_batches,
                 target_diffs=self._target_diffs(ordered_batches),
                 import_graph=review.inputs.import_graph,
+                import_graph_complete=review.inputs.import_graph_complete,
                 admitted_claims=list(review._claims.values()),
                 session_id=review.run_id,
                 remaining_s=self.investigation.remaining_s(),
@@ -1903,7 +1915,7 @@ class _Schedule:
             self.settings["system1_cross_assignment"] = {
                 "action": "focused",
                 "model": plan.model or config.model,
-                "p_cross_needed": None if plan.p_cross_needed is None else round(plan.p_cross_needed, 4),
+                "p_cross_needed": None if plan.p_cross_needed is None else float(plan.p_cross_needed),
                 "threshold": config.cross_assignment_threshold,
                 "cross_batch_edges": plan.cross_batch_edge_count,
                 "focused_pairs": len(plan.focused_pairs),
@@ -1936,7 +1948,7 @@ class _Schedule:
                 remaining_s=self.ledger.remaining_s(),
             )
         self._challenge_triage = plan
-        calibrated = plan.calibrated_severities()
+        calibrated = plan.calibrated_severities_by_revision()
         if calibrated:
             self.review.set_system1_calibrated_severities(calibrated)
         fast_rejected: list[str] = []
@@ -1944,9 +1956,13 @@ class _Schedule:
             for claim in pending:
                 uid = claim["uid"]
                 triage = plan.triages.get(uid)
-                if triage is not None and triage.qualifies_for_fast_reject(
-                    reject_threshold=config.claim_reject_threshold,
-                    search_max=config.local_challenge_search_max,
+                if (
+                    triage is not None
+                    and triage.revision == claim["revision"]
+                    and triage.qualifies_for_fast_reject(
+                        reject_threshold=config.claim_reject_threshold,
+                        search_max=config.local_challenge_search_max,
+                    )
                 ):
                     assert triage.p_invalid is not None
                     self.review.host_reject_claim(
@@ -1987,7 +2003,7 @@ class _Schedule:
                 "challenge_fast" in self.backends
                 and self._challenge_triage is not None
                 and self._challenge_triage.is_fast_challenge_group(
-                    tuple(work.claims),
+                    work.claims,
                     search_max=self._challenge_search_max,
                 )
             ):
@@ -2134,7 +2150,7 @@ class _Schedule:
         if self._prefetch_hints is not None and kind in INVESTIGATION_KINDS:
             advisory_hints = self._prefetch_hints.work_advisory_hints(work.targets)
         elif self._challenge_triage is not None and kind == "challenge":
-            advisory_hints = self._challenge_triage.work_advisory_hints(tuple(work.claims))
+            advisory_hints = self._challenge_triage.work_advisory_hints(work.claims)
         focused_cross_pairs: tuple[Any, ...] = ()
         if kind == "cross_assignment" and self._cross_plan is not None:
             cross_hints = self._cross_plan.work_advisory_hints()
@@ -2145,7 +2161,7 @@ class _Schedule:
             work_context["advisory_hints"] = advisory_hints
         preinlined_claims: list[dict[str, Any]] = []
         if route_key == "challenge_fast" and self._challenge_triage is not None:
-            preinlined_claims = self._challenge_triage.preinlined_context_blocks(tuple(work.claims))
+            preinlined_claims = self._challenge_triage.preinlined_context_blocks(work.claims)
         assignment = {
             "kind": kind,
             "run_id": review.run_id,

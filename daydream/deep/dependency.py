@@ -79,33 +79,40 @@ def _resolve_import(import_str: str, file: str) -> list[str]:
     return [(base_rel + "/" + c) if base_rel else c for c in candidates]
 
 
-def build_import_graph(
+def build_import_graph_with_status(
     changed_files: list[str], repo_root: Path
-) -> dict[str, set[str]]:
-    """Return directed imports between changed files within a five-second wall budget.
+) -> tuple[dict[str, set[str]], bool]:
+    """Return ``(graph, complete)`` for changed files within a five-second wall budget.
 
-    Unknown grammars and unreadable files contribute no edges. Timeout returns the
-    partial graph.
+    ``complete`` is ``True`` only when every file in *changed_files* had a supported
+    grammar, an available parser and query, succeeded reading its bytes, and finished
+    within the wall budget. Empty *changed_files* returns ``({}, True)``.
     """
     changed = set(changed_files)
     graph: dict[str, set[str]] = {}
+    complete = True
     deadline = time.monotonic() + _GRAPH_BUILD_WALL_BUDGET_S
-    for file in changed_files:
+    for idx, file in enumerate(changed_files):
         graph[file] = set()
         if time.monotonic() > deadline:
+            complete = False
             break
         lang_id = _LANG_BY_EXT.get(PurePosixPath(file).suffix.lower())
         if lang_id is None:
+            complete = False
             continue
         parser = get_parser(lang_id)
         if parser is None:
+            complete = False
             continue
         query = _query_for_language(lang_id)
         if query is None:
+            complete = False
             continue
         try:
             source = (repo_root / file).read_bytes()
         except Exception:
+            complete = False
             continue
         imports = extract_imports(parser, source, query)
         for imp in imports:
@@ -114,5 +121,19 @@ def build_import_graph(
                     graph[file].add(candidate)
                     break
         if time.monotonic() > deadline:
+            if idx + 1 < len(changed_files):
+                complete = False
             break
+    return graph, complete
+
+
+def build_import_graph(
+    changed_files: list[str], repo_root: Path
+) -> dict[str, set[str]]:
+    """Return directed imports between changed files within a five-second wall budget.
+
+    Unknown grammars and unreadable files contribute no edges. Timeout returns the
+    partial graph.
+    """
+    graph, _ = build_import_graph_with_status(changed_files, repo_root)
     return graph

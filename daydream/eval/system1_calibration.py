@@ -18,14 +18,19 @@ from typing import Any
 
 from daydream.dataset import LocalRecordStore
 from daydream.deep.diff import iter_diff_blocks
+from daydream.prompt_budget import truncate_utf8_to_budget
 from daydream.review_system1 import (
     CLAIM_TRIAGE_QUESTIONS,
     CROSS_ASSIGNMENT_QUESTIONS,
+    CROSS_SUMMARY_DIFF_PER_BATCH_BYTES,
     SKIP_TIER_RISK_SCORE_MAX,
     TARGET_TRIAGE_QUESTIONS,
+    build_claim_triage_state,
+    build_cross_assignment_state,
 )
 from daydream.system1 import (
     DecisionOutcome,
+    DecisionQuestion,
     System1Client,
     injection_detected,
     path_is_hard_denied,
@@ -71,6 +76,8 @@ class CrossAssignmentShadowCase:
     changed_files: tuple[str, ...]
     batch_summary: dict[str, Any]
     has_cross_finding: bool
+    unfinished_targets: int = 0
+    cross_batch_edges: int = 0
 
 
 @dataclass(frozen=True)
@@ -214,29 +221,50 @@ def load_shadow_cases_from_runs(paths: Sequence[Path]) -> ShadowDataset:
         if policy.get("decomposed"):
             work_items = sealed.get("work") or []
             work_kind = {str(w.get("work_id")): str(w.get("kind")) for w in work_items if isinstance(w, Mapping)}
-            local_batches = [
-                {"work_id": w.get("work_id"), "targets": list(w.get("targets") or [])}
-                for w in work_items
-                if isinstance(w, Mapping) and w.get("kind") == "discovery"
+            target_file = {
+                str(part["target_id"]): str(part["file"])
+                for part in (sealed.get("assignments") or [])
+                if isinstance(part, Mapping) and part.get("target_id") and part.get("file")
+            }
+            batch_files: list[list[str]] = []
+            batch_excerpts: list[str] = []
+            for w in work_items:
+                if not isinstance(w, Mapping) or w.get("kind") != "discovery":
+                    continue
+                files_in_batch = list(dict.fromkeys(
+                    target_file.get(str(tid), str(tid)) for tid in (w.get("targets") or [])
+                ))
+                batch_files.append(files_in_batch)
+                combined_diff = "\n".join(diff_by_file[f] for f in files_in_batch if f in diff_by_file)
+                batch_excerpts.append(truncate_utf8_to_budget(combined_diff, CROSS_SUMMARY_DIFF_PER_BATCH_BYTES))
+            local_claims = [
+                c
+                for c in (sealed.get("claims") or [])
+                if isinstance(c, Mapping) and work_kind.get(str(c.get("work_id"))) != "cross_assignment"
             ]
             has_cross = any(
                 work_kind.get(str(item.get("work_id"))) == "cross_assignment"
                 for item in sealed_findings
                 if isinstance(item, Mapping)
             )
+            stack_outcomes = (sealed.get("terminal_result") or {}).get("stack_outcomes") or []
+            unfinished_targets = sum(
+                1
+                for outcome in stack_outcomes
+                if isinstance(outcome, Mapping)
+                for decision in (outcome.get("target_decisions") or [])
+                if isinstance(decision, Mapping) and decision.get("status") != "reviewed"
+            )
+            cross_meta = (sealed.get("settings") or {}).get("system1_cross_assignment")
+            raw_edges = cross_meta.get("cross_batch_edges") if isinstance(cross_meta, Mapping) else None
+            cross_batch_edges = raw_edges if type(raw_edges) is int and raw_edges >= 0 else 0
             cross_assignments.append(CrossAssignmentShadowCase(
                 run_id=run_id,
                 changed_files=tuple(sorted(diff_by_file)),
-                batch_summary={
-                    "batches": local_batches,
-                    "changed_files": sorted(diff_by_file),
-                    "local_claim_titles": [
-                        {"file": (c.get("payload") or {}).get("file"), "title": c.get("title")}
-                        for c in (sealed.get("claims") or [])
-                        if work_kind.get(str(c.get("work_id"))) != "cross_assignment"
-                    ],
-                },
+                batch_summary=build_cross_assignment_state(batch_files, batch_excerpts, {}, local_claims),
                 has_cross_finding=has_cross,
+                unfinished_targets=unfinished_targets,
+                cross_batch_edges=cross_batch_edges,
             ))
 
     return ShadowDataset(
@@ -403,6 +431,8 @@ def _calibrate_gate[T](
     total_positives = sum(is_positive(case) for case in cases)
     brier, ece = compute_brier_and_ece(brier_samples)
     evaluated = len(scored)
+    evaluated_positives = sum(positive for _, positive, _ in scored)
+    sufficient_coverage = evaluated > 0 and evaluated * 2 >= total_cases and evaluated_positives > 0
     sweep: list[CalibrationPoint] = []
     for threshold in thresholds:
         gated_count = 0
@@ -418,14 +448,18 @@ def _calibrate_gate[T](
             total_evaluated=evaluated,
             gated_fraction=round(gated_count / total_cases, 6) if total_cases > 0 else 0.0,
             missed_positives=missed,
-            total_positives=total_positives,
-            recall=None if total_positives == 0 else round((total_positives - missed) / total_positives, 6),
+            total_positives=evaluated_positives,
+            recall=None if evaluated_positives == 0 else round((evaluated_positives - missed) / evaluated_positives, 6),
             gate_precision=None if gated_count == 0 else round((gated_count - missed) / gated_count, 6),
         ))
-    eligible_points = [
-        point for point in sweep
-        if point.recall is not None and point.recall >= recall_floor and point.gated_count > 0
-    ]
+    eligible_points = (
+        [
+            point for point in sweep
+            if point.recall is not None and point.recall >= recall_floor and point.gated_count > 0
+        ]
+        if sufficient_coverage
+        else []
+    )
     # Break ties toward the more conservative threshold (higher for >= gates, lower for < gates).
     best = max(
         eligible_points,
@@ -449,6 +483,20 @@ def _calibrate_gate[T](
     )
 
 
+async def _evaluate_chunked(
+    client: System1Client,
+    items: Sequence[tuple[Any, Mapping[str, DecisionQuestion]]],
+) -> list[DecisionOutcome]:
+    """Replay *items* in bounded chunks so large corpora do not share one batch deadline."""
+    if not items:
+        return []
+    chunk_size = max(1, client.config.max_concurrency * 2)
+    outcomes: list[DecisionOutcome] = []
+    for start in range(0, len(items), chunk_size):
+        outcomes.extend(await client.evaluate_many(items[start : start + chunk_size], record_usage=False))
+    return outcomes
+
+
 async def run_shadow_calibration(
     dataset: ShadowDataset,
     client: System1Client,
@@ -458,17 +506,20 @@ async def run_shadow_calibration(
     cross_recall_floor: float = 0.99,
 ) -> CalibrationReport:
     """Replay *dataset* through *client* in shadow mode and compute calibrated gate recommendations."""
-    target_outcomes = await client.evaluate_many(
+    target_outcomes = await _evaluate_chunked(
+        client,
         [({"path": case.path, "diff": case.diff}, TARGET_TRIAGE_QUESTIONS) for case in dataset.targets],
-        record_usage=False,
     )
-    claim_outcomes = await client.evaluate_many(
-        [({"claim": case.claim, "file_diff": case.file_diff}, CLAIM_TRIAGE_QUESTIONS) for case in dataset.claims],
-        record_usage=False,
+    claim_outcomes = await _evaluate_chunked(
+        client,
+        [
+            (build_claim_triage_state(case.claim, cited_diff=case.file_diff), CLAIM_TRIAGE_QUESTIONS)
+            for case in dataset.claims
+        ],
     )
-    cross_outcomes = await client.evaluate_many(
+    cross_outcomes = await _evaluate_chunked(
+        client,
         [(case.batch_summary, CROSS_ASSIGNMENT_QUESTIONS) for case in dataset.cross_assignments],
-        record_usage=False,
     )
 
     def _extract_target(case: TargetShadowCase, outcome: DecisionOutcome) -> tuple[float, float, bool] | None:
@@ -499,11 +550,12 @@ async def run_shadow_calibration(
             p_search is not None and p_search <= client.config.local_challenge_search_max,
         )
 
-    def _extract_cross(_case: CrossAssignmentShadowCase, outcome: DecisionOutcome) -> tuple[float, float, bool] | None:
+    def _extract_cross(case: CrossAssignmentShadowCase, outcome: DecisionOutcome) -> tuple[float, float, bool] | None:
         p_needed = outcome.noul("cross_boundary_needed")
         if p_needed is None:
             return None
-        return (p_needed, p_needed, True)
+        eligible = case.unfinished_targets == 0 and case.cross_batch_edges == 0
+        return (p_needed, p_needed, eligible)
 
     target_gate = _calibrate_gate(
         name="target_skip",
