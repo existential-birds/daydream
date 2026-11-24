@@ -119,9 +119,10 @@ async def test_recorded_read_only_turn_becomes_events_and_per_step_usage(
 
     metrics = [event for event in events if isinstance(event, MetricsEvent)]
     assert [event.message_id for event in metrics] == ["step-1", "step-3", "step-5", "step-7", "step-9"]
-    # Exactly the recorded cumulative result.usage: per-step usage is charged once and the total never again.
+    # Exactly the recorded cumulative result.usage, charged once per step and never again as a total. agy
+    # reports cache reads apart from input_tokens, so the prompt size is their sum.
     assert (sum(event.prompt_tokens for event in metrics), sum(event.completion_tokens for event in metrics),
-            sum(event.cached_tokens or 0 for event in metrics)) == (11103, 311, 3197)
+            sum(event.cached_tokens or 0 for event in metrics)) == (11103 + 3197, 311, 3197)
     assert {(event.cost_usd, event.model_name, event.reasoning_tokens) for event in metrics} == {
         (None, "gemini-3.8-flash-low", 0)}
     assert not any(isinstance(event, CostEvent) for event in events)
@@ -139,7 +140,8 @@ async def test_mutating_turns_pass_native_controls_and_return_schema_output(
     """A mutating turn resumes, selects model/effort/home and returns agy's schema output.
 
     Regressions: a dedicated agy home read from process globals or not applied, the version check
-    repeated per invocation, a mutating turn without the permission flag, or ``persist_session=False``
+    repeated per invocation, a mutating turn without the permission flag, a schema turn without agy's
+    ``finish`` tool (live, it loops and returns no structured output), or ``persist_session=False``
     resuming or handing back a continuation.
     """
     structured = fixture_lines("structured_output.jsonl")
@@ -164,6 +166,10 @@ async def test_mutating_turns_pass_native_controls_and_return_schema_output(
     assert fresh == ("agy", *_FORMAT, "--model", "gemini-3.8-pro", "--effort", "low", "--add-dir",
                      str(replay.run_dirs[1]), "--agent", "daydream-edit", "--dangerously-skip-permissions")
     assert [kwargs["env"]["HOME"] for kwargs in replay.spawner.kwargs] == [str(home)] * 3
+    # agy returns schema output through its finish tool, so only the schema turn lists and allows it.
+    for files, listed in zip(replay.run_files, (True, False), strict=True):
+        assert ("  - finish\n" in files[".agents/agents/daydream-edit.md"]) is listed
+        assert ("finish" in json.loads(files["guard-policy.json"])["allowed_tools"]) is listed
 
     request, result = events[0], events[-1]
     assert isinstance(request, RequestEvent) and isinstance(result, ResultEvent)

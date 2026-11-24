@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The Antigravity backend, checked against live `agy` 1.5.15: turns that request schema output
+  now list `agy`'s `finish` tool, without which they looped and returned no structured result;
+  recorded prompt tokens include cache reads, which `agy` reports apart from `input_tokens`; and
+  read-only search guidance no longer promises search tools that `agy` does not offer every model.
+
 ## [0.38.0] - 2026-11-24
 
 ### Added
