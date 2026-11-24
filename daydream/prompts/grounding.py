@@ -75,7 +75,8 @@ READ_ONLY_PI_SEARCH_GUIDANCE = _NO_SHELL_SEARCH_GUIDANCE.format(
 )
 
 READ_ONLY_ANTIGRAVITY_SEARCH_GUIDANCE = _NO_SHELL_SEARCH_GUIDANCE.format(
-    tools="view_file, grep_search, find_by_name and list_dir",
+    # Live agy offers some models read_file alone, whatever the agent's tool list names.
+    tools="read_file, and grep_search, find_by_name and list_dir where your tool list offers them",
     limits="Host tools named in these instructions are served by the MCP server `daydream`. ",
 )
 
