@@ -10,40 +10,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Host-owned OpenRouter Decisions (`POST /api/alpha/decisions`) client for Jev / System 1
-  (`typesafe/jev-1.13`) with `noul`/`choice`/`score` primitives, context-ceiling preflight,
-  prompt-injection and security hard-deny path guards, fail-open fallback, trajectory billing,
-  and the offline `daydream corpus calibrate-system1` shadow-calibration harness
-  ([#1969](https://github.com/existential-birds/daydream/issues/1969)).
-- Opt-in System 1 pre-dispatch ranking for committed reviews (`daydream.review_system1`): scores
-  targets, `historical_context` fields, and confined import/test supporting files in one parallel
-  pass to order discovery targets and batches highest-risk first and attach bounded advisory hints
-  under `work.advisory_hints` without exposing raw author prose or altering sealed contracts
+  (`typesafe/jev-1.13`, opt-in via `DAYDREAM_SYSTEM1_ENABLED=1`) with `noul`/`choice`/`score`
+  primitives, context-ceiling preflight, prompt-injection and security hard-deny path guards,
+  fail-open fallback, trajectory billing, and the offline `daydream corpus calibrate-system1`
+  shadow-calibration harness ([#1969](https://github.com/existential-birds/daydream/issues/1969)).
+- System 1 pre-dispatch ranking for committed reviews: orders discovery targets and batches
+  highest-risk first and attaches bounded advisory hints for `historical_context` and confined
+  import/test supporting files without exposing raw author prose
   ([#1970](https://github.com/existential-birds/daydream/issues/1970)).
-- System 1 target triage for committed reviews: Mode 1 risk-weighted tool-call budget allocation
-  (Hamilton largest-remainder preserving `_MIN_WORK_CALLS`) and optional `discovery_fast` tier
-  routing (`DAYDREAM_SYSTEM1_FAST_REVIEW_*` / `[phases.review_fast]`) for mechanical/low-risk
-  batches; plus opt-in Mode 2 non-behavioral fast-path (`DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL=1`)
-  generalizing host decisions with hard-deny/injection guards and strict `validate_committed_result`
-  attribution checks ([#1971](https://github.com/existential-birds/daydream/issues/1971)).
-- System 1 pre-challenge claim triage for committed reviews: bounded host-side enclosing source
-  extraction, opt-in asymmetric fast-rejection (`DAYDREAM_SYSTEM1_FAST_REJECT_CLAIMS=1`, strictly
-  forbidden from confirming findings by `validate_committed_result`), same-file duplicate claim
-  clustering, 2-tier `challenge_fast` arbiter routing with pre-inlined local context, and
-  single-round calibrated severity normalization on confirmation
-  ([#1972](https://github.com/existential-birds/daydream/issues/1972)).
-- Deterministic import-graph coupling-aware batch packing in `StageInputFactory` (co-locating
-  directly importing changed files within ≤4-file / byte-capped batches while keeping inventory
-  and `planned_work_id` invariant), plus System 1 cross-assignment boundary scoring to opt-in
-  host-noop decoupled decomposed reviews (`DAYDREAM_SYSTEM1_GATE_CROSS_ASSIGNMENT=1`, strictly
-  gated on zero unfinished targets and zero cross-batch edges) or focus `cross_assignment` on
-  ranked coupled batch pairs with bounded untrusted excerpts
+- System 1 target triage for committed reviews: risk-weighted tool-call budget allocation,
+  optional `discovery_fast` routing (`DAYDREAM_SYSTEM1_FAST_REVIEW_*` / `[phases.review_fast]`),
+  and opt-in non-behavioral fast-path skipping (`DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL=1`) with
+  validated host attribution ([#1971](https://github.com/existential-birds/daydream/issues/1971)).
+- System 1 pre-challenge claim triage for committed reviews: opt-in asymmetric fast-rejection
+  (`DAYDREAM_SYSTEM1_FAST_REJECT_CLAIMS=1`, never confirming findings), same-file duplicate
+  clustering, 2-tier `challenge_fast` arbiter routing (`DAYDREAM_SYSTEM1_FAST_ARBITER_*` /
+  `[phases.arbiter_fast]`) with pre-inlined local context, and single-round calibrated severity
+  normalization on confirmation ([#1972](https://github.com/existential-birds/daydream/issues/1972)).
+- Deterministic import-graph coupling-aware batch packing for committed reviews (keeping
+  target inventory and `planned_work_id` invariant), plus System 1 cross-assignment gating
+  (`DAYDREAM_SYSTEM1_GATE_CROSS_ASSIGNMENT=1`) and ranked coupled batch-pair focus
   ([#1973](https://github.com/existential-birds/daydream/issues/1973)).
-- System 1 semantic pre-checks for `--diagram auto` (skipping low-value sequence/flowchart
-  authoring with explicit recorded reasons while bypassing explicit `--diagram sequence|flowchart|both`
-  and failing open on errors) and Improve `vet` pre-triage (signal-ordered candidate batching and
-  opt-in `DAYDREAM_SYSTEM1_IMPROVE_PREFILTER=1` noise filtering with `vet-system1-prefilter.json`
-  audit retention and snapshot-root confinement)
-  ([#1974](https://github.com/existential-birds/daydream/issues/1974)).
+- System 1 semantic pre-checks for `--diagram auto` (bypassing explicit forced modes and
+  recording explicit skip reasons) and Improve `vet` pre-triage (signal-ordered batching and
+  opt-in `DAYDREAM_SYSTEM1_IMPROVE_PREFILTER=1` noise filtering retained in
+  `vet-system1-prefilter.json`) ([#1974](https://github.com/existential-birds/daydream/issues/1974)).
 
 ## [0.38.0] - 2026-11-24
 

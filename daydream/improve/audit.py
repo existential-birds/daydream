@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -548,26 +547,24 @@ async def _step_vet(ctx: FlowContext) -> Stop | None:
     previously_rejected = len(audit_findings) - len(candidates)
 
     prefiltered_records: list[dict[str, Any]] = []
-    raw_s1 = os.environ.get("DAYDREAM_SYSTEM1_ENABLED")
-    if candidates and raw_s1 is not None and raw_s1.strip().lower() in {"1", "true", "yes", "on"}:
-        from daydream.review_system1 import triage_improve_vet_candidates
-        from daydream.system1 import System1Client, System1Config
+    from daydream.run_config import resolve_system1_client
 
-        s1_config = System1Config.from_environment()
-        if s1_config.enabled and s1_config.api_key:
-            async with trajectory.phase_scope(trajectory.DaydreamPhase.VET, stage="system1-vet-triage"):
-                candidates, prefiltered_records = await triage_improve_vet_candidates(
-                    candidates,
-                    client=System1Client(s1_config),
-                    repo=_audit_repo(ctx),
-                    session_id=ctx.work.run_id,
-                )
-            if prefiltered_records:
-                artifacts.write_artifact(
-                    directory / "vet-system1-prefilter.json",
-                    {"prefiltered": prefiltered_records},
-                    phase=trajectory.DaydreamPhase.VET,
-                )
+    if candidates and (s1_client := resolve_system1_client()) is not None:
+        from daydream.review_system1 import triage_improve_vet_candidates
+
+        async with trajectory.phase_scope(trajectory.DaydreamPhase.VET, stage="system1-vet-triage"):
+            candidates, prefiltered_records = await triage_improve_vet_candidates(
+                candidates,
+                client=s1_client,
+                repo=_audit_repo(ctx),
+                session_id=ctx.work.run_id,
+            )
+        if prefiltered_records:
+            artifacts.write_artifact(
+                directory / "vet-system1-prefilter.json",
+                {"prefiltered": prefiltered_records},
+                phase=trajectory.DaydreamPhase.VET,
+            )
     ctx.data["vet_system1_prefiltered"] = len(prefiltered_records)
 
     by_category: dict[str, list[dict[str, Any]]] = {}

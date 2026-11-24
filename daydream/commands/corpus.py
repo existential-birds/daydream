@@ -179,10 +179,7 @@ def _handle_calibrate_system1_command(argv: list[str]) -> int:
     from dataclasses import replace
 
     from daydream.eval.system1_calibration import (
-        ClaimShadowCase,
-        CrossAssignmentShadowCase,
         ShadowDataset,
-        TargetShadowCase,
         load_shadow_cases_from_runs,
         load_shadow_cases_from_store,
         run_shadow_calibration,
@@ -207,31 +204,18 @@ def _handle_calibrate_system1_command(argv: list[str]) -> int:
             print_error(console, f"Invalid {flag}", "Recall floor must be in (0, 1].")
             return 2
 
-    config = replace(System1Config.from_environment(), enabled=True)
-    if args.model:
-        config = replace(config, model=args.model)
-    if not config.api_key:
-        print_error(console, "Missing OpenRouter API key", "Set OPENROUTER_API_KEY to run shadow calibration.")
-        return 1
-
     try:
-        run_ids: list[str] = []
-        targets: list[TargetShadowCase] = []
-        claims: list[ClaimShadowCase] = []
-        cross_assignments: list[CrossAssignmentShadowCase] = []
+        config = replace(System1Config.from_environment(), enabled=True)
+        if args.model is not None:
+            config = replace(config, model=args.model)
+        if not config.api_key:
+            print_error(console, "Missing OpenRouter API key", "Set OPENROUTER_API_KEY to run shadow calibration.")
+            return 1
+        datasets: list[ShadowDataset] = []
         if args.run_dir:
-            from_runs = load_shadow_cases_from_runs(args.run_dir)
-            run_ids.extend(from_runs.run_ids)
-            targets.extend(from_runs.targets)
-            claims.extend(from_runs.claims)
-            cross_assignments.extend(from_runs.cross_assignments)
+            datasets.append(load_shadow_cases_from_runs(args.run_dir))
         if args.store and args.snapshot_id:
-            from_store = load_shadow_cases_from_store(args.store.expanduser(), args.snapshot_id)
-            run_ids.extend(from_store.run_ids)
-            targets.extend(from_store.targets)
-            claims.extend(from_store.claims)
-            cross_assignments.extend(from_store.cross_assignments)
-        dataset = ShadowDataset(tuple(run_ids), tuple(targets), tuple(claims), tuple(cross_assignments))
+            datasets.append(load_shadow_cases_from_store(args.store.expanduser(), args.snapshot_id))
         report = anyio.run(
             partial(
                 run_shadow_calibration,
@@ -239,19 +223,18 @@ def _handle_calibrate_system1_command(argv: list[str]) -> int:
                 claim_recall_floor=args.claim_recall_floor,
                 cross_recall_floor=args.cross_recall_floor,
             ),
-            dataset,
+            ShadowDataset.merge(datasets),
             System1Client(config),
         )
+        payload = report.to_dict()
+        if args.out is not None:
+            atomic_write_json(args.out.expanduser(), payload, trailing_newline=True)
+            print_success(console, f"Wrote System 1 calibration report to {args.out}")
+        else:
+            print(json.dumps(payload, indent=2))
     except (OSError, ValueError, TypeError) as exc:
         print_error(console, "System 1 calibration failed", str(exc))
         return 1
-
-    payload = report.to_dict()
-    if args.out is not None:
-        atomic_write_json(args.out.expanduser(), payload, trailing_newline=True)
-        print_success(console, f"Wrote System 1 calibration report to {args.out}")
-    else:
-        print(json.dumps(payload, indent=2))
     return 0
 
 

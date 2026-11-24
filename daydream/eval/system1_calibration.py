@@ -21,6 +21,7 @@ from daydream.deep.diff import iter_diff_blocks
 from daydream.review_system1 import (
     CLAIM_TRIAGE_QUESTIONS,
     CROSS_ASSIGNMENT_QUESTIONS,
+    SKIP_TIER_RISK_SCORE_MAX,
     TARGET_TRIAGE_QUESTIONS,
 )
 from daydream.system1 import (
@@ -34,10 +35,9 @@ from daydream.system1 import (
 # TARGET_TRIAGE_QUESTIONS, CLAIM_TRIAGE_QUESTIONS, and CROSS_ASSIGNMENT_QUESTIONS
 # live in daydream.review_system1 so live triage and shadow calibration share one rubric.
 
-TARGET_SKIP_THRESHOLDS: tuple[float, ...] = (0.50, 0.70, 0.80, 0.85, 0.90, 0.95, 0.98, 0.99)
-CLAIM_REJECT_THRESHOLDS: tuple[float, ...] = (0.50, 0.70, 0.80, 0.85, 0.90, 0.95, 0.98, 0.99)
+TARGET_SKIP_THRESHOLDS: tuple[float, ...] = (0.70, 0.80, 0.85, 0.90, 0.95, 0.98, 0.99)
+CLAIM_REJECT_THRESHOLDS: tuple[float, ...] = (0.70, 0.80, 0.85, 0.90, 0.95, 0.98, 0.99)
 CROSS_NOOP_THRESHOLDS: tuple[float, ...] = (0.02, 0.05, 0.10, 0.15, 0.20, 0.30, 0.50)
-MAX_CROSS_FILE_PROBABILITY_FOR_SKIP = 0.05
 _ECE_BINS = 10
 
 
@@ -80,12 +80,39 @@ class ShadowDataset:
     claims: tuple[ClaimShadowCase, ...]
     cross_assignments: tuple[CrossAssignmentShadowCase, ...]
 
+    @classmethod
+    def merge(cls, datasets: Sequence[ShadowDataset]) -> ShadowDataset:
+        return cls(
+            run_ids=tuple(r for ds in datasets for r in ds.run_ids),
+            targets=tuple(t for ds in datasets for t in ds.targets),
+            claims=tuple(c for ds in datasets for c in ds.claims),
+            cross_assignments=tuple(x for ds in datasets for x in ds.cross_assignments),
+        )
+
 
 def _is_binary_block(block: str) -> bool:
     lines = block.splitlines()
     return any(line.startswith("Binary files ") for line in lines) and not any(
         line.startswith("@@ ") for line in lines
     )
+
+
+def _target_cases(
+    run_id: str,
+    diff_by_file: Mapping[str, str],
+    confirmed_files: set[str],
+) -> list[TargetShadowCase]:
+    return [
+        TargetShadowCase(
+            run_id=run_id,
+            path=path,
+            diff=block,
+            has_confirmed_finding=path in confirmed_files,
+            hard_denied=path_is_hard_denied(path),
+        )
+        for path, block in sorted(diff_by_file.items())
+        if not _is_binary_block(block)
+    ]
 
 
 def _find_committed_review(run_dir: Path) -> Path | None:
@@ -155,16 +182,7 @@ def load_shadow_cases_from_runs(paths: Sequence[Path]) -> ShadowDataset:
             if isinstance(item, Mapping) and isinstance(item.get("payload"), Mapping) and item["payload"].get("file")
         }
 
-        for path, block in sorted(diff_by_file.items()):
-            if _is_binary_block(block):
-                continue
-            targets.append(TargetShadowCase(
-                run_id=run_id,
-                path=path,
-                diff=block,
-                has_confirmed_finding=path in confirmed_files,
-                hard_denied=path_is_hard_denied(path),
-            ))
+        targets.extend(_target_cases(run_id, diff_by_file, confirmed_files))
 
         for claim in sealed.get("claims") or []:
             disposition = claim.get("disposition")
@@ -246,16 +264,7 @@ def load_shadow_cases_from_store(store_dir: Path, snapshot_id: str) -> ShadowDat
         run_id = str(run["run_id"])
         run_ids.append(run_id)
         confirmed_files = {str(item["file"]) for item in items if isinstance(item, Mapping) and item.get("file")}
-        for path, block in sorted(_diff_blocks_by_file(diff_text).items()):
-            if _is_binary_block(block):
-                continue
-            targets.append(TargetShadowCase(
-                run_id=run_id,
-                path=path,
-                diff=block,
-                has_confirmed_finding=path in confirmed_files,
-                hard_denied=path_is_hard_denied(path),
-            ))
+        targets.extend(_target_cases(run_id, _diff_blocks_by_file(diff_text), confirmed_files))
     return ShadowDataset(run_ids=tuple(run_ids), targets=tuple(targets), claims=(), cross_assignments=())
 
 
@@ -338,67 +347,6 @@ def _percentile_ms(latencies_s: Sequence[float], quantile: float) -> float | Non
     return round(ordered[index] * 1000.0, 2)
 
 
-def _summarize_gate(
-    *,
-    name: str,
-    total_cases: int,
-    hard_denied_cases: int,
-    injection_flagged_cases: int,
-    fallback_cases: int,
-    total_positives: int,
-    scored: Sequence[tuple[float, bool, bool]],
-    thresholds: Sequence[float],
-    gate_when_below: bool,
-    recall_floor: float,
-    brier_samples: Sequence[tuple[float, bool]],
-) -> GateCalibration:
-    """Sweep thresholds over ``(score, is_positive, eligible_to_gate)`` tuples."""
-    brier, ece = compute_brier_and_ece(brier_samples)
-    evaluated = len(scored)
-    sweep: list[CalibrationPoint] = []
-    for threshold in thresholds:
-        gated_count = 0
-        missed = 0
-        for value, is_positive, eligible in scored:
-            gated = eligible and (value < threshold if gate_when_below else value >= threshold)
-            if gated:
-                gated_count += 1
-                if is_positive:
-                    missed += 1
-        recall = None if total_positives == 0 else round((total_positives - missed) / total_positives, 6)
-        gate_precision = None if gated_count == 0 else round((gated_count - missed) / gated_count, 6)
-        sweep.append(CalibrationPoint(
-            threshold=threshold,
-            gated_count=gated_count,
-            total_evaluated=evaluated,
-            gated_fraction=round(gated_count / total_cases, 6) if total_cases > 0 else 0.0,
-            missed_positives=missed,
-            total_positives=total_positives,
-            recall=recall,
-            gate_precision=gate_precision,
-        ))
-    eligible_points = [
-        point for point in sweep
-        if point.recall is not None and point.recall >= recall_floor and point.gated_count > 0
-    ]
-    best = max(eligible_points, key=lambda p: (p.gated_fraction, p.recall or 0.0), default=None)
-    return GateCalibration(
-        name=name,
-        total_cases=total_cases,
-        evaluated_cases=evaluated,
-        hard_denied_cases=hard_denied_cases,
-        injection_flagged_cases=injection_flagged_cases,
-        fallback_cases=fallback_cases,
-        total_positives=total_positives,
-        brier_score=brier,
-        ece=ece,
-        recall_floor=recall_floor,
-        recommended_threshold=None if best is None else best.threshold,
-        recommended_gated_fraction=None if best is None else best.gated_fraction,
-        sweep=tuple(sweep),
-    )
-
-
 def _accumulate_usage(outcomes: Sequence[DecisionOutcome]) -> tuple[int, int, int, float | None, list[float]]:
     fallbacks = 0
     input_tokens = 0
@@ -423,14 +371,14 @@ def _calibrate_gate[T](
     name: str,
     cases: Sequence[T],
     outcomes: Sequence[DecisionOutcome],
-    extract: Callable[[T, DecisionOutcome], tuple[float, float, bool, bool] | None],
+    extract: Callable[[T, DecisionOutcome], tuple[float, float, bool] | None],
     is_positive: Callable[[T], bool],
     hard_denied_cases: int,
     thresholds: Sequence[float],
     gate_when_below: bool,
     recall_floor: float,
 ) -> GateCalibration:
-    """Collect valid outcomes through *extract* → ``(gate_prob, positive_prob, positive, eligible)``."""
+    """Collect valid outcomes through *extract* → ``(gate_prob, positive_prob, eligible)`` and sweep thresholds."""
     injections = 0
     fallbacks = 0
     scored: list[tuple[float, bool, bool]] = []
@@ -443,24 +391,61 @@ def _calibrate_gate[T](
         if extracted is None:
             fallbacks += 1
             continue
-        gate_prob, pos_prob, positive, pre_eligible = extracted
+        gate_prob, pos_prob, pre_eligible = extracted
+        positive = is_positive(case)
         injected = injection_detected(outcome)
         if injected:
             injections += 1
         scored.append((gate_prob, positive, pre_eligible and not injected))
         brier_samples.append((pos_prob, positive))
-    return _summarize_gate(
+
+    total_cases = len(cases)
+    total_positives = sum(is_positive(case) for case in cases)
+    brier, ece = compute_brier_and_ece(brier_samples)
+    evaluated = len(scored)
+    sweep: list[CalibrationPoint] = []
+    for threshold in thresholds:
+        gated_count = 0
+        missed = 0
+        for value, positive, eligible in scored:
+            if eligible and (value < threshold if gate_when_below else value >= threshold):
+                gated_count += 1
+                if positive:
+                    missed += 1
+        sweep.append(CalibrationPoint(
+            threshold=threshold,
+            gated_count=gated_count,
+            total_evaluated=evaluated,
+            gated_fraction=round(gated_count / total_cases, 6) if total_cases > 0 else 0.0,
+            missed_positives=missed,
+            total_positives=total_positives,
+            recall=None if total_positives == 0 else round((total_positives - missed) / total_positives, 6),
+            gate_precision=None if gated_count == 0 else round((gated_count - missed) / gated_count, 6),
+        ))
+    eligible_points = [
+        point for point in sweep
+        if point.recall is not None and point.recall >= recall_floor and point.gated_count > 0
+    ]
+    # Break ties toward the more conservative threshold (higher for >= gates, lower for < gates).
+    best = max(
+        eligible_points,
+        key=lambda p: (p.gated_fraction, p.recall or 0.0, -p.threshold if gate_when_below else p.threshold),
+        default=None,
+    )
+    return GateCalibration(
         name=name,
-        total_cases=len(cases),
+        total_cases=total_cases,
+        evaluated_cases=evaluated,
         hard_denied_cases=hard_denied_cases,
         injection_flagged_cases=injections,
         fallback_cases=fallbacks,
-        total_positives=sum(is_positive(case) for case in cases),
-        scored=scored,
-        thresholds=thresholds,
-        gate_when_below=gate_when_below,
+        total_positives=total_positives,
+        brier_score=brier,
+        ece=ece,
         recall_floor=recall_floor,
-        brier_samples=brier_samples,
+        recommended_threshold=None if best is None else best.threshold,
+        recommended_gated_fraction=None if best is None else best.gated_fraction,
+        sweep=tuple(sweep),
     )
 
 
@@ -486,31 +471,39 @@ async def run_shadow_calibration(
         record_usage=False,
     )
 
-    def _extract_target(case: TargetShadowCase, outcome: DecisionOutcome) -> tuple[float, float, bool, bool] | None:
+    def _extract_target(case: TargetShadowCase, outcome: DecisionOutcome) -> tuple[float, float, bool] | None:
         p_no_risk = outcome.noul("non_behavioral")
         p_cross = outcome.noul("cross_file_contract")
         if p_no_risk is None or p_cross is None:
             return None
-        return (
-            p_no_risk,
-            1.0 - p_no_risk,
-            case.has_confirmed_finding,
-            (not case.hard_denied) and p_cross <= MAX_CROSS_FILE_PROBABILITY_FOR_SKIP,
+        tier = outcome.choice("risk_tier")
+        risk_ans = outcome.score("defect_risk")
+        risk_score = risk_ans.score if risk_ans is not None else (1.0 - p_no_risk) * 4.0
+        eligible = (
+            (not case.hard_denied)
+            and p_cross <= client.config.cross_file_max
+            and tier is not None
+            and tier.choice == "mechanical"
+            and risk_score <= SKIP_TIER_RISK_SCORE_MAX
         )
+        return (p_no_risk, 1.0 - p_no_risk, eligible)
 
-    def _extract_claim(case: ClaimShadowCase, outcome: DecisionOutcome) -> tuple[float, float, bool, bool] | None:
+    def _extract_claim(_case: ClaimShadowCase, outcome: DecisionOutcome) -> tuple[float, float, bool] | None:
         p_invalid = outcome.noul("obviously_invalid")
         if p_invalid is None:
             return None
-        return (p_invalid, 1.0 - p_invalid, case.confirmed, True)
+        p_search = outcome.noul("needs_repo_search")
+        return (
+            p_invalid,
+            1.0 - p_invalid,
+            p_search is not None and p_search <= client.config.local_challenge_search_max,
+        )
 
-    def _extract_cross(
-        case: CrossAssignmentShadowCase, outcome: DecisionOutcome,
-    ) -> tuple[float, float, bool, bool] | None:
+    def _extract_cross(_case: CrossAssignmentShadowCase, outcome: DecisionOutcome) -> tuple[float, float, bool] | None:
         p_needed = outcome.noul("cross_boundary_needed")
         if p_needed is None:
             return None
-        return (p_needed, p_needed, case.has_cross_finding, True)
+        return (p_needed, p_needed, True)
 
     target_gate = _calibrate_gate(
         name="target_skip",

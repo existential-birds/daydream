@@ -8,9 +8,11 @@ existing deterministic order when System 1 is disabled, unavailable, or times ou
 
 from __future__ import annotations
 
+import codecs
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from itertools import combinations, islice
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -213,6 +215,7 @@ RISK_TIER_WEIGHTS: Mapping[RiskTier, float] = {
     "medium": 3.0,
     "high_critical": 5.0,
 }
+_RISK_TIERS: Mapping[str, RiskTier] = {str(tier): tier for tier in RISK_TIER_WEIGHTS}
 FAST_TIER_CROSS_FILE_MAX = 0.25
 FAST_TIER_RISK_SCORE_MAX = 2.0
 SKIP_TIER_RISK_SCORE_MAX = 1.0
@@ -294,62 +297,30 @@ def allocate_weighted_calls(total: int, weights: Sequence[float], *, floor: int 
     return shares
 
 
-def resolve_fast_discovery_spec(
+def resolve_fast_phase_spec(
     config: Any,
     system1_config: System1Config,
+    phase: Literal["review", "arbiter"],
     *,
     hosted: bool,
 ) -> tuple[str, str | None, str | None] | None:
-    """Resolve optional fast discovery ``(backend, model, effort)`` when System 1 Mode 1 routing is configured."""
-    return _resolve_fast_phase_spec(
-        config,
-        system1_config,
-        base_phase="review",
-        fast_phase="review_fast",
-        override_backend=system1_config.fast_review_backend,
-        override_model=system1_config.fast_review_model,
-        override_effort=system1_config.fast_review_effort,
-        hosted=hosted,
-    )
-
-
-def resolve_fast_arbiter_spec(
-    config: Any,
-    system1_config: System1Config,
-    *,
-    hosted: bool,
-) -> tuple[str, str | None, str | None] | None:
-    """Resolve optional fast arbiter ``(backend, model, effort)`` when System 1 2-tier challenge routing is set."""
-    return _resolve_fast_phase_spec(
-        config,
-        system1_config,
-        base_phase="arbiter",
-        fast_phase="arbiter_fast",
-        override_backend=system1_config.fast_arbiter_backend,
-        override_model=system1_config.fast_arbiter_model,
-        override_effort=system1_config.fast_arbiter_effort,
-        hosted=hosted,
-    )
-
-
-def _resolve_fast_phase_spec(
-    config: Any,
-    system1_config: System1Config,
-    *,
-    base_phase: str,
-    fast_phase: str,
-    override_backend: str | None,
-    override_model: str | None,
-    override_effort: str | None,
-    hosted: bool,
-) -> tuple[str, str | None, str | None] | None:
+    """Resolve optional fast ``(backend, model, effort)`` for discovery or arbiter System 1 tier routing."""
     if not system1_config.enabled:
         return None
     from daydream.run_config import resolved_backend_name, resolved_model, resolved_reasoning_effort
 
+    override_backend, override_model, override_effort = (
+        (system1_config.fast_review_backend, system1_config.fast_review_model, system1_config.fast_review_effort)
+        if phase == "review"
+        else (
+            system1_config.fast_arbiter_backend,
+            system1_config.fast_arbiter_model,
+            system1_config.fast_arbiter_effort,
+        )
+    )
     file_fast: Mapping[str, str] = {}
     if not hosted and config.file_config is not None:
-        raw_fast = config.file_config.phases.get(fast_phase)
+        raw_fast = config.file_config.phases.get(f"{phase}_fast")
         if isinstance(raw_fast, Mapping):
             file_fast = raw_fast
     eff_backend = override_backend or file_fast.get("backend")
@@ -357,12 +328,10 @@ def _resolve_fast_phase_spec(
     eff_effort = override_effort or file_fast.get("reasoning_effort")
     if not any((eff_backend, eff_model, eff_effort)):
         return None
-    base_backend = resolved_backend_name(config, base_phase)
+    base_backend = resolved_backend_name(config, phase)
     backend_name = eff_backend or base_backend
-    model = eff_model or (
-        resolved_model(config, base_phase) if backend_name == base_backend else None
-    )
-    effort = eff_effort or resolved_reasoning_effort(config, base_phase)
+    model = eff_model or (resolved_model(config, phase) if backend_name == base_backend else None)
+    effort = eff_effort or resolved_reasoning_effort(config, phase)
     return backend_name, model, effort
 
 
@@ -427,8 +396,8 @@ def _direct_import_paths(repo: Path, changed_file: str) -> list[str]:
     return resolved
 
 
-def _read_confined_preview(repo: Path, rel_path: str, *, max_bytes: int) -> str | None:
-    """Read a bounded UTF-8 prefix of a confined regular file; reject symlinks, escapes, and binaries."""
+def _read_confined_utf8(repo: Path, rel_path: str, *, max_bytes: int | None = None) -> str | None:
+    """Read a confined regular UTF-8 file (optionally prefix-bounded); reject symlinks, escapes, and binaries."""
     if not git_observed_path_is_confined(repo, rel_path):
         return None
     full = repo / rel_path
@@ -436,21 +405,15 @@ def _read_confined_preview(repo: Path, rel_path: str, *, max_bytes: int) -> str 
         if full.is_symlink() or not full.is_file():
             return None
         with full.open("rb") as handle:
-            raw = handle.read(max_bytes + 1)
+            raw = handle.read() if max_bytes is None else handle.read(max_bytes + 1)
     except OSError:
         return None
     if b"\x00" in raw:
         return None
-    truncated = len(raw) > max_bytes
-    chunk = raw[:max_bytes]
-    # Trim any split trailing UTF-8 sequence only when we truncated mid-file.
-    if truncated:
-        while chunk and (chunk[-1] & 0xC0) == 0x80:
-            chunk = chunk[:-1]
-        if chunk and chunk[-1] >= 0xC0:
-            chunk = chunk[:-1]
+    truncated = max_bytes is not None and len(raw) > max_bytes
+    chunk = raw[:max_bytes] if truncated else raw
     try:
-        return chunk.decode("utf-8")
+        return codecs.getincrementaldecoder("utf-8")("strict").decode(chunk, final=not truncated)
     except UnicodeDecodeError:
         return None
 
@@ -472,7 +435,7 @@ def collect_supporting_candidates(
         if path in changed_set or path in seen:
             return False
         seen.add(path)
-        preview = _read_confined_preview(repo, path, max_bytes=preview_bytes)
+        preview = _read_confined_utf8(repo, path, max_bytes=preview_bytes)
         if preview is None:
             return False
         results.append(SupportingCandidate(path=path, relation=relation, preview=preview))
@@ -494,14 +457,17 @@ def collect_supporting_candidates(
 class ReviewPrefetchHints:
     """Advisory System 1 pre-dispatch hints, target triage classifications, and risk priority scores."""
 
-    target_risk_scores: Mapping[str, float]
     historical_context: dict[str, Any] | None = None
     supporting_files_by_group: Mapping[frozenset[str], tuple[dict[str, Any], ...]] = field(default_factory=dict)
     target_triages: Mapping[str, TargetTriage] = field(default_factory=dict)
 
     @classmethod
     def empty(cls) -> ReviewPrefetchHints:
-        return cls(target_risk_scores={}, historical_context=None, supporting_files_by_group={}, target_triages={})
+        return cls()
+
+    def _risk_score(self, target_id: str) -> float:
+        triage = self.target_triages.get(target_id)
+        return UNSCORED_NEUTRAL_RISK if triage is None or triage.fallback else triage.risk_score
 
     def order_targets(
         self,
@@ -509,47 +475,38 @@ class ReviewPrefetchHints:
         inventory_index: Mapping[str, int],
     ) -> tuple[str, ...]:
         """Sort *targets* highest risk first; preserve inventory order on ties or when unscored."""
-        if not self.target_risk_scores:
+        if not self.target_triages:
             return tuple(targets)
         return tuple(
             sorted(
                 targets,
-                key=lambda target_id: (
-                    -self.target_risk_scores.get(target_id, UNSCORED_NEUTRAL_RISK),
-                    inventory_index.get(target_id, 0),
-                ),
+                key=lambda target_id: (-self._risk_score(target_id), inventory_index.get(target_id, 0)),
             )
         )
 
     def group_priority(self, targets: Sequence[str], fallback_index: int) -> tuple[float, int]:
         """Priority key for ordering batches (highest max target risk first)."""
-        if not self.target_risk_scores or not targets:
+        if not self.target_triages or not targets:
             return (0.0, fallback_index)
-        max_risk = max(self.target_risk_scores.get(target_id, UNSCORED_NEUTRAL_RISK) for target_id in targets)
-        return (-max_risk, fallback_index)
+        return (-max(self._risk_score(target_id) for target_id in targets), fallback_index)
 
     def group_weight(self, targets: Sequence[str]) -> float:
         """Risk-weighted tool-call budget weight for one batch (neutral medium weight when unscored)."""
         if not self.target_triages or not targets:
             return RISK_TIER_WEIGHTS["medium"]
-        weights: list[float] = []
-        for target_id in targets:
-            triage = self.target_triages.get(target_id)
-            if triage is None or triage.fallback:
-                weights.append(RISK_TIER_WEIGHTS["medium"])
-            else:
-                weights.append(RISK_TIER_WEIGHTS[triage.risk_tier])
-        return max(weights)
+        return max(
+            RISK_TIER_WEIGHTS["medium"]
+            if (triage := self.target_triages.get(target_id)) is None or triage.fallback
+            else RISK_TIER_WEIGHTS[triage.risk_tier]
+            for target_id in targets
+        )
 
     def is_fast_tier_group(self, targets: Sequence[str]) -> bool:
         """Whether every target in *targets* safely qualifies for a fast/low-effort discovery tier."""
-        if not self.target_triages or not targets:
-            return False
-        for target_id in targets:
-            triage = self.target_triages.get(target_id)
-            if triage is None or not triage.qualifies_for_fast_tier():
-                return False
-        return True
+        return bool(self.target_triages and targets) and all(
+            (triage := self.target_triages.get(target_id)) is not None and triage.qualifies_for_fast_tier()
+            for target_id in targets
+        )
 
     def work_advisory_hints(self, targets: Sequence[str]) -> dict[str, Any] | None:
         """Build the bounded advisory hints payload for one investigation dispatch, or None."""
@@ -580,25 +537,38 @@ def _group_diff_excerpt(
     return files, truncate_utf8_to_budget(combined, max_bytes)
 
 
-def _clamp_client_timeout(client: System1Client, remaining_s: float | None) -> System1Client:
-    if remaining_s is not None and remaining_s < client.config.batch_timeout_s:
-        effective_timeout = min(client.config.timeout_s, remaining_s)
-        return System1Client(
-            replace(client.config, timeout_s=effective_timeout, batch_timeout_s=remaining_s),
-            transport=client._transport,
-        )
-    return client
+def _partition_target_triage_items(
+    target_diffs: Mapping[str, tuple[str, str]],
+    *,
+    precomputed: Mapping[str, TargetTriage] | None = None,
+) -> tuple[
+    dict[str, TargetTriage],
+    list[tuple[str, str]],
+    list[tuple[Any, Mapping[str, DecisionQuestion]]],
+]:
+    """Separate precomputed/hard-denied targets from targets queued for System 1 triage."""
+    triages: dict[str, TargetTriage] = {}
+    scored_ids: list[tuple[str, str]] = []
+    items: list[tuple[Any, Mapping[str, DecisionQuestion]]] = []
+    for target_id, (file_path, diff_text) in target_diffs.items():
+        if precomputed is not None and target_id in precomputed:
+            triages[target_id] = precomputed[target_id]
+            continue
+        if path_is_hard_denied(file_path):
+            triages[target_id] = TargetTriage(
+                target_id=target_id,
+                file_path=file_path,
+                risk_score=PRIORITY_MAX_RISK,
+                risk_tier="high_critical",
+                hard_denied=True,
+            )
+            continue
+        scored_ids.append((target_id, file_path))
+        items.append(({"path": file_path, "diff": diff_text}, TARGET_TRIAGE_QUESTIONS))
+    return triages, scored_ids, items
 
 
 def _triage_from_outcome(target_id: str, file_path: str, outcome: DecisionOutcome) -> TargetTriage:
-    if path_is_hard_denied(file_path):
-        return TargetTriage(
-            target_id=target_id,
-            file_path=file_path,
-            risk_score=PRIORITY_MAX_RISK,
-            risk_tier="high_critical",
-            hard_denied=True,
-        )
     if not outcome.ok or outcome.response is None:
         return TargetTriage(
             target_id=target_id,
@@ -634,18 +604,7 @@ def _triage_from_outcome(target_id: str, file_path: str, outcome: DecisionOutcom
             model=model_name,
         )
     tier_ans = outcome.choice("risk_tier")
-    raw_tier = tier_ans.choice if tier_ans is not None else None
-    risk_tier: RiskTier
-    if raw_tier == "mechanical":
-        risk_tier = "mechanical"
-    elif raw_tier == "low":
-        risk_tier = "low"
-    elif raw_tier == "medium":
-        risk_tier = "medium"
-    elif raw_tier == "high_critical":
-        risk_tier = "high_critical"
-    else:
-        risk_tier = "medium"
+    risk_tier: RiskTier = _RISK_TIERS.get(tier_ans.choice, "medium") if tier_ans is not None else "medium"
     return TargetTriage(
         target_id=target_id,
         file_path=file_path,
@@ -665,29 +624,13 @@ async def triage_targets(
     remaining_s: float | None = None,
 ) -> tuple[dict[str, TargetTriage], tuple[DecisionUsage, ...]]:
     """Score non-hard-denied targets in one parallel pass; return triages plus any unbilled usage."""
-    if not client.config.enabled or not client.config.api_key:
+    ready = client.with_remaining_budget(remaining_s)
+    if ready is None:
         return {}, ()
-    if remaining_s is not None and remaining_s <= 0:
-        return {}, ()
-    client = _clamp_client_timeout(client, remaining_s)
-    triages: dict[str, TargetTriage] = {}
-    scored_ids: list[tuple[str, str]] = []
-    items: list[tuple[Any, Mapping[str, DecisionQuestion]]] = []
-    for target_id, (file_path, diff_text) in target_diffs.items():
-        if path_is_hard_denied(file_path):
-            triages[target_id] = TargetTriage(
-                target_id=target_id,
-                file_path=file_path,
-                risk_score=PRIORITY_MAX_RISK,
-                risk_tier="high_critical",
-                hard_denied=True,
-            )
-            continue
-        scored_ids.append((target_id, file_path))
-        items.append(({"path": file_path, "diff": diff_text}, TARGET_TRIAGE_QUESTIONS))
+    triages, scored_ids, items = _partition_target_triage_items(target_diffs)
 
     has_recorder = get_current_recorder() is not None
-    outcomes = await client.evaluate_many(
+    outcomes = await ready.evaluate_many(
         items,
         phase=DaydreamPhase.REVIEW,
         session_id=session_id,
@@ -713,11 +656,9 @@ async def prepare_review_prefetch_hints(
     precomputed_triages: Mapping[str, TargetTriage] | None = None,
 ) -> ReviewPrefetchHints:
     """Evaluate targets, historical context, and supporting files in one parallel System 1 pass."""
-    if not client.config.enabled or not client.config.api_key:
+    ready = client.with_remaining_budget(remaining_s)
+    if ready is None:
         return ReviewPrefetchHints.empty()
-    if remaining_s is not None and remaining_s <= 0:
-        return ReviewPrefetchHints.empty()
-    client = _clamp_client_timeout(client, remaining_s)
 
     # Discover confined supporting candidates off the event loop so timers/host tools stay responsive.
     group_files_and_excerpts = [_group_diff_excerpt(group, target_diffs) for group in groups]
@@ -725,25 +666,11 @@ async def prepare_review_prefetch_hints(
         lambda: [collect_supporting_candidates(repo, files) for files, _ in group_files_and_excerpts]
     )
 
-    items: list[tuple[Any, Mapping[str, DecisionQuestion]]] = []
     # 1. Target triage items (reuse Mode 2 precomputed triages if already evaluated in plan_review).
-    scored_target_ids: list[tuple[str, str]] = []
-    target_triages: dict[str, TargetTriage] = {}
-    for target_id, (file_path, diff_text) in target_diffs.items():
-        if precomputed_triages is not None and target_id in precomputed_triages:
-            target_triages[target_id] = precomputed_triages[target_id]
-            continue
-        if path_is_hard_denied(file_path):
-            target_triages[target_id] = TargetTriage(
-                target_id=target_id,
-                file_path=file_path,
-                risk_score=PRIORITY_MAX_RISK,
-                risk_tier="high_critical",
-                hard_denied=True,
-            )
-            continue
-        scored_target_ids.append((target_id, file_path))
-        items.append(({"path": file_path, "diff": diff_text}, TARGET_TRIAGE_QUESTIONS))
+    target_triages, scored_target_ids, items = _partition_target_triage_items(
+        target_diffs,
+        precomputed=precomputed_triages,
+    )
 
     # 2. Historical context relevance items (author text stays host-side; only advisory scores surface).
     historical_keys: list[str] = []
@@ -771,7 +698,7 @@ async def prepare_review_prefetch_hints(
                 SUPPORTING_FILE_QUESTIONS,
             ))
 
-    outcomes = await client.evaluate_many(
+    outcomes = await ready.evaluate_many(
         items,
         phase=DaydreamPhase.REVIEW,
         session_id=session_id,
@@ -782,11 +709,7 @@ async def prepare_review_prefetch_hints(
     for target_id, file_path in scored_target_ids:
         target_triages[target_id] = _triage_from_outcome(target_id, file_path, outcomes[cursor])
         cursor += 1
-    target_scores: dict[str, float] = {
-        target_id: triage.risk_score
-        for target_id, triage in target_triages.items()
-        if not triage.fallback
-    }
+    has_scored_targets = any(not triage.fallback for triage in target_triages.values())
 
     hist_fields_summary: dict[str, dict[str, Any]] = {}
     for field_name in historical_keys:
@@ -818,8 +741,6 @@ async def prepare_review_prefetch_hints(
         rel_prob = outcome.noul("relevant_to_diff")
         if rel_prob is None or rel_prob < SUPPORTING_RELEVANCE_THRESHOLD:
             continue
-        if not git_observed_path_is_confined(repo, candidate.path):
-            continue
         rel_score_ans = outcome.score("relevance_score")
         rel_score = rel_score_ans.score if rel_score_ans is not None else rel_prob * 3.0
         ranked_by_group_idx.setdefault(group_idx, []).append((rel_score, rel_prob, candidate))
@@ -840,16 +761,16 @@ async def prepare_review_prefetch_hints(
         )
 
     return ReviewPrefetchHints(
-        target_risk_scores=target_scores,
         historical_context=historical_hint,
         supporting_files_by_group=supporting_by_group,
-        target_triages=target_triages if target_scores else {},
+        target_triages=target_triages if has_scored_targets else {},
     )
 
 
 # --- Pre-challenge claim triage, duplicate clustering, and 2-tier arbiter routing (#1972) ---
 
 SeverityLevel = Literal["high", "medium", "low"]
+_SEVERITY_LEVELS: Mapping[str, SeverityLevel] = {"high": "high", "medium": "medium", "low": "low"}
 CLAIM_ENCLOSING_RADIUS_LINES = 30
 CLAIM_ENCLOSING_MAX_BYTES = 4096
 CLAIM_DIFF_EXCERPT_MAX_BYTES = 6144
@@ -862,7 +783,6 @@ FAST_CHALLENGE_CALL_CAP = 6
 class ClaimTriage:
     """Calibrated System 1 pre-challenge triage for one pending claim revision."""
 
-    uid: str
     revision: int
     p_invalid: float | None = None
     p_needs_repo_search: float | None = None
@@ -873,19 +793,19 @@ class ClaimTriage:
     cited_diff: str = ""
     enclosing_source: str = ""
 
-    def qualifies_for_fast_reject(self, *, reject_threshold: float, search_max: float) -> bool:
-        """Whether this claim qualifies for opt-in asymmetric host fast-rejection (never confirmation)."""
-        if self.injection_flagged or self.fallback:
-            return False
-        if self.p_invalid is None or self.p_invalid < reject_threshold:
-            return False
-        return self.p_needs_repo_search is not None and self.p_needs_repo_search <= search_max
-
     def qualifies_for_fast_challenge(self, *, search_max: float) -> bool:
         """Whether this self-contained local claim can use the fast/low-effort arbiter tier."""
         if self.injection_flagged or self.fallback:
             return False
         return self.p_needs_repo_search is not None and self.p_needs_repo_search <= search_max
+
+    def qualifies_for_fast_reject(self, *, reject_threshold: float, search_max: float) -> bool:
+        """Whether this claim qualifies for opt-in asymmetric host fast-rejection (never confirmation)."""
+        return (
+            self.qualifies_for_fast_challenge(search_max=search_max)
+            and self.p_invalid is not None
+            and self.p_invalid >= reject_threshold
+        )
 
 
 @dataclass(frozen=True)
@@ -897,13 +817,17 @@ class ChallengeTriagePlan:
 
     @classmethod
     def empty(cls) -> ChallengeTriagePlan:
-        return cls(triages={}, duplicate_clusters=())
+        return cls()
 
-    def calibrated_severities(self) -> dict[str, str]:
+    def calibrated_severities(self, claim_uids: Sequence[str] | None = None) -> dict[str, str]:
+        uids = self.triages if claim_uids is None else claim_uids
         return {
             uid: triage.calibrated_severity
-            for uid, triage in self.triages.items()
-            if not triage.injection_flagged and not triage.fallback and triage.calibrated_severity is not None
+            for uid in uids
+            if (triage := self.triages.get(uid)) is not None
+            and not triage.injection_flagged
+            and not triage.fallback
+            and triage.calibrated_severity is not None
         }
 
     def is_fast_challenge_group(self, claim_uids: Sequence[str], *, search_max: float) -> bool:
@@ -961,14 +885,7 @@ class ChallengeTriagePlan:
 
     def work_advisory_hints(self, claim_uids: Sequence[str]) -> dict[str, Any] | None:
         uid_set = set(claim_uids)
-        severities = {
-            uid: triage.calibrated_severity
-            for uid in claim_uids
-            if (triage := self.triages.get(uid)) is not None
-            and not triage.injection_flagged
-            and not triage.fallback
-            and triage.calibrated_severity is not None
-        }
+        severities = self.calibrated_severities(claim_uids)
         clusters = [
             list(cluster)
             for cluster in self.duplicate_clusters
@@ -1007,20 +924,8 @@ def extract_claim_enclosing_source(
     max_bytes: int = CLAIM_ENCLOSING_MAX_BYTES,
 ) -> str:
     """Read bounded line-numbered enclosing source around *line* from a confined captured file."""
-    if not git_observed_path_is_confined(repo, file_path):
-        return ""
-    full = repo / file_path
-    try:
-        if full.is_symlink() or not full.is_file():
-            return ""
-        raw = full.read_bytes()
-    except OSError:
-        return ""
-    if b"\x00" in raw:
-        return ""
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
+    text = _read_confined_utf8(repo, file_path)
+    if not text:
         return ""
     lines = text.splitlines()
     if not lines:
@@ -1042,11 +947,9 @@ def _claim_triage_from_outcome(
     cited_diff: str,
     enclosing_source: str,
 ) -> ClaimTriage:
-    uid = str(claim["uid"])
     revision = int(claim["revision"])
     if not outcome.ok or outcome.response is None:
         return ClaimTriage(
-            uid=uid,
             revision=revision,
             fallback=True,
             cited_diff=cited_diff,
@@ -1055,7 +958,6 @@ def _claim_triage_from_outcome(
     model_name = outcome.response.model
     if injection_detected(outcome):
         return ClaimTriage(
-            uid=uid,
             revision=revision,
             injection_flagged=True,
             model=model_name,
@@ -1063,18 +965,8 @@ def _claim_triage_from_outcome(
             enclosing_source=enclosing_source,
         )
     sev_ans = outcome.choice("severity")
-    raw_sev = sev_ans.choice if sev_ans is not None else None
-    calibrated: SeverityLevel | None
-    if raw_sev == "high":
-        calibrated = "high"
-    elif raw_sev == "medium":
-        calibrated = "medium"
-    elif raw_sev == "low":
-        calibrated = "low"
-    else:
-        calibrated = None
+    calibrated = _SEVERITY_LEVELS.get(sev_ans.choice) if sev_ans is not None else None
     return ClaimTriage(
-        uid=uid,
         revision=revision,
         p_invalid=outcome.noul("obviously_invalid"),
         p_needs_repo_search=outcome.noul("needs_repo_search"),
@@ -1109,6 +1001,16 @@ def _connected_clusters(pairs: Sequence[tuple[str, str]]) -> tuple[tuple[str, ..
     return tuple(clusters)
 
 
+def _claim_brief(claim: Mapping[str, Any]) -> dict[str, Any]:
+    payload = claim["payload"]
+    return {
+        "title": claim.get("title", ""),
+        "line": payload.get("line"),
+        "claim": payload.get("claim", ""),
+        "trigger": payload.get("trigger", ""),
+    }
+
+
 async def prepare_challenge_triage(
     *,
     client: System1Client,
@@ -1119,11 +1021,9 @@ async def prepare_challenge_triage(
     remaining_s: float | None = None,
 ) -> ChallengeTriagePlan:
     """Evaluate pending claims + bounded same-file duplicate pairs in one parallel System 1 pass."""
-    if not pending_claims or not client.config.enabled or not client.config.api_key:
+    ready = client.with_remaining_budget(remaining_s)
+    if not pending_claims or ready is None:
         return ChallengeTriagePlan.empty()
-    if remaining_s is not None and remaining_s <= 0:
-        return ChallengeTriagePlan.empty()
-    client = _clamp_client_timeout(client, remaining_s)
 
     def _collect_contexts() -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
@@ -1166,37 +1066,23 @@ async def prepare_challenge_triage(
     for claim in pending_claims:
         by_file.setdefault(str(claim["payload"]["file"]), []).append(claim)
     dup_pairs: list[tuple[str, str]] = []
-    for file_claims in by_file.values():
-        if len(file_claims) < 2:
-            continue
-        for i in range(len(file_claims)):
-            for j in range(i + 1, len(file_claims)):
-                if len(dup_pairs) >= MAX_DUPLICATE_PAIRS:
-                    break
-                left, right = file_claims[i], file_claims[j]
-                dup_pairs.append((str(left["uid"]), str(right["uid"])))
-                items.append((
-                    {
-                        "file": left["payload"]["file"],
-                        "claim_a": {
-                            "title": left.get("title", ""),
-                            "line": left["payload"].get("line"),
-                            "claim": left["payload"].get("claim", ""),
-                            "trigger": left["payload"].get("trigger", ""),
-                        },
-                        "claim_b": {
-                            "title": right.get("title", ""),
-                            "line": right["payload"].get("line"),
-                            "claim": right["payload"].get("claim", ""),
-                            "trigger": right["payload"].get("trigger", ""),
-                        },
-                    },
-                    CLAIM_DUPLICATE_QUESTIONS,
-                ))
-            if len(dup_pairs) >= MAX_DUPLICATE_PAIRS:
-                break
+    same_file_pairs = (
+        (left, right)
+        for file_claims in by_file.values()
+        for left, right in combinations(file_claims, 2)
+    )
+    for left, right in islice(same_file_pairs, MAX_DUPLICATE_PAIRS):
+        dup_pairs.append((str(left["uid"]), str(right["uid"])))
+        items.append((
+            {
+                "file": left["payload"]["file"],
+                "claim_a": _claim_brief(left),
+                "claim_b": _claim_brief(right),
+            },
+            CLAIM_DUPLICATE_QUESTIONS,
+        ))
 
-    outcomes = await client.evaluate_many(
+    outcomes = await ready.evaluate_many(
         items,
         phase=DaydreamPhase.CHALLENGE,
         session_id=session_id,
@@ -1233,7 +1119,6 @@ async def prepare_challenge_triage(
 MAX_BATCH_PAIR_CHECKS = 12
 MAX_FOCUSED_CROSS_PAIRS = 4
 CROSS_SUMMARY_DIFF_PER_BATCH_BYTES = 2048
-CROSS_PAIR_EXCERPT_MAX_BYTES = 2048
 CROSS_PAIR_COUPLING_THRESHOLD = 0.25
 
 
@@ -1342,11 +1227,9 @@ async def prepare_cross_assignment_plan(
     edges_by_pair = find_cross_batch_edges(batch_files, import_graph)
     total_cross_edges = sum(len(edges) for edges in edges_by_pair.values())
 
-    if len(batches) < 2 or not client.config.enabled or not client.config.api_key:
+    ready = client.with_remaining_budget(remaining_s)
+    if len(batches) < 2 or ready is None:
         return CrossAssignmentPlan.empty(cross_batch_edge_count=total_cross_edges)
-    if remaining_s is not None and remaining_s <= 0:
-        return CrossAssignmentPlan.empty(cross_batch_edge_count=total_cross_edges)
-    client = _clamp_client_timeout(client, remaining_s)
 
     batch_excerpts: list[str] = [
         truncate_utf8_to_budget(
@@ -1375,18 +1258,14 @@ async def prepare_cross_assignment_plan(
     }
 
     # Prioritize batch pairs with known import edges first, then fill up to MAX_BATCH_PAIR_CHECKS.
-    candidate_pairs: list[tuple[int, int]] = list(sorted(edges_by_pair))
+    candidate_pairs: list[tuple[int, int]] = sorted(edges_by_pair)
     if len(candidate_pairs) < MAX_BATCH_PAIR_CHECKS:
-        seen_pairs = set(candidate_pairs)
-        for i in range(len(batches)):
-            for j in range(i + 1, len(batches)):
-                if len(candidate_pairs) >= MAX_BATCH_PAIR_CHECKS:
-                    break
-                if (i, j) not in seen_pairs:
-                    seen_pairs.add((i, j))
-                    candidate_pairs.append((i, j))
-            if len(candidate_pairs) >= MAX_BATCH_PAIR_CHECKS:
-                break
+        candidate_pairs.extend(
+            islice(
+                (pair for pair in combinations(range(len(batches)), 2) if pair not in edges_by_pair),
+                MAX_BATCH_PAIR_CHECKS - len(candidate_pairs),
+            )
+        )
 
     items: list[tuple[Any, Mapping[str, DecisionQuestion]]] = [(pr_state, CROSS_ASSIGNMENT_QUESTIONS)]
     for a, b in candidate_pairs:
@@ -1399,7 +1278,7 @@ async def prepare_cross_assignment_plan(
             BATCH_PAIR_COUPLING_QUESTIONS,
         ))
 
-    outcomes = await client.evaluate_many(
+    outcomes = await ready.evaluate_many(
         items,
         phase=DaydreamPhase.REVIEW,
         session_id=session_id,
@@ -1418,25 +1297,12 @@ async def prepare_cross_assignment_plan(
         outcome = outcomes[1 + pair_idx]
         edges = tuple(edges_by_pair.get((a, b), ()))
         if not outcome.ok or injection_detected(outcome):
-            if edges:
-                # Deterministic import edges stay visible even if a pair call failed open.
-                ranked_pairs.append(
-                    CoupledBatchPair(
-                        batch_a=a,
-                        batch_b=b,
-                        files_a=batch_files[a],
-                        files_b=batch_files[b],
-                        import_edges=edges,
-                        p_coupled=1.0,
-                        excerpt_a=truncate_utf8_to_budget(batch_excerpts[a], CROSS_PAIR_EXCERPT_MAX_BYTES),
-                        excerpt_b=truncate_utf8_to_budget(batch_excerpts[b], CROSS_PAIR_EXCERPT_MAX_BYTES),
-                    )
-                )
-            continue
-        p_coupled = outcome.noul("coupled_boundary")
-        if p_coupled is None:
-            continue
-        if edges or p_coupled >= CROSS_PAIR_COUPLING_THRESHOLD:
+            # Deterministic import edges stay visible even if a pair call failed open.
+            p_coupled = 1.0 if edges else None
+        else:
+            raw_p = outcome.noul("coupled_boundary")
+            p_coupled = raw_p if raw_p is not None and (edges or raw_p >= CROSS_PAIR_COUPLING_THRESHOLD) else None
+        if p_coupled is not None:
             ranked_pairs.append(
                 CoupledBatchPair(
                     batch_a=a,
@@ -1445,8 +1311,8 @@ async def prepare_cross_assignment_plan(
                     files_b=batch_files[b],
                     import_edges=edges,
                     p_coupled=p_coupled,
-                    excerpt_a=truncate_utf8_to_budget(batch_excerpts[a], CROSS_PAIR_EXCERPT_MAX_BYTES),
-                    excerpt_b=truncate_utf8_to_budget(batch_excerpts[b], CROSS_PAIR_EXCERPT_MAX_BYTES),
+                    excerpt_a=batch_excerpts[a],
+                    excerpt_b=batch_excerpts[b],
                 )
             )
     ranked_pairs.sort(key=lambda p: (not bool(p.import_edges), -p.p_coupled, p.batch_a, p.batch_b))
@@ -1523,6 +1389,12 @@ DIAGRAM_DIFF_EXCERPT_MAX_BYTES = 12_288
 IMPROVE_PREFILTER_IMPACT_MAX = 1.0
 
 
+_DIAGRAM_GATE_SPECS: tuple[tuple[str, str, DecisionQuestion, str], ...] = (
+    ("sequence", "sequence_clarifies", DIAGRAM_SEQUENCE_QUESTION, "no clarifying cross-component flow"),
+    ("flowchart", "flowchart_clarifies", DIAGRAM_FLOWCHART_QUESTION, "no clarifying branching logic"),
+)
+
+
 async def apply_system1_diagram_gate(
     eligibility: Any,
     *,
@@ -1532,13 +1404,14 @@ async def apply_system1_diagram_gate(
     session_id: str | None = None,
 ) -> Any:
     """Apply System 1 semantic pre-checks to ``--diagram auto`` eligibility; fail open on errors."""
-    if eligibility.force != "auto" or not client.config.enabled or not client.config.api_key:
+    ready = client.with_remaining_budget()
+    if eligibility.force != "auto" or ready is None:
         return eligibility
-    questions: dict[str, DecisionQuestion] = {}
-    if eligibility.sequence.eligible:
-        questions["sequence_clarifies"] = DIAGRAM_SEQUENCE_QUESTION
-    if eligibility.flowchart.eligible:
-        questions["flowchart_clarifies"] = DIAGRAM_FLOWCHART_QUESTION
+    questions: dict[str, DecisionQuestion] = {
+        qkey: question
+        for attr, qkey, question, _detail in _DIAGRAM_GATE_SPECS
+        if getattr(eligibility, attr).eligible
+    }
     if not questions:
         return eligibility
 
@@ -1565,7 +1438,7 @@ async def apply_system1_diagram_gate(
         ],
         "diff_excerpt": truncate_utf8_to_budget(diff_text, DIAGRAM_DIFF_EXCERPT_MAX_BYTES),
     }
-    outcome = await client.evaluate(
+    outcome = await ready.evaluate(
         state,
         with_injection_guard(questions),
         phase=DaydreamPhase.DIAGRAM,
@@ -1575,61 +1448,22 @@ async def apply_system1_diagram_gate(
     if not outcome.ok or injection_detected(outcome):
         return eligibility
 
-    threshold = client.config.diagram_min_probability
-    sequence_decision = eligibility.sequence
-    flowchart_decision = eligibility.flowchart
-    if "sequence_clarifies" in questions:
-        prob = outcome.noul("sequence_clarifies")
+    threshold = ready.config.diagram_min_probability
+    updates: dict[str, Any] = {}
+    for attr, qkey, _question, detail in _DIAGRAM_GATE_SPECS:
+        if qkey not in questions:
+            continue
+        prob = outcome.noul(qkey)
         if prob is not None and prob < threshold:
-            sequence_decision = KindDecision(
+            updates[attr] = KindDecision(
                 eligible=False,
                 rule="system1-gate",
                 reason=(
-                    f"System 1 semantic gate skipped sequence diagram "
-                    f"(p={prob:.3f} < {threshold:.2f}; no clarifying cross-component flow)."
+                    f"System 1 semantic gate skipped {attr} diagram "
+                    f"(p={prob:.3f} < {threshold:.2f}; {detail})."
                 ),
             )
-    if "flowchart_clarifies" in questions:
-        prob = outcome.noul("flowchart_clarifies")
-        if prob is not None and prob < threshold:
-            flowchart_decision = KindDecision(
-                eligible=False,
-                rule="system1-gate",
-                reason=(
-                    f"System 1 semantic gate skipped flowchart diagram "
-                    f"(p={prob:.3f} < {threshold:.2f}; no clarifying branching logic)."
-                ),
-            )
-    if sequence_decision is eligibility.sequence and flowchart_decision is eligibility.flowchart:
-        return eligibility
-    return replace(eligibility, sequence=sequence_decision, flowchart=flowchart_decision)
-
-
-@dataclass(frozen=True)
-class ImproveVetCandidateScore:
-    """System 1 pre-vetting triage score for one Improve audit candidate."""
-
-    fingerprint: str
-    p_noise: float | None = None
-    concrete_impact: float | None = None
-    injection_flagged: bool = False
-    fallback: bool = False
-    model: str | None = None
-
-    def qualifies_for_prefilter(self, *, reject_threshold: float) -> bool:
-        if self.injection_flagged or self.fallback:
-            return False
-        if self.p_noise is None or self.p_noise < reject_threshold:
-            return False
-        return self.concrete_impact is not None and self.concrete_impact <= IMPROVE_PREFILTER_IMPACT_MAX
-
-    def priority_key(self, original_index: int) -> tuple[float, float, int]:
-        """Sort highest-signal, injection-flagged, and fallback candidates first."""
-        if self.injection_flagged or self.fallback:
-            return (-PRIORITY_MAX_RISK, 0.0, original_index)
-        impact = self.concrete_impact if self.concrete_impact is not None else 2.0
-        noise = self.p_noise if self.p_noise is not None else 0.5
-        return (-impact, noise, original_index)
+    return replace(eligibility, **updates) if updates else eligibility
 
 
 async def triage_improve_vet_candidates(
@@ -1644,7 +1478,8 @@ async def triage_improve_vet_candidates(
     Reads only bounded excerpts confined to *repo* (preserving snapshot-root isolation).
     Returns ``(ordered_for_vet, prefiltered_audit_records)``.
     """
-    if not candidates or not client.config.enabled or not client.config.api_key:
+    ready = client.with_remaining_budget()
+    if not candidates or ready is None:
         return list(candidates), []
 
     def _collect_excerpts() -> list[str]:
@@ -1661,9 +1496,8 @@ async def triage_improve_vet_candidates(
         return excerpts
 
     excerpts = await anyio.to_thread.run_sync(_collect_excerpts)
-    items: list[tuple[Any, Mapping[str, DecisionQuestion]]] = []
-    for finding, excerpt in zip(candidates, excerpts, strict=True):
-        items.append((
+    items: list[tuple[Any, Mapping[str, DecisionQuestion]]] = [
+        (
             {
                 "category": finding.get("category"),
                 "title": finding.get("title", ""),
@@ -1676,61 +1510,54 @@ async def triage_improve_vet_candidates(
                 "source_excerpt": excerpt,
             },
             IMPROVE_VET_TRIAGE_QUESTIONS,
-        ))
+        )
+        for finding, excerpt in zip(candidates, excerpts, strict=True)
+    ]
 
-    outcomes = await client.evaluate_many(
+    outcomes = await ready.evaluate_many(
         items,
         phase=DaydreamPhase.VET,
         session_id=session_id,
         record_usage=True,
     )
 
-    scores: list[ImproveVetCandidateScore] = []
-    for finding, outcome in zip(candidates, outcomes, strict=True):
-        fp = str(finding.get("fingerprint") or "")
-        if not outcome.ok or outcome.response is None:
-            scores.append(ImproveVetCandidateScore(fingerprint=fp, fallback=True))
-            continue
-        if injection_detected(outcome):
-            scores.append(ImproveVetCandidateScore(
-                fingerprint=fp,
-                injection_flagged=True,
-                model=outcome.response.model,
-            ))
-            continue
-        impact_ans = outcome.score("concrete_impact")
-        scores.append(ImproveVetCandidateScore(
-            fingerprint=fp,
-            p_noise=outcome.noul("speculative_noise"),
-            concrete_impact=impact_ans.score if impact_ans is not None else None,
-            model=outcome.response.model,
-        ))
-
-    kept_indexed: list[tuple[int, dict[str, Any], ImproveVetCandidateScore]] = []
+    kept_indexed: list[tuple[tuple[float, float, int], dict[str, Any]]] = []
     prefiltered: list[dict[str, Any]] = []
-    for idx, (finding, score) in enumerate(zip(candidates, scores, strict=True)):
-        if client.config.improve_prefilter and score.qualifies_for_prefilter(
-            reject_threshold=client.config.improve_reject_threshold,
+    threshold = ready.config.improve_reject_threshold
+    for idx, (finding, outcome) in enumerate(zip(candidates, outcomes, strict=True)):
+        if not outcome.ok or outcome.response is None or injection_detected(outcome):
+            kept_indexed.append(((-PRIORITY_MAX_RISK, 0.0, idx), finding))
+            continue
+        p_noise = outcome.noul("speculative_noise")
+        impact_ans = outcome.score("concrete_impact")
+        concrete_impact = impact_ans.score if impact_ans is not None else None
+        model = outcome.response.model or ready.config.model
+        if (
+            ready.config.improve_prefilter
+            and p_noise is not None
+            and p_noise >= threshold
+            and concrete_impact is not None
+            and concrete_impact <= IMPROVE_PREFILTER_IMPACT_MAX
         ):
-            assert score.p_noise is not None and score.concrete_impact is not None
             prefiltered.append({
-                "fingerprint": score.fingerprint,
+                "fingerprint": str(finding.get("fingerprint") or ""),
                 "category": finding.get("category", "unknown"),
                 "title": finding.get("title", ""),
                 "path": finding.get("path", ""),
                 "line": finding.get("line"),
-                "p_noise": round(score.p_noise, 4),
-                "concrete_impact": round(score.concrete_impact, 4),
-                "threshold": client.config.improve_reject_threshold,
-                "model": score.model or client.config.model,
+                "p_noise": round(p_noise, 4),
+                "concrete_impact": round(concrete_impact, 4),
+                "threshold": threshold,
+                "model": model,
                 "reason": (
                     f"system1_prefiltered: speculative/unsupported noise "
-                    f"(p={score.p_noise:.3f} >= {client.config.improve_reject_threshold:.2f}, "
-                    f"impact={score.concrete_impact:.2f}, model={score.model or client.config.model})"
+                    f"(p={p_noise:.3f} >= {threshold:.2f}, impact={concrete_impact:.2f}, model={model})"
                 ),
             })
             continue
-        kept_indexed.append((idx, finding, score))
+        impact = concrete_impact if concrete_impact is not None else 2.0
+        noise = p_noise if p_noise is not None else 0.5
+        kept_indexed.append(((-impact, noise, idx), finding))
 
-    kept_indexed.sort(key=lambda item: item[2].priority_key(item[0]))
-    return [finding for _, finding, _ in kept_indexed], prefiltered
+    kept_indexed.sort(key=lambda item: item[0])
+    return [finding for _, finding in kept_indexed], prefiltered

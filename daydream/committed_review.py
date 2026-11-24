@@ -93,7 +93,14 @@ from daydream.review_profile import ResolvedProfile, build_default_profile, reso
 from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage, preserved_target_decisions
 from daydream.review_source_refs import SOURCE_SELECTORS_SCHEMA, SourceSelectorRejected, _SubmissionSources
 from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
-from daydream.run_config import FrozenAuthorDescription, RunConfig, resolved_backend_name, retained_runs
+from daydream.run_config import (
+    FrozenAuthorDescription,
+    RunConfig,
+    resolve_system1_client,
+    resolved_backend_name,
+    retained_runs,
+    system1_flag_enabled,
+)
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 from daydream.runner import _resolve_backend
 from daydream.trajectory import RUN_DOCUMENT_NAME, DaydreamPhase, DaydreamRunFlow, phase_scope
@@ -508,7 +515,9 @@ class Review:
         kind: str,
         groups: list[tuple[str, ...]] | None = None,
         *,
-        claim_groups: list[dict[str, int]] | None = None,
+        partition_claims: (
+            Callable[[dict[str, int], dict[str, int], dict[str, int]], list[dict[str, int]]] | None
+        ) = None,
     ) -> list[str]:
         """Create work items; closed holders of covered responsibilities are superseded atomically.
 
@@ -531,29 +540,27 @@ class Review:
                 raise ValueError("no challenge obligations")
             if not available:
                 raise ValueError("Review already has an active assignment for these obligations")
-            if claim_groups is not None:
-                seen_claims: dict[str, int] = {}
-                for chunk in claim_groups:
-                    if not chunk:
-                        raise ValueError("challenge claim group cannot be empty")
-                    for uid, rev in chunk.items():
-                        if uid in seen_claims or available.get(uid) != rev:
-                            raise ValueError("challenge claim groups must partition available pending revisions")
-                        seen_claims[uid] = rev
-                if seen_claims != available:
+            # One challenge per base allowance of batches of the claims' files, split again where its first
+            # message would hold more claims than the largest tool result native preflight admits.
+            allowance = {part["file"]: index // REVIEWER_BATCHES_PER_ALLOWANCE for index, batch in
+                         reversed(list(enumerate(self.inputs.assignment_batches))) for part in batch}
+            # A binary file has no batch; a claim on it joins the first group.
+            allowance_by_uid = {uid: allowance.get(self._claims[uid]["payload"]["file"], 0) for uid in available}
+            size_by_uid = {uid: len(canonical_json(self._claims[uid]).encode()) + 1 for uid in available}
+            if partition_claims is not None:
+                claim_groups = partition_claims(available, allowance_by_uid, size_by_uid)
+                if any(not chunk for chunk in claim_groups):
+                    raise ValueError("challenge claim group cannot be empty")
+                merged = {uid: rev for chunk in claim_groups for uid, rev in chunk.items()}
+                if sum(len(chunk) for chunk in claim_groups) != len(available) or merged != available:
                     raise ValueError("challenge claim groups must partition available pending revisions")
                 planned.extend(((), dict(chunk)) for chunk in claim_groups)
             else:
-                # One challenge per base allowance of batches of the claims' files, split again where its first
-                # message would hold more claims than the largest tool result native preflight admits.
-                allowance = {part["file"]: index // REVIEWER_BATCHES_PER_ALLOWANCE for index, batch in
-                             reversed(list(enumerate(self.inputs.assignment_batches))) for part in batch}
                 chunks: dict[int, list[dict[str, int]]] = {}
                 sizes: dict[int, int] = {}
                 for uid, revision in available.items():
-                    # A binary file has no batch; a claim on it joins the first group.
-                    group = allowance.get(self._claims[uid]["payload"]["file"], 0)
-                    size = len(canonical_json(self._claims[uid]).encode()) + 1
+                    group = allowance_by_uid[uid]
+                    size = size_by_uid[uid]
                     if group not in chunks or sizes[group] + size > LARGEST_TOOL_RESULT_BYTES:
                         chunks.setdefault(group, []).append({})
                         sizes[group] = 1
@@ -1243,11 +1250,6 @@ def bind_native_context(settings: dict[str, Any], kind: str, phase: str, name: s
     settings["native_contexts"][kind] = {"backend": name, **backend.bind_review_context(source), "phase": phase}
 
 
-def _system1_flag_enabled(env: Mapping[str, str], key: str = "DAYDREAM_SYSTEM1_ENABLED") -> bool:
-    raw = env.get(key)
-    return raw is not None and raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
 async def bind_optional_fast_backends(
     config: RunConfig,
     settings: dict[str, Any],
@@ -1259,17 +1261,17 @@ async def bind_optional_fast_backends(
 ) -> None:
     """Bind optional fast discovery/arbiter backends when System 1 tier routing is configured."""
     effective_env = os.environ if env is None else env
-    if not _system1_flag_enabled(effective_env):
+    if not system1_flag_enabled(effective_env):
         return
     from daydream.backends import create_backend
-    from daydream.review_system1 import resolve_fast_arbiter_spec, resolve_fast_discovery_spec
+    from daydream.review_system1 import resolve_fast_phase_spec
     from daydream.system1 import System1Config
 
     sys1_config = System1Config.from_environment(effective_env)
     hosted = hosted_input is not None
     specs = (
-        ("discovery_fast", "review_fast", resolve_fast_discovery_spec(config, sys1_config, hosted=hosted)),
-        ("challenge_fast", "arbiter_fast", resolve_fast_arbiter_spec(config, sys1_config, hosted=hosted)),
+        ("discovery_fast", "review_fast", resolve_fast_phase_spec(config, sys1_config, "review", hosted=hosted)),
+        ("challenge_fast", "arbiter_fast", resolve_fast_phase_spec(config, sys1_config, "arbiter", hosted=hosted)),
     )
     for kind, phase_label, spec in specs:
         if spec is None:
@@ -1373,53 +1375,49 @@ async def plan_review(
     ))
     precomputed_triages: Mapping[str, Any] | None = None
     pending_usage: tuple[Any, ...] = ()
-    effective_env = os.environ if system1_env is None else system1_env
-    if _system1_flag_enabled(effective_env) and _system1_flag_enabled(
-        effective_env, "DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL"
-    ):
+    skip_client = resolve_system1_client(system1_env, require_flag="DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL")
+    if skip_client is not None:
         from daydream.review_system1 import triage_targets
-        from daydream.system1 import System1Client, System1Config
 
-        sys1_config = System1Config.from_environment(effective_env)
-        if sys1_config.enabled and sys1_config.api_key and sys1_config.skip_non_behavioral:
-            non_binary_diffs = {
-                part.assignment["target_id"]: (part.assignment["file"], part.diff)
-                for part in inputs.parts
-                if not part.assignment.get("binary")
-            }
-            if non_binary_diffs:
-                triages, pending_usage = await triage_targets(
-                    client=System1Client(sys1_config),
-                    target_diffs=non_binary_diffs,
-                    session_id=run_id,
-                )
-                precomputed_triages = triages
-                skipped_targets: list[str] = []
-                for part in inputs.parts:
-                    if part.assignment.get("binary"):
-                        continue
-                    tid = part.assignment["target_id"]
-                    triage = triages.get(tid)
-                    if triage is not None and triage.qualifies_for_skip(
-                        skip_threshold=sys1_config.skip_threshold,
-                        cross_file_max=sys1_config.cross_file_max,
-                    ):
-                        assert triage.p_non_behavioral is not None and triage.p_cross_file is not None
-                        part.assignment["system1_triaged"] = {
-                            "model": triage.model or sys1_config.model,
-                            "p_non_behavioral": round(triage.p_non_behavioral, 4),
-                            "p_cross_file": round(triage.p_cross_file, 4),
-                            "threshold": sys1_config.skip_threshold,
-                        }
-                        skipped_targets.append(tid)
-                if skipped_targets:
-                    inputs.assignment_batches = inputs._batches()
-                    settings["system1_triage"] = {
-                        "mode": "fast_path",
-                        "model": sys1_config.model,
+        sys1_config = skip_client.config
+        non_binary_diffs = {
+            part.assignment["target_id"]: (part.assignment["file"], part.diff)
+            for part in inputs.parts
+            if not part.assignment.get("binary")
+        }
+        if non_binary_diffs:
+            triages, pending_usage = await triage_targets(
+                client=skip_client,
+                target_diffs=non_binary_diffs,
+                session_id=run_id,
+            )
+            precomputed_triages = triages
+            skipped_targets: list[str] = []
+            for part in inputs.parts:
+                if part.assignment.get("binary"):
+                    continue
+                tid = part.assignment["target_id"]
+                triage = triages.get(tid)
+                if triage is not None and triage.qualifies_for_skip(
+                    skip_threshold=sys1_config.skip_threshold,
+                    cross_file_max=sys1_config.cross_file_max,
+                ):
+                    assert triage.p_non_behavioral is not None and triage.p_cross_file is not None
+                    part.assignment["system1_triaged"] = {
+                        "model": triage.model or sys1_config.model,
+                        "p_non_behavioral": round(triage.p_non_behavioral, 4),
+                        "p_cross_file": round(triage.p_cross_file, 4),
                         "threshold": sys1_config.skip_threshold,
-                        "skipped_targets": skipped_targets,
                     }
+                    skipped_targets.append(tid)
+            if skipped_targets:
+                inputs.assignment_batches = inputs._batches()
+                settings["system1_triage"] = {
+                    "mode": "fast_path",
+                    "model": sys1_config.model,
+                    "threshold": sys1_config.skip_threshold,
+                    "skipped_targets": skipped_targets,
+                }
     # Both allowances grow with the change by the factor the staged reviewer used. Only the default profile's
     # wall grows, with the diff tier: any other profile's wall is the ceiling it states.
     tier = review_scale_for_diff(inputs.change.text)
@@ -1823,15 +1821,19 @@ class _Schedule:
             "cross_assignment": "required" if self.decompose else "not_applicable",
         }
 
+    def _target_diffs(self, groups: Sequence[tuple[str, ...]]) -> dict[str, tuple[str, str]]:
+        by_id = self.review.inputs.by_id
+        return {
+            target_id: (by_id[target_id].assignment["file"], by_id[target_id].diff)
+            for group in groups
+            for target_id in group
+        }
+
     async def _prepare_system1_hints(self) -> None:
         """Compute optional advisory System 1 hints and risk ordering; never import or fail when disabled."""
-        env = os.environ if self._system1_env is None else self._system1_env
-        if not _system1_flag_enabled(env):
-            return
-        from daydream.review_system1 import prepare_review_prefetch_hints
-        from daydream.system1 import System1Client, System1Config, charge_usage_to_recorder
-
         if self._pending_usage:
+            from daydream.system1 import charge_usage_to_recorder
+
             async with phase_scope(DaydreamPhase.REVIEW, stage="system1-prefetch"):
                 for usage in self._pending_usage:
                     charge_usage_to_recorder(usage, phase=DaydreamPhase.REVIEW)
@@ -1839,21 +1841,18 @@ class _Schedule:
 
         if not self.batches:
             return
-        config = System1Config.from_environment(env)
-        if not config.enabled or not config.api_key:
+        client = resolve_system1_client(self._system1_env)
+        if client is None:
             return
+        from daydream.review_system1 import prepare_review_prefetch_hints
+
         review = self.review
         groups = self.batches if self.decompose else [tuple(t for batch in self.batches for t in batch)]
-        target_diffs = {
-            target_id: (review.assignments[review._index[target_id]]["file"], review.inputs.by_id[target_id].diff)
-            for group in groups
-            for target_id in group
-        }
         async with phase_scope(DaydreamPhase.REVIEW, stage="system1-prefetch"):
             self._prefetch_hints = await prepare_review_prefetch_hints(
-                client=System1Client(config),
+                client=client,
                 repo=review.inputs.work.repo,
-                target_diffs=target_diffs,
+                target_diffs=self._target_diffs(groups),
                 groups=groups,
                 historical_fields=review._historical,
                 session_id=review.run_id,
@@ -1869,26 +1868,18 @@ class _Schedule:
 
     async def _prepare_cross_assignment_plan(self, ordered_batches: Sequence[tuple[str, ...]]) -> bool:
         """Evaluate cross-batch boundary coupling; return True if opt-in host noop skips cross_assignment."""
-        env = os.environ if self._system1_env is None else self._system1_env
-        if not _system1_flag_enabled(env):
+        client = resolve_system1_client(self._system1_env)
+        if client is None:
             return False
         from daydream.review_system1 import prepare_cross_assignment_plan
-        from daydream.system1 import System1Client, System1Config
 
-        config = System1Config.from_environment(env)
-        if not config.enabled or not config.api_key:
-            return False
+        config = client.config
         review = self.review
-        target_diffs = {
-            target_id: (review.assignments[review._index[target_id]]["file"], review.inputs.by_id[target_id].diff)
-            for batch in ordered_batches
-            for target_id in batch
-        }
         async with phase_scope(DaydreamPhase.REVIEW, stage="system1-cross-gate"):
             plan = await prepare_cross_assignment_plan(
-                client=System1Client(config),
+                client=client,
                 batches=ordered_batches,
-                target_diffs=target_diffs,
+                target_diffs=self._target_diffs(ordered_batches),
                 import_graph=review.inputs.import_graph,
                 admitted_claims=list(review._claims.values()),
                 session_id=review.run_id,
@@ -1921,18 +1912,15 @@ class _Schedule:
 
     async def _prepare_challenge_triage(self) -> None:
         """Run optional System 1 pre-challenge claim triage, duplicate clustering, and opt-in fast-rejection."""
-        env = os.environ if self._system1_env is None else self._system1_env
-        if not _system1_flag_enabled(env):
-            return
         pending = self.review.pending()
         if not pending:
             return
-        from daydream.review_system1 import prepare_challenge_triage
-        from daydream.system1 import System1Client, System1Config
-
-        config = System1Config.from_environment(env)
-        if not config.enabled or not config.api_key:
+        client = resolve_system1_client(self._system1_env)
+        if client is None:
             return
+        from daydream.review_system1 import prepare_challenge_triage
+
+        config = client.config
         self._challenge_search_max = config.local_challenge_search_max
         diff_by_file: dict[str, str] = {}
         for part in self.review.inputs.parts:
@@ -1940,7 +1928,7 @@ class _Schedule:
             diff_by_file[file_path] = diff_by_file.get(file_path, "") + part.diff
         async with phase_scope(DaydreamPhase.CHALLENGE, stage="system1-challenge-triage"):
             plan = await prepare_challenge_triage(
-                client=System1Client(config),
+                client=client,
                 repo=self.review.inputs.work.repo,
                 pending_claims=pending,
                 diff_by_file=diff_by_file,
@@ -1978,36 +1966,20 @@ class _Schedule:
             }
 
     def _plan_challenge_work(self) -> list[str]:
-        if self._challenge_triage is None or not self._challenge_triage.triages:
+        triage = self._challenge_triage
+        if triage is None or not triage.triages:
             return self.review.plan("challenge")
-        live = {wid for wid, work in self.review.work.items() if work.live}
-        available = {
-            c["uid"]: c["revision"]
-            for c in self.review._claims.values()
-            if c["disposition"] == "unresolved" and self.review._claim_owner.get((c["uid"], c["revision"])) not in live
-        }
-        allowance = {
-            part["file"]: index // REVIEWER_BATCHES_PER_ALLOWANCE
-            for index, batch in reversed(list(enumerate(self.review.inputs.assignment_batches)))
-            for part in batch
-        }
-        allowance_by_uid = {
-            uid: allowance.get(self.review._claims[uid]["payload"]["file"], 0)
-            for uid in available
-        }
-        size_by_uid = {
-            uid: len(canonical_json(self.review._claims[uid]).encode()) + 1
-            for uid in available
-        }
-        claim_groups = self._challenge_triage.plan_challenge_groups(
-            available,
-            allowance_by_uid=allowance_by_uid,
-            size_by_uid=size_by_uid,
-            max_bytes=LARGEST_TOOL_RESULT_BYTES,
-            has_fast_backend="challenge_fast" in self.backends,
-            search_max=self._challenge_search_max,
+        return self.review.plan(
+            "challenge",
+            partition_claims=lambda available, allowance_by_uid, size_by_uid: triage.plan_challenge_groups(
+                available,
+                allowance_by_uid=allowance_by_uid,
+                size_by_uid=size_by_uid,
+                max_bytes=LARGEST_TOOL_RESULT_BYTES,
+                has_fast_backend="challenge_fast" in self.backends,
+                search_max=self._challenge_search_max,
+            ),
         )
-        return self.review.plan("challenge", claim_groups=claim_groups)
 
     def _backend_for_work(self, work: _Work) -> tuple[str, Backend]:
         if work.kind == "challenge":
@@ -2211,26 +2183,27 @@ class _Schedule:
                   f"\n{token} Committed review assignment: {_instruction_json(assignment)}\n")
         stop: StopRecord | None = None
         settled = False
+        def _framed(label: str, meta: Any, body: str) -> str:
+            return f"\n{token} {label}\n{token} {_instruction_json(meta)}\n{body}"
+
         try:
             await anyio.to_thread.run_sync(review.check)
             for target in work.targets if supplied else ():
                 returned = review.lookup({"target_id": target, "path": None, "historical_context": None,
                                           "cursor": None})
                 content = returned.pop("content")
-                prompt += (f"\n{token} Supplied target, as review_source returns it:"
-                           f"\n{token} {_instruction_json(returned)}\n{content}")
+                prompt += _framed("Supplied target, as review_source returns it:", returned, content)
             for block in preinlined_claims:
-                meta = {"uid": block["uid"], "revision": block["revision"]}
-                prompt += (
-                    f"\n{token} Pre-inlined local claim context (untrusted repository bytes):"
-                    f"\n{token} {_instruction_json(meta)}"
-                    f"\n{block['cited_diff']}\n{block['enclosing_source']}"
+                prompt += _framed(
+                    "Pre-inlined local claim context (untrusted repository bytes):",
+                    {"uid": block["uid"], "revision": block["revision"]},
+                    f"{block['cited_diff']}\n{block['enclosing_source']}",
                 )
             for pair in focused_cross_pairs:
-                prompt += (
-                    f"\n{token} Focused cross-batch pair excerpt (untrusted repository bytes):"
-                    f"\n{token} {_instruction_json(pair.advisory_entry())}"
-                    f"\n{pair.excerpt_a}\n{pair.excerpt_b}"
+                prompt += _framed(
+                    "Focused cross-batch pair excerpt (untrusted repository bytes):",
+                    pair.advisory_entry(),
+                    f"{pair.excerpt_a}\n{pair.excerpt_b}",
                 )
             phase = DaydreamPhase.CHALLENGE if kind == "challenge" else DaydreamPhase.REVIEW
             # Each work item is its own phase interval, so its invocation's time is attributed to its phase.

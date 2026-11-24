@@ -119,52 +119,48 @@ def shard_scope_id(index: int) -> str:
     return f"committed:{index:05d}"
 
 
+def _is_finite_number(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
+
+
 def is_valid_system1_triaged(meta: Any, *, file_path: str) -> bool:
     """Validate host-authored System 1 non-behavioral fast-path metadata on one assignment part."""
     if not isinstance(meta, dict) or set(meta) != {"model", "p_non_behavioral", "p_cross_file", "threshold"}:
         return False
-    model = meta["model"]
-    p_nb = meta["p_non_behavioral"]
-    p_cf = meta["p_cross_file"]
-    threshold = meta["threshold"]
+    model, p_nb, p_cf, threshold = meta["model"], meta["p_non_behavioral"], meta["p_cross_file"], meta["threshold"]
     if not isinstance(model, str) or not model.strip() or len(model) > 256:
         return False
-    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
-           for v in (p_nb, p_cf, threshold)):
+    if not all(_is_finite_number(v) for v in (p_nb, p_cf, threshold)):
         return False
-    if not (0.5 < float(threshold) <= 1.0 and 0.0 <= float(p_nb) <= 1.0 and 0.0 <= float(p_cf) <= 0.5):
-        return False
-    if float(p_nb) < float(threshold):
+    if not (0.5 < float(threshold) <= float(p_nb) <= 1.0 and 0.0 <= float(p_cf) <= 0.5):
         return False
     from daydream.system1 import path_is_hard_denied
 
     return not path_is_hard_denied(file_path)
 
 
+def _host_decision_reason(part: dict[str, Any]) -> str | None:
+    if part.get("binary"):
+        return "binary change: no text content"
+    meta = part.get("system1_triaged")
+    if meta is not None and is_valid_system1_triaged(meta, file_path=str(part.get("file", ""))):
+        p_nb = float(meta["p_non_behavioral"])
+        return f"system1_triaged: non-behavioral change (p={p_nb:.3f}, model={meta['model']})"
+    return None
+
+
 def is_host_decided_part(part: dict[str, Any]) -> bool:
     """Whether the host, rather than a review model, owns this target's decision."""
-    if part.get("binary"):
-        return True
-    meta = part.get("system1_triaged")
-    return meta is not None and is_valid_system1_triaged(meta, file_path=str(part.get("file", "")))
+    return _host_decision_reason(part) is not None
 
 
 def host_decision(part: dict[str, Any]) -> dict[str, Any]:
     """The host's decision for a binary target or an opt-in System 1 non-behavioral fast-path target."""
-    if part.get("binary"):
-        return {"target_id": part["target_id"], "status": "reviewed", "reason": "binary change: no text content",
-                "evidence_refs": part["source_refs"]}
-    meta = part.get("system1_triaged")
-    if meta is not None and is_valid_system1_triaged(meta, file_path=str(part.get("file", ""))):
-        p_nb = float(meta["p_non_behavioral"])
-        model = str(meta["model"])
-        return {
-            "target_id": part["target_id"],
-            "status": "reviewed",
-            "reason": f"system1_triaged: non-behavioral change (p={p_nb:.3f}, model={model})",
-            "evidence_refs": part["source_refs"],
-        }
-    raise ValueError(f"target {part.get('target_id')!r} is not host-decided")
+    reason = _host_decision_reason(part)
+    if reason is None:
+        raise ValueError(f"target {part.get('target_id')!r} is not host-decided")
+    return {"target_id": part["target_id"], "status": "reviewed", "reason": reason,
+            "evidence_refs": part["source_refs"]}
 
 
 HOST_SYSTEM1_CHALLENGE_WORK_ID = "host:system1"
@@ -379,24 +375,24 @@ def validate_committed_result(value: dict[str, Any]) -> None:
         check_refs(claim["payload"]["evidence_refs"], expected_refs)
         for verdict in claim["challenge_evidence"]:
             check_refs(verdict["evidence_refs"], expected_refs)
-            if verdict["work_id"] == HOST_SYSTEM1_CHALLENGE_WORK_ID:
-                # Host System 1 may ONLY fast-reject; it can never confirm or defer a claim.
-                if (
-                    verdict["uid"] != claim["uid"]
-                    or verdict["revision"] > claim["revision"]
-                    or not is_host_system1_rejection_verdict(verdict)
-                ):
-                    raise ValueError("invalid retained challenge evidence")
-                continue
-            if (
+            invalid_verdict = (
                 verdict["uid"] != claim["uid"]
                 or verdict["revision"] > claim["revision"]
-                or not verdict["grounds"].strip()
-                or work.get(verdict["work_id"], {}).get("kind") != "challenge"
-                or {"uid": verdict["uid"], "revision": verdict["revision"]} not in work[verdict["work_id"]]["verdicts"]
-                # A current-revision verdict comes from a context distinct from that revision's author.
-                or verdict["revision"] == claim["revision"] and verdict["work_id"] == claim["revised_by"]
-            ):
+                or (
+                    # Host System 1 may ONLY fast-reject; it can never confirm or defer a claim.
+                    not is_host_system1_rejection_verdict(verdict)
+                    if verdict["work_id"] == HOST_SYSTEM1_CHALLENGE_WORK_ID
+                    else (
+                        not verdict["grounds"].strip()
+                        or work.get(verdict["work_id"], {}).get("kind") != "challenge"
+                        or {"uid": verdict["uid"], "revision": verdict["revision"]}
+                        not in work[verdict["work_id"]]["verdicts"]
+                        # A current-revision verdict comes from a context distinct from that revision's author.
+                        or verdict["revision"] == claim["revision"] and verdict["work_id"] == claim["revised_by"]
+                    )
+                )
+            )
+            if invalid_verdict:
                 raise ValueError("invalid retained challenge evidence")
         if claim["disposition"] != "unresolved" and not any(
             verdict["revision"] == claim["revision"] and verdict["verdict"] == claim["disposition"]
@@ -416,15 +412,11 @@ def validate_committed_result(value: dict[str, Any]) -> None:
             if not (
                 isinstance(cross_meta, dict)
                 and cross_meta.get("action") == "host_noop"
-                and cross_meta.get("cross_batch_edges") == 0
-                and isinstance(cross_meta.get("p_cross_needed"), (int, float))
-                and not isinstance(cross_meta.get("p_cross_needed"), bool)
-                and isinstance(cross_meta.get("threshold"), (int, float))
-                and not isinstance(cross_meta.get("threshold"), bool)
-                and math.isfinite(float(cross_meta["p_cross_needed"]))
-                and math.isfinite(float(cross_meta["threshold"]))
-                and 0.0 < float(cross_meta["threshold"]) <= 0.5
-                and 0.0 <= float(cross_meta["p_cross_needed"]) < float(cross_meta["threshold"])
+                and type(cross_meta.get("cross_batch_edges")) is int
+                and cross_meta["cross_batch_edges"] == 0
+                and _is_finite_number(cross_meta.get("p_cross_needed"))
+                and _is_finite_number(cross_meta.get("threshold"))
+                and 0.0 <= float(cross_meta["p_cross_needed"]) < float(cross_meta["threshold"]) <= 0.5
             ):
                 raise ValueError("decomposed cross_assignment noop requires valid host System 1 metadata")
     native_assignments = {e["assignment"] for e in value["execution"]}

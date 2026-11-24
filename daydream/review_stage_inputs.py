@@ -335,51 +335,40 @@ class StageInputFactory:
 
     def _coupling_components(self, eligible: list[_Part]) -> list[list[_Part]]:
         """Group eligible parts into deterministic import-coupled file components."""
+        if not self.import_graph:
+            return [[part] for part in eligible]
         by_file: dict[str, list[_Part]] = {}
         for part in eligible:
             by_file.setdefault(part.assignment["file"], []).append(part)
-        file_order = list(by_file)
-        file_set = set(file_order)
-        if not self.import_graph:
-            return [[part] for part in eligible]
-        adjacency: dict[str, set[str]] = {path: set() for path in file_order}
-        has_edges = False
+        adjacency: dict[str, set[str]] = {}
         for src, dsts in self.import_graph.items():
-            if src not in file_set:
+            if src not in by_file:
                 continue
             for dst in dsts:
-                if dst in file_set and dst != src:
-                    adjacency[src].add(dst)
-                    adjacency[dst].add(src)
-                    has_edges = True
-        if not has_edges:
+                if dst in by_file and dst != src:
+                    adjacency.setdefault(src, set()).add(dst)
+                    adjacency.setdefault(dst, set()).add(src)
+        if not adjacency:
             return [[part] for part in eligible]
-        index_of = {path: idx for idx, path in enumerate(file_order)}
+        index_of = {path: idx for idx, path in enumerate(by_file)}
         visited: set[str] = set()
         units: list[list[_Part]] = []
-        for root in file_order:
+        for root in by_file:
             if root in visited:
                 continue
-            if not adjacency[root]:
+            if root not in adjacency:
                 visited.add(root)
                 units.extend([part] for part in by_file[root])
                 continue
             # Deterministic BFS over connected component so direct neighbors stay adjacent.
-            component_files: list[str] = []
-            queue = [root]
+            component_files = [root]
             visited.add(root)
-            while queue:
-                current = queue.pop(0)
-                component_files.append(current)
+            for current in component_files:
                 for neighbor in sorted(adjacency[current], key=index_of.__getitem__):
                     if neighbor not in visited:
                         visited.add(neighbor)
-                        queue.append(neighbor)
-            component_parts = [part for path in component_files for part in by_file[path]]
-            if len(component_files) <= 4:
-                units.append(component_parts)
-            else:
-                units.extend([part] for part in component_parts)
+                        component_files.append(neighbor)
+            units.append([part for path in component_files for part in by_file[path]])
         return units
 
     def _batches(self) -> list[list[dict[str, Any]]]:
@@ -395,26 +384,23 @@ class StageInputFactory:
                 and self._remaining_bytes(self._render(parts), dispatch=True) >= 0
             )
 
-        units = self._coupling_components(eligible)
         batches: list[list[_Part]] = []
         current: list[_Part] = []
-        for unit in units:
+        for unit in self._coupling_components(eligible):
             if len(unit) > 1 and not fits(unit):
                 # Oversized coupled component: fall back to part-by-part packing in BFS neighbor order.
-                for part in unit:
-                    if not fits([part]):
-                        raise inputs.SanctionedInputUnavailable("required assignment exceeds the assignment allowance")
-                    if current and not fits([*current, part]):
-                        batches.append(current)
-                        current = []
-                    current.append(part)
-                continue
-            if not fits(unit):
-                raise inputs.SanctionedInputUnavailable("required assignment exceeds the assignment allowance")
-            if current and not fits([*current, *unit]):
-                batches.append(current)
-                current = []
-            current.extend(unit)
+                chunks: list[list[_Part]] = [[part] for part in unit]
+                unit_verified = False
+            else:
+                chunks = [unit]
+                unit_verified = len(unit) > 1
+            for chunk in chunks:
+                if not unit_verified and not fits(chunk):
+                    raise inputs.SanctionedInputUnavailable("required assignment exceeds the assignment allowance")
+                if current and not fits([*current, *chunk]):
+                    batches.append(current)
+                    current = []
+                current.extend(chunk)
         if current:
             batches.append(current)
         part_index = {id(part): idx for idx, part in enumerate(self.parts)}

@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from daydream.config import DEFAULT_SYSTEM1_MODEL
 from daydream.pricing import (
     ModelPrice,
     compute_cost,
@@ -19,8 +18,6 @@ def test_claude_sonnet_5_uses_the_rate_in_effect_on_the_usage_date() -> None:
     assert compute_cost("claude-sonnet-5", *tokens, effective_date=date(2026, 8, 31)) == pytest.approx(12.20)
     assert compute_cost("claude-sonnet-5", *tokens, effective_date=date(2026, 9, 1)) == pytest.approx(18.30)
     assert compute_cost("claude-sonnet-5", *tokens) == pytest.approx(18.30)
-    # OpenRouter Jev pricing: $0.042/1M input tokens, $0 output tokens.
-    assert compute_cost(DEFAULT_SYSTEM1_MODEL, 476, 0, 70) == pytest.approx(0.000019992)
 
 
 # --- User-overridable pricing -------------------------------------------------

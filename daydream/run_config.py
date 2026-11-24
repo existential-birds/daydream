@@ -1,9 +1,10 @@
 """Run policy and model/backend precedence, independent of flow execution."""
 
-from collections.abc import Iterable
+import os
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from daydream.config import DEFAULT_RETAINED_RUNS, PHASE_DEFAULT_EFFORT, PHASE_DEFAULT_MODELS
 from daydream.config_file import DaydreamFileConfig
@@ -164,3 +165,29 @@ DEEP_FLOW_ALIASES = ("deep",)
 def runs_review(config: RunConfig) -> bool:
     """Whether this request runs the reviewer: every built-in flow mode except diagram-only."""
     return config.flow_name in (None, *DEEP_FLOW_ALIASES) and config.output_mode != "diagram"
+
+
+def system1_flag_enabled(env: Mapping[str, str] | None = None, key: str = "DAYDREAM_SYSTEM1_ENABLED") -> bool:
+    """Return whether a host-owned System 1 environment flag is explicitly enabled."""
+    source = os.environ if env is None else env
+    raw = source.get(key)
+    return raw is not None and raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def resolve_system1_client(
+    env: Mapping[str, str] | None = None,
+    *,
+    require_flag: str | None = None,
+) -> Any | None:
+    """Lazily build a ready host-owned ``System1Client`` when enabled with an API key, else ``None``."""
+    source = os.environ if env is None else env
+    if not system1_flag_enabled(source):
+        return None
+    if require_flag is not None and not system1_flag_enabled(source, require_flag):
+        return None
+    from daydream import system1
+
+    config = system1.System1Config.from_environment(source)
+    if not config.enabled or not config.api_key:
+        return None
+    return system1.System1Client(config)

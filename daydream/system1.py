@@ -14,7 +14,7 @@ import logging
 import math
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -26,6 +26,7 @@ from daydream.json_utils import canonical_json
 from daydream.pricing import compute_cost_from_totals
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.redaction import redact_structured_text
+from daydream.run_config import system1_flag_enabled
 from daydream.trajectory import DaydreamPhase, get_current_recorder
 
 if TYPE_CHECKING:
@@ -77,8 +78,51 @@ DEFAULT_HARD_DENY_GLOBS: tuple[str, ...] = (
 )
 
 
-def _truthy(value: str | None) -> bool:
-    return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
+@dataclass(frozen=True)
+class _FloatBound:
+    env_var: str
+    default: float
+    low: float
+    high: float
+    low_inclusive: bool = False
+    high_inclusive: bool = True
+
+    def contains(self, value: float) -> bool:
+        low_ok = value >= self.low if self.low_inclusive else value > self.low
+        high_ok = value <= self.high if self.high_inclusive else value < self.high
+        return math.isfinite(value) and low_ok and high_ok
+
+    def interval(self) -> str:
+        left = "[" if self.low_inclusive else "("
+        right = "]" if self.high_inclusive else ")"
+        return f"{left}{self.low}, {self.high}{right}"
+
+
+_BOUNDED_FLOAT_SPECS: Mapping[str, _FloatBound] = {
+    "skip_threshold": _FloatBound("DAYDREAM_SYSTEM1_SKIP_THRESHOLD", DEFAULT_SYSTEM1_SKIP_THRESHOLD, 0.5, 1.0),
+    "cross_file_max": _FloatBound(
+        "DAYDREAM_SYSTEM1_CROSS_FILE_MAX", DEFAULT_SYSTEM1_CROSS_FILE_MAX, 0.0, 0.5, low_inclusive=True,
+    ),
+    "claim_reject_threshold": _FloatBound(
+        "DAYDREAM_SYSTEM1_CLAIM_REJECT_THRESHOLD", DEFAULT_SYSTEM1_CLAIM_REJECT_THRESHOLD, 0.5, 1.0,
+    ),
+    "local_challenge_search_max": _FloatBound(
+        "DAYDREAM_SYSTEM1_LOCAL_CHALLENGE_SEARCH_MAX",
+        DEFAULT_SYSTEM1_LOCAL_CHALLENGE_SEARCH_MAX,
+        0.0,
+        0.5,
+        low_inclusive=True,
+    ),
+    "cross_assignment_threshold": _FloatBound(
+        "DAYDREAM_SYSTEM1_CROSS_ASSIGNMENT_THRESHOLD", DEFAULT_SYSTEM1_CROSS_THRESHOLD, 0.0, 0.5,
+    ),
+    "diagram_min_probability": _FloatBound(
+        "DAYDREAM_SYSTEM1_DIAGRAM_THRESHOLD", DEFAULT_SYSTEM1_DIAGRAM_THRESHOLD, 0.0, 1.0, high_inclusive=False,
+    ),
+    "improve_reject_threshold": _FloatBound(
+        "DAYDREAM_SYSTEM1_IMPROVE_REJECT_THRESHOLD", DEFAULT_SYSTEM1_IMPROVE_REJECT_THRESHOLD, 0.5, 1.0,
+    ),
+}
 
 
 def _parse_positive_float(raw: str | None, *, default: float, name: str) -> float:
@@ -109,26 +153,19 @@ def _parse_positive_int(raw: str | None, *, default: int, name: str) -> int:
     return parsed
 
 
-def _parse_bounded_float(
-    raw: str | None,
-    *,
-    default: float,
-    name: str,
-    low: float,
-    high: float,
-    low_inclusive: bool = False,
-) -> float:
+def _parse_bounded_float(source: Mapping[str, str], field_name: str) -> float:
+    spec = _BOUNDED_FLOAT_SPECS[field_name]
+    raw = source.get(spec.env_var)
     if raw is None or not raw.strip():
-        return default
+        return spec.default
     try:
         parsed = float(raw)
     except ValueError:
-        logger.warning("daydream system1: invalid %s=%r — using default %g", name, raw, default)
-        return default
-    lower_ok = parsed >= low if low_inclusive else parsed > low
-    if not math.isfinite(parsed) or not lower_ok or parsed > high:
-        logger.warning("daydream system1: out-of-range %s=%r — using default %g", name, raw, default)
-        return default
+        logger.warning("daydream system1: invalid %s=%r — using default %g", spec.env_var, raw, spec.default)
+        return spec.default
+    if not spec.contains(parsed):
+        logger.warning("daydream system1: out-of-range %s=%r — using default %g", spec.env_var, raw, spec.default)
+        return spec.default
     return parsed
 
 
@@ -154,7 +191,6 @@ class System1Config:
     max_question_tokens: int = SYSTEM1_MAX_QUESTION_TOKENS
     zdr: bool = False
     data_collection: Literal["allow", "deny"] | None = None
-    hard_deny_globs: tuple[str, ...] = DEFAULT_HARD_DENY_GLOBS
     fast_review_backend: str | None = None
     fast_review_model: str | None = None
     fast_review_effort: str | None = None
@@ -190,64 +226,15 @@ class System1Config:
                 raise ValueError(f"system1 {label} must be a positive integer")
         if self.data_collection not in (None, "allow", "deny"):
             raise ValueError("system1 data_collection must be 'allow', 'deny', or None")
-        if (
-            isinstance(self.skip_threshold, bool)
-            or not isinstance(self.skip_threshold, (int, float))
-            or not math.isfinite(self.skip_threshold)
-            or not (0.5 < float(self.skip_threshold) <= 1.0)
-        ):
-            raise ValueError("system1 skip_threshold must be in (0.5, 1.0]")
-        if (
-            isinstance(self.cross_file_max, bool)
-            or not isinstance(self.cross_file_max, (int, float))
-            or not math.isfinite(self.cross_file_max)
-            or not (0.0 <= float(self.cross_file_max) <= 0.5)
-        ):
-            raise ValueError("system1 cross_file_max must be in [0.0, 0.5]")
-        if (
-            isinstance(self.claim_reject_threshold, bool)
-            or not isinstance(self.claim_reject_threshold, (int, float))
-            or not math.isfinite(self.claim_reject_threshold)
-            or not (0.5 < float(self.claim_reject_threshold) <= 1.0)
-        ):
-            raise ValueError("system1 claim_reject_threshold must be in (0.5, 1.0]")
-        if (
-            isinstance(self.local_challenge_search_max, bool)
-            or not isinstance(self.local_challenge_search_max, (int, float))
-            or not math.isfinite(self.local_challenge_search_max)
-            or not (0.0 <= float(self.local_challenge_search_max) <= 0.5)
-        ):
-            raise ValueError("system1 local_challenge_search_max must be in [0.0, 0.5]")
-        if (
-            isinstance(self.cross_assignment_threshold, bool)
-            or not isinstance(self.cross_assignment_threshold, (int, float))
-            or not math.isfinite(self.cross_assignment_threshold)
-            or not (0.0 < float(self.cross_assignment_threshold) <= 0.5)
-        ):
-            raise ValueError("system1 cross_assignment_threshold must be in (0.0, 0.5]")
-        if (
-            isinstance(self.diagram_min_probability, bool)
-            or not isinstance(self.diagram_min_probability, (int, float))
-            or not math.isfinite(self.diagram_min_probability)
-            or not (0.0 < float(self.diagram_min_probability) < 1.0)
-        ):
-            raise ValueError("system1 diagram_min_probability must be in (0.0, 1.0)")
-        if (
-            isinstance(self.improve_reject_threshold, bool)
-            or not isinstance(self.improve_reject_threshold, (int, float))
-            or not math.isfinite(self.improve_reject_threshold)
-            or not (0.5 < float(self.improve_reject_threshold) <= 1.0)
-        ):
-            raise ValueError("system1 improve_reject_threshold must be in (0.5, 1.0]")
+        for field_name, spec in _BOUNDED_FLOAT_SPECS.items():
+            value = getattr(self, field_name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not spec.contains(float(value)):
+                raise ValueError(f"system1 {field_name} must be in {spec.interval()}")
 
     @classmethod
     def from_environment(cls, env: Mapping[str, str] | None = None) -> System1Config:
         """Resolve host-owned settings from environment variables (disabled by default)."""
         source = os.environ if env is None else env
-        enabled = _truthy(source.get("DAYDREAM_SYSTEM1_ENABLED"))
-        model = (source.get("DAYDREAM_SYSTEM1_MODEL") or "").strip() or DEFAULT_SYSTEM1_MODEL
-        endpoint = (source.get("DAYDREAM_SYSTEM1_ENDPOINT") or "").strip() or OPENROUTER_DECISIONS_URL
-        api_key = _optional_stripped(source.get("OPENROUTER_API_KEY"))
         raw_dc = (source.get("DAYDREAM_SYSTEM1_DATA_COLLECTION") or "").strip().lower()
         data_collection: Literal["allow", "deny"] | None
         if raw_dc in ("allow", "deny"):
@@ -257,10 +244,10 @@ class System1Config:
                 logger.warning("daydream system1: invalid DAYDREAM_SYSTEM1_DATA_COLLECTION=%r — ignoring", raw_dc)
             data_collection = None
         return cls(
-            enabled=enabled,
-            model=model,
-            endpoint=endpoint,
-            api_key=api_key,
+            enabled=system1_flag_enabled(source, "DAYDREAM_SYSTEM1_ENABLED"),
+            model=(source.get("DAYDREAM_SYSTEM1_MODEL") or "").strip() or DEFAULT_SYSTEM1_MODEL,
+            endpoint=(source.get("DAYDREAM_SYSTEM1_ENDPOINT") or "").strip() or OPENROUTER_DECISIONS_URL,
+            api_key=_optional_stripped(source.get("OPENROUTER_API_KEY")),
             timeout_s=_parse_positive_float(
                 source.get("DAYDREAM_SYSTEM1_TIMEOUT_S"),
                 default=DEFAULT_SYSTEM1_TIMEOUT_S,
@@ -276,69 +263,25 @@ class System1Config:
                 default=DEFAULT_SYSTEM1_MAX_CONCURRENCY,
                 name="DAYDREAM_SYSTEM1_MAX_CONCURRENCY",
             ),
-            zdr=_truthy(source.get("DAYDREAM_SYSTEM1_ZDR")),
+            zdr=system1_flag_enabled(source, "DAYDREAM_SYSTEM1_ZDR"),
             data_collection=data_collection,
             fast_review_backend=_optional_stripped(source.get("DAYDREAM_SYSTEM1_FAST_REVIEW_BACKEND")),
             fast_review_model=_optional_stripped(source.get("DAYDREAM_SYSTEM1_FAST_REVIEW_MODEL")),
             fast_review_effort=_optional_stripped(source.get("DAYDREAM_SYSTEM1_FAST_REVIEW_EFFORT")),
-            skip_non_behavioral=_truthy(source.get("DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL")),
-            skip_threshold=_parse_bounded_float(
-                source.get("DAYDREAM_SYSTEM1_SKIP_THRESHOLD"),
-                default=DEFAULT_SYSTEM1_SKIP_THRESHOLD,
-                name="DAYDREAM_SYSTEM1_SKIP_THRESHOLD",
-                low=0.5,
-                high=1.0,
-            ),
-            cross_file_max=_parse_bounded_float(
-                source.get("DAYDREAM_SYSTEM1_CROSS_FILE_MAX"),
-                default=DEFAULT_SYSTEM1_CROSS_FILE_MAX,
-                name="DAYDREAM_SYSTEM1_CROSS_FILE_MAX",
-                low=0.0,
-                high=0.5,
-                low_inclusive=True,
-            ),
-            fast_reject_claims=_truthy(source.get("DAYDREAM_SYSTEM1_FAST_REJECT_CLAIMS")),
-            claim_reject_threshold=_parse_bounded_float(
-                source.get("DAYDREAM_SYSTEM1_CLAIM_REJECT_THRESHOLD"),
-                default=DEFAULT_SYSTEM1_CLAIM_REJECT_THRESHOLD,
-                name="DAYDREAM_SYSTEM1_CLAIM_REJECT_THRESHOLD",
-                low=0.5,
-                high=1.0,
-            ),
-            local_challenge_search_max=_parse_bounded_float(
-                source.get("DAYDREAM_SYSTEM1_LOCAL_CHALLENGE_SEARCH_MAX"),
-                default=DEFAULT_SYSTEM1_LOCAL_CHALLENGE_SEARCH_MAX,
-                name="DAYDREAM_SYSTEM1_LOCAL_CHALLENGE_SEARCH_MAX",
-                low=0.0,
-                high=0.5,
-                low_inclusive=True,
-            ),
+            skip_non_behavioral=system1_flag_enabled(source, "DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL"),
+            skip_threshold=_parse_bounded_float(source, "skip_threshold"),
+            cross_file_max=_parse_bounded_float(source, "cross_file_max"),
+            fast_reject_claims=system1_flag_enabled(source, "DAYDREAM_SYSTEM1_FAST_REJECT_CLAIMS"),
+            claim_reject_threshold=_parse_bounded_float(source, "claim_reject_threshold"),
+            local_challenge_search_max=_parse_bounded_float(source, "local_challenge_search_max"),
             fast_arbiter_backend=_optional_stripped(source.get("DAYDREAM_SYSTEM1_FAST_ARBITER_BACKEND")),
             fast_arbiter_model=_optional_stripped(source.get("DAYDREAM_SYSTEM1_FAST_ARBITER_MODEL")),
             fast_arbiter_effort=_optional_stripped(source.get("DAYDREAM_SYSTEM1_FAST_ARBITER_EFFORT")),
-            gate_cross_assignment=_truthy(source.get("DAYDREAM_SYSTEM1_GATE_CROSS_ASSIGNMENT")),
-            cross_assignment_threshold=_parse_bounded_float(
-                source.get("DAYDREAM_SYSTEM1_CROSS_ASSIGNMENT_THRESHOLD"),
-                default=DEFAULT_SYSTEM1_CROSS_THRESHOLD,
-                name="DAYDREAM_SYSTEM1_CROSS_ASSIGNMENT_THRESHOLD",
-                low=0.0,
-                high=0.5,
-            ),
-            diagram_min_probability=_parse_bounded_float(
-                source.get("DAYDREAM_SYSTEM1_DIAGRAM_THRESHOLD"),
-                default=DEFAULT_SYSTEM1_DIAGRAM_THRESHOLD,
-                name="DAYDREAM_SYSTEM1_DIAGRAM_THRESHOLD",
-                low=0.0,
-                high=0.999999,
-            ),
-            improve_prefilter=_truthy(source.get("DAYDREAM_SYSTEM1_IMPROVE_PREFILTER")),
-            improve_reject_threshold=_parse_bounded_float(
-                source.get("DAYDREAM_SYSTEM1_IMPROVE_REJECT_THRESHOLD"),
-                default=DEFAULT_SYSTEM1_IMPROVE_REJECT_THRESHOLD,
-                name="DAYDREAM_SYSTEM1_IMPROVE_REJECT_THRESHOLD",
-                low=0.5,
-                high=1.0,
-            ),
+            gate_cross_assignment=system1_flag_enabled(source, "DAYDREAM_SYSTEM1_GATE_CROSS_ASSIGNMENT"),
+            cross_assignment_threshold=_parse_bounded_float(source, "cross_assignment_threshold"),
+            diagram_min_probability=_parse_bounded_float(source, "diagram_min_probability"),
+            improve_prefilter=system1_flag_enabled(source, "DAYDREAM_SYSTEM1_IMPROVE_PREFILTER"),
+            improve_reject_threshold=_parse_bounded_float(source, "improve_reject_threshold"),
         )
 
 
@@ -747,6 +690,21 @@ class System1Client:
         self.config = config
         self._transport = transport
 
+    def with_remaining_budget(self, remaining_s: float | None = None) -> System1Client | None:
+        """Return a ready client clamped to *remaining_s*, or None when disabled, unkeyed, or expired."""
+        if not self.config.enabled or not self.config.api_key:
+            return None
+        if remaining_s is not None:
+            if remaining_s <= 0:
+                return None
+            if remaining_s < self.config.batch_timeout_s:
+                effective_timeout = min(self.config.timeout_s, remaining_s)
+                return type(self)(
+                    replace(self.config, timeout_s=effective_timeout, batch_timeout_s=remaining_s),
+                    transport=self._transport,
+                )
+        return self
+
     def _build_payload(
         self,
         state: Any,
@@ -786,12 +744,11 @@ class System1Client:
         }
         if http_client is not None:
             response = await http_client.post(self.config.endpoint, headers=headers, json=payload, timeout=timeout_s)
-            response.raise_for_status()
-            return response.json()
-        async with httpx.AsyncClient(transport=self._transport, timeout=timeout_s) as owned_client:
-            response = await owned_client.post(self.config.endpoint, headers=headers, json=payload)
-            response.raise_for_status()
-            return response.json()
+        else:
+            async with httpx.AsyncClient(transport=self._transport, timeout=timeout_s) as owned_client:
+                response = await owned_client.post(self.config.endpoint, headers=headers, json=payload)
+        response.raise_for_status()
+        return response.json()
 
     async def evaluate(
         self,
@@ -829,36 +786,34 @@ class System1Client:
         try:
             with anyio.fail_after(timeout_s):
                 raw = await self._post_decisions(payload, timeout_s=timeout_s, http_client=_http_client)
-        except TimeoutError:
             elapsed = max(0.0, clock.monotonic() - started)
-            logger.warning("daydream system1: request timed out after %.3fs — failing open", elapsed)
-            return DecisionOutcome(ok=False, fallback_reason="timeout", latency_s=elapsed)
-        except httpx.HTTPStatusError as exc:
-            elapsed = max(0.0, clock.monotonic() - started)
-            status = exc.response.status_code
-            logger.warning(
-                "daydream system1: HTTP %d from decisions endpoint (%s) — failing open",
-                status,
-                redact_structured_text(exc.response.text[:256]),
-            )
-            return DecisionOutcome(ok=False, fallback_reason="http_error", latency_s=elapsed)
-        except httpx.HTTPError as exc:
-            elapsed = max(0.0, clock.monotonic() - started)
-            logger.warning(
-                "daydream system1: transport error (%s) — failing open",
-                redact_structured_text(type(exc).__name__),
-            )
-            return DecisionOutcome(ok=False, fallback_reason="transport_error", latency_s=elapsed)
-
-        elapsed = max(0.0, clock.monotonic() - started)
-        try:
             parsed = parse_decisions_response(
                 raw,
                 questions,
                 request_model=self.config.model,
                 latency_s=elapsed,
             )
+        except (TimeoutError, httpx.TimeoutException):
+            elapsed = max(0.0, clock.monotonic() - started)
+            logger.warning("daydream system1: request timed out after %.3fs — failing open", elapsed)
+            return DecisionOutcome(ok=False, fallback_reason="timeout", latency_s=elapsed)
+        except httpx.HTTPStatusError as exc:
+            elapsed = max(0.0, clock.monotonic() - started)
+            logger.warning(
+                "daydream system1: HTTP %d from decisions endpoint (%s) — failing open",
+                exc.response.status_code,
+                redact_structured_text(exc.response.text[:256]),
+            )
+            return DecisionOutcome(ok=False, fallback_reason="http_error", latency_s=elapsed)
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
+            elapsed = max(0.0, clock.monotonic() - started)
+            logger.warning(
+                "daydream system1: transport error (%s) — failing open",
+                redact_structured_text(type(exc).__name__),
+            )
+            return DecisionOutcome(ok=False, fallback_reason="transport_error", latency_s=elapsed)
         except ValueError as exc:
+            elapsed = max(0.0, clock.monotonic() - started)
             logger.warning(
                 "daydream system1: malformed decisions response (%s) — failing open",
                 redact_structured_text(str(exc)),
@@ -896,7 +851,6 @@ class System1Client:
                 async with limiter:
                     remaining = deadline - clock.monotonic()
                     if remaining <= 0:
-                        results[index] = DecisionOutcome(ok=False, fallback_reason="timeout")
                         return
                     results[index] = await self.evaluate(
                         state,

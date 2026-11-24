@@ -612,25 +612,18 @@ async def _run_diagram_step(
     mode = deep_state.mode
     target_dir = ctx.work.repo
 
-    raw_s1 = os.environ.get("DAYDREAM_SYSTEM1_ENABLED")
-    if (
-        eligibility.force == "auto"
-        and eligibility.eligible_kinds()
-        and raw_s1 is not None
-        and raw_s1.strip().lower() in {"1", "true", "yes", "on"}
-    ):
-        from daydream.review_system1 import apply_system1_diagram_gate
-        from daydream.system1 import System1Client, System1Config
+    from daydream.run_config import resolve_system1_client
 
-        s1_config = System1Config.from_environment()
-        if s1_config.enabled and s1_config.api_key:
-            eligibility = await apply_system1_diagram_gate(
-                eligibility,
-                client=System1Client(s1_config),
-                diff_text=_ttt_diff_text(ctx) or "",
-                import_graph=deep_state.import_graph or {},
-                session_id=ctx.work.run_id,
-            )
+    if eligibility.force == "auto" and eligibility.eligible_kinds() and (s1_client := resolve_system1_client()):
+        from daydream.review_system1 import apply_system1_diagram_gate
+
+        eligibility = await apply_system1_diagram_gate(
+            eligibility,
+            client=s1_client,
+            diff_text=_ttt_diff_text(ctx) or "",
+            import_graph=deep_state.import_graph or {},
+            session_id=ctx.work.run_id,
+        )
 
     kinds = eligibility.eligible_kinds()
 
