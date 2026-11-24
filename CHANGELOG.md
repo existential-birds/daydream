@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Host-owned OpenRouter Decisions (`POST /api/alpha/decisions`) client for Jev / System 1
+  (`typesafe/jev-1.13`) with `noul`/`choice`/`score` primitives, context-ceiling preflight,
+  prompt-injection and security hard-deny path guards, fail-open fallback, trajectory billing,
+  and the offline `daydream corpus calibrate-system1` shadow-calibration harness
+  ([#1969](https://github.com/existential-birds/daydream/issues/1969)).
+
 ## [0.38.0] - 2026-11-24
 
 ### Added

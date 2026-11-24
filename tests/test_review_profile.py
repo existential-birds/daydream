@@ -35,7 +35,8 @@ def test_invalid_profiles_fail_closed_naming_field_and_source() -> None:
     # Host invariants are unoverridable.
     for field in ("backend", "model", "effort", "trust_mode", "egress",
                   "harbor_judge_model", "skill_name", "findings_schema",
-                  "verifier", "judge", "scoring", "gold"):
+                  "verifier", "judge", "scoring", "gold",
+                  "system1", "decision_model", "jev"):
         with pytest.raises(rp.ProfileError) as e:
             _profile(f'{field} = "x"', source="y")
         assert "host-owned" in str(e.value).lower() or field in str(e.value)
