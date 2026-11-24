@@ -346,7 +346,12 @@ class StageInputFactory:
         return chunks
 
     def _batches(self) -> list[list[dict[str, Any]]]:
-        batches = _bounded_groups([part for part in self.parts if not part.assignment.get("binary")],
+        batches = _bounded_groups(
+            [
+                part
+                for part in self.parts
+                if not part.assignment.get("binary") and not part.assignment.get("system1_triaged")
+            ],
             lambda parts: len({p.assignment['file'] for p in parts}) <= 4
             and self._remaining_bytes(self._render(parts), dispatch=True) >= 0,
             "required assignment exceeds the assignment allowance")

@@ -42,6 +42,8 @@ DEFAULT_SYSTEM1_TIMEOUT_S = 5.0
 DEFAULT_SYSTEM1_BATCH_TIMEOUT_S = 15.0
 DEFAULT_SYSTEM1_MAX_CONCURRENCY = 8
 DEFAULT_INJECTION_THRESHOLD = 0.5
+DEFAULT_SYSTEM1_SKIP_THRESHOLD = 0.98
+DEFAULT_SYSTEM1_CROSS_FILE_MAX = 0.05
 INJECTION_QUESTION_KEY = "prompt_injection_attempt"
 
 # Security- and deployment-critical paths that System 1 triage must never fast-skip.
@@ -102,6 +104,36 @@ def _parse_positive_int(raw: str | None, *, default: int, name: str) -> int:
     return parsed
 
 
+def _parse_bounded_float(
+    raw: str | None,
+    *,
+    default: float,
+    name: str,
+    low: float,
+    high: float,
+    low_inclusive: bool = False,
+) -> float:
+    if raw is None or not raw.strip():
+        return default
+    try:
+        parsed = float(raw)
+    except ValueError:
+        logger.warning("daydream system1: invalid %s=%r — using default %g", name, raw, default)
+        return default
+    lower_ok = parsed >= low if low_inclusive else parsed > low
+    if not math.isfinite(parsed) or not lower_ok or parsed > high:
+        logger.warning("daydream system1: out-of-range %s=%r — using default %g", name, raw, default)
+        return default
+    return parsed
+
+
+def _optional_stripped(raw: str | None) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    stripped = raw.strip()
+    return stripped or None
+
+
 @dataclass(frozen=True)
 class System1Config:
     """Host-owned System 1 client settings; never derived from repository review profiles."""
@@ -118,6 +150,12 @@ class System1Config:
     zdr: bool = False
     data_collection: Literal["allow", "deny"] | None = None
     hard_deny_globs: tuple[str, ...] = DEFAULT_HARD_DENY_GLOBS
+    fast_review_backend: str | None = None
+    fast_review_model: str | None = None
+    fast_review_effort: str | None = None
+    skip_non_behavioral: bool = False
+    skip_threshold: float = DEFAULT_SYSTEM1_SKIP_THRESHOLD
+    cross_file_max: float = DEFAULT_SYSTEM1_CROSS_FILE_MAX
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, str) or not self.model.strip():
@@ -136,6 +174,20 @@ class System1Config:
                 raise ValueError(f"system1 {label} must be a positive integer")
         if self.data_collection not in (None, "allow", "deny"):
             raise ValueError("system1 data_collection must be 'allow', 'deny', or None")
+        if (
+            isinstance(self.skip_threshold, bool)
+            or not isinstance(self.skip_threshold, (int, float))
+            or not math.isfinite(self.skip_threshold)
+            or not (0.5 < float(self.skip_threshold) <= 1.0)
+        ):
+            raise ValueError("system1 skip_threshold must be in (0.5, 1.0]")
+        if (
+            isinstance(self.cross_file_max, bool)
+            or not isinstance(self.cross_file_max, (int, float))
+            or not math.isfinite(self.cross_file_max)
+            or not (0.0 <= float(self.cross_file_max) <= 0.5)
+        ):
+            raise ValueError("system1 cross_file_max must be in [0.0, 0.5]")
 
     @classmethod
     def from_environment(cls, env: Mapping[str, str] | None = None) -> System1Config:
@@ -144,8 +196,7 @@ class System1Config:
         enabled = _truthy(source.get("DAYDREAM_SYSTEM1_ENABLED"))
         model = (source.get("DAYDREAM_SYSTEM1_MODEL") or "").strip() or DEFAULT_SYSTEM1_MODEL
         endpoint = (source.get("DAYDREAM_SYSTEM1_ENDPOINT") or "").strip() or OPENROUTER_DECISIONS_URL
-        raw_key = source.get("OPENROUTER_API_KEY")
-        api_key = raw_key.strip() if isinstance(raw_key, str) and raw_key.strip() else None
+        api_key = _optional_stripped(source.get("OPENROUTER_API_KEY"))
         raw_dc = (source.get("DAYDREAM_SYSTEM1_DATA_COLLECTION") or "").strip().lower()
         data_collection: Literal["allow", "deny"] | None
         if raw_dc in ("allow", "deny"):
@@ -176,6 +227,25 @@ class System1Config:
             ),
             zdr=_truthy(source.get("DAYDREAM_SYSTEM1_ZDR")),
             data_collection=data_collection,
+            fast_review_backend=_optional_stripped(source.get("DAYDREAM_SYSTEM1_FAST_REVIEW_BACKEND")),
+            fast_review_model=_optional_stripped(source.get("DAYDREAM_SYSTEM1_FAST_REVIEW_MODEL")),
+            fast_review_effort=_optional_stripped(source.get("DAYDREAM_SYSTEM1_FAST_REVIEW_EFFORT")),
+            skip_non_behavioral=_truthy(source.get("DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL")),
+            skip_threshold=_parse_bounded_float(
+                source.get("DAYDREAM_SYSTEM1_SKIP_THRESHOLD"),
+                default=DEFAULT_SYSTEM1_SKIP_THRESHOLD,
+                name="DAYDREAM_SYSTEM1_SKIP_THRESHOLD",
+                low=0.5,
+                high=1.0,
+            ),
+            cross_file_max=_parse_bounded_float(
+                source.get("DAYDREAM_SYSTEM1_CROSS_FILE_MAX"),
+                default=DEFAULT_SYSTEM1_CROSS_FILE_MAX,
+                name="DAYDREAM_SYSTEM1_CROSS_FILE_MAX",
+                low=0.0,
+                high=0.5,
+                low_inclusive=True,
+            ),
         )
 
 
@@ -550,6 +620,25 @@ def parse_decisions_response(
     )
 
 
+def charge_usage_to_recorder(
+    usage: DecisionUsage,
+    *,
+    phase: DaydreamPhase = DaydreamPhase.REVIEW,
+) -> bool:
+    """Record one System 1 DecisionUsage on the active EvidenceRecorder, returning whether one was active."""
+    recorder = get_current_recorder()
+    if recorder is None:
+        return False
+    recorder.usage.charge(
+        phase=phase.value,
+        prompt_tokens=usage.input_tokens,
+        completion_tokens=usage.output_tokens,
+        cached_tokens=usage.cached_tokens,
+        cost_usd=usage.cost_usd,
+    )
+    return True
+
+
 # --- Client ------------------------------------------------------------------
 
 
@@ -684,15 +773,7 @@ class System1Client:
             return DecisionOutcome(ok=False, fallback_reason="malformed_response", latency_s=elapsed)
 
         if record_usage:
-            recorder = get_current_recorder()
-            if recorder is not None:
-                recorder.usage.charge(
-                    phase=phase.value,
-                    prompt_tokens=parsed.usage.input_tokens,
-                    completion_tokens=parsed.usage.output_tokens,
-                    cached_tokens=parsed.usage.cached_tokens,
-                    cost_usd=parsed.usage.cost_usd,
-                )
+            charge_usage_to_recorder(parsed.usage, phase=phase)
         return DecisionOutcome(ok=True, response=parsed, latency_s=elapsed)
 
     async def evaluate_many(

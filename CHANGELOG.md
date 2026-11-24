@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pass to order discovery targets and batches highest-risk first and attach bounded advisory hints
   under `work.advisory_hints` without exposing raw author prose or altering sealed contracts
   ([#1970](https://github.com/existential-birds/daydream/issues/1970)).
+- System 1 target triage for committed reviews: Mode 1 risk-weighted tool-call budget allocation
+  (Hamilton largest-remainder preserving `_MIN_WORK_CALLS`) and optional `discovery_fast` tier
+  routing (`DAYDREAM_SYSTEM1_FAST_REVIEW_*` / `[phases.review_fast]`) for mechanical/low-risk
+  batches; plus opt-in Mode 2 non-behavioral fast-path (`DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL=1`)
+  generalizing host decisions with hard-deny/injection guards and strict `validate_committed_result`
+  attribution checks ([#1971](https://github.com/existential-birds/daydream/issues/1971)).
 
 ## [0.38.0] - 2026-11-24
 

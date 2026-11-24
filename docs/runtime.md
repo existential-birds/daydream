@@ -503,6 +503,19 @@ and the report names these files. A claim may still name or cite a binary file. 
 change of only binary files completes without a model. A host decision is not partial
 evidence, so a review whose model admitted nothing still fails.
 
+When host-owned System 1 target triage is explicitly enabled with the non-behavioral
+fast-path (`DAYDREAM_SYSTEM1_ENABLED=1` and `DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL=1`),
+a non-binary target that passes the calibrated non-behavioral, low cross-file-contract,
+prompt-injection, and security hard-deny path guards follows the same host-decision
+contract: its assignment records `system1_triaged` (`model`, `p_non_behavioral`,
+`p_cross_file`, `threshold`), it is excluded from model batches before scale and
+decomposition are computed, its sealed decision is `reviewed` with reason
+`system1_triaged: non-behavioral change (p=..., model=...)` and its assigned source,
+the report names these files, and `validate_committed_result` rejects malformed
+metadata or hard-denied security paths. Without `DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL`,
+System 1 never skips any target and uses Mode 1 only (risk-weighted call budgets and
+optional `discovery_fast` routing for mechanical/low-risk batches).
+
 ### Captured local source
 
 [`git_ops.captured_source`](../daydream/git_ops/captured_source.py) owns accepted

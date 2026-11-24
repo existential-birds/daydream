@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -118,10 +119,52 @@ def shard_scope_id(index: int) -> str:
     return f"committed:{index:05d}"
 
 
+def is_valid_system1_triaged(meta: Any, *, file_path: str) -> bool:
+    """Validate host-authored System 1 non-behavioral fast-path metadata on one assignment part."""
+    if not isinstance(meta, dict) or set(meta) != {"model", "p_non_behavioral", "p_cross_file", "threshold"}:
+        return False
+    model = meta["model"]
+    p_nb = meta["p_non_behavioral"]
+    p_cf = meta["p_cross_file"]
+    threshold = meta["threshold"]
+    if not isinstance(model, str) or not model.strip() or len(model) > 256:
+        return False
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+           for v in (p_nb, p_cf, threshold)):
+        return False
+    if not (0.5 < float(threshold) <= 1.0 and 0.0 <= float(p_nb) <= 1.0 and 0.0 <= float(p_cf) <= 0.5):
+        return False
+    if float(p_nb) < float(threshold):
+        return False
+    from daydream.system1 import path_is_hard_denied
+
+    return not path_is_hard_denied(file_path)
+
+
+def is_host_decided_part(part: dict[str, Any]) -> bool:
+    """Whether the host, rather than a review model, owns this target's decision."""
+    if part.get("binary"):
+        return True
+    meta = part.get("system1_triaged")
+    return meta is not None and is_valid_system1_triaged(meta, file_path=str(part.get("file", "")))
+
+
 def host_decision(part: dict[str, Any]) -> dict[str, Any]:
-    """The host's decision for a binary target, which has no text a model could review."""
-    return {"target_id": part["target_id"], "status": "reviewed", "reason": "binary change: no text content",
-            "evidence_refs": part["source_refs"]}
+    """The host's decision for a binary target or an opt-in System 1 non-behavioral fast-path target."""
+    if part.get("binary"):
+        return {"target_id": part["target_id"], "status": "reviewed", "reason": "binary change: no text content",
+                "evidence_refs": part["source_refs"]}
+    meta = part.get("system1_triaged")
+    if meta is not None and is_valid_system1_triaged(meta, file_path=str(part.get("file", ""))):
+        p_nb = float(meta["p_non_behavioral"])
+        model = str(meta["model"])
+        return {
+            "target_id": part["target_id"],
+            "status": "reviewed",
+            "reason": f"system1_triaged: non-behavioral change (p={p_nb:.3f}, model={model})",
+            "evidence_refs": part["source_refs"],
+        }
+    raise ValueError(f"target {part.get('target_id')!r} is not host-decided")
 
 
 # Work records, attribution, per-execution capacity evidence, the cross_assignment phase (#1628) and claim severity.
@@ -268,6 +311,8 @@ def validate_committed_result(value: dict[str, Any]) -> None:
             raise ValueError("source reference differs from planned assignment")
 
     for part in assignments:
+        if "system1_triaged" in part and not is_valid_system1_triaged(part["system1_triaged"], file_path=part["file"]):
+            raise ValueError("invalid host system1_triaged attribution on assignment")
         # Inventories retain every planned source; only submitted citations
         # share the four-reference bound. Validate each inventory identity.
         for ref in part["source_refs"]:
@@ -335,7 +380,7 @@ def validate_committed_result(value: dict[str, Any]) -> None:
         raise ValueError("terminal cause is not a retained execution stop")
     # Current accepted work decides completion; superseded attempts remain evidence only.
     if terminal["analysis_state"] == "complete" and (
-        any(not part.get("binary") for part in assignments) and not native_assignments & INVESTIGATION_KINDS
+        any(not is_host_decided_part(part) for part in assignments) and not native_assignments & INVESTIGATION_KINDS
         or claims and "challenge" not in native_assignments
         or any(c["disposition"] == "unresolved" for c in claims)
         or any(record["state"] != "accepted" for wid, record in work.items() if wid not in superseded)
@@ -377,7 +422,7 @@ def _validate_work(records: list[dict[str, Any]], work: dict[str, dict[str, Any]
     for target, decision in decided.items():
         if target not in admitted and (decision["status"] != "not_reviewed" or decision["evidence_refs"]
                                        or not decision["reason"].startswith("unsubmitted:")) and not (
-                by_target[target].get("binary") and decision == host_decision(by_target[target])):
+                is_host_decided_part(by_target[target]) and decision == host_decision(by_target[target])):
             raise ValueError("target decision lacks admitting work attribution")
 
 

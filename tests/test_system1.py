@@ -14,8 +14,14 @@ import pytest
 
 from daydream import agent, committed_review
 from daydream.committed_review import CommittedReviewRequest, run_committed_review
-from daydream.committed_review_model import validate_committed_result
+from daydream.committed_review_model import (
+    host_decision,
+    is_valid_system1_triaged,
+    planned_work_id,
+    validate_committed_result,
+)
 from daydream.config import DEFAULT_SYSTEM1_MODEL
+from daydream.config_file import DaydreamFileConfig
 from daydream.dataset import LocalRecordStore
 from daydream.eval.system1_calibration import (
     CLAIM_TRIAGE_QUESTIONS,
@@ -36,8 +42,11 @@ from daydream.review_system1 import (
     TARGET_TRIAGE_QUESTIONS,
     UNSCORED_NEUTRAL_RISK,
     ReviewPrefetchHints,
+    TargetTriage,
+    allocate_weighted_calls,
     collect_supporting_candidates,
     prepare_review_prefetch_hints,
+    resolve_fast_discovery_spec,
 )
 from daydream.run_config import FrozenAuthorDescription, RunConfig
 from daydream.system1 import (
@@ -121,10 +130,38 @@ def test_system1_config_environment_parsing_and_validation(caplog: pytest.LogCap
         {"max_concurrency": 0},
         {"max_request_tokens": True},
         {"data_collection": "other"},
+        {"skip_threshold": 0.5},
+        {"skip_threshold": 1.1},
+        {"skip_threshold": True},
+        {"cross_file_max": -0.01},
+        {"cross_file_max": 0.6},
+        {"cross_file_max": False},
     )
     for bad_kwargs in bad_configs:
         with pytest.raises(ValueError):
             System1Config(**bad_kwargs)
+
+    mode_cfg = System1Config.from_environment({
+        "DAYDREAM_SYSTEM1_ENABLED": "1",
+        "DAYDREAM_SYSTEM1_FAST_REVIEW_BACKEND": "pi",
+        "DAYDREAM_SYSTEM1_FAST_REVIEW_MODEL": "fast-model",
+        "DAYDREAM_SYSTEM1_FAST_REVIEW_EFFORT": "low",
+        "DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL": "true",
+        "DAYDREAM_SYSTEM1_SKIP_THRESHOLD": "0.97",
+        "DAYDREAM_SYSTEM1_CROSS_FILE_MAX": "0.0",
+    })
+    assert mode_cfg.fast_review_backend == "pi"
+    assert mode_cfg.fast_review_model == "fast-model"
+    assert mode_cfg.fast_review_effort == "low"
+    assert mode_cfg.skip_non_behavioral is True
+    assert mode_cfg.skip_threshold == pytest.approx(0.97)
+    assert mode_cfg.cross_file_max == pytest.approx(0.0)
+    bad_mode_cfg = System1Config.from_environment({
+        "DAYDREAM_SYSTEM1_SKIP_THRESHOLD": "bad",
+        "DAYDREAM_SYSTEM1_CROSS_FILE_MAX": "0.9",
+    })
+    assert bad_mode_cfg.skip_threshold == pytest.approx(0.98)
+    assert bad_mode_cfg.cross_file_max == pytest.approx(0.05)
 
     with pytest.raises(ValueError):
         ChoiceQuestion(criteria={})
@@ -1297,3 +1334,354 @@ async def test_committed_review_system1_prefetch_single_decomposed_and_fail_open
     fail_work1 = next(d for d in dispatches_fail if d["work_id"] == "work:1")
     assert fail_work1["targets"][0] == "m00.py"
     assert fail_work1["advisory_hints"] is None
+
+
+def test_mode1_weighted_allocation_fast_tier_routing_and_triage_rules() -> None:
+    """Weighted call allocator, fast-tier/skip predicates, fast-backend spec, and host attribution checks."""
+    # Exact sum, floor preservation, monotonicity, and tight/uniform edge cases.
+    assert allocate_weighted_calls(20, []) == []
+    assert allocate_weighted_calls(20, [5.0]) == [20]
+    assert allocate_weighted_calls(10, [1.0, 5.0, 1.0, 1.0, 1.0], floor=2) == [2, 2, 2, 2, 2]
+    assert allocate_weighted_calls(9, [1.0, 5.0, 1.0, 1.0, 1.0], floor=2) == [2, 2, 2, 2, 1]
+    assert allocate_weighted_calls(20, [2.0, 2.0, 2.0], floor=2) == [7, 7, 6]
+    assert allocate_weighted_calls(20, [0.0, 5.0], floor=2) == [10, 10]
+    weighted = allocate_weighted_calls(40, [5.0, 3.0, 1.5, 1.0, 1.0], floor=2)
+    assert sum(weighted) == 40
+    assert all(share >= 2 for share in weighted)
+    assert weighted[0] > weighted[1] > weighted[2] >= weighted[3] >= weighted[4]
+
+    # TargetTriage Mode 1 & Mode 2 safety predicates.
+    mech_ok = TargetTriage(
+        target_id="README.md",
+        file_path="README.md",
+        risk_score=0.2,
+        risk_tier="mechanical",
+        p_non_behavioral=0.99,
+        p_cross_file=0.01,
+        model=DEFAULT_SYSTEM1_MODEL,
+    )
+    assert mech_ok.qualifies_for_fast_tier() is True
+    assert mech_ok.qualifies_for_skip(skip_threshold=0.98, cross_file_max=0.05) is True
+
+    low_ok = TargetTriage(
+        target_id="util.py",
+        file_path="util.py",
+        risk_score=1.1,
+        risk_tier="low",
+        p_non_behavioral=0.99,
+        p_cross_file=0.01,
+    )
+    assert low_ok.qualifies_for_fast_tier() is True
+    assert low_ok.qualifies_for_skip(skip_threshold=0.98, cross_file_max=0.05) is False
+
+    high_risk = TargetTriage(
+        target_id="core.py",
+        file_path="core.py",
+        risk_score=3.5,
+        risk_tier="high_critical",
+        p_non_behavioral=0.05,
+        p_cross_file=0.8,
+    )
+    hard_denied = TargetTriage(
+        target_id="auth/login.py",
+        file_path="auth/login.py",
+        risk_score=PRIORITY_MAX_RISK,
+        risk_tier="high_critical",
+        hard_denied=True,
+    )
+    injected = TargetTriage(
+        target_id="doc.md",
+        file_path="doc.md",
+        risk_score=0.1,
+        risk_tier="mechanical",
+        p_non_behavioral=0.99,
+        p_cross_file=0.0,
+        injection_flagged=True,
+    )
+    cross_file_high = TargetTriage(
+        target_id="api.py",
+        file_path="api.py",
+        risk_score=0.4,
+        risk_tier="mechanical",
+        p_non_behavioral=0.99,
+        p_cross_file=0.30,
+    )
+    assert high_risk.qualifies_for_fast_tier() is False
+    assert hard_denied.qualifies_for_fast_tier() is False
+    assert hard_denied.qualifies_for_skip(skip_threshold=0.98, cross_file_max=0.05) is False
+    assert injected.qualifies_for_fast_tier() is False
+    assert injected.qualifies_for_skip(skip_threshold=0.98, cross_file_max=0.05) is False
+    assert cross_file_high.qualifies_for_fast_tier() is False
+    assert cross_file_high.qualifies_for_skip(skip_threshold=0.98, cross_file_max=0.05) is False
+    assert TargetTriage(
+        target_id="auth/readme.md",
+        file_path="auth/readme.md",
+        risk_score=0.1,
+        risk_tier="mechanical",
+        p_non_behavioral=0.99,
+        p_cross_file=0.0,
+    ).qualifies_for_skip(skip_threshold=0.98, cross_file_max=0.05) is False
+
+    hints = ReviewPrefetchHints(
+        target_risk_scores={"README.md": 0.2, "util.py": 1.1, "core.py": 3.5},
+        target_triages={"README.md": mech_ok, "util.py": low_ok, "core.py": high_risk},
+    )
+    assert hints.is_fast_tier_group(("README.md", "util.py")) is True
+    assert hints.is_fast_tier_group(("README.md", "core.py")) is False
+    assert hints.is_fast_tier_group(("README.md", "unscored.py")) is False
+    assert hints.is_fast_tier_group(()) is False
+    assert hints.group_weight(("README.md",)) == pytest.approx(1.0)
+    assert hints.group_weight(("core.py", "README.md")) == pytest.approx(5.0)
+    assert hints.group_weight(("unscored.py",)) == pytest.approx(3.0)
+
+    # resolve_fast_discovery_spec precedence and hosted isolation.
+    base_cfg = RunConfig(
+        backend="pi",
+        model="base-model",
+        file_config=DaydreamFileConfig(phases={"review_fast": {"model": "toml-fast", "reasoning_effort": "low"}}),
+    )
+    assert resolve_fast_discovery_spec(base_cfg, System1Config(enabled=False), hosted=False) is None
+    assert resolve_fast_discovery_spec(base_cfg, System1Config(enabled=True), hosted=False) == (
+        "pi",
+        "toml-fast",
+        "low",
+    )
+    assert resolve_fast_discovery_spec(base_cfg, System1Config(enabled=True), hosted=True) is None
+    assert resolve_fast_discovery_spec(
+        base_cfg,
+        System1Config(enabled=True, fast_review_model="env-fast", fast_review_effort="minimal"),
+        hosted=True,
+    ) == ("pi", "env-fast", "minimal")
+
+    # Strict validation of host-authored system1_triaged attribution.
+    valid_meta = {"model": DEFAULT_SYSTEM1_MODEL, "p_non_behavioral": 0.99, "p_cross_file": 0.01, "threshold": 0.98}
+    assert is_valid_system1_triaged(valid_meta, file_path="README.md") is True
+    assert is_valid_system1_triaged(valid_meta, file_path="auth/tokens.py") is False
+    assert is_valid_system1_triaged({**valid_meta, "p_non_behavioral": 0.95}, file_path="README.md") is False
+    assert is_valid_system1_triaged({**valid_meta, "extra": 1}, file_path="README.md") is False
+    assert is_valid_system1_triaged({**valid_meta, "model": ""}, file_path="README.md") is False
+    assert is_valid_system1_triaged({**valid_meta, "p_cross_file": True}, file_path="README.md") is False
+    with pytest.raises(ValueError, match="not host-decided"):
+        host_decision({"target_id": "a.py", "file": "a.py", "source_refs": []})
+
+
+async def test_committed_review_mode1_and_mode2_end_to_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mode 1 routes fast/heavy tiers with weighted budgets; Mode 2 skips calibrated non-behavioral targets safely."""
+    import daydream.system1 as s1_mod
+
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    monkeypatch.setenv("DAYDREAM_SYSTEM1_ENABLED", "1")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    original_client = s1_mod.System1Client
+
+    def _run_scripted() -> tuple[list[dict[str, Any]], Any]:
+        dispatches: list[dict[str, Any]] = []
+
+        async def execute(backend: Any, _cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, str | None]:
+            token = prompt.split(" ", 1)[0]
+            assignment = json.loads(prompt.split("\n")[1].removeprefix(f"{token} Committed review assignment: "))
+            work = assignment["work"]
+            binding = kwargs["host_tools"]
+            lookup = binding.host_tools["review_source"].callback
+            targets = list(work["targets"]["ids"])
+            dispatches.append({
+                "kind": work["kind"],
+                "work_id": work["work_id"],
+                "targets": targets,
+                "allocation": kwargs["budget"].limit,
+                "backend_model": getattr(backend, "model", None),
+                "backend_effort": getattr(backend, "reasoning_effort", None),
+            })
+
+            def _submit(payload: dict[str, Any]) -> dict[str, Any]:
+                call_id = f"term-{binding.calls}"
+                binding.admit(call_id, "structured_output", payload, terminal=True)
+                submitted: dict[str, Any] = binding.submit(call_id, payload)
+                return submitted
+
+            async with binding.session():
+                if work["kind"] == "cross_assignment":
+                    accepted = _submit({"targets": [], "claims": []})
+                else:
+                    decisions = []
+                    for target_id in targets:
+                        fetched = lookup({
+                            "target_id": target_id,
+                            "path": None,
+                            "historical_context": None,
+                            "cursor": None,
+                        })
+                        ref = fetched["target"]["source_options"][0]
+                        decisions.append({
+                            "target_id": target_id,
+                            "status": "reviewed",
+                            "reason": "Inspected.",
+                            "evidence_refs": [
+                                {"source_id": ref["source_id"], "basis": "supplied_diff", "source_range": None}
+                            ],
+                        })
+                    accepted = _submit({"targets": decisions, "claims": []})
+                binding.native_settled = True
+            return accepted, None, None
+
+        return dispatches, execute
+
+    # Repo with 20 modules (5 batches) + 1 hard-denied auth file (6 batches total).
+    repo = tmp_path / "repo"
+    base_files = {f"m{idx:02d}.py": f"VAL = {idx}\n" for idx in range(20)}
+    base_files["auth/tokens.py"] = "def check() -> bool:\n    return True\n"
+    feature_files = {f"m{idx:02d}.py": f"VAL = {idx + 1}\n" for idx in range(20)}
+    feature_files["auth/tokens.py"] = "def check() -> bool:\n    return False\n"
+    seed_feature_branch(repo, base=base_files, feature=feature_files)
+    base_sha = git(repo, "rev-parse", "main")
+
+    def triage_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        path = body["state"]["path"]
+        assert path != "auth/tokens.py"
+        if path == "m19.py":
+            ans = {
+                "non_behavioral": {"type": "noul", "noul": 0.02},
+                "cross_file_contract": {"type": "noul", "noul": 0.80},
+                "risk_tier": {"type": "choice", "choice": "high_critical"},
+                "defect_risk": {"type": "score", "score": 3.9},
+                "prompt_injection_attempt": {"type": "noul", "noul": 0.01},
+            }
+        elif path == "m18.py":
+            # Below skip threshold (0.90 < 0.98), still low risk for Mode 1.
+            ans = {
+                "non_behavioral": {"type": "noul", "noul": 0.90},
+                "cross_file_contract": {"type": "noul", "noul": 0.02},
+                "risk_tier": {"type": "choice", "choice": "low"},
+                "defect_risk": {"type": "score", "score": 0.8},
+                "prompt_injection_attempt": {"type": "noul", "noul": 0.01},
+            }
+        elif path == "m17.py":
+            # High cross-file contract probability blocks both skip and fast tier.
+            ans = {
+                "non_behavioral": {"type": "noul", "noul": 0.99},
+                "cross_file_contract": {"type": "noul", "noul": 0.45},
+                "risk_tier": {"type": "choice", "choice": "mechanical"},
+                "defect_risk": {"type": "score", "score": 0.4},
+                "prompt_injection_attempt": {"type": "noul", "noul": 0.01},
+            }
+        elif path == "m16.py":
+            # Injection-flagged: fails closed to full discovery & never skipped.
+            ans = {
+                "non_behavioral": {"type": "noul", "noul": 0.99},
+                "cross_file_contract": {"type": "noul", "noul": 0.01},
+                "risk_tier": {"type": "choice", "choice": "mechanical"},
+                "defect_risk": {"type": "score", "score": 0.1},
+                "prompt_injection_attempt": {"type": "noul", "noul": 0.92},
+            }
+        else:
+            # m00..m15: pure mechanical non-behavioral changes.
+            ans = {
+                "non_behavioral": {"type": "noul", "noul": 0.995},
+                "cross_file_contract": {"type": "noul", "noul": 0.01},
+                "risk_tier": {"type": "choice", "choice": "mechanical"},
+                "defect_risk": {"type": "score", "score": 0.1},
+                "prompt_injection_attempt": {"type": "noul", "noul": 0.01},
+            }
+        return httpx.Response(200, json={
+            "model": DEFAULT_SYSTEM1_MODEL,
+            "answers": ans,
+            "usage": {"input_tokens": 80, "output_tokens": 0, "cost": 0.00000336},
+        })
+
+    monkeypatch.setattr(
+        s1_mod,
+        "System1Client",
+        lambda cfg: original_client(cfg, transport=httpx.MockTransport(triage_handler)),
+    )
+
+    # --- 1. Mode 1: weighted call budgets + discovery_fast tier routing, zero skipped targets ---
+    monkeypatch.delenv("DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL", raising=False)
+    monkeypatch.setenv("DAYDREAM_SYSTEM1_FAST_REVIEW_MODEL", "pi-fast-tier")
+    monkeypatch.setenv("DAYDREAM_SYSTEM1_FAST_REVIEW_EFFORT", "low")
+    dispatches_m1, exec_m1 = _run_scripted()
+    monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=exec_m1, console=agent.console))
+    cfg = RunConfig(
+        backend="pi",
+        model="pi-full-tier",
+        output_mode="review",
+        review_profile=_profile_with_pipeline(reviewer_investigation_budget_s=90, reviewer_tool_call_budget=48),
+    )
+    res_m1 = await run_committed_review(CommittedReviewRequest(repo, base_sha, config=cfg))
+    val_m1 = res_m1.to_dict()
+    validate_committed_result(val_m1)
+    assert res_m1.complete and val_m1["settings"]["assignment_policy"]["decomposed"] is True
+    assert "discovery_fast" in val_m1["settings"]["native_contexts"]
+
+    disc_m1 = [d for d in dispatches_m1 if d["kind"] == "discovery"]
+    cross_m1 = next(d for d in dispatches_m1 if d["kind"] == "cross_assignment")
+    assert len(disc_m1) == 6
+    # Sum of weighted allocations equals local allowance (scale=2 -> 96 total -> 48 inv -> 12 cross -> 36 local).
+    assert sum(d["allocation"] for d in disc_m1) == 36
+    assert all(d["allocation"] >= 2 for d in disc_m1)
+    # 3 high-risk/security/injection batches get full backend (9 calls each) vs 3 mechanical batches on fast (3 calls).
+    full_dispatches = [d for d in disc_m1 if d["backend_model"] == "pi-full-tier"]
+    fast_dispatches = [d for d in disc_m1 if d["backend_model"] == "pi-fast-tier"]
+    assert len(full_dispatches) == 3 and len(fast_dispatches) == 3
+    assert all(d["backend_effort"] == "low" for d in fast_dispatches)
+    assert min(d["allocation"] for d in full_dispatches) > max(d["allocation"] for d in fast_dispatches)
+    assert cross_m1["backend_model"] == "pi-full-tier"
+    assert val_m1["settings"]["system1_routing"][cross_m1["work_id"]] == "discovery"
+    assert sum(v == "discovery_fast" for v in val_m1["settings"]["system1_routing"].values()) == 3
+
+    # --- 2. Mode 2: opt-in non-behavioral fast-path drops B from 6 -> 2, scale 2 -> 1, undecomposed ---
+    monkeypatch.setenv("DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL", "1")
+    monkeypatch.delenv("DAYDREAM_SYSTEM1_FAST_REVIEW_MODEL", raising=False)
+    monkeypatch.delenv("DAYDREAM_SYSTEM1_FAST_REVIEW_EFFORT", raising=False)
+    dispatches_m2, exec_m2 = _run_scripted()
+    monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=exec_m2, console=agent.console))
+    res_m2 = await run_committed_review(CommittedReviewRequest(repo, base_sha, config=cfg))
+    val_m2 = res_m2.to_dict()
+    validate_committed_result(val_m2)
+    assert res_m2.complete
+    # 16 targets (m00..m15) skipped -> 5 targets remain (auth/tokens.py, m16..m19) -> 2 batches <= 4 -> undecomposed!
+    assert val_m2["settings"]["assignment_policy"]["decomposed"] is False
+    assert val_m2["settings"]["assignment_policy"]["planned_assignments"] == 1
+    assert val_m2["settings"]["limits"]["scale"] == 1
+    assert len(dispatches_m2) == 1
+    assert set(dispatches_m2[0]["targets"]) == {"auth/tokens.py", "m16.py", "m17.py", "m18.py", "m19.py"}
+    decisions_m2 = {
+        d["target_id"]: d
+        for outcome in val_m2["terminal_result"]["stack_outcomes"]
+        for d in outcome["target_decisions"]
+    }
+    assert decisions_m2["m00.py"]["status"] == "reviewed"
+    assert decisions_m2["m00.py"]["reason"].startswith("system1_triaged: non-behavioral change")
+    assert "Triaged by host System 1 as non-behavioral changes:" in (repo / ".review-output.md").read_text()
+
+    # Forging system1_triaged onto a hard-denied security file fails validate_committed_result even if re-hashed.
+    forged = json.loads(json.dumps(val_m2))
+    auth_part = next(p for p in forged["assignments"] if p["file"] == "auth/tokens.py")
+    auth_part["system1_triaged"] = {
+        "model": DEFAULT_SYSTEM1_MODEL,
+        "p_non_behavioral": 0.999,
+        "p_cross_file": 0.0,
+        "threshold": 0.98,
+    }
+    forged["planned_work_id"] = planned_work_id(forged["analyzed_revision"], forged["assignments"])
+    with pytest.raises(ValueError, match="invalid host system1_triaged"):
+        validate_committed_result(forged)
+
+    # --- 3. Mode 2 all-non-behavioral PR completes with 0 System 2 calls and bills System 1 usage ---
+    docs_repo = tmp_path / "docs_only"
+    seed_feature_branch(docs_repo, base={"README.md": "# v1\n"}, feature={"README.md": "# v2\n"})
+    docs_base = git(docs_repo, "rev-parse", "main")
+    dispatches_docs, exec_docs = _run_scripted()
+    monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=exec_docs, console=agent.console))
+    res_docs = await run_committed_review(CommittedReviewRequest(docs_repo, docs_base, config=cfg))
+    val_docs = res_docs.to_dict()
+    validate_committed_result(val_docs)
+    assert res_docs.complete
+    assert dispatches_docs == []
+    assert val_docs["settings"]["assignment_policy"]["planned_assignments"] == 0
+    docs_traj = read_trajectory(docs_repo / ".daydream" / "runs" / val_docs["run_id"] / RUN_DOCUMENT_NAME)
+    assert docs_traj["final_metrics"]["total_prompt_tokens"] == 80
+    assert docs_traj["final_metrics"]["total_cost_usd"] > 0

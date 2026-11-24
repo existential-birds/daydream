@@ -54,6 +54,7 @@ from daydream.committed_review_model import (
     fragment_spans,
     head_line,
     host_decision,
+    is_host_decided_part,
     planned_work_id,
     receipt_schema,
     reference_covers,
@@ -202,7 +203,7 @@ class Review:
         # admits claim lines without changing the canonical fragment identity.
         self._fragment_spans = fragment_spans(self.assignments)
         self._decisions: dict[str, dict[str, Any]] = {
-            part["target_id"]: host_decision(part) for part in self.assignments if part.get("binary")}
+            part["target_id"]: host_decision(part) for part in self.assignments if is_host_decided_part(part)}
         self._host_decided = frozenset(self._decisions)
         self._claims: dict[str, dict[str, Any]] = {}
         self._sealed = False
@@ -1122,6 +1123,55 @@ def bind_native_context(settings: dict[str, Any], kind: str, phase: str, name: s
     settings["native_contexts"][kind] = {"backend": name, **backend.bind_review_context(source), "phase": phase}
 
 
+def _system1_flag_enabled(env: Mapping[str, str], key: str = "DAYDREAM_SYSTEM1_ENABLED") -> bool:
+    raw = env.get(key)
+    return raw is not None and raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def bind_optional_fast_discovery_backend(
+    config: RunConfig,
+    settings: dict[str, Any],
+    backends: dict[str, Any],
+    source: Path,
+    *,
+    env: Mapping[str, str] | None = None,
+    hosted_input: BackendExecutionInput | None = None,
+) -> None:
+    """Bind an optional fast discovery backend when System 1 Mode 1 tier routing is configured."""
+    effective_env = os.environ if env is None else env
+    if not _system1_flag_enabled(effective_env):
+        return
+    from daydream.backends import create_backend
+    from daydream.review_system1 import resolve_fast_discovery_spec
+    from daydream.system1 import System1Config
+
+    sys1_config = System1Config.from_environment(effective_env)
+    spec = resolve_fast_discovery_spec(config, sys1_config, hosted=hosted_input is not None)
+    if spec is None:
+        return
+    fast_name, fast_model, fast_effort = spec
+    try:
+        fast_exec_input = (
+            hosted_input
+            if hosted_input is not None
+            else BackendExecutionInput.from_environment(dict(effective_env), backend=fast_name)
+        )
+    except ValueError:
+        raise ValueError(host_tools_refusal("discovery_fast", fast_name)) from None
+    kwargs: dict[str, Any] = {
+        "model": fast_model,
+        "reasoning_effort": fast_effort,
+        "execution_input": fast_exec_input,
+    }
+    if fast_name == "pi":
+        kwargs["cwd"] = source
+    fast_backend: Any = create_backend(fast_name, **kwargs)
+    bind_native_context(settings, "discovery_fast", "review_fast", fast_name, fast_backend, source)
+    if hosted_input is not None:
+        await fast_backend.validate_hosted_policy()
+    backends["discovery_fast"] = fast_backend
+
+
 @dataclass
 class ReviewProgram:
     """Planned review work on a caller-owned workspace, artifact session, recorder and backends."""
@@ -1180,6 +1230,55 @@ async def plan_review(
         change=CanonicalChange.capture(diff_path, index_path, work.captured_source),
         revision=revision, read_only=True,
     ))
+    precomputed_triages: Mapping[str, Any] | None = None
+    pending_usage: tuple[Any, ...] = ()
+    effective_env = os.environ if system1_env is None else system1_env
+    if _system1_flag_enabled(effective_env) and _system1_flag_enabled(
+        effective_env, "DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL"
+    ):
+        from daydream.review_system1 import triage_targets
+        from daydream.system1 import System1Client, System1Config
+
+        sys1_config = System1Config.from_environment(effective_env)
+        if sys1_config.enabled and sys1_config.api_key and sys1_config.skip_non_behavioral:
+            non_binary_diffs = {
+                part.assignment["target_id"]: (part.assignment["file"], part.diff)
+                for part in inputs.parts
+                if not part.assignment.get("binary")
+            }
+            if non_binary_diffs:
+                triages, pending_usage = await triage_targets(
+                    client=System1Client(sys1_config),
+                    target_diffs=non_binary_diffs,
+                    session_id=run_id,
+                )
+                precomputed_triages = triages
+                skipped_targets: list[str] = []
+                for part in inputs.parts:
+                    if part.assignment.get("binary"):
+                        continue
+                    tid = part.assignment["target_id"]
+                    triage = triages.get(tid)
+                    if triage is not None and triage.qualifies_for_skip(
+                        skip_threshold=sys1_config.skip_threshold,
+                        cross_file_max=sys1_config.cross_file_max,
+                    ):
+                        assert triage.p_non_behavioral is not None and triage.p_cross_file is not None
+                        part.assignment["system1_triaged"] = {
+                            "model": triage.model or sys1_config.model,
+                            "p_non_behavioral": round(triage.p_non_behavioral, 4),
+                            "p_cross_file": round(triage.p_cross_file, 4),
+                            "threshold": sys1_config.skip_threshold,
+                        }
+                        skipped_targets.append(tid)
+                if skipped_targets:
+                    inputs.assignment_batches = inputs._batches()
+                    settings["system1_triage"] = {
+                        "mode": "fast_path",
+                        "model": sys1_config.model,
+                        "threshold": sys1_config.skip_threshold,
+                        "skipped_targets": skipped_targets,
+                    }
     # Both allowances grow with the change by the factor the staged reviewer used. Only the default profile's
     # wall grows, with the diff tier: any other profile's wall is the ceiling it states.
     tier = review_scale_for_diff(inputs.change.text)
@@ -1195,7 +1294,8 @@ async def plan_review(
         # Assignments and the sealed result carry what review_source serves, never the text itself.
         settings["historical_context"] = deepcopy(review.historical_context)
     schedule = _Schedule(review, backends, tool_calls, settings, started=started,
-                         deadline=finish - _FINALIZATION_S, system1_env=system1_env)
+                         deadline=finish - _FINALIZATION_S, system1_env=system1_env,
+                         precomputed_triages=precomputed_triages, pending_usage=pending_usage)
     return ReviewProgram(review, schedule, settings, backends, finish)
 
 
@@ -1305,6 +1405,14 @@ async def _run_committed_review(
         backends[kind] = backend
         if hosted is not None:
             await backend.validate_hosted_policy()
+    await bind_optional_fast_discovery_backend(
+        config,
+        settings,
+        backends,
+        source,
+        env=None if hosted is None else hosted.environment,
+        hosted_input=hosted_input,
+    )
     if prepared_source is not None:
         source = prepared_source
     owner = resolve_private_workspace_owner(
@@ -1524,10 +1632,15 @@ class _Schedule:
 
     def __init__(self, review: Review, backends: dict[str, Backend], tool_calls: int,
                  settings: dict[str, Any], *, started: float, deadline: float,
-                 system1_env: Mapping[str, str] | None = None) -> None:
+                 system1_env: Mapping[str, str] | None = None,
+                 precomputed_triages: Mapping[str, Any] | None = None,
+                 pending_usage: tuple[Any, ...] = ()) -> None:
         self.review, self.backends, self.settings = review, backends, settings
         self._system1_env = system1_env
+        self._precomputed_triages = precomputed_triages
+        self._pending_usage = pending_usage
         self._prefetch_hints: Any = None
+        self._work_routes: dict[str, str] = {}
         self.ledger = BudgetLedger("committed", deadline=deadline, limit=tool_calls, investigation=True,
                                    start_floor=1)
         window = deadline - started
@@ -1569,12 +1682,19 @@ class _Schedule:
     async def _prepare_system1_hints(self) -> None:
         """Compute optional advisory System 1 hints and risk ordering; never import or fail when disabled."""
         env = os.environ if self._system1_env is None else self._system1_env
-        raw_enabled = env.get("DAYDREAM_SYSTEM1_ENABLED")
-        if raw_enabled is None or raw_enabled.strip().lower() not in {"1", "true", "yes", "on"}:
+        if not _system1_flag_enabled(env):
             return
         from daydream.review_system1 import prepare_review_prefetch_hints
-        from daydream.system1 import System1Client, System1Config
+        from daydream.system1 import System1Client, System1Config, charge_usage_to_recorder
 
+        if self._pending_usage:
+            async with phase_scope(DaydreamPhase.REVIEW, stage="system1-prefetch"):
+                for usage in self._pending_usage:
+                    charge_usage_to_recorder(usage, phase=DaydreamPhase.REVIEW)
+            self._pending_usage = ()
+
+        if not self.batches:
+            return
         config = System1Config.from_environment(env)
         if not config.enabled or not config.api_key:
             return
@@ -1594,6 +1714,7 @@ class _Schedule:
                 historical_fields=review._historical,
                 session_id=review.run_id,
                 remaining_s=self.local.remaining_s(),
+                precomputed_triages=self._precomputed_triages,
             )
 
     def _order_targets(self, targets: tuple[str, ...]) -> tuple[str, ...]:
@@ -1602,11 +1723,23 @@ class _Schedule:
         ordered: tuple[str, ...] = self._prefetch_hints.order_targets(targets, self.review._index)
         return ordered
 
+    def _backend_for_work(self, work: _Work) -> tuple[str, Backend]:
+        if work.kind == "challenge":
+            return "challenge", self.backends["challenge"]
+        if (
+            work.kind in {"discovery", "follow_up"}
+            and "discovery_fast" in self.backends
+            and self._prefetch_hints is not None
+            and self._prefetch_hints.is_fast_tier_group(work.targets)
+        ):
+            return "discovery_fast", self.backends["discovery_fast"]
+        return "discovery", self.backends["discovery"]
+
     async def run(self, recorder: Any) -> None:
         review = self.review
-        if self.batches:
+        if self.batches or self._pending_usage:
             await self._prepare_system1_hints()
-        # A change of only binary files leaves no batch: the host decided every target.
+        # A change of only binary or host-triaged files leaves no batch: the host decided every target.
         if self.batches and not self.decompose:
             ordered = self._order_targets(tuple(t for batch in self.batches for t in batch))
             (work_id,) = review.plan("discovery", [ordered])
@@ -1655,6 +1788,8 @@ class _Schedule:
                 await self._dispatch(last[0], self.ledger, {"finalization_s": _FINALIZATION_S})
             else:
                 await self._round(last, recorder, self.ledger, {"finalization_s": _FINALIZATION_S})
+        if self._work_routes:
+            self.settings["system1_routing"] = dict(self._work_routes)
 
     def _refuse(self, assignment: str, stop: StopRecord) -> None:
         """A dispatch the schedule refuses: its ledger's stop is retained as that work's execution entry."""
@@ -1678,9 +1813,18 @@ class _Schedule:
 
     async def _round(self, work_ids: list[str], recorder: Any, parent: BudgetLedger,
                      reserves: dict[str, Any]) -> None:
-        backend = self.backends["challenge" if self.review.work[work_ids[0]].kind == "challenge" else "discovery"]
+        first_kind = self.review.work[work_ids[0]].kind
+        backend = self.backends["challenge" if first_kind == "challenge" else "discovery"]
         limiter = anyio.CapacityLimiter(effective_fanout_concurrency(_FANOUT_CEILING, backend))
         unsupported: list[UnsupportedHostedPolicy] = []
+
+        if first_kind != "challenge" and self._prefetch_hints is not None and self._prefetch_hints.target_triages:
+            from daydream.review_system1 import allocate_weighted_calls
+
+            weights = [self._prefetch_hints.group_weight(self.review.work[wid].targets) for wid in work_ids]
+            allocations = allocate_weighted_calls(_remaining(parent), weights, floor=_MIN_WORK_CALLS)
+        else:
+            allocations = _split(_remaining(parent), len(work_ids))
 
         async def child(work_id: str, allocation: int) -> None:
             async with limiter, maybe_fork(recorder, f"committed-{work_id}"):
@@ -1690,7 +1834,7 @@ class _Schedule:
                     unsupported.append(exc)
 
         async with anyio.create_task_group() as group:
-            for work_id, allocation in zip(work_ids, _split(_remaining(parent), len(work_ids)), strict=True):
+            for work_id, allocation in zip(work_ids, allocations, strict=True):
                 group.start_soon(child, work_id, allocation)
         if unsupported:
             raise unsupported[0]
@@ -1699,11 +1843,13 @@ class _Schedule:
                         allocation: int | None = None) -> None:
         """Run one work item on its own ledger carved from ``parent`` (its remaining calls by default)."""
         review, profile = self.review, self.settings
-        kind = review.work[work_id].kind
-        budget = parent.carve(f"committed:{kind}", limit=allocation, reserved=parent.reserved)
-        backend = self.backends["challenge" if kind == "challenge" else "discovery"]
-        repo = review.inputs.work.repo
         work = review.work[work_id]
+        kind = work.kind
+        budget = parent.carve(f"committed:{kind}", limit=allocation, reserved=parent.reserved)
+        route_key, backend = self._backend_for_work(work)
+        if self._prefetch_hints is not None:
+            self._work_routes[work_id] = route_key
+        repo = review.inputs.work.repo
         binding, schema = review.open(work_id, budget=budget, reserves=reserves)
         pending = review.pending()
         work_context = review.context(work_id)
