@@ -1458,3 +1458,279 @@ async def prepare_cross_assignment_plan(
         fallback=p_cross_needed is None,
         model=model_name,
     )
+
+
+# --- Diagram auto semantic pre-gate & Improve xhigh vetting triage (#1974) ---
+
+DIAGRAM_SEQUENCE_QUESTION = NoulQuestion(
+    instructions=(
+        "Does this change introduce or materially modify a multi-component interaction flow "
+        "that a sequence diagram would clarify for a reviewer?"
+    ),
+    true_criteria=(
+        "Introduces or meaningfully alters cross-component calls, async handoffs, protocol flows, "
+        "or request/response orchestration across modules/services."
+    ),
+    false_criteria=(
+        "Mechanical refactor, bulk rename, repetitive boilerplate, or flat changes where a "
+        "sequence diagram adds no clarifying insight."
+    ),
+)
+
+DIAGRAM_FLOWCHART_QUESTION = NoulQuestion(
+    instructions=(
+        "Does this change introduce or materially modify non-trivial branching or state-machine "
+        "logic that a flowchart would clarify for a reviewer?"
+    ),
+    true_criteria=(
+        "Introduces or alters meaningful decision trees, fallback paths, retry/error states, "
+        "or non-trivial control flow in a changed function."
+    ),
+    false_criteria=(
+        "Simple input validation guards, mechanical table/switch additions, or routine boilerplate "
+        "that needs no flowchart."
+    ),
+)
+
+IMPROVE_VET_TRIAGE_QUESTIONS: dict[str, DecisionQuestion] = with_injection_guard({
+    "speculative_noise": NoulQuestion(
+        instructions=(
+            "Is this audit candidate clearly speculative, purely stylistic/nitpicky, or unsupported "
+            "by the cited source excerpt?"
+        ),
+        true_criteria=(
+            "Clearly speculative, stylistic preference without real failure mode, or contradicted "
+            "by the cited source excerpt."
+        ),
+        false_criteria=(
+            "Plausible, concrete maintainability, correctness, security, or performance issue "
+            "warranting deep verification."
+        ),
+    ),
+    "concrete_impact": ScoreQuestion(
+        instructions="Rate the concrete engineering impact and trigger strength of this audit candidate.",
+        criteria=[
+            "Noise or unsupported speculation",
+            "Minimal/cosmetic impact only",
+            "Moderate localized improvement",
+            "Strong concrete issue with clear trigger",
+            "High-leverage correctness, security, or architectural risk",
+        ],
+    ),
+})
+
+DIAGRAM_DIFF_EXCERPT_MAX_BYTES = 12_288
+IMPROVE_PREFILTER_IMPACT_MAX = 1.0
+
+
+async def apply_system1_diagram_gate(
+    eligibility: Any,
+    *,
+    client: System1Client,
+    diff_text: str,
+    import_graph: Mapping[str, set[str]],
+    session_id: str | None = None,
+) -> Any:
+    """Apply System 1 semantic pre-checks to ``--diagram auto`` eligibility; fail open on errors."""
+    if eligibility.force != "auto" or not client.config.enabled or not client.config.api_key:
+        return eligibility
+    questions: dict[str, DecisionQuestion] = {}
+    if eligibility.sequence.eligible:
+        questions["sequence_clarifies"] = DIAGRAM_SEQUENCE_QUESTION
+    if eligibility.flowchart.eligible:
+        questions["flowchart_clarifies"] = DIAGRAM_FLOWCHART_QUESTION
+    if not questions:
+        return eligibility
+
+    from daydream.deep.diagram_trigger import KindDecision
+
+    state = {
+        "code_files": list(eligibility.code_files[:40]),
+        "modules": dict(list(eligibility.modules.items())[:40]),
+        "services": dict(list(eligibility.services.items())[:40]),
+        "cross_module_edges": eligibility.cross_module_edges,
+        "import_edges": [
+            [src, dst]
+            for src, dsts in sorted(import_graph.items())
+            for dst in sorted(dsts)
+        ][:40],
+        "candidate_roots": [
+            {
+                "file": root.file,
+                "name": root.name,
+                "line": root.line,
+                "branch_points": root.branch_points,
+            }
+            for root in eligibility.candidate_roots[:10]
+        ],
+        "diff_excerpt": truncate_utf8_to_budget(diff_text, DIAGRAM_DIFF_EXCERPT_MAX_BYTES),
+    }
+    outcome = await client.evaluate(
+        state,
+        with_injection_guard(questions),
+        phase=DaydreamPhase.DIAGRAM,
+        session_id=session_id,
+        record_usage=True,
+    )
+    if not outcome.ok or injection_detected(outcome):
+        return eligibility
+
+    threshold = client.config.diagram_min_probability
+    sequence_decision = eligibility.sequence
+    flowchart_decision = eligibility.flowchart
+    if "sequence_clarifies" in questions:
+        prob = outcome.noul("sequence_clarifies")
+        if prob is not None and prob < threshold:
+            sequence_decision = KindDecision(
+                eligible=False,
+                rule="system1-gate",
+                reason=(
+                    f"System 1 semantic gate skipped sequence diagram "
+                    f"(p={prob:.3f} < {threshold:.2f}; no clarifying cross-component flow)."
+                ),
+            )
+    if "flowchart_clarifies" in questions:
+        prob = outcome.noul("flowchart_clarifies")
+        if prob is not None and prob < threshold:
+            flowchart_decision = KindDecision(
+                eligible=False,
+                rule="system1-gate",
+                reason=(
+                    f"System 1 semantic gate skipped flowchart diagram "
+                    f"(p={prob:.3f} < {threshold:.2f}; no clarifying branching logic)."
+                ),
+            )
+    if sequence_decision is eligibility.sequence and flowchart_decision is eligibility.flowchart:
+        return eligibility
+    return replace(eligibility, sequence=sequence_decision, flowchart=flowchart_decision)
+
+
+@dataclass(frozen=True)
+class ImproveVetCandidateScore:
+    """System 1 pre-vetting triage score for one Improve audit candidate."""
+
+    fingerprint: str
+    p_noise: float | None = None
+    concrete_impact: float | None = None
+    injection_flagged: bool = False
+    fallback: bool = False
+    model: str | None = None
+
+    def qualifies_for_prefilter(self, *, reject_threshold: float) -> bool:
+        if self.injection_flagged or self.fallback:
+            return False
+        if self.p_noise is None or self.p_noise < reject_threshold:
+            return False
+        return self.concrete_impact is not None and self.concrete_impact <= IMPROVE_PREFILTER_IMPACT_MAX
+
+    def priority_key(self, original_index: int) -> tuple[float, float, int]:
+        """Sort highest-signal, injection-flagged, and fallback candidates first."""
+        if self.injection_flagged or self.fallback:
+            return (-PRIORITY_MAX_RISK, 0.0, original_index)
+        impact = self.concrete_impact if self.concrete_impact is not None else 2.0
+        noise = self.p_noise if self.p_noise is not None else 0.5
+        return (-impact, noise, original_index)
+
+
+async def triage_improve_vet_candidates(
+    candidates: Sequence[dict[str, Any]],
+    *,
+    client: System1Client,
+    repo: Path,
+    session_id: str | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Score Improve audit candidates with System 1 for signal-ordered batching and opt-in pre-filtering.
+
+    Reads only bounded excerpts confined to *repo* (preserving snapshot-root isolation).
+    Returns ``(ordered_for_vet, prefiltered_audit_records)``.
+    """
+    if not candidates or not client.config.enabled or not client.config.api_key:
+        return list(candidates), []
+
+    def _collect_excerpts() -> list[str]:
+        excerpts: list[str] = []
+        for finding in candidates:
+            path = str(finding.get("path") or "")
+            raw_line = finding.get("line")
+            line = raw_line if isinstance(raw_line, int) else None
+            excerpts.append(
+                extract_claim_enclosing_source(repo, path, line, radius=20, max_bytes=3072)
+                if path
+                else ""
+            )
+        return excerpts
+
+    excerpts = await anyio.to_thread.run_sync(_collect_excerpts)
+    items: list[tuple[Any, Mapping[str, DecisionQuestion]]] = []
+    for finding, excerpt in zip(candidates, excerpts, strict=True):
+        items.append((
+            {
+                "category": finding.get("category"),
+                "title": finding.get("title", ""),
+                "path": finding.get("path", ""),
+                "line": finding.get("line"),
+                "severity": finding.get("severity"),
+                "confidence": finding.get("confidence"),
+                "summary": finding.get("summary") or finding.get("description") or finding.get("claim", ""),
+                "evidence": finding.get("evidence", []),
+                "source_excerpt": excerpt,
+            },
+            IMPROVE_VET_TRIAGE_QUESTIONS,
+        ))
+
+    outcomes = await client.evaluate_many(
+        items,
+        phase=DaydreamPhase.VET,
+        session_id=session_id,
+        record_usage=True,
+    )
+
+    scores: list[ImproveVetCandidateScore] = []
+    for finding, outcome in zip(candidates, outcomes, strict=True):
+        fp = str(finding.get("fingerprint") or "")
+        if not outcome.ok or outcome.response is None:
+            scores.append(ImproveVetCandidateScore(fingerprint=fp, fallback=True))
+            continue
+        if injection_detected(outcome):
+            scores.append(ImproveVetCandidateScore(
+                fingerprint=fp,
+                injection_flagged=True,
+                model=outcome.response.model,
+            ))
+            continue
+        impact_ans = outcome.score("concrete_impact")
+        scores.append(ImproveVetCandidateScore(
+            fingerprint=fp,
+            p_noise=outcome.noul("speculative_noise"),
+            concrete_impact=impact_ans.score if impact_ans is not None else None,
+            model=outcome.response.model,
+        ))
+
+    kept_indexed: list[tuple[int, dict[str, Any], ImproveVetCandidateScore]] = []
+    prefiltered: list[dict[str, Any]] = []
+    for idx, (finding, score) in enumerate(zip(candidates, scores, strict=True)):
+        if client.config.improve_prefilter and score.qualifies_for_prefilter(
+            reject_threshold=client.config.improve_reject_threshold,
+        ):
+            assert score.p_noise is not None and score.concrete_impact is not None
+            prefiltered.append({
+                "fingerprint": score.fingerprint,
+                "category": finding.get("category", "unknown"),
+                "title": finding.get("title", ""),
+                "path": finding.get("path", ""),
+                "line": finding.get("line"),
+                "p_noise": round(score.p_noise, 4),
+                "concrete_impact": round(score.concrete_impact, 4),
+                "threshold": client.config.improve_reject_threshold,
+                "model": score.model or client.config.model,
+                "reason": (
+                    f"system1_prefiltered: speculative/unsupported noise "
+                    f"(p={score.p_noise:.3f} >= {client.config.improve_reject_threshold:.2f}, "
+                    f"impact={score.concrete_impact:.2f}, model={score.model or client.config.model})"
+                ),
+            })
+            continue
+        kept_indexed.append((idx, finding, score))
+
+    kept_indexed.sort(key=lambda item: item[2].priority_key(item[0]))
+    return [finding for _, finding, _ in kept_indexed], prefiltered

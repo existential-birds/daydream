@@ -47,6 +47,8 @@ DEFAULT_SYSTEM1_CROSS_FILE_MAX = 0.05
 DEFAULT_SYSTEM1_CLAIM_REJECT_THRESHOLD = 0.95
 DEFAULT_SYSTEM1_LOCAL_CHALLENGE_SEARCH_MAX = 0.15
 DEFAULT_SYSTEM1_CROSS_THRESHOLD = 0.10
+DEFAULT_SYSTEM1_DIAGRAM_THRESHOLD = 0.40
+DEFAULT_SYSTEM1_IMPROVE_REJECT_THRESHOLD = 0.95
 INJECTION_QUESTION_KEY = "prompt_injection_attempt"
 
 # Security- and deployment-critical paths that System 1 triage must never fast-skip.
@@ -167,6 +169,9 @@ class System1Config:
     fast_arbiter_effort: str | None = None
     gate_cross_assignment: bool = False
     cross_assignment_threshold: float = DEFAULT_SYSTEM1_CROSS_THRESHOLD
+    diagram_min_probability: float = DEFAULT_SYSTEM1_DIAGRAM_THRESHOLD
+    improve_prefilter: bool = False
+    improve_reject_threshold: float = DEFAULT_SYSTEM1_IMPROVE_REJECT_THRESHOLD
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, str) or not self.model.strip():
@@ -220,6 +225,20 @@ class System1Config:
             or not (0.0 < float(self.cross_assignment_threshold) <= 0.5)
         ):
             raise ValueError("system1 cross_assignment_threshold must be in (0.0, 0.5]")
+        if (
+            isinstance(self.diagram_min_probability, bool)
+            or not isinstance(self.diagram_min_probability, (int, float))
+            or not math.isfinite(self.diagram_min_probability)
+            or not (0.0 < float(self.diagram_min_probability) < 1.0)
+        ):
+            raise ValueError("system1 diagram_min_probability must be in (0.0, 1.0)")
+        if (
+            isinstance(self.improve_reject_threshold, bool)
+            or not isinstance(self.improve_reject_threshold, (int, float))
+            or not math.isfinite(self.improve_reject_threshold)
+            or not (0.5 < float(self.improve_reject_threshold) <= 1.0)
+        ):
+            raise ValueError("system1 improve_reject_threshold must be in (0.5, 1.0]")
 
     @classmethod
     def from_environment(cls, env: Mapping[str, str] | None = None) -> System1Config:
@@ -304,6 +323,21 @@ class System1Config:
                 name="DAYDREAM_SYSTEM1_CROSS_ASSIGNMENT_THRESHOLD",
                 low=0.0,
                 high=0.5,
+            ),
+            diagram_min_probability=_parse_bounded_float(
+                source.get("DAYDREAM_SYSTEM1_DIAGRAM_THRESHOLD"),
+                default=DEFAULT_SYSTEM1_DIAGRAM_THRESHOLD,
+                name="DAYDREAM_SYSTEM1_DIAGRAM_THRESHOLD",
+                low=0.0,
+                high=0.999999,
+            ),
+            improve_prefilter=_truthy(source.get("DAYDREAM_SYSTEM1_IMPROVE_PREFILTER")),
+            improve_reject_threshold=_parse_bounded_float(
+                source.get("DAYDREAM_SYSTEM1_IMPROVE_REJECT_THRESHOLD"),
+                default=DEFAULT_SYSTEM1_IMPROVE_REJECT_THRESHOLD,
+                name="DAYDREAM_SYSTEM1_IMPROVE_REJECT_THRESHOLD",
+                low=0.5,
+                high=1.0,
             ),
         )
 

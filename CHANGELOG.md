@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gated on zero unfinished targets and zero cross-batch edges) or focus `cross_assignment` on
   ranked coupled batch pairs with bounded untrusted excerpts
   ([#1973](https://github.com/existential-birds/daydream/issues/1973)).
+- System 1 semantic pre-checks for `--diagram auto` (skipping low-value sequence/flowchart
+  authoring with explicit recorded reasons while bypassing explicit `--diagram sequence|flowchart|both`
+  and failing open on errors) and Improve `vet` pre-triage (signal-ordered candidate batching and
+  opt-in `DAYDREAM_SYSTEM1_IMPROVE_PREFILTER=1` noise filtering with `vet-system1-prefilter.json`
+  audit retention and snapshot-root confinement)
+  ([#1974](https://github.com/existential-birds/daydream/issues/1974)).
 
 ## [0.38.0] - 2026-11-24
 
