@@ -21,8 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--backend antigravity` runs reviews and the fix/test phases through Google's `agy` CLI
   (1.5.15 or newer) in headless stream-json mode, with a Daydream-owned agent, a
   deny-by-default tool hook and host tools over the loopback MCP server Codex uses. Set
-  `DAYDREAM_ANTIGRAVITY_HOME` for a dedicated `agy` home. Improve stays Claude-only, and the
-  README states the account-terms caveat for consumer sign-in
+  `DAYDREAM_ANTIGRAVITY_HOME` for a dedicated `agy` home. Improve stays Claude-only
   ([#1966](https://github.com/existential-birds/daydream/issues/1966), #1967).
 
 ### Changed
