@@ -516,6 +516,22 @@ metadata or hard-denied security paths. Without `DAYDREAM_SYSTEM1_SKIP_NON_BEHAV
 System 1 never skips any target and uses Mode 1 only (risk-weighted call budgets and
 optional `discovery_fast` routing for mechanical/low-risk batches).
 
+Before System 2 `challenge` work is planned, enabled System 1 pre-challenge triage evaluates
+pending claims with bounded host-extracted diff and enclosing source excerpts:
+- **Never confirms**: System 1 cannot confirm a finding; `validate_committed_result` rejects
+  any `host:system1` challenge verdict whose verdict is not `rejected`.
+- **Opt-in asymmetric fast-rejection** (`DAYDREAM_SYSTEM1_FAST_REJECT_CLAIMS=1`): clearly
+  invalid self-contained claims above `DAYDREAM_SYSTEM1_CLAIM_REJECT_THRESHOLD` (default
+  `0.95`) with clean injection checks are rejected with an auditable `host:system1` verdict.
+- **2-tier arbiter escalation & duplicate clustering**: high-confidence same-file duplicate
+  claims are kept in the same challenge context; self-contained local claims route to an
+  optional `challenge_fast` tier (`DAYDREAM_SYSTEM1_FAST_ARBITER_*` / `[phases.arbiter_fast]`)
+  with tight call caps and pre-inlined untrusted context, while cross-file, uncertain, or
+  injection-flagged claims escalate to full `[phases.arbiter]`.
+- **Single-round calibrated severity normalization**: when a confirming challenge verdict
+  adjusts only `severity` (and optionally `title`) to match the host System 1 calibrated
+  severity, it applies in place without forcing a second challenge round.
+
 ### Captured local source
 
 [`git_ops.captured_source`](../daydream/git_ops/captured_source.py) owns accepted

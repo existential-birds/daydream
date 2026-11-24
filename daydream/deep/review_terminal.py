@@ -154,7 +154,7 @@ async def plan_committed_review(
         backends[kind] = reviewers.backend_for(phase)
         committed_review.bind_native_context(
             settings, kind, phase, resolved_backend_name(ctx.config, phase), backends[kind], ctx.work.source)
-    await committed_review.bind_optional_fast_discovery_backend(
+    await committed_review.bind_optional_fast_backends(
         ctx.config, settings, backends, ctx.work.source,
     )
     state = DeepState(ctx.data)

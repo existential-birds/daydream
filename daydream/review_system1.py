@@ -126,6 +126,50 @@ SUPPORTING_FILE_QUESTIONS: dict[str, DecisionQuestion] = with_injection_guard({
     ),
 })
 
+CLAIM_TRIAGE_QUESTIONS: dict[str, DecisionQuestion] = with_injection_guard({
+    "obviously_invalid": NoulQuestion(
+        instructions=(
+            "Is this proposed code-review claim clearly invalid, purely stylistic/speculative, "
+            "lacking a concrete trigger/consequence, or directly contradicted by the cited diff?"
+        ),
+        true_criteria=(
+            "Clearly contradicted by the cited code, purely stylistic preference, speculative "
+            "without concrete failure mode, or trivial noise."
+        ),
+        false_criteria=(
+            "Plausible correctness, security, data-integrity, or contract bug that warrants "
+            "independent verification."
+        ),
+    ),
+    "needs_repo_search": NoulQuestion(
+        instructions=(
+            "Does verifying or refuting this claim require reading callers, definitions, or files "
+            "outside the cited diff hunk and enclosing function?"
+        ),
+        true_criteria="Requires checking external callers, callees, config, or cross-file invariants.",
+        false_criteria="Self-contained within the cited hunk and enclosing symbol.",
+    ),
+    "severity": ChoiceQuestion(
+        instructions="Classify the calibrated severity of this claim under Daydream's consequence rubric.",
+        criteria={
+            "high": "Security vulnerability, data loss/corruption, crash, or broken critical contract.",
+            "medium": "Real functional defect, edge-case bug, or degraded reliability under realistic inputs.",
+            "low": "Minor edge case, localized non-critical bug, or low-impact defect.",
+        },
+    ),
+})
+
+CLAIM_DUPLICATE_QUESTIONS: dict[str, DecisionQuestion] = with_injection_guard({
+    "is_duplicate": NoulQuestion(
+        instructions=(
+            "Do these two proposed code-review claims describe the same underlying defect or "
+            "root cause such that one challenge session should evaluate and deduplicate them together?"
+        ),
+        true_criteria="Both claims target the same bug, failure mode, or overlapping root cause.",
+        false_criteria="The two claims describe independent defects with distinct failure modes.",
+    ),
+})
+
 MAX_SUPPORTING_CANDIDATES = 12
 MAX_SUPPORTING_HINTS = 3
 SUPPORTING_PREVIEW_MAX_BYTES = 2048
@@ -234,26 +278,68 @@ def resolve_fast_discovery_spec(
     hosted: bool,
 ) -> tuple[str, str | None, str | None] | None:
     """Resolve optional fast discovery ``(backend, model, effort)`` when System 1 Mode 1 routing is configured."""
+    return _resolve_fast_phase_spec(
+        config,
+        system1_config,
+        base_phase="review",
+        fast_phase="review_fast",
+        override_backend=system1_config.fast_review_backend,
+        override_model=system1_config.fast_review_model,
+        override_effort=system1_config.fast_review_effort,
+        hosted=hosted,
+    )
+
+
+def resolve_fast_arbiter_spec(
+    config: Any,
+    system1_config: System1Config,
+    *,
+    hosted: bool,
+) -> tuple[str, str | None, str | None] | None:
+    """Resolve optional fast arbiter ``(backend, model, effort)`` when System 1 2-tier challenge routing is set."""
+    return _resolve_fast_phase_spec(
+        config,
+        system1_config,
+        base_phase="arbiter",
+        fast_phase="arbiter_fast",
+        override_backend=system1_config.fast_arbiter_backend,
+        override_model=system1_config.fast_arbiter_model,
+        override_effort=system1_config.fast_arbiter_effort,
+        hosted=hosted,
+    )
+
+
+def _resolve_fast_phase_spec(
+    config: Any,
+    system1_config: System1Config,
+    *,
+    base_phase: str,
+    fast_phase: str,
+    override_backend: str | None,
+    override_model: str | None,
+    override_effort: str | None,
+    hosted: bool,
+) -> tuple[str, str | None, str | None] | None:
     if not system1_config.enabled:
         return None
     from daydream.run_config import resolved_backend_name, resolved_model, resolved_reasoning_effort
 
     file_fast: Mapping[str, str] = {}
     if not hosted and config.file_config is not None:
-        raw_fast = config.file_config.phases.get("review_fast")
+        raw_fast = config.file_config.phases.get(fast_phase)
         if isinstance(raw_fast, Mapping):
             file_fast = raw_fast
-    override_backend = system1_config.fast_review_backend or file_fast.get("backend")
-    override_model = system1_config.fast_review_model or file_fast.get("model")
-    override_effort = system1_config.fast_review_effort or file_fast.get("reasoning_effort")
-    if not any((override_backend, override_model, override_effort)):
+    eff_backend = override_backend or file_fast.get("backend")
+    eff_model = override_model or file_fast.get("model")
+    eff_effort = override_effort or file_fast.get("reasoning_effort")
+    if not any((eff_backend, eff_model, eff_effort)):
         return None
-    base_backend = resolved_backend_name(config, "review")
-    backend_name = override_backend or base_backend
-    model = override_model or (
-        resolved_model(config, "review") if backend_name == base_backend else None
+    base_backend = resolved_backend_name(config, base_phase)
+    backend_name = eff_backend or base_backend
+    model = eff_model or (
+        resolved_model(config, base_phase) if backend_name == base_backend else None
     )
-    effort = override_effort or resolved_reasoning_effort(config, "review")
+    effort = eff_effort or resolved_reasoning_effort(config, base_phase)
     return backend_name, model, effort
 
 
@@ -735,4 +821,385 @@ async def prepare_review_prefetch_hints(
         historical_context=historical_hint,
         supporting_files_by_group=supporting_by_group,
         target_triages=target_triages if target_scores else {},
+    )
+
+
+# --- Pre-challenge claim triage, duplicate clustering, and 2-tier arbiter routing (#1972) ---
+
+SeverityLevel = Literal["high", "medium", "low"]
+CLAIM_ENCLOSING_RADIUS_LINES = 30
+CLAIM_ENCLOSING_MAX_BYTES = 4096
+CLAIM_DIFF_EXCERPT_MAX_BYTES = 6144
+CLAIM_DUPLICATE_THRESHOLD = 0.80
+MAX_DUPLICATE_PAIRS = 16
+FAST_CHALLENGE_CALL_CAP = 6
+
+
+@dataclass(frozen=True)
+class ClaimTriage:
+    """Calibrated System 1 pre-challenge triage for one pending claim revision."""
+
+    uid: str
+    revision: int
+    p_invalid: float | None = None
+    p_needs_repo_search: float | None = None
+    calibrated_severity: SeverityLevel | None = None
+    injection_flagged: bool = False
+    fallback: bool = False
+    model: str | None = None
+    cited_diff: str = ""
+    enclosing_source: str = ""
+
+    def qualifies_for_fast_reject(self, *, reject_threshold: float, search_max: float) -> bool:
+        """Whether this claim qualifies for opt-in asymmetric host fast-rejection (never confirmation)."""
+        if self.injection_flagged or self.fallback:
+            return False
+        if self.p_invalid is None or self.p_invalid < reject_threshold:
+            return False
+        return self.p_needs_repo_search is not None and self.p_needs_repo_search <= search_max
+
+    def qualifies_for_fast_challenge(self, *, search_max: float) -> bool:
+        """Whether this self-contained local claim can use the fast/low-effort arbiter tier."""
+        if self.injection_flagged or self.fallback:
+            return False
+        return self.p_needs_repo_search is not None and self.p_needs_repo_search <= search_max
+
+
+@dataclass(frozen=True)
+class ChallengeTriagePlan:
+    """Host System 1 pre-challenge triage, duplicate clusters, and 2-tier routing plan."""
+
+    triages: Mapping[str, ClaimTriage] = field(default_factory=dict)
+    duplicate_clusters: tuple[tuple[str, ...], ...] = ()
+
+    @classmethod
+    def empty(cls) -> ChallengeTriagePlan:
+        return cls(triages={}, duplicate_clusters=())
+
+    def calibrated_severities(self) -> dict[str, str]:
+        return {
+            uid: triage.calibrated_severity
+            for uid, triage in self.triages.items()
+            if not triage.injection_flagged and not triage.fallback and triage.calibrated_severity is not None
+        }
+
+    def is_fast_challenge_group(self, claim_uids: Sequence[str], *, search_max: float) -> bool:
+        if not self.triages or not claim_uids:
+            return False
+        return all(
+            (triage := self.triages.get(uid)) is not None and triage.qualifies_for_fast_challenge(search_max=search_max)
+            for uid in claim_uids
+        )
+
+    def plan_challenge_groups(
+        self,
+        available: Mapping[str, int],
+        *,
+        allowance_by_uid: Mapping[str, int],
+        size_by_uid: Mapping[str, int],
+        max_bytes: int,
+        has_fast_backend: bool,
+        search_max: float,
+    ) -> list[dict[str, int]]:
+        """Partition pending claims keeping duplicate clusters together and separating fast local groups."""
+        if not available:
+            return []
+        cluster_of: dict[str, tuple[str, ...]] = {}
+        for cluster in self.duplicate_clusters:
+            present = tuple(uid for uid in cluster if uid in available)
+            if len(present) >= 2:
+                for uid in present:
+                    cluster_of[uid] = present
+
+        # Build atomic units: each duplicate cluster stays together; non-clustered claims are singletons.
+        units: list[tuple[str, ...]] = []
+        seen: set[str] = set()
+        for uid in available:
+            if uid in seen:
+                continue
+            unit = cluster_of.get(uid, (uid,))
+            units.append(unit)
+            seen.update(unit)
+
+        chunks: dict[tuple[int, int], list[dict[str, int]]] = {}
+        sizes: dict[tuple[int, int], int] = {}
+        for unit in units:
+            is_fast = int(has_fast_backend and self.is_fast_challenge_group(unit, search_max=search_max))
+            base_group = min(allowance_by_uid.get(uid, 0) for uid in unit)
+            bucket = (is_fast, base_group)
+            unit_size = sum(size_by_uid[uid] for uid in unit)
+            if bucket not in chunks or (chunks[bucket][-1] and sizes[bucket] + unit_size > max_bytes):
+                chunks.setdefault(bucket, []).append({})
+                sizes[bucket] = 1
+            for uid in unit:
+                chunks[bucket][-1][uid] = available[uid]
+            sizes[bucket] += unit_size
+        return [group for bucket_groups in chunks.values() for group in bucket_groups]
+
+    def work_advisory_hints(self, claim_uids: Sequence[str]) -> dict[str, Any] | None:
+        uid_set = set(claim_uids)
+        severities = {
+            uid: triage.calibrated_severity
+            for uid in claim_uids
+            if (triage := self.triages.get(uid)) is not None
+            and not triage.injection_flagged
+            and not triage.fallback
+            and triage.calibrated_severity is not None
+        }
+        clusters = [
+            list(cluster)
+            for cluster in self.duplicate_clusters
+            if len(uid_set.intersection(cluster)) >= 2
+        ]
+        hints: dict[str, Any] = {}
+        if severities:
+            hints["calibrated_severity"] = severities
+        if clusters:
+            hints["possible_duplicate_clusters"] = clusters
+        return hints or None
+
+    def preinlined_context_blocks(self, claim_uids: Sequence[str]) -> list[dict[str, Any]]:
+        """Bounded untrusted diff + enclosing source snippets for fast local challenge dispatches."""
+        blocks: list[dict[str, Any]] = []
+        for uid in claim_uids:
+            triage = self.triages.get(uid)
+            if triage is None:
+                continue
+            if triage.cited_diff or triage.enclosing_source:
+                blocks.append({
+                    "uid": uid,
+                    "revision": triage.revision,
+                    "cited_diff": triage.cited_diff,
+                    "enclosing_source": triage.enclosing_source,
+                })
+        return blocks
+
+
+def extract_claim_enclosing_source(
+    repo: Path,
+    file_path: str,
+    line: int | None,
+    *,
+    radius: int = CLAIM_ENCLOSING_RADIUS_LINES,
+    max_bytes: int = CLAIM_ENCLOSING_MAX_BYTES,
+) -> str:
+    """Read bounded line-numbered enclosing source around *line* from a confined captured file."""
+    if not git_observed_path_is_confined(repo, file_path):
+        return ""
+    full = repo / file_path
+    try:
+        if full.is_symlink() or not full.is_file():
+            return ""
+        raw = full.read_bytes()
+    except OSError:
+        return ""
+    if b"\x00" in raw:
+        return ""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+    lines = text.splitlines()
+    if not lines:
+        return ""
+    if line is None or line < 1:
+        start, end = 1, min(len(lines), 2 * radius + 1)
+    else:
+        center = min(line, len(lines))
+        start = max(1, center - radius)
+        end = min(len(lines), center + radius)
+    excerpt = "\n".join(f"L{lineno}: {lines[lineno - 1]}" for lineno in range(start, end + 1))
+    return truncate_utf8_to_budget(excerpt, max_bytes)
+
+
+def _claim_triage_from_outcome(
+    claim: Mapping[str, Any],
+    outcome: DecisionOutcome,
+    *,
+    cited_diff: str,
+    enclosing_source: str,
+) -> ClaimTriage:
+    uid = str(claim["uid"])
+    revision = int(claim["revision"])
+    if not outcome.ok or outcome.response is None:
+        return ClaimTriage(
+            uid=uid,
+            revision=revision,
+            fallback=True,
+            cited_diff=cited_diff,
+            enclosing_source=enclosing_source,
+        )
+    model_name = outcome.response.model
+    if injection_detected(outcome):
+        return ClaimTriage(
+            uid=uid,
+            revision=revision,
+            injection_flagged=True,
+            model=model_name,
+            cited_diff=cited_diff,
+            enclosing_source=enclosing_source,
+        )
+    sev_ans = outcome.choice("severity")
+    raw_sev = sev_ans.choice if sev_ans is not None else None
+    calibrated: SeverityLevel | None
+    if raw_sev == "high":
+        calibrated = "high"
+    elif raw_sev == "medium":
+        calibrated = "medium"
+    elif raw_sev == "low":
+        calibrated = "low"
+    else:
+        calibrated = None
+    return ClaimTriage(
+        uid=uid,
+        revision=revision,
+        p_invalid=outcome.noul("obviously_invalid"),
+        p_needs_repo_search=outcome.noul("needs_repo_search"),
+        calibrated_severity=calibrated,
+        model=model_name,
+        cited_diff=cited_diff,
+        enclosing_source=enclosing_source,
+    )
+
+
+def _connected_clusters(pairs: Sequence[tuple[str, str]]) -> tuple[tuple[str, ...], ...]:
+    adjacency: dict[str, set[str]] = {}
+    for left, right in pairs:
+        adjacency.setdefault(left, set()).add(right)
+        adjacency.setdefault(right, set()).add(left)
+    visited: set[str] = set()
+    clusters: list[tuple[str, ...]] = []
+    for node in sorted(adjacency):
+        if node in visited:
+            continue
+        component: list[str] = []
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            component.append(current)
+            stack.extend(adjacency[current] - visited)
+        if len(component) >= 2:
+            clusters.append(tuple(sorted(component)))
+    return tuple(clusters)
+
+
+async def prepare_challenge_triage(
+    *,
+    client: System1Client,
+    repo: Path,
+    pending_claims: Sequence[Mapping[str, Any]],
+    diff_by_file: Mapping[str, str],
+    session_id: str | None = None,
+    remaining_s: float | None = None,
+) -> ChallengeTriagePlan:
+    """Evaluate pending claims + bounded same-file duplicate pairs in one parallel System 1 pass."""
+    if not pending_claims or not client.config.enabled or not client.config.api_key:
+        return ChallengeTriagePlan.empty()
+    if remaining_s is not None and remaining_s <= 0:
+        return ChallengeTriagePlan.empty()
+    client = _clamp_client_timeout(client, remaining_s)
+
+    def _collect_contexts() -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        for claim in pending_claims:
+            payload = claim["payload"]
+            file_path = str(payload["file"])
+            line = payload.get("line")
+            cited_diff = truncate_utf8_to_budget(diff_by_file.get(file_path, ""), CLAIM_DIFF_EXCERPT_MAX_BYTES)
+            enclosing = extract_claim_enclosing_source(
+                repo,
+                file_path,
+                line if isinstance(line, int) else None,
+            )
+            out.append((cited_diff, enclosing))
+        return out
+
+    contexts = await anyio.to_thread.run_sync(_collect_contexts)
+
+    items: list[tuple[Any, Mapping[str, DecisionQuestion]]] = []
+    for claim, (cited_diff, enclosing) in zip(pending_claims, contexts, strict=True):
+        payload = claim["payload"]
+        items.append((
+            {
+                "title": claim.get("title", ""),
+                "file": payload["file"],
+                "line": payload.get("line"),
+                "severity": payload.get("severity"),
+                "claim": payload.get("claim", ""),
+                "trigger": payload.get("trigger", ""),
+                "consequence": payload.get("consequence", ""),
+                "grounds": payload.get("grounds", ""),
+                "cited_diff": cited_diff,
+                "enclosing_source": enclosing,
+            },
+            CLAIM_TRIAGE_QUESTIONS,
+        ))
+
+    # Pairwise duplicate checks across pending claims touching the same file (bounded).
+    by_file: dict[str, list[Mapping[str, Any]]] = {}
+    for claim in pending_claims:
+        by_file.setdefault(str(claim["payload"]["file"]), []).append(claim)
+    dup_pairs: list[tuple[str, str]] = []
+    for file_claims in by_file.values():
+        if len(file_claims) < 2:
+            continue
+        for i in range(len(file_claims)):
+            for j in range(i + 1, len(file_claims)):
+                if len(dup_pairs) >= MAX_DUPLICATE_PAIRS:
+                    break
+                left, right = file_claims[i], file_claims[j]
+                dup_pairs.append((str(left["uid"]), str(right["uid"])))
+                items.append((
+                    {
+                        "file": left["payload"]["file"],
+                        "claim_a": {
+                            "title": left.get("title", ""),
+                            "line": left["payload"].get("line"),
+                            "claim": left["payload"].get("claim", ""),
+                            "trigger": left["payload"].get("trigger", ""),
+                        },
+                        "claim_b": {
+                            "title": right.get("title", ""),
+                            "line": right["payload"].get("line"),
+                            "claim": right["payload"].get("claim", ""),
+                            "trigger": right["payload"].get("trigger", ""),
+                        },
+                    },
+                    CLAIM_DUPLICATE_QUESTIONS,
+                ))
+            if len(dup_pairs) >= MAX_DUPLICATE_PAIRS:
+                break
+
+    outcomes = await client.evaluate_many(
+        items,
+        phase=DaydreamPhase.CHALLENGE,
+        session_id=session_id,
+        record_usage=True,
+    )
+
+    triages: dict[str, ClaimTriage] = {}
+    claim_count = len(pending_claims)
+    for idx, (claim, (cited_diff, enclosing)) in enumerate(zip(pending_claims, contexts, strict=True)):
+        triages[str(claim["uid"])] = _claim_triage_from_outcome(
+            claim,
+            outcomes[idx],
+            cited_diff=cited_diff,
+            enclosing_source=enclosing,
+        )
+
+    matched_pairs: list[tuple[str, str]] = []
+    for pair_idx, (uid_a, uid_b) in enumerate(dup_pairs):
+        outcome = outcomes[claim_count + pair_idx]
+        if not outcome.ok or injection_detected(outcome):
+            continue
+        prob = outcome.noul("is_duplicate")
+        if prob is not None and prob >= CLAIM_DUPLICATE_THRESHOLD:
+            matched_pairs.append((uid_a, uid_b))
+
+    return ChallengeTriagePlan(
+        triages=triages,
+        duplicate_clusters=_connected_clusters(matched_pairs),
     )

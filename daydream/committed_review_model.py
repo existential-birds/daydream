@@ -167,6 +167,34 @@ def host_decision(part: dict[str, Any]) -> dict[str, Any]:
     raise ValueError(f"target {part.get('target_id')!r} is not host-decided")
 
 
+HOST_SYSTEM1_CHALLENGE_WORK_ID = "host:system1"
+HOST_SYSTEM1_REJECTION_PREFIX = "system1_fast_rejected: "
+
+
+def is_host_system1_rejection_verdict(verdict: Any) -> bool:
+    """Whether *verdict* is a valid host System 1 fast-rejection (never a confirmation)."""
+    if not isinstance(verdict, dict):
+        return False
+    return (
+        verdict.get("work_id") == HOST_SYSTEM1_CHALLENGE_WORK_ID
+        and verdict.get("verdict") == "rejected"
+        and isinstance(verdict.get("grounds"), str)
+        and verdict["grounds"].startswith(HOST_SYSTEM1_REJECTION_PREFIX)
+    )
+
+
+def all_claims_host_rejected(claims: list[dict[str, Any]]) -> bool:
+    """Whether every claim was rejected by host System 1 fast-rejection (so no System 2 challenge was required)."""
+    return bool(claims) and all(
+        claim.get("disposition") == "rejected"
+        and any(
+            verdict.get("revision") == claim.get("revision") and is_host_system1_rejection_verdict(verdict)
+            for verdict in claim.get("challenge_evidence", [])
+        )
+        for claim in claims
+    )
+
+
 # Work records, attribution, per-execution capacity evidence, the cross_assignment phase (#1628) and claim severity.
 # A committed result over tracked uncommitted edits (#1828) is its own variant, as a captured local source is.
 # Each execution entry carries its stop record and the terminal result its cause (#1959).
@@ -351,6 +379,15 @@ def validate_committed_result(value: dict[str, Any]) -> None:
         check_refs(claim["payload"]["evidence_refs"], expected_refs)
         for verdict in claim["challenge_evidence"]:
             check_refs(verdict["evidence_refs"], expected_refs)
+            if verdict["work_id"] == HOST_SYSTEM1_CHALLENGE_WORK_ID:
+                # Host System 1 may ONLY fast-reject; it can never confirm or defer a claim.
+                if (
+                    verdict["uid"] != claim["uid"]
+                    or verdict["revision"] > claim["revision"]
+                    or not is_host_system1_rejection_verdict(verdict)
+                ):
+                    raise ValueError("invalid retained challenge evidence")
+                continue
             if (
                 verdict["uid"] != claim["uid"]
                 or verdict["revision"] > claim["revision"]
@@ -381,7 +418,7 @@ def validate_committed_result(value: dict[str, Any]) -> None:
     # Current accepted work decides completion; superseded attempts remain evidence only.
     if terminal["analysis_state"] == "complete" and (
         any(not is_host_decided_part(part) for part in assignments) and not native_assignments & INVESTIGATION_KINDS
-        or claims and "challenge" not in native_assignments
+        or claims and not all_claims_host_rejected(claims) and "challenge" not in native_assignments
         or any(c["disposition"] == "unresolved" for c in claims)
         or any(record["state"] != "accepted" for wid, record in work.items() if wid not in superseded)
         or any(

@@ -18,9 +18,8 @@ from typing import Any
 
 from daydream.dataset import LocalRecordStore
 from daydream.deep.diff import iter_diff_blocks
-from daydream.review_system1 import TARGET_TRIAGE_QUESTIONS
+from daydream.review_system1 import CLAIM_TRIAGE_QUESTIONS, TARGET_TRIAGE_QUESTIONS
 from daydream.system1 import (
-    ChoiceQuestion,
     DecisionOutcome,
     NoulQuestion,
     System1Client,
@@ -30,42 +29,8 @@ from daydream.system1 import (
 )
 
 # --- Shared review-triage question sets --------------------------------------
-# TARGET_TRIAGE_QUESTIONS lives in daydream.review_system1 so live ranking/triage
-# and offline shadow calibration always evaluate the exact same rubric.
-
-CLAIM_TRIAGE_QUESTIONS = with_injection_guard({
-    "obviously_invalid": NoulQuestion(
-        instructions=(
-            "Given the proposed code-review claim and its cited diff, is the claim clearly "
-            "contradicted by the code, purely stylistic/speculative, or missing a concrete "
-            "trigger and observable consequence?"
-        ),
-        true_criteria=(
-            "The cited code directly refutes the claim, or the claim is a stylistic nit, "
-            "speculative 'what-if', or lacks a concrete triggering input and observable bug."
-        ),
-        false_criteria=(
-            "The claim identifies a plausible, concrete defect supported by or consistent "
-            "with the cited code that merits verification."
-        ),
-    ),
-    "needs_repo_search": NoulQuestion(
-        instructions=(
-            "Does confirming or refuting this claim require reading callers, definitions, "
-            "configuration, or other files outside the provided diff snippet?"
-        ),
-        true_criteria="Truth of the claim depends on external callers, types, config, or sibling modules.",
-        false_criteria="The defect or refutation is self-contained inside the provided diff snippet.",
-    ),
-    "severity": ChoiceQuestion(
-        instructions="Classify the severity of this claim if it holds.",
-        criteria={
-            "high": "Breaks correctness, security, or data integrity and must be fixed before merge.",
-            "medium": "Real defect with limited reach or moderate impact.",
-            "low": "Minor defect or edge-case polish.",
-        },
-    ),
-})
+# TARGET_TRIAGE_QUESTIONS and CLAIM_TRIAGE_QUESTIONS live in daydream.review_system1
+# so live review triage and offline shadow calibration evaluate identical rubrics.
 
 CROSS_ASSIGNMENT_QUESTIONS = with_injection_guard({
     "cross_boundary_needed": NoulQuestion(

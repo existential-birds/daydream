@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   batches; plus opt-in Mode 2 non-behavioral fast-path (`DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL=1`)
   generalizing host decisions with hard-deny/injection guards and strict `validate_committed_result`
   attribution checks ([#1971](https://github.com/existential-birds/daydream/issues/1971)).
+- System 1 pre-challenge claim triage for committed reviews: bounded host-side enclosing source
+  extraction, opt-in asymmetric fast-rejection (`DAYDREAM_SYSTEM1_FAST_REJECT_CLAIMS=1`, strictly
+  forbidden from confirming findings by `validate_committed_result`), same-file duplicate claim
+  clustering, 2-tier `challenge_fast` arbiter routing with pre-inlined local context, and
+  single-round calibrated severity normalization on confirmation
+  ([#1972](https://github.com/existential-birds/daydream/issues/1972)).
 
 ## [0.38.0] - 2026-11-24
 

@@ -44,6 +44,8 @@ DEFAULT_SYSTEM1_MAX_CONCURRENCY = 8
 DEFAULT_INJECTION_THRESHOLD = 0.5
 DEFAULT_SYSTEM1_SKIP_THRESHOLD = 0.98
 DEFAULT_SYSTEM1_CROSS_FILE_MAX = 0.05
+DEFAULT_SYSTEM1_CLAIM_REJECT_THRESHOLD = 0.95
+DEFAULT_SYSTEM1_LOCAL_CHALLENGE_SEARCH_MAX = 0.15
 INJECTION_QUESTION_KEY = "prompt_injection_attempt"
 
 # Security- and deployment-critical paths that System 1 triage must never fast-skip.
@@ -156,6 +158,12 @@ class System1Config:
     skip_non_behavioral: bool = False
     skip_threshold: float = DEFAULT_SYSTEM1_SKIP_THRESHOLD
     cross_file_max: float = DEFAULT_SYSTEM1_CROSS_FILE_MAX
+    fast_reject_claims: bool = False
+    claim_reject_threshold: float = DEFAULT_SYSTEM1_CLAIM_REJECT_THRESHOLD
+    local_challenge_search_max: float = DEFAULT_SYSTEM1_LOCAL_CHALLENGE_SEARCH_MAX
+    fast_arbiter_backend: str | None = None
+    fast_arbiter_model: str | None = None
+    fast_arbiter_effort: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, str) or not self.model.strip():
@@ -188,6 +196,20 @@ class System1Config:
             or not (0.0 <= float(self.cross_file_max) <= 0.5)
         ):
             raise ValueError("system1 cross_file_max must be in [0.0, 0.5]")
+        if (
+            isinstance(self.claim_reject_threshold, bool)
+            or not isinstance(self.claim_reject_threshold, (int, float))
+            or not math.isfinite(self.claim_reject_threshold)
+            or not (0.5 < float(self.claim_reject_threshold) <= 1.0)
+        ):
+            raise ValueError("system1 claim_reject_threshold must be in (0.5, 1.0]")
+        if (
+            isinstance(self.local_challenge_search_max, bool)
+            or not isinstance(self.local_challenge_search_max, (int, float))
+            or not math.isfinite(self.local_challenge_search_max)
+            or not (0.0 <= float(self.local_challenge_search_max) <= 0.5)
+        ):
+            raise ValueError("system1 local_challenge_search_max must be in [0.0, 0.5]")
 
     @classmethod
     def from_environment(cls, env: Mapping[str, str] | None = None) -> System1Config:
@@ -246,6 +268,25 @@ class System1Config:
                 high=0.5,
                 low_inclusive=True,
             ),
+            fast_reject_claims=_truthy(source.get("DAYDREAM_SYSTEM1_FAST_REJECT_CLAIMS")),
+            claim_reject_threshold=_parse_bounded_float(
+                source.get("DAYDREAM_SYSTEM1_CLAIM_REJECT_THRESHOLD"),
+                default=DEFAULT_SYSTEM1_CLAIM_REJECT_THRESHOLD,
+                name="DAYDREAM_SYSTEM1_CLAIM_REJECT_THRESHOLD",
+                low=0.5,
+                high=1.0,
+            ),
+            local_challenge_search_max=_parse_bounded_float(
+                source.get("DAYDREAM_SYSTEM1_LOCAL_CHALLENGE_SEARCH_MAX"),
+                default=DEFAULT_SYSTEM1_LOCAL_CHALLENGE_SEARCH_MAX,
+                name="DAYDREAM_SYSTEM1_LOCAL_CHALLENGE_SEARCH_MAX",
+                low=0.0,
+                high=0.5,
+                low_inclusive=True,
+            ),
+            fast_arbiter_backend=_optional_stripped(source.get("DAYDREAM_SYSTEM1_FAST_ARBITER_BACKEND")),
+            fast_arbiter_model=_optional_stripped(source.get("DAYDREAM_SYSTEM1_FAST_ARBITER_MODEL")),
+            fast_arbiter_effort=_optional_stripped(source.get("DAYDREAM_SYSTEM1_FAST_ARBITER_EFFORT")),
         )
 
 
