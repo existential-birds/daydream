@@ -333,6 +333,10 @@ STREAM_DROP_SIGNATURES = (
     "socket hang up",
     "premature close",
     "epipe",
+    # Node's fetch (undici) when the provider closes the connection mid-request, as Pi
+    # reports it: "Connection error.: other side closed (UND_ERR_SOCKET)".
+    "other side closed",
+    "und_err_socket",
 )
 
 logger = logging.getLogger(__name__)

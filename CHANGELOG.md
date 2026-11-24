@@ -41,6 +41,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated the verified Pi host-tools baseline from Pi `1.4.0` to Pi `1.6.0` (retaining Node `24.18.1`
   and compaction defaults `reserveTokens=16384`, `keepRecentTokens=20000`).
 
+### Fixed
+
+- The Pi backend retries a turn when the provider closes the connection mid-request, as Node's fetch
+  reports it (`Connection error.: other side closed (UND_ERR_SOCKET)`). It was classed as an unknown,
+  permanent failure and ended the review; OpenRouter does this about once in 80 requests.
+
 ## [0.38.1] - 2026-11-24
 
 ### Fixed

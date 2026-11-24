@@ -497,6 +497,7 @@ async def test_error_turn_sets_retryable_via_classifier() -> None:
         ("request timed out after 30 seconds", True, "TIMEOUT"),
         ("Stream ended without finish_reason", True, "STREAM_TRUNCATION"),
         ("socket hang up", True, "STREAM_DROP"),
+        ("Connection error.: other side closed (UND_ERR_SOCKET)", True, "STREAM_DROP"),
         ("Pi CLI exited with return code 1", False, "PROCESS_EXIT"),
         ("model not found: gpt-5 (503)", False, "AUTH_CONFIG"),
         ("JSON schema validation failed: the model is temporarily at capacity.", False, "SCHEMA"),
