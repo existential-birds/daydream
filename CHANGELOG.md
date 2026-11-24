@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-11-24
+
 ### Added
 
 - Merging a release PR now publishes the release: `.github/workflows/release.yml` runs
@@ -15,13 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when `daydream/__init__.py` disagrees with `pyproject.toml` or the dated CHANGELOG section has no
   entries. It never moves an existing tag; when that tag's release is missing, it publishes it from
   the tagged commit's CHANGELOG, so a dispatch on `main` retries a failed publish even after later
-  merges ([#1964](https://github.com/existential-birds/daydream/issues/1964)).
+  merges ([#1964](https://github.com/existential-birds/daydream/issues/1964), #1965).
 - `--backend antigravity` runs reviews and the fix/test phases through Google's `agy` CLI
   (1.5.15 or newer) in headless stream-json mode, with a Daydream-owned agent, a
   deny-by-default tool hook and host tools over the loopback MCP server Codex uses. Set
   `DAYDREAM_ANTIGRAVITY_HOME` for a dedicated `agy` home. Improve stays Claude-only, and the
   README states the account-terms caveat for consumer sign-in
-  ([#1966](https://github.com/existential-birds/daydream/issues/1966)).
+  ([#1966](https://github.com/existential-birds/daydream/issues/1966), #1967).
 
 ### Changed
 
@@ -3569,7 +3571,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.37.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.38.0...HEAD
+[0.38.0]: https://github.com/existential-birds/daydream/compare/v0.37.0...v0.38.0
 [0.37.0]: https://github.com/existential-birds/daydream/compare/v0.36.0...v0.37.0
 [0.36.0]: https://github.com/existential-birds/daydream/compare/v0.35.2...v0.36.0
 [0.35.2]: https://github.com/existential-birds/daydream/compare/v0.35.1...v0.35.2
