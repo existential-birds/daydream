@@ -302,16 +302,17 @@ class AntigravityBackend:
                 lifecycle.teardown_completed()
 
         try:
+            native_schema = output_schema is not None and host is None
             run = create_run_directory(
                 cwd, read_only=read_only, review_instructions=review_instructions,
-                mcp_url=host.url if host is not None else None, mcp_token=host.token if host is not None else None)
+                mcp_url=host.url if host is not None else None, mcp_token=host.token if host is not None else None,
+                native_schema=native_schema)
             args = [_AGY, "--input-format", "stream-json", "--output-format", "stream-json"]
             if self._model:
                 args.extend(["--model", self._model])
             if self.reasoning_effort:
                 args.extend(["--effort", self.reasoning_effort])
             args.extend(["--add-dir", str(run.path), "--agent", run.agent])
-            native_schema = output_schema is not None and host is None
             if host is not None:
                 # The only permission rule added: this attempt's own server. Its URL and bearer
                 # live in the per-run directory, never in argv, the prompt or the child environment.
@@ -425,16 +426,18 @@ class AntigravityBackend:
                         yield TextEvent(text=delta)
                     usage = body.get("usage")
                     if isinstance(usage, dict) and index not in metered_steps:
-                        prompt_tokens = _token_count(usage.get("input_tokens"))
+                        uncached_tokens = _token_count(usage.get("input_tokens"))
                         completion_tokens = _token_count(usage.get("output_tokens"))
-                        if prompt_tokens is None or completion_tokens is None:
+                        if uncached_tokens is None or completion_tokens is None:
                             coverage["malformed_usage"] += 1
                         else:
-                            # One charge per step. agy reports no cost; cache reads are part of input.
+                            # One charge per step. agy reports no cost. Its ``input_tokens`` excludes cache
+                            # reads (a live step: 2181 input beside 5886 cached), so the prompt is their sum.
                             metered_steps.add(index)
+                            cached_tokens = _token_count(usage.get("cache_read_tokens"))
                             metrics = MetricsEvent(
-                                message_id=step_id, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
-                                cached_tokens=_token_count(usage.get("cache_read_tokens")), cost_usd=None,
+                                message_id=step_id, prompt_tokens=uncached_tokens + (cached_tokens or 0),
+                                completion_tokens=completion_tokens, cached_tokens=cached_tokens, cost_usd=None,
                                 reasoning_tokens=_token_count(usage.get("thinking_tokens")),
                                 model_name=native_model or self._model,
                                 duration_ms=_milliseconds(body.get("duration_seconds")),

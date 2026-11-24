@@ -1178,7 +1178,8 @@ environment becomes the child's `HOME`.
   non-zero. The agent's `tools:` list alone is not the boundary: the model also reaches for
   `agy` built-ins outside it, and the hook denies those. It is a tool-call filter, not a sandbox: a search rooted above the per-run
   directory, or a mutating turn's shell, is not confined by it.
-- Profiles: read-only offers `view_file`, `grep_search`, `find_by_name` and `list_dir`,
+- Profiles: read-only lists `view_file`, `grep_search`, `find_by_name` and `list_dir`
+  (`agy` offers a model only those it supports: `gemini-3.8-flash-low` gets `read_file` alone),
   with no shell and without `--dangerously-skip-permissions`. Mutating turns add
   `write_to_file`, `replace_file_content`, `multi_replace_file_content`, `run_command` and
   `command_status` with `--dangerously-skip-permissions`; the hook stays active and
@@ -1209,9 +1210,11 @@ environment becomes the child's `HOME`.
   cleanup; a completed turn with nothing accepted or failed is the same retryable
   truncation as on Codex. A `denied_actions` entry for an MCP call before acceptance
   fails the turn.
-- Results and usage: without host tools, `--json-schema` supplies the structured result.
-  Each `step_update` that carries `usage` is charged once; `result.usage` is cumulative
-  for the conversation and is not charged. `agy` reports no cost and none is estimated.
+- Results and usage: without host tools, `--json-schema` supplies the structured result
+  through `agy`'s `finish` tool, which the agent's `tools:` list names only for such a
+  turn. Each `step_update` that carries `usage` is charged once, with `cache_read_tokens`
+  added to `input_tokens` as the prompt size (`agy` reports them apart); `result.usage` is
+  cumulative for the conversation and is not charged. `agy` reports no cost and none is estimated.
   `conversation_id` is the session id and the `--conversation` continuation token.
 - Failures: `result.error: "interrupted"` is cancellation; `authentication failed or timed
   out` is a non-retryable configuration error; a stderr `AGY_ERROR: {...}` line supplies

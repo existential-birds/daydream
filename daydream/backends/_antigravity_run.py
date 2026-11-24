@@ -24,6 +24,7 @@ from daydream.backends._command_guards import BACKGROUND_COMMAND_PATTERN, DANGER
 from daydream.backends._mcp_host import HOST_SERVER
 
 _MCP_TOOL = "call_mcp_tool"
+_FINISH_TOOL = "finish"
 READ_ONLY_TOOLS: tuple[str, ...] = ("view_file", "grep_search", "find_by_name", "list_dir")
 MUTATING_TOOLS: tuple[str, ...] = READ_ONLY_TOOLS + (
     "write_to_file", "replace_file_content", "multi_replace_file_content", "run_command", "command_status",
@@ -64,12 +65,15 @@ def _write_private(path: Path, text: str) -> None:
 
 
 def create_run_directory(cwd: Path, *, read_only: bool, review_instructions: str | None,
-                         mcp_url: str | None = None, mcp_token: str | None = None) -> RunDirectory:
+                         mcp_url: str | None = None, mcp_token: str | None = None,
+                         native_schema: bool = False) -> RunDirectory:
     """Write the agent, guard hook and policy (and MCP config, given a URL and bearer) to a fresh 0700 directory."""
     host_tools = mcp_url is not None and mcp_token is not None
     agent = "daydream-review" if read_only else "daydream-edit"
     # MCP access comes from ``inheritMcp``: agy's registry has no ``call_mcp_tool`` to list and refuses to start.
-    tools = READ_ONLY_TOOLS if read_only else MUTATING_TOOLS
+    # agy returns ``--json-schema`` output through its ``finish`` tool: without it the turn loops and
+    # the result carries no structured output.
+    tools = (READ_ONLY_TOOLS if read_only else MUTATING_TOOLS) + ((_FINISH_TOOL,) if native_schema else ())
     instructions = _H1_LINE.sub(r"\1\#", review_instructions or _DEFAULT_INSTRUCTIONS)
     if host_tools:
         instructions += "\n\n" + _MCP_CALL_SHAPE
