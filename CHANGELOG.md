@@ -7,12 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.1] - 2026-11-24
+
 ### Fixed
 
 - The Antigravity backend, checked against live `agy` 1.5.15: turns that request schema output
   now list `agy`'s `finish` tool, without which they looped and returned no structured result;
   recorded prompt tokens include cache reads, which `agy` reports apart from `input_tokens`; and
-  read-only search guidance no longer promises search tools that `agy` does not offer every model.
+  read-only search guidance no longer promises search tools that `agy` does not offer every model
+  (#1981).
 
 ## [0.38.0] - 2026-11-24
 
@@ -3577,7 +3580,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.38.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.38.1...HEAD
+[0.38.1]: https://github.com/existential-birds/daydream/compare/v0.38.0...v0.38.1
 [0.38.0]: https://github.com/existential-birds/daydream/compare/v0.37.0...v0.38.0
 [0.37.0]: https://github.com/existential-birds/daydream/compare/v0.36.0...v0.37.0
 [0.36.0]: https://github.com/existential-birds/daydream/compare/v0.35.2...v0.36.0
