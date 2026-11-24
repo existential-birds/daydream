@@ -405,6 +405,28 @@ def validate_committed_result(value: dict[str, Any]) -> None:
             raise ValueError("publication/rejection requires current-revision challenge evidence")
     if value["findings"] != delivered_findings(claims):
         raise ValueError("findings differ from challenged publication claims")
+    # A decomposed review may only record cross_assignment as noop=True when host System 1 verified decoupled batches.
+    if (value["settings"].get("assignment_policy") or {}).get("decomposed"):
+        cross_outcome = next(
+            (o for o in terminal.get("phase_outcomes", []) if o.get("phase") == "cross_assignment"),
+            None,
+        )
+        if cross_outcome is not None and cross_outcome.get("noop") is True:
+            cross_meta = value["settings"].get("system1_cross_assignment")
+            if not (
+                isinstance(cross_meta, dict)
+                and cross_meta.get("action") == "host_noop"
+                and cross_meta.get("cross_batch_edges") == 0
+                and isinstance(cross_meta.get("p_cross_needed"), (int, float))
+                and not isinstance(cross_meta.get("p_cross_needed"), bool)
+                and isinstance(cross_meta.get("threshold"), (int, float))
+                and not isinstance(cross_meta.get("threshold"), bool)
+                and math.isfinite(float(cross_meta["p_cross_needed"]))
+                and math.isfinite(float(cross_meta["threshold"]))
+                and 0.0 < float(cross_meta["threshold"]) <= 0.5
+                and 0.0 <= float(cross_meta["p_cross_needed"]) < float(cross_meta["threshold"])
+            ):
+                raise ValueError("decomposed cross_assignment noop requires valid host System 1 metadata")
     native_assignments = {e["assignment"] for e in value["execution"]}
     superseded = {wid for wid, record in work.items() if record["state"] == "superseded"}
     # A dispatch the schedule refused stays evidence once later work finished what it held, as superseded work does.

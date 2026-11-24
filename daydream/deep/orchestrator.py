@@ -13,7 +13,7 @@ from daydream.artifact_visibility import ArtifactVisibilityError, artifact_dir_f
 from daydream.deep import review_steps
 from daydream.deep.artifacts import DeepArtifact, deep_dir, diff_key
 from daydream.deep.dependency import build_import_graph
-from daydream.deep.diagram_steps import _diagram_mode_for, _resolved_diagram_mode, _step_diagram, _step_post_diagram
+from daydream.deep.diagram_steps import _resolved_diagram_mode, _step_diagram, _step_post_diagram
 from daydream.deep.diff import _diff_changed_files, bound_deep_diff
 from daydream.deep.fix_steps import (
     _perform_cleanup,
@@ -396,10 +396,10 @@ async def run_deep(
 
         changed_files = (list(work.captured_source.files) if work.captured_source is not None
                          else _diff_changed_files(diff))
-        # One changed-file import graph for diagram eligibility. The guard also
-        # catches unsafe tree-sitter versions that can escape the fail-open builder.
+        # One changed-file import graph shared by coupling-aware review batching and diagram eligibility.
+        # The guard also catches unsafe tree-sitter versions that can escape the fail-open builder.
         import_graph: dict[str, set[str]] = {}
-        if _diagram_mode_for(config, mode) != "off":
+        if changed_files:
             try:
                 import_graph = build_import_graph(changed_files, target_dir)
             except Exception:

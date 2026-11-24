@@ -2920,7 +2920,8 @@ async def test_split_review_transfers_unfinished_work_and_investigates_across_as
     assert value["settings"]["assignment_policy"] == {"name": "broad", "decomposed": True,
                                                      "planned_assignments": batches, "cross_assignment": "required"}
     first = next(d for d in dispatches if d["work_id"] == "work:1")
-    assert first["targets"]["ids"] == ["a.py", "b.py", "c.py", "d.py"]
+    # Coupling-aware batching co-locates a.py with its direct importer f.py, keeping inventory order inside the batch.
+    assert first["targets"]["ids"] == ["a.py", "b.py", "c.py", "f.py"]
     assert "+    return total / (count - 1)\n" in first["prompt"] and '"basis":"supplied_diff"' in first["prompt"]
     assert any(_FORGED in returned["content"] for d in dispatches for returned in d["returned"])
     if scenario in _SCALED:

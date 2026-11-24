@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clustering, 2-tier `challenge_fast` arbiter routing with pre-inlined local context, and
   single-round calibrated severity normalization on confirmation
   ([#1972](https://github.com/existential-birds/daydream/issues/1972)).
+- Deterministic import-graph coupling-aware batch packing in `StageInputFactory` (co-locating
+  directly importing changed files within ≤4-file / byte-capped batches while keeping inventory
+  and `planned_work_id` invariant), plus System 1 cross-assignment boundary scoring to opt-in
+  host-noop decoupled decomposed reviews (`DAYDREAM_SYSTEM1_GATE_CROSS_ASSIGNMENT=1`, strictly
+  gated on zero unfinished targets and zero cross-batch edges) or focus `cross_assignment` on
+  ranked coupled batch pairs with bounded untrusted excerpts
+  ([#1973](https://github.com/existential-birds/daydream/issues/1973)).
 
 ## [0.38.0] - 2026-11-24
 

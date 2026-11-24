@@ -25,8 +25,8 @@ from daydream.committed_review_model import (
 from daydream.config import DEFAULT_SYSTEM1_MODEL
 from daydream.config_file import DaydreamFileConfig
 from daydream.dataset import LocalRecordStore
+from daydream.deep.detection import StackAssignment
 from daydream.eval.system1_calibration import (
-    CROSS_ASSIGNMENT_QUESTIONS,
     CalibrationReport,
     ShadowDataset,
     compute_brier_and_ece,
@@ -35,23 +35,31 @@ from daydream.eval.system1_calibration import (
     load_shadow_cases_from_store,
     run_shadow_calibration,
 )
+from daydream.hunk_index import write_hunk_index
+from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
 from daydream.review_system1 import (
+    BATCH_PAIR_COUPLING_QUESTIONS,
     CLAIM_DUPLICATE_QUESTIONS,
     CLAIM_TRIAGE_QUESTIONS,
+    CROSS_ASSIGNMENT_QUESTIONS,
     FAST_CHALLENGE_CALL_CAP,
     HISTORICAL_CONTEXT_QUESTIONS,
+    MAX_FOCUSED_CROSS_PAIRS,
     MAX_SUPPORTING_HINTS,
     PRIORITY_MAX_RISK,
     SUPPORTING_FILE_QUESTIONS,
     TARGET_TRIAGE_QUESTIONS,
     UNSCORED_NEUTRAL_RISK,
     ChallengeTriagePlan,
+    CrossAssignmentPlan,
     ReviewPrefetchHints,
     TargetTriage,
     allocate_weighted_calls,
     collect_supporting_candidates,
     extract_claim_enclosing_source,
+    find_cross_batch_edges,
     prepare_challenge_triage,
+    prepare_cross_assignment_plan,
     prepare_review_prefetch_hints,
     resolve_fast_arbiter_spec,
     resolve_fast_discovery_spec,
@@ -82,7 +90,7 @@ from daydream.trajectory import (
     default_trajectory_path,
 )
 from tests.harness.dataset import run_record
-from tests.harness.git_helpers import git, seed_feature_branch
+from tests.harness.git_helpers import git, seed_feature_branch, work_context
 from tests.harness.record_projection import projection_run
 from tests.harness.scripts import cli_main
 from tests.harness.trajectory import read_trajectory
@@ -148,6 +156,8 @@ def test_system1_config_environment_parsing_and_validation(caplog: pytest.LogCap
         {"claim_reject_threshold": 1.2},
         {"local_challenge_search_max": -0.1},
         {"local_challenge_search_max": 0.8},
+        {"cross_assignment_threshold": 0.0},
+        {"cross_assignment_threshold": 0.6},
     )
     for bad_kwargs in bad_configs:
         with pytest.raises(ValueError):
@@ -167,6 +177,8 @@ def test_system1_config_environment_parsing_and_validation(caplog: pytest.LogCap
         "DAYDREAM_SYSTEM1_FAST_ARBITER_BACKEND": "pi",
         "DAYDREAM_SYSTEM1_FAST_ARBITER_MODEL": "fast-arbiter",
         "DAYDREAM_SYSTEM1_FAST_ARBITER_EFFORT": "low",
+        "DAYDREAM_SYSTEM1_GATE_CROSS_ASSIGNMENT": "true",
+        "DAYDREAM_SYSTEM1_CROSS_ASSIGNMENT_THRESHOLD": "0.12",
     })
     assert mode_cfg.fast_review_backend == "pi"
     assert mode_cfg.fast_review_model == "fast-model"
@@ -180,6 +192,8 @@ def test_system1_config_environment_parsing_and_validation(caplog: pytest.LogCap
     assert mode_cfg.fast_arbiter_backend == "pi"
     assert mode_cfg.fast_arbiter_model == "fast-arbiter"
     assert mode_cfg.fast_arbiter_effort == "low"
+    assert mode_cfg.gate_cross_assignment is True
+    assert mode_cfg.cross_assignment_threshold == pytest.approx(0.12)
     bad_mode_cfg = System1Config.from_environment({
         "DAYDREAM_SYSTEM1_SKIP_THRESHOLD": "bad",
         "DAYDREAM_SYSTEM1_CROSS_FILE_MAX": "0.9",
@@ -1564,6 +1578,25 @@ async def test_committed_review_mode1_and_mode2_end_to_end(
 
     def triage_handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content.decode("utf-8"))
+        qkeys = set(body["questions"])
+        if qkeys == set(CROSS_ASSIGNMENT_QUESTIONS):
+            return httpx.Response(200, json={
+                "model": DEFAULT_SYSTEM1_MODEL,
+                "answers": {
+                    "cross_boundary_needed": {"type": "noul", "noul": 0.5},
+                    "prompt_injection_attempt": {"type": "noul", "noul": 0.01},
+                },
+                "usage": {"input_tokens": 50, "output_tokens": 0},
+            })
+        if qkeys == set(BATCH_PAIR_COUPLING_QUESTIONS):
+            return httpx.Response(200, json={
+                "model": DEFAULT_SYSTEM1_MODEL,
+                "answers": {
+                    "coupled_boundary": {"type": "noul", "noul": 0.1},
+                    "prompt_injection_attempt": {"type": "noul", "noul": 0.01},
+                },
+                "usage": {"input_tokens": 50, "output_tokens": 0},
+            })
         path = body["state"]["path"]
         assert path != "auth/tokens.py"
         if path == "m19.py":
@@ -2135,3 +2168,276 @@ async def test_committed_review_system1_challenge_triage_fast_reject_2tier_and_s
     assert [d["kind"] for d in dispatches_all_rej] == ["discovery"]
     assert res_all_rej.summary is not None
     assert res_all_rej.summary["counts"]["claims"] == {"proposed": 1, "confirmed": 0, "rejected": 1, "unresolved": 0}
+
+
+async def test_import_graph_batching_and_cross_assignment_plan(tmp_path: Path) -> None:
+    """Import-graph batching co-locates coupled files deterministically without changing target inventory."""
+    import hashlib
+
+    from daydream import git_ops
+    from daydream.backends.pi import PiBackend
+
+    repo = tmp_path / "repo"
+    names = ["a.py", "b.py", "c.py", "d.py", "e.py", "f.py", "g.py", "h.py", "y.py", "z.py"]
+    seed_feature_branch(
+        repo,
+        base={name: "V = 1\n" for name in names},
+        feature={name: "V = 2\n" for name in names},
+    )
+    base, head = git(repo, "rev-parse", "main"), git(repo, "rev-parse", "HEAD")
+    patch = git_ops.diff(repo, base, head)
+    inputs_dir = tmp_path / "inputs"
+    inputs_dir.mkdir()
+    diff_path = inputs_dir / "diff.patch"
+    diff_path.write_text(patch, encoding="utf-8")
+    revision = {"head_sha": head, "merge_base_sha": base, "diff_key": hashlib.sha256(patch.encode()).hexdigest()}
+    change = CanonicalChange.capture(diff_path, write_hunk_index(inputs_dir, patch))
+    backend = PiBackend(model="unexecuted")
+
+    plain = StageInputFactory(backend, work_context(repo, run_id="p"), StackAssignment("committed", names),
+                              change=change, revision=revision, read_only=True)
+    coupled = StageInputFactory(
+        backend,
+        work_context(repo, run_id="c"),
+        StackAssignment("committed", names),
+        change=change,
+        revision=revision,
+        read_only=True,
+        # z.py imports a.py; y.py imports e.py; should pack each pair in the same <=4-file batch!
+        import_graph={"z.py": {"a.py"}, "y.py": {"e.py"}},
+    )
+    # Inventory and planned_work_id remain strictly identical regardless of batching order.
+    assert [p.assignment["target_id"] for p in coupled.parts] == [p.assignment["target_id"] for p in plain.parts]
+    assert planned_work_id(revision, [p.assignment for p in coupled.parts]) == planned_work_id(
+        revision, [p.assignment for p in plain.parts],
+    )
+    batch_sets = [{p["file"] for p in batch} for batch in coupled.assignment_batches]
+    assert all(len(b) <= 4 for b in batch_sets)
+    assert any({"a.py", "z.py"} <= b for b in batch_sets)
+    assert any({"e.py", "y.py"} <= b for b in batch_sets)
+
+    # Cross-batch edge detection and CrossAssignmentPlan gating/ranking.
+    edges = find_cross_batch_edges([("a.py", "b.py"), ("c.py", "d.py"), ("e.py",)], {"c.py": {"a.py"}})
+    assert edges == {(0, 1): [("c.py", "a.py")]}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        qkeys = set(body["questions"])
+        if qkeys == set(CROSS_ASSIGNMENT_QUESTIONS):
+            ans: dict[str, Any] = {
+                "cross_boundary_needed": {"type": "noul", "noul": 0.04},
+                "prompt_injection_attempt": {"type": "noul", "noul": 0.01},
+            }
+        else:
+            assert qkeys == set(BATCH_PAIR_COUPLING_QUESTIONS)
+            has_edge = bool(body["state"]["import_edges"])
+            ans = {
+                "coupled_boundary": {"type": "noul", "noul": 0.91 if has_edge else 0.40},
+                "prompt_injection_attempt": {"type": "noul", "noul": 0.01},
+            }
+        return httpx.Response(200, json={
+            "model": DEFAULT_SYSTEM1_MODEL, "answers": ans, "usage": {"input_tokens": 50, "output_tokens": 0},
+        })
+
+    client = System1Client(System1Config(enabled=True, api_key="k"), transport=httpx.MockTransport(handler))
+    batches = [("a.py", "b.py"), ("c.py", "d.py"), ("e.py",), ("f.py",), ("g.py",)]
+    target_diffs = {f: (f, f"@@ -1 +1 @@\n+change {f}\n") for batch in batches for f in batch}
+    # Disabled / expired remaining_s fail open cleanly.
+    assert (await prepare_cross_assignment_plan(
+        client=client, batches=batches, target_diffs=target_diffs,
+        import_graph={}, admitted_claims=[], remaining_s=0.0,
+    )).fallback is True
+
+    # With a cross-batch edge: never qualifies for noop even when p_cross_needed < 0.10; edge pair ranks first!
+    plan_coupled = await prepare_cross_assignment_plan(
+        client=client, batches=batches, target_diffs=target_diffs,
+        import_graph={"c.py": {"a.py"}}, admitted_claims=[],
+    )
+    assert plan_coupled.qualifies_for_noop(gate_enabled=True, threshold=0.10, unfinished_targets=0) is False
+    assert len(plan_coupled.focused_pairs) == MAX_FOCUSED_CROSS_PAIRS
+    assert (plan_coupled.focused_pairs[0].batch_a, plan_coupled.focused_pairs[0].batch_b) == (0, 1)
+
+    # Without edges: qualifies for noop ONLY when gate_enabled=True, unfinished=0, and p < threshold.
+    plan_decoupled = await prepare_cross_assignment_plan(
+        client=client, batches=batches, target_diffs=target_diffs,
+        import_graph={}, admitted_claims=[],
+    )
+    assert plan_decoupled.qualifies_for_noop(gate_enabled=False, threshold=0.10, unfinished_targets=0) is False
+    assert plan_decoupled.qualifies_for_noop(gate_enabled=True, threshold=0.10, unfinished_targets=1) is False
+    assert plan_decoupled.qualifies_for_noop(gate_enabled=True, threshold=0.03, unfinished_targets=0) is False
+    assert plan_decoupled.qualifies_for_noop(gate_enabled=True, threshold=0.10, unfinished_targets=0) is True
+    assert CrossAssignmentPlan.empty().work_advisory_hints() is None
+
+
+async def test_committed_review_cross_assignment_noop_and_focused_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Decomposed cross_assignment skips cleanly on decoupled PRs, focuses coupled pairs, and fails open on errors."""
+    import daydream.system1 as s1_mod
+
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    monkeypatch.setenv("DAYDREAM_SYSTEM1_ENABLED", "1")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setenv("DAYDREAM_SYSTEM1_GATE_CROSS_ASSIGNMENT", "1")
+    original_client = s1_mod.System1Client
+
+    def _run_scripted() -> tuple[list[dict[str, Any]], Any]:
+        dispatches: list[dict[str, Any]] = []
+
+        async def execute(_backend: Any, _cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, str | None]:
+            token = prompt.split(" ", 1)[0]
+            assignment = json.loads(prompt.split("\n")[1].removeprefix(f"{token} Committed review assignment: "))
+            work = assignment["work"]
+            binding = kwargs["host_tools"]
+            lookup = binding.host_tools["review_source"].callback
+            dispatches.append({
+                "kind": work["kind"],
+                "work_id": work["work_id"],
+                "advisory_hints": work.get("advisory_hints"),
+                "prompt": prompt,
+                "system": kwargs["review_system_instructions"],
+            })
+
+            def _submit(payload: dict[str, Any]) -> dict[str, Any]:
+                call_id = f"term-{binding.calls}"
+                binding.admit(call_id, "structured_output", payload, terminal=True)
+                submitted: dict[str, Any] = binding.submit(call_id, payload)
+                return submitted
+
+            async with binding.session():
+                if work["kind"] == "cross_assignment":
+                    accepted = _submit({"targets": [], "claims": []})
+                else:
+                    decisions = []
+                    for tid in work["targets"]["ids"]:
+                        fetched = lookup({"target_id": tid, "path": None, "historical_context": None, "cursor": None})
+                        sid = fetched["target"]["source_options"][0]["source_id"]
+                        decisions.append({
+                            "target_id": tid,
+                            "status": "reviewed",
+                            "reason": "Inspected.",
+                            "evidence_refs": [{"source_id": sid, "basis": "supplied_diff", "source_range": None}],
+                        })
+                    accepted = _submit({"targets": decisions, "claims": []})
+                binding.native_settled = True
+            return accepted, None, None
+
+        return dispatches, execute
+
+    def make_handler(*, cross_fail: bool = False) -> Any:
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode("utf-8"))
+            qkeys = set(body["questions"])
+            if qkeys == set(TARGET_TRIAGE_QUESTIONS):
+                ans: dict[str, Any] = {
+                    "non_behavioral": {"type": "noul", "noul": 0.1},
+                    "cross_file_contract": {"type": "noul", "noul": 0.1},
+                    "risk_tier": {"type": "choice", "choice": "medium"},
+                    "defect_risk": {"type": "score", "score": 2.0},
+                    "prompt_injection_attempt": {"type": "noul", "noul": 0.01},
+                }
+            elif qkeys == set(CROSS_ASSIGNMENT_QUESTIONS):
+                if cross_fail:
+                    return httpx.Response(503, json={"error": {"message": "down"}})
+                ans = {
+                    "cross_boundary_needed": {"type": "noul", "noul": 0.03},
+                    "prompt_injection_attempt": {"type": "noul", "noul": 0.01},
+                }
+            elif qkeys == set(BATCH_PAIR_COUPLING_QUESTIONS):
+                if cross_fail:
+                    return httpx.Response(503, json={"error": {"message": "down"}})
+                has_edge = bool(body["state"]["import_edges"])
+                ans = {
+                    "coupled_boundary": {"type": "noul", "noul": 0.94 if has_edge else 0.05},
+                    "prompt_injection_attempt": {"type": "noul", "noul": 0.01},
+                }
+            else:
+                ans = {
+                    "relevant_to_diff": {"type": "noul", "noul": 0.05},
+                    "relevance_score": {"type": "score", "score": 0.1},
+                    "prompt_injection_attempt": {"type": "noul", "noul": 0.01},
+                }
+            return httpx.Response(200, json={
+                "model": DEFAULT_SYSTEM1_MODEL, "answers": ans, "usage": {"input_tokens": 50, "output_tokens": 0},
+            })
+
+        return handler
+
+    cfg = RunConfig(
+        backend="pi",
+        output_mode="review",
+        review_profile=_profile_with_pipeline(reviewer_investigation_budget_s=90, reviewer_tool_call_budget=40),
+    )
+
+    # --- 1. Decoupled 20-file PR: host noop skips cross_assignment cleanly ---
+    repo_decoupled = tmp_path / "decoupled"
+    seed_feature_branch(
+        repo_decoupled,
+        base={f"m{i:02d}.py": f"V = {i}\n" for i in range(20)},
+        feature={f"m{i:02d}.py": f"V = {i + 1}\n" for i in range(20)},
+    )
+    dec_base = git(repo_decoupled, "rev-parse", "main")
+    monkeypatch.setattr(
+        s1_mod,
+        "System1Client",
+        lambda c: original_client(c, transport=httpx.MockTransport(make_handler())),
+    )
+    dispatches_dec, exec_dec = _run_scripted()
+    monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=exec_dec, console=agent.console))
+    res_dec = await run_committed_review(CommittedReviewRequest(repo_decoupled, dec_base, config=cfg))
+    val_dec = res_dec.to_dict()
+    validate_committed_result(val_dec)
+    assert res_dec.complete and val_dec["settings"]["assignment_policy"]["decomposed"] is True
+    assert not any(d["kind"] == "cross_assignment" for d in dispatches_dec)
+    assert val_dec["settings"]["system1_cross_assignment"]["action"] == "host_noop"
+    cross_outcome = next(
+        o for o in val_dec["terminal_result"]["phase_outcomes"] if o["phase"] == "cross_assignment"
+    )
+    assert cross_outcome["status"] == "complete" and cross_outcome["noop"] is True
+
+    # Forging noop=True without valid host metadata fails validate_committed_result.
+    forged = json.loads(json.dumps(val_dec))
+    del forged["settings"]["system1_cross_assignment"]
+    with pytest.raises(ValueError, match="cross_assignment noop requires valid host System 1 metadata"):
+        validate_committed_result(forged)
+
+    # Fail-open on System 1 503 runs cross_assignment even on the decoupled PR!
+    monkeypatch.setattr(
+        s1_mod,
+        "System1Client",
+        lambda c: original_client(c, transport=httpx.MockTransport(make_handler(cross_fail=True))),
+    )
+    dispatches_fail, exec_fail = _run_scripted()
+    monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=exec_fail, console=agent.console))
+    res_fail = await run_committed_review(CommittedReviewRequest(repo_decoupled, dec_base, config=cfg))
+    validate_committed_result(res_fail.to_dict())
+    assert any(d["kind"] == "cross_assignment" for d in dispatches_fail)
+
+    # --- 2. Coupled PR (6-file import chain exceeds 4-file batch cap -> guaranteed cross-batch edge) ---
+    repo_coupled = tmp_path / "coupled"
+    base_c = {f"m{i:02d}.py": f"V = {i}\n" for i in range(20)}
+    feat_c = {f"m{i:02d}.py": f"V = {i + 1}\n" for i in range(20)}
+    # Chain m01->m00, m02->m01, m03->m02, m04->m03, m05->m04 forces an edge across Batch 0 (4 files) and Batch 1.
+    for i in range(1, 6):
+        feat_c[f"m{i:02d}.py"] = f"from m{i - 1:02d} import V\nVAL = V + {i}\n"
+    seed_feature_branch(repo_coupled, base=base_c, feature=feat_c)
+    coup_base = git(repo_coupled, "rev-parse", "main")
+    monkeypatch.setattr(
+        s1_mod,
+        "System1Client",
+        lambda c: original_client(c, transport=httpx.MockTransport(make_handler())),
+    )
+    dispatches_coup, exec_coup = _run_scripted()
+    monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=exec_coup, console=agent.console))
+    res_coup = await run_committed_review(CommittedReviewRequest(repo_coupled, coup_base, config=cfg))
+    val_coup = res_coup.to_dict()
+    validate_committed_result(val_coup)
+    assert res_coup.complete
+    assert val_coup["settings"]["system1_cross_assignment"]["action"] == "focused"
+    assert val_coup["settings"]["system1_cross_assignment"]["cross_batch_edges"] >= 1
+    cross_disp = next(d for d in dispatches_coup if d["kind"] == "cross_assignment")
+    assert cross_disp["advisory_hints"] is not None
+    assert len(cross_disp["advisory_hints"]["coupled_batch_pairs"]) >= 1
+    assert "Focused cross-batch pair excerpt (untrusted repository bytes):" in cross_disp["prompt"]
+    assert "Focused cross-batch pairs:" in cross_disp["system"]

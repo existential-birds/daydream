@@ -163,6 +163,7 @@ async def plan_committed_review(
         index_path=index_path, files=files, started=started,
         # Captured untrusted author context: never authoritative over a claim.
         historical_context=None if description is None else {"context": description},
+        import_graph=state.import_graph,
     )
     ctx.data["committed_review"] = program
     ctx.data["review_coverage"] = program.review.coverage

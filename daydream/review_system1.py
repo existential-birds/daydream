@@ -170,6 +170,29 @@ CLAIM_DUPLICATE_QUESTIONS: dict[str, DecisionQuestion] = with_injection_guard({
     ),
 })
 
+CROSS_ASSIGNMENT_QUESTIONS: dict[str, DecisionQuestion] = with_injection_guard({
+    "cross_boundary_needed": NoulQuestion(
+        instructions=(
+            "Could interactions across these separately reviewed file groups introduce a defect "
+            "(broken interface, mismatched schema/config, shared state bug, or caller/callee drift) "
+            "that would be invisible when reviewing each group in isolation?"
+        ),
+        true_criteria="Multiple groups touch coupled interfaces, shared state, schemas, or contracts.",
+        false_criteria="Groups are independent mechanical, doc, or isolated module changes.",
+    ),
+})
+
+BATCH_PAIR_COUPLING_QUESTIONS: dict[str, DecisionQuestion] = with_injection_guard({
+    "coupled_boundary": NoulQuestion(
+        instructions=(
+            "Do the changes in Batch A and Batch B share an interface, invariant, schema, "
+            "configuration contract, or shared state boundary that should be cross-checked together?"
+        ),
+        true_criteria="Batch A and Batch B modify interacting APIs, types, callers/callees, or shared state.",
+        false_criteria="Batch A and Batch B are independent changes with no meaningful cross-batch interaction.",
+    ),
+})
+
 MAX_SUPPORTING_CANDIDATES = 12
 MAX_SUPPORTING_HINTS = 3
 SUPPORTING_PREVIEW_MAX_BYTES = 2048
@@ -1202,4 +1225,236 @@ async def prepare_challenge_triage(
     return ChallengeTriagePlan(
         triages=triages,
         duplicate_clusters=_connected_clusters(matched_pairs),
+    )
+
+
+# --- Cross-assignment boundary gating and focused pair ranking (#1973) ---
+
+MAX_BATCH_PAIR_CHECKS = 12
+MAX_FOCUSED_CROSS_PAIRS = 4
+CROSS_SUMMARY_DIFF_PER_BATCH_BYTES = 2048
+CROSS_PAIR_EXCERPT_MAX_BYTES = 2048
+CROSS_PAIR_COUPLING_THRESHOLD = 0.25
+
+
+@dataclass(frozen=True)
+class CoupledBatchPair:
+    """One ranked cross-batch boundary candidate for focused cross_assignment review."""
+
+    batch_a: int
+    batch_b: int
+    files_a: tuple[str, ...]
+    files_b: tuple[str, ...]
+    import_edges: tuple[tuple[str, str], ...]
+    p_coupled: float
+    excerpt_a: str
+    excerpt_b: str
+
+    def advisory_entry(self) -> dict[str, Any]:
+        return {
+            "batch_a": self.batch_a,
+            "batch_b": self.batch_b,
+            "files_a": list(self.files_a),
+            "files_b": list(self.files_b),
+            "import_edges": [[src, dst] for src, dst in self.import_edges],
+            "coupling_probability": round(self.p_coupled, 4),
+        }
+
+
+@dataclass(frozen=True)
+class CrossAssignmentPlan:
+    """Host System 1 cross-assignment risk gate and focused boundary-pair ranking."""
+
+    p_cross_needed: float | None = None
+    cross_batch_edge_count: int = 0
+    focused_pairs: tuple[CoupledBatchPair, ...] = ()
+    injection_flagged: bool = False
+    fallback: bool = False
+    model: str | None = None
+
+    @classmethod
+    def empty(cls, *, cross_batch_edge_count: int = 0) -> CrossAssignmentPlan:
+        return cls(
+            p_cross_needed=None,
+            cross_batch_edge_count=cross_batch_edge_count,
+            focused_pairs=(),
+            fallback=True,
+        )
+
+    def qualifies_for_noop(
+        self,
+        *,
+        gate_enabled: bool,
+        threshold: float,
+        unfinished_targets: int,
+    ) -> bool:
+        """Whether decomposed cross_assignment may safely record host noop=True."""
+        if not gate_enabled or unfinished_targets > 0 or self.cross_batch_edge_count > 0:
+            return False
+        if self.injection_flagged or self.fallback or self.p_cross_needed is None:
+            return False
+        return self.p_cross_needed < threshold
+
+    def work_advisory_hints(self) -> dict[str, Any] | None:
+        if not self.focused_pairs:
+            return None
+        return {"coupled_batch_pairs": [pair.advisory_entry() for pair in self.focused_pairs]}
+
+
+def find_cross_batch_edges(
+    batch_files: Sequence[Sequence[str]],
+    import_graph: Mapping[str, set[str]],
+) -> dict[tuple[int, int], list[tuple[str, str]]]:
+    """Return directed import edges crossing between distinct batches, keyed by ``(min_idx, max_idx)``."""
+    batch_of: dict[str, int] = {}
+    for idx, files in enumerate(batch_files):
+        for path in files:
+            batch_of.setdefault(path, idx)
+    edges_by_pair: dict[tuple[int, int], list[tuple[str, str]]] = {}
+    for src, dsts in sorted(import_graph.items()):
+        src_batch = batch_of.get(src)
+        if src_batch is None:
+            continue
+        for dst in sorted(dsts):
+            dst_batch = batch_of.get(dst)
+            if dst_batch is None or dst_batch == src_batch:
+                continue
+            pair = (min(src_batch, dst_batch), max(src_batch, dst_batch))
+            edges_by_pair.setdefault(pair, []).append((src, dst))
+    return edges_by_pair
+
+
+async def prepare_cross_assignment_plan(
+    *,
+    client: System1Client,
+    batches: Sequence[Sequence[str]],
+    target_diffs: Mapping[str, tuple[str, str]],
+    import_graph: Mapping[str, set[str]],
+    admitted_claims: Sequence[Mapping[str, Any]],
+    session_id: str | None = None,
+    remaining_s: float | None = None,
+) -> CrossAssignmentPlan:
+    """Score PR-level cross-batch defect risk and rank coupled batch pairs in one System 1 pass."""
+    batch_files: list[tuple[str, ...]] = [
+        tuple(dict.fromkeys(target_diffs[t][0] for t in batch if t in target_diffs))
+        for batch in batches
+    ]
+    edges_by_pair = find_cross_batch_edges(batch_files, import_graph)
+    total_cross_edges = sum(len(edges) for edges in edges_by_pair.values())
+
+    if len(batches) < 2 or not client.config.enabled or not client.config.api_key:
+        return CrossAssignmentPlan.empty(cross_batch_edge_count=total_cross_edges)
+    if remaining_s is not None and remaining_s <= 0:
+        return CrossAssignmentPlan.empty(cross_batch_edge_count=total_cross_edges)
+    client = _clamp_client_timeout(client, remaining_s)
+
+    batch_excerpts: list[str] = [
+        truncate_utf8_to_budget(
+            "\n".join(target_diffs[t][1] for t in batch if t in target_diffs),
+            CROSS_SUMMARY_DIFF_PER_BATCH_BYTES,
+        )
+        for batch in batches
+    ]
+    pr_state = {
+        "batches": [
+            {"batch": idx, "files": list(files), "diff_excerpt": batch_excerpts[idx]}
+            for idx, files in enumerate(batch_files)
+        ],
+        "cross_batch_import_edges": [
+            {"batch_a": a, "batch_b": b, "edges": [[src, dst] for src, dst in edges]}
+            for (a, b), edges in sorted(edges_by_pair.items())
+        ],
+        "admitted_local_claims": [
+            {
+                "file": claim.get("payload", {}).get("file"),
+                "title": claim.get("title", ""),
+                "severity": claim.get("payload", {}).get("severity"),
+            }
+            for claim in admitted_claims[:24]
+        ],
+    }
+
+    # Prioritize batch pairs with known import edges first, then fill up to MAX_BATCH_PAIR_CHECKS.
+    candidate_pairs: list[tuple[int, int]] = list(sorted(edges_by_pair))
+    if len(candidate_pairs) < MAX_BATCH_PAIR_CHECKS:
+        seen_pairs = set(candidate_pairs)
+        for i in range(len(batches)):
+            for j in range(i + 1, len(batches)):
+                if len(candidate_pairs) >= MAX_BATCH_PAIR_CHECKS:
+                    break
+                if (i, j) not in seen_pairs:
+                    seen_pairs.add((i, j))
+                    candidate_pairs.append((i, j))
+            if len(candidate_pairs) >= MAX_BATCH_PAIR_CHECKS:
+                break
+
+    items: list[tuple[Any, Mapping[str, DecisionQuestion]]] = [(pr_state, CROSS_ASSIGNMENT_QUESTIONS)]
+    for a, b in candidate_pairs:
+        items.append((
+            {
+                "batch_a": {"index": a, "files": list(batch_files[a]), "diff_excerpt": batch_excerpts[a]},
+                "batch_b": {"index": b, "files": list(batch_files[b]), "diff_excerpt": batch_excerpts[b]},
+                "import_edges": [[src, dst] for src, dst in edges_by_pair.get((a, b), ())],
+            },
+            BATCH_PAIR_COUPLING_QUESTIONS,
+        ))
+
+    outcomes = await client.evaluate_many(
+        items,
+        phase=DaydreamPhase.REVIEW,
+        session_id=session_id,
+        record_usage=True,
+    )
+
+    pr_outcome = outcomes[0]
+    if not pr_outcome.ok or pr_outcome.response is None:
+        return CrossAssignmentPlan.empty(cross_batch_edge_count=total_cross_edges)
+    pr_injection = injection_detected(pr_outcome)
+    p_cross_needed = pr_outcome.noul("cross_boundary_needed")
+    model_name = pr_outcome.response.model
+
+    ranked_pairs: list[CoupledBatchPair] = []
+    for pair_idx, (a, b) in enumerate(candidate_pairs):
+        outcome = outcomes[1 + pair_idx]
+        edges = tuple(edges_by_pair.get((a, b), ()))
+        if not outcome.ok or injection_detected(outcome):
+            if edges:
+                # Deterministic import edges stay visible even if a pair call failed open.
+                ranked_pairs.append(
+                    CoupledBatchPair(
+                        batch_a=a,
+                        batch_b=b,
+                        files_a=batch_files[a],
+                        files_b=batch_files[b],
+                        import_edges=edges,
+                        p_coupled=1.0,
+                        excerpt_a=truncate_utf8_to_budget(batch_excerpts[a], CROSS_PAIR_EXCERPT_MAX_BYTES),
+                        excerpt_b=truncate_utf8_to_budget(batch_excerpts[b], CROSS_PAIR_EXCERPT_MAX_BYTES),
+                    )
+                )
+            continue
+        p_coupled = outcome.noul("coupled_boundary")
+        if p_coupled is None:
+            continue
+        if edges or p_coupled >= CROSS_PAIR_COUPLING_THRESHOLD:
+            ranked_pairs.append(
+                CoupledBatchPair(
+                    batch_a=a,
+                    batch_b=b,
+                    files_a=batch_files[a],
+                    files_b=batch_files[b],
+                    import_edges=edges,
+                    p_coupled=p_coupled,
+                    excerpt_a=truncate_utf8_to_budget(batch_excerpts[a], CROSS_PAIR_EXCERPT_MAX_BYTES),
+                    excerpt_b=truncate_utf8_to_budget(batch_excerpts[b], CROSS_PAIR_EXCERPT_MAX_BYTES),
+                )
+            )
+    ranked_pairs.sort(key=lambda p: (not bool(p.import_edges), -p.p_coupled, p.batch_a, p.batch_b))
+    return CrossAssignmentPlan(
+        p_cross_needed=p_cross_needed,
+        cross_batch_edge_count=total_cross_edges,
+        focused_pairs=tuple(ranked_pairs[:MAX_FOCUSED_CROSS_PAIRS]),
+        injection_flagged=pr_injection,
+        fallback=p_cross_needed is None,
+        model=model_name,
     )

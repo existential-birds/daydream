@@ -18,31 +18,21 @@ from typing import Any
 
 from daydream.dataset import LocalRecordStore
 from daydream.deep.diff import iter_diff_blocks
-from daydream.review_system1 import CLAIM_TRIAGE_QUESTIONS, TARGET_TRIAGE_QUESTIONS
+from daydream.review_system1 import (
+    CLAIM_TRIAGE_QUESTIONS,
+    CROSS_ASSIGNMENT_QUESTIONS,
+    TARGET_TRIAGE_QUESTIONS,
+)
 from daydream.system1 import (
     DecisionOutcome,
-    NoulQuestion,
     System1Client,
     injection_detected,
     path_is_hard_denied,
-    with_injection_guard,
 )
 
 # --- Shared review-triage question sets --------------------------------------
-# TARGET_TRIAGE_QUESTIONS and CLAIM_TRIAGE_QUESTIONS live in daydream.review_system1
-# so live review triage and offline shadow calibration evaluate identical rubrics.
-
-CROSS_ASSIGNMENT_QUESTIONS = with_injection_guard({
-    "cross_boundary_needed": NoulQuestion(
-        instructions=(
-            "Could interactions across these separately reviewed file groups introduce a defect "
-            "(broken interface, mismatched schema/config, shared state bug, or caller/callee drift) "
-            "that would be invisible when reviewing each group in isolation?"
-        ),
-        true_criteria="Multiple groups touch coupled interfaces, shared state, schemas, or contracts.",
-        false_criteria="Groups are independent mechanical, doc, or isolated module changes.",
-    ),
-})
+# TARGET_TRIAGE_QUESTIONS, CLAIM_TRIAGE_QUESTIONS, and CROSS_ASSIGNMENT_QUESTIONS
+# live in daydream.review_system1 so live triage and shadow calibration share one rubric.
 
 TARGET_SKIP_THRESHOLDS: tuple[float, ...] = (0.50, 0.70, 0.80, 0.85, 0.90, 0.95, 0.98, 0.99)
 CLAIM_REJECT_THRESHOLDS: tuple[float, ...] = (0.50, 0.70, 0.80, 0.85, 0.90, 0.95, 0.98, 0.99)

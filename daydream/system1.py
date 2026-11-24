@@ -46,6 +46,7 @@ DEFAULT_SYSTEM1_SKIP_THRESHOLD = 0.98
 DEFAULT_SYSTEM1_CROSS_FILE_MAX = 0.05
 DEFAULT_SYSTEM1_CLAIM_REJECT_THRESHOLD = 0.95
 DEFAULT_SYSTEM1_LOCAL_CHALLENGE_SEARCH_MAX = 0.15
+DEFAULT_SYSTEM1_CROSS_THRESHOLD = 0.10
 INJECTION_QUESTION_KEY = "prompt_injection_attempt"
 
 # Security- and deployment-critical paths that System 1 triage must never fast-skip.
@@ -164,6 +165,8 @@ class System1Config:
     fast_arbiter_backend: str | None = None
     fast_arbiter_model: str | None = None
     fast_arbiter_effort: str | None = None
+    gate_cross_assignment: bool = False
+    cross_assignment_threshold: float = DEFAULT_SYSTEM1_CROSS_THRESHOLD
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, str) or not self.model.strip():
@@ -210,6 +213,13 @@ class System1Config:
             or not (0.0 <= float(self.local_challenge_search_max) <= 0.5)
         ):
             raise ValueError("system1 local_challenge_search_max must be in [0.0, 0.5]")
+        if (
+            isinstance(self.cross_assignment_threshold, bool)
+            or not isinstance(self.cross_assignment_threshold, (int, float))
+            or not math.isfinite(self.cross_assignment_threshold)
+            or not (0.0 < float(self.cross_assignment_threshold) <= 0.5)
+        ):
+            raise ValueError("system1 cross_assignment_threshold must be in (0.0, 0.5]")
 
     @classmethod
     def from_environment(cls, env: Mapping[str, str] | None = None) -> System1Config:
@@ -287,6 +297,14 @@ class System1Config:
             fast_arbiter_backend=_optional_stripped(source.get("DAYDREAM_SYSTEM1_FAST_ARBITER_BACKEND")),
             fast_arbiter_model=_optional_stripped(source.get("DAYDREAM_SYSTEM1_FAST_ARBITER_MODEL")),
             fast_arbiter_effort=_optional_stripped(source.get("DAYDREAM_SYSTEM1_FAST_ARBITER_EFFORT")),
+            gate_cross_assignment=_truthy(source.get("DAYDREAM_SYSTEM1_GATE_CROSS_ASSIGNMENT")),
+            cross_assignment_threshold=_parse_bounded_float(
+                source.get("DAYDREAM_SYSTEM1_CROSS_ASSIGNMENT_THRESHOLD"),
+                default=DEFAULT_SYSTEM1_CROSS_THRESHOLD,
+                name="DAYDREAM_SYSTEM1_CROSS_ASSIGNMENT_THRESHOLD",
+                low=0.0,
+                high=0.5,
+            ),
         )
 
 

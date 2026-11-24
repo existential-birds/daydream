@@ -531,6 +531,14 @@ pending claims with bounded host-extracted diff and enclosing source excerpts:
 - **Single-round calibrated severity normalization**: when a confirming challenge verdict
   adjusts only `severity` (and optionally `title`) to match the host System 1 calibrated
   severity, it applies in place without forcing a second challenge round.
+- **Import-graph batching & cross-assignment gate/focus**: `StageInputFactory` deterministically
+  packs directly importing changed files (`build_import_graph`) into the same ≤4-file batch
+  without changing `assignments` or `planned_work_id`. On decomposed reviews with System 1
+  enabled, opt-in `DAYDREAM_SYSTEM1_GATE_CROSS_ASSIGNMENT=1` may record `cross_assignment`
+  as `complete (noop=True)` ONLY when zero local targets remain unfinished, zero cross-batch
+  import edges exist, injection checks are clean, and `p_cross_needed < threshold` (validated
+  by `validate_committed_result`); when `cross_assignment` runs, top-K coupled batch pairs and
+  bounded untrusted interface excerpts are supplied to focus investigation.
 
 ### Captured local source
 
