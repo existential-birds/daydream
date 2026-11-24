@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opt-in `DAYDREAM_SYSTEM1_IMPROVE_PREFILTER=1` noise filtering retained in
   `vet-system1-prefilter.json`) ([#1974](https://github.com/existential-birds/daydream/issues/1974)).
 
+### Changed
+
+- Updated the verified Pi host-tools baseline from Pi `1.4.0` to Pi `1.6.0` (retaining Node `24.18.1`
+  and compaction defaults `reserveTokens=16384`, `keepRecentTokens=20000`).
+
 ## [0.38.1] - 2026-11-24
 
 ### Fixed

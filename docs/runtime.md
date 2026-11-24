@@ -213,7 +213,7 @@ canonical fragment identity is unchanged.
 
 Before provider work the native
 extension reports the selected model's `contextWindow`/`maxTokens` and compaction
-settings (Pi 1.4.0 defaults when unset, labelled as such). The host requires the
+settings (Pi 1.6.0 defaults when unset, labelled as such). The host requires the
 instructions and prompt, the largest single tool result (64 KiB), one recommended
 32 KiB batch, the compaction reserve and kept context to fit, estimated at three
 bytes per token, and requires output for that batch; otherwise it fails with an
@@ -699,7 +699,7 @@ environment cannot supply hosted authority.
 |---|---|
 | Backend | Native Pi |
 | Provider / model | Operator-selected nonblank strings supported by the isolated native configuration |
-| Native baseline | Official Pi 1.4.0 / Node 24.18.1 |
+| Native baseline | Official Pi 1.6.0 / Node 24.18.1 |
 | Model tools | Stock `read`, `find`, `ls`, `grep`; charged host `review_source` lookup and `review_admit` batches; bounded `structured_output` admission (policy `pi-read-only-v2`) |
 | Source preparation | Explicit `trusted_prepared_source=True` operator attestation |
 

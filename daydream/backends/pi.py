@@ -759,7 +759,7 @@ class PiBackend:
         """Pin the fail-closed extension loader used by the readiness barrier."""
         if self._hosted_read_only:
             await self._require_native_version("node", "v24.18.1", cwd, environment, binding)
-        await self._require_native_version("pi", "1.4.0", cwd, environment, binding)
+        await self._require_native_version("pi", "1.6.0", cwd, environment, binding)
 
     async def _require_native_version(self, command: str, expected: str, cwd: Path,
                                       environment: dict[str, str], binding: HostToolBinding) -> None:
@@ -796,8 +796,8 @@ class PiBackend:
                 message = f"`{command} --version` reported {observed}; expected {expected}"
                 if self._hosted_read_only:
                     raise _unsupported_hosted_policy(
-                        f"Hosted read-only policy requires official Pi 1.4.0 / Node 24.18.1; {message}")
-                raise PiError(f"Native host tools require Pi 1.4.0; {message}", category="HOST_TOOLS")
+                        f"Hosted read-only policy requires official Pi 1.6.0 / Node 24.18.1; {message}")
+                raise PiError(f"Native host tools require Pi 1.6.0; {message}", category="HOST_TOOLS")
         finally:
             try:
                 await teardown(probe, self._transports, cleanup_timeout_s=host_policy._CLEANUP_TIMEOUT_S)
@@ -1393,7 +1393,7 @@ class PiBackend:
                                 "Fuzzy model fallback is unsupported.")
                         raise _unsupported_hosted_policy(
                             "Hosted Pi native readiness failed; required stock tools and packaged helpers "
-                            "must be supported by official Pi 1.4.0 / Node 24.18.1")
+                            "must be supported by official Pi 1.6.0 / Node 24.18.1")
                     raise PiError("Required native host-tool binding is unavailable", category="HOST_TOOLS")
                 if event_type == "daydream_host_tool_fatal" and host_tools is not None:
                     # Native details only explain the stop. Binding-local state

@@ -810,7 +810,7 @@ async def test_http_readiness_refuses_native_limits_or_host_schemas_before_provi
             response = await _ready(client, native_limits=limits)
             assert response["outcome"] == "fatal" and response["code"] == "native_capacity"
             assert binding.native_limits is not None
-            assert binding.native_limits["keep_recent_tokens_source"] == "pi_1.4.0_default"
+            assert binding.native_limits["keep_recent_tokens_source"] == "pi_1.6.0_default"
             # 41,000 prompt/result/submission tokens plus Pi's default compaction allowances.
             assert binding.native_limits["required_context_tokens"] == 41_000 + 16_384 + 20_000
         admitted = (await client.post("/admit", json={"id": "late", "name": "read", "arguments": None})).json()
