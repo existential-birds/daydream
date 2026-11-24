@@ -18,11 +18,11 @@ from typing import Any
 
 from daydream.dataset import LocalRecordStore
 from daydream.deep.diff import iter_diff_blocks
+from daydream.review_system1 import TARGET_TRIAGE_QUESTIONS
 from daydream.system1 import (
     ChoiceQuestion,
     DecisionOutcome,
     NoulQuestion,
-    ScoreQuestion,
     System1Client,
     injection_detected,
     path_is_hard_denied,
@@ -30,51 +30,8 @@ from daydream.system1 import (
 )
 
 # --- Shared review-triage question sets --------------------------------------
-
-TARGET_TRIAGE_QUESTIONS = with_injection_guard({
-    "non_behavioral": NoulQuestion(
-        instructions=(
-            "Is this file diff strictly non-behavioral (comments, documentation, formatting, "
-            "lockfiles, snapshots, or pure import/identifier reordering) with no plausible "
-            "runtime, security, or contract defect?"
-        ),
-        true_criteria=(
-            "Only comments, markdown/docs, whitespace/formatting, lockfile/snapshot churn, "
-            "or mechanical edits that cannot alter runtime logic, contracts, or security."
-        ),
-        false_criteria=(
-            "Modifies executable code, control flow, data handling, types/schemas, configuration, "
-            "queries, permissions, tests asserting behavior, or anything that could introduce a defect."
-        ),
-    ),
-    "cross_file_contract": NoulQuestion(
-        instructions=(
-            "Does this diff modify an exported symbol signature, shared schema, public API, "
-            "configuration key, or cross-file invariant?"
-        ),
-        true_criteria="Changes a contract, signature, schema, or shared state consumed by other files.",
-        false_criteria="Changes remain purely internal to this file with no external contract change.",
-    ),
-    "risk_tier": ChoiceQuestion(
-        instructions="Classify the defect-review risk tier of this changed file.",
-        criteria={
-            "mechanical": "Formatting, comments, docs, snapshots, or trivial renames.",
-            "low": "Small isolated helper, simple test update, or straightforward plumbing.",
-            "medium": "Meaningful business logic, error handling, state updates, or API changes.",
-            "high_critical": "Auth, security, concurrency, data integrity, persistence, or subtle invariants.",
-        },
-    ),
-    "defect_risk": ScoreQuestion(
-        instructions="Rate how likely this diff is to harbor a real correctness, security, or contract defect.",
-        criteria=[
-            "No plausible defect risk (purely mechanical/docs)",
-            "Very low risk (trivial isolated change)",
-            "Moderate risk (standard behavioral change)",
-            "Elevated risk (complex state, edge cases, or boundary changes)",
-            "High risk (security, concurrency, data loss, or subtle cross-cutting invariants)",
-        ],
-    ),
-})
+# TARGET_TRIAGE_QUESTIONS lives in daydream.review_system1 so live ranking/triage
+# and offline shadow calibration always evaluate the exact same rubric.
 
 CLAIM_TRIAGE_QUESTIONS = with_injection_guard({
     "obviously_invalid": NoulQuestion(

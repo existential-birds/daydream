@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prompt-injection and security hard-deny path guards, fail-open fallback, trajectory billing,
   and the offline `daydream corpus calibrate-system1` shadow-calibration harness
   ([#1969](https://github.com/existential-birds/daydream/issues/1969)).
+- Opt-in System 1 pre-dispatch ranking for committed reviews (`daydream.review_system1`): scores
+  targets, `historical_context` fields, and confined import/test supporting files in one parallel
+  pass to order discovery targets and batches highest-risk first and attach bounded advisory hints
+  under `work.advisory_hints` without exposing raw author prose or altering sealed contracts
+  ([#1970](https://github.com/existential-birds/daydream/issues/1970)).
 
 ## [0.38.0] - 2026-11-24
 
