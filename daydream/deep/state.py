@@ -156,6 +156,8 @@ class DeepState:
 
     import_graph = _StateField[dict[str, set[str]]](dict, default=dict)
 
+    import_graph_complete = _StateField[bool](bool, default=bool)
+
     changed_files = _StateField[set[str]](set)
 
     changed_files_or_none = _StateField[set[str] | None](

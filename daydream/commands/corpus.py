@@ -154,22 +154,108 @@ def _handle_adjudicate_command(argv: list[str]) -> int:
     return handle_adjudicate(argv)
 
 
+def _build_calibrate_system1_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="daydream corpus calibrate-system1",
+        description=(
+            "Replay archived review runs or a frozen record snapshot through Jev / System 1 "
+            "in shadow mode to calibrate gate thresholds."
+        ),
+    )
+    parser.add_argument("--run-dir", type=Path, action="append", default=[],
+                        help="Archived run directory or archive root (repeatable).")
+    parser.add_argument("--store", type=Path, help="Private JSONL record store (requires --snapshot-id).")
+    parser.add_argument("--snapshot-id", help="Frozen snapshot ID inside --store.")
+    parser.add_argument("--model", help="System 1 Decisions model override (default: DAYDREAM_SYSTEM1_MODEL or Jev).")
+    parser.add_argument("--out", type=Path, help="Write JSON calibration report to this path instead of stdout.")
+    parser.add_argument("--target-recall-floor", type=float, default=0.99)
+    parser.add_argument("--claim-recall-floor", type=float, default=0.98)
+    parser.add_argument("--cross-recall-floor", type=float, default=0.99)
+    return parser
+
+
+def _handle_calibrate_system1_command(argv: list[str]) -> int:
+    import json
+    from dataclasses import replace
+
+    from daydream.eval.system1_calibration import (
+        ShadowDataset,
+        load_shadow_cases_from_runs,
+        load_shadow_cases_from_store,
+        run_shadow_calibration,
+    )
+    from daydream.json_utils import atomic_write_json
+    from daydream.system1 import System1Client, System1Config
+
+    args = _build_calibrate_system1_parser().parse_args(argv)
+    console = create_console()
+    if not args.run_dir and not args.store:
+        print_error(console, "Calibration input required", "Pass at least one --run-dir or --store with --snapshot-id.")
+        return 2
+    if bool(args.store) != bool(args.snapshot_id):
+        print_error(console, "Invalid snapshot selection", "--store and --snapshot-id must be provided together.")
+        return 2
+    for flag, value in (
+        ("--target-recall-floor", args.target_recall_floor),
+        ("--claim-recall-floor", args.claim_recall_floor),
+        ("--cross-recall-floor", args.cross_recall_floor),
+    ):
+        if not 0.0 < value <= 1.0:
+            print_error(console, f"Invalid {flag}", "Recall floor must be in (0, 1].")
+            return 2
+
+    try:
+        config = replace(System1Config.from_environment(), enabled=True)
+        if args.model is not None:
+            config = replace(config, model=args.model)
+        if not config.api_key:
+            print_error(console, "Missing OpenRouter API key", "Set OPENROUTER_API_KEY to run shadow calibration.")
+            return 1
+        datasets: list[ShadowDataset] = []
+        if args.run_dir:
+            datasets.append(load_shadow_cases_from_runs(args.run_dir))
+        if args.store and args.snapshot_id:
+            datasets.append(load_shadow_cases_from_store(args.store.expanduser(), args.snapshot_id))
+        report = anyio.run(
+            partial(
+                run_shadow_calibration,
+                target_recall_floor=args.target_recall_floor,
+                claim_recall_floor=args.claim_recall_floor,
+                cross_recall_floor=args.cross_recall_floor,
+            ),
+            ShadowDataset.merge(datasets),
+            System1Client(config),
+        )
+        payload = report.to_dict()
+        if args.out is not None:
+            atomic_write_json(args.out.expanduser(), payload, trailing_newline=True)
+            print_success(console, f"Wrote System 1 calibration report to {args.out}")
+        else:
+            print(json.dumps(payload, indent=2))
+    except (OSError, ValueError, TypeError) as exc:
+        print_error(console, "System 1 calibration failed", str(exc))
+        return 1
+    return 0
+
+
 _CORPUS_SUBVERBS: dict[str, Callable[[list[str]], int]] = {
     "dataset": dataset.handle_dataset,
     "harvest": _handle_harvest_command,
     "build": _handle_build_corpus_command,
     "label": _handle_label_command,
     "adjudicate": _handle_adjudicate_command,
+    "calibrate-system1": _handle_calibrate_system1_command,
 }
 
 _CORPUS_USAGE = (
-    "usage: daydream corpus {dataset,harvest,build,label,adjudicate} ...\n\n"
+    "usage: daydream corpus {dataset,harvest,build,label,adjudicate,calibrate-system1} ...\n\n"
     "Data-pipeline sub-verbs:\n"
-    "  dataset   publish/status/download JSONL evidence or select a frozen snapshot\n"
-    "  harvest   append PR enrichment and annotations for selected run records\n"
-    "  build     project a frozen record snapshot offline\n"
-    "  label     append an authoritative human outcome label\n"
-    "  adjudicate  per-finding queue, preview, label, export, report, materialize, and harvest-snapshot"
+    "  dataset            publish/status/download JSONL evidence or select a frozen snapshot\n"
+    "  harvest            append PR enrichment and annotations for selected run records\n"
+    "  build              project a frozen record snapshot offline\n"
+    "  label              append an authoritative human outcome label\n"
+    "  adjudicate         per-finding queue, preview, label, export, report, materialize, and harvest-snapshot\n"
+    "  calibrate-system1  replay archived runs through Jev / System 1 in shadow mode to calibrate thresholds"
 )
 
 

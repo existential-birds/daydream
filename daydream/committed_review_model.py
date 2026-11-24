@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -118,10 +119,76 @@ def shard_scope_id(index: int) -> str:
     return f"committed:{index:05d}"
 
 
+def _is_finite_number(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
+
+
+def is_valid_system1_triaged(meta: Any, *, file_path: str) -> bool:
+    """Validate host-authored System 1 non-behavioral fast-path metadata on one assignment part."""
+    if not isinstance(meta, dict) or set(meta) != {"model", "p_non_behavioral", "p_cross_file", "threshold"}:
+        return False
+    model, p_nb, p_cf, threshold = meta["model"], meta["p_non_behavioral"], meta["p_cross_file"], meta["threshold"]
+    if not isinstance(model, str) or not model.strip() or len(model) > 256:
+        return False
+    if not all(_is_finite_number(v) for v in (p_nb, p_cf, threshold)):
+        return False
+    if not (0.5 < float(threshold) <= float(p_nb) <= 1.0 and 0.0 <= float(p_cf) <= 0.5):
+        return False
+    from daydream.system1 import path_is_hard_denied
+
+    return not path_is_hard_denied(file_path)
+
+
+def _host_decision_reason(part: dict[str, Any]) -> str | None:
+    if part.get("binary"):
+        return "binary change: no text content"
+    meta = part.get("system1_triaged")
+    if meta is not None and is_valid_system1_triaged(meta, file_path=str(part.get("file", ""))):
+        p_nb = float(meta["p_non_behavioral"])
+        return f"system1_triaged: non-behavioral change (p={p_nb:.3f}, model={meta['model']})"
+    return None
+
+
+def is_host_decided_part(part: dict[str, Any]) -> bool:
+    """Whether the host, rather than a review model, owns this target's decision."""
+    return _host_decision_reason(part) is not None
+
+
 def host_decision(part: dict[str, Any]) -> dict[str, Any]:
-    """The host's decision for a binary target, which has no text a model could review."""
-    return {"target_id": part["target_id"], "status": "reviewed", "reason": "binary change: no text content",
+    """The host's decision for a binary target or an opt-in System 1 non-behavioral fast-path target."""
+    reason = _host_decision_reason(part)
+    if reason is None:
+        raise ValueError(f"target {part.get('target_id')!r} is not host-decided")
+    return {"target_id": part["target_id"], "status": "reviewed", "reason": reason,
             "evidence_refs": part["source_refs"]}
+
+
+HOST_SYSTEM1_CHALLENGE_WORK_ID = "host:system1"
+HOST_SYSTEM1_REJECTION_PREFIX = "system1_fast_rejected: "
+
+
+def is_host_system1_rejection_verdict(verdict: Any) -> bool:
+    """Whether *verdict* is a valid host System 1 fast-rejection (never a confirmation)."""
+    if not isinstance(verdict, dict):
+        return False
+    return (
+        verdict.get("work_id") == HOST_SYSTEM1_CHALLENGE_WORK_ID
+        and verdict.get("verdict") == "rejected"
+        and isinstance(verdict.get("grounds"), str)
+        and verdict["grounds"].startswith(HOST_SYSTEM1_REJECTION_PREFIX)
+    )
+
+
+def all_claims_host_rejected(claims: list[dict[str, Any]]) -> bool:
+    """Whether every claim was rejected by host System 1 fast-rejection (so no System 2 challenge was required)."""
+    return bool(claims) and all(
+        claim.get("disposition") == "rejected"
+        and any(
+            verdict.get("revision") == claim.get("revision") and is_host_system1_rejection_verdict(verdict)
+            for verdict in claim.get("challenge_evidence", [])
+        )
+        for claim in claims
+    )
 
 
 # Work records, attribution, per-execution capacity evidence, the cross_assignment phase (#1628) and claim severity.
@@ -268,6 +335,8 @@ def validate_committed_result(value: dict[str, Any]) -> None:
             raise ValueError("source reference differs from planned assignment")
 
     for part in assignments:
+        if "system1_triaged" in part and not is_valid_system1_triaged(part["system1_triaged"], file_path=part["file"]):
+            raise ValueError("invalid host system1_triaged attribution on assignment")
         # Inventories retain every planned source; only submitted citations
         # share the four-reference bound. Validate each inventory identity.
         for ref in part["source_refs"]:
@@ -306,15 +375,24 @@ def validate_committed_result(value: dict[str, Any]) -> None:
         check_refs(claim["payload"]["evidence_refs"], expected_refs)
         for verdict in claim["challenge_evidence"]:
             check_refs(verdict["evidence_refs"], expected_refs)
-            if (
+            invalid_verdict = (
                 verdict["uid"] != claim["uid"]
                 or verdict["revision"] > claim["revision"]
-                or not verdict["grounds"].strip()
-                or work.get(verdict["work_id"], {}).get("kind") != "challenge"
-                or {"uid": verdict["uid"], "revision": verdict["revision"]} not in work[verdict["work_id"]]["verdicts"]
-                # A current-revision verdict comes from a context distinct from that revision's author.
-                or verdict["revision"] == claim["revision"] and verdict["work_id"] == claim["revised_by"]
-            ):
+                or (
+                    # Host System 1 may ONLY fast-reject; it can never confirm or defer a claim.
+                    not is_host_system1_rejection_verdict(verdict)
+                    if verdict["work_id"] == HOST_SYSTEM1_CHALLENGE_WORK_ID
+                    else (
+                        not verdict["grounds"].strip()
+                        or work.get(verdict["work_id"], {}).get("kind") != "challenge"
+                        or {"uid": verdict["uid"], "revision": verdict["revision"]}
+                        not in work[verdict["work_id"]]["verdicts"]
+                        # A current-revision verdict comes from a context distinct from that revision's author.
+                        or verdict["revision"] == claim["revision"] and verdict["work_id"] == claim["revised_by"]
+                    )
+                )
+            )
+            if invalid_verdict:
                 raise ValueError("invalid retained challenge evidence")
         if claim["disposition"] != "unresolved" and not any(
             verdict["revision"] == claim["revision"] and verdict["verdict"] == claim["disposition"]
@@ -323,6 +401,24 @@ def validate_committed_result(value: dict[str, Any]) -> None:
             raise ValueError("publication/rejection requires current-revision challenge evidence")
     if value["findings"] != delivered_findings(claims):
         raise ValueError("findings differ from challenged publication claims")
+    # A decomposed review may only record cross_assignment as noop=True when host System 1 verified decoupled batches.
+    if (value["settings"].get("assignment_policy") or {}).get("decomposed"):
+        cross_outcome = next(
+            (o for o in terminal.get("phase_outcomes", []) if o.get("phase") == "cross_assignment"),
+            None,
+        )
+        if cross_outcome is not None and cross_outcome.get("noop") is True:
+            cross_meta = value["settings"].get("system1_cross_assignment")
+            if not (
+                isinstance(cross_meta, dict)
+                and cross_meta.get("action") == "host_noop"
+                and type(cross_meta.get("cross_batch_edges")) is int
+                and cross_meta["cross_batch_edges"] == 0
+                and _is_finite_number(cross_meta.get("p_cross_needed"))
+                and _is_finite_number(cross_meta.get("threshold"))
+                and 0.0 <= float(cross_meta["p_cross_needed"]) < float(cross_meta["threshold"]) <= 0.5
+            ):
+                raise ValueError("decomposed cross_assignment noop requires valid host System 1 metadata")
     native_assignments = {e["assignment"] for e in value["execution"]}
     superseded = {wid for wid, record in work.items() if record["state"] == "superseded"}
     # A dispatch the schedule refused stays evidence once later work finished what it held, as superseded work does.
@@ -335,8 +431,8 @@ def validate_committed_result(value: dict[str, Any]) -> None:
         raise ValueError("terminal cause is not a retained execution stop")
     # Current accepted work decides completion; superseded attempts remain evidence only.
     if terminal["analysis_state"] == "complete" and (
-        any(not part.get("binary") for part in assignments) and not native_assignments & INVESTIGATION_KINDS
-        or claims and "challenge" not in native_assignments
+        any(not is_host_decided_part(part) for part in assignments) and not native_assignments & INVESTIGATION_KINDS
+        or claims and not all_claims_host_rejected(claims) and "challenge" not in native_assignments
         or any(c["disposition"] == "unresolved" for c in claims)
         or any(record["state"] != "accepted" for wid, record in work.items() if wid not in superseded)
         or any(
@@ -377,7 +473,7 @@ def _validate_work(records: list[dict[str, Any]], work: dict[str, dict[str, Any]
     for target, decision in decided.items():
         if target not in admitted and (decision["status"] != "not_reviewed" or decision["evidence_refs"]
                                        or not decision["reason"].startswith("unsubmitted:")) and not (
-                by_target[target].get("binary") and decision == host_decision(by_target[target])):
+                is_host_decided_part(by_target[target]) and decision == host_decision(by_target[target])):
             raise ValueError("target decision lacks admitting work attribution")
 
 

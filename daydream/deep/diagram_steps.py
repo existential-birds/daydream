@@ -612,6 +612,19 @@ async def _run_diagram_step(
     mode = deep_state.mode
     target_dir = ctx.work.repo
 
+    from daydream.run_config import resolve_system1_client
+
+    if eligibility.force == "auto" and eligibility.eligible_kinds() and (s1_client := resolve_system1_client()):
+        from daydream.review_system1 import apply_system1_diagram_gate
+
+        eligibility = await apply_system1_diagram_gate(
+            eligibility,
+            client=s1_client,
+            diff_text=_ttt_diff_text(ctx) or "",
+            import_graph=deep_state.import_graph or {},
+            session_id=ctx.work.run_id,
+        )
+
     kinds = eligibility.eligible_kinds()
 
     results: dict[str, DiagramResult | None] = {}

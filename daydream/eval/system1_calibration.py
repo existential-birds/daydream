@@ -1,0 +1,609 @@
+"""Offline shadow-calibration harness for Jev / System 1 review gates.
+
+Replays historical targets, proposed claims, and decomposed cross-assignment
+boundaries from archived Daydream runs or frozen ``LocalRecordStore`` snapshots
+through :class:`~daydream.system1.System1Client`, computes calibration error
+(ECE, Brier score) and threshold sweeps against confirmed findings, and
+recommends safe abstain thresholds without altering live review behavior.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+from daydream.dataset import LocalRecordStore
+from daydream.deep.diff import iter_diff_blocks
+from daydream.prompt_budget import truncate_utf8_to_budget
+from daydream.review_system1 import (
+    CLAIM_TRIAGE_QUESTIONS,
+    CROSS_ASSIGNMENT_QUESTIONS,
+    CROSS_SUMMARY_DIFF_PER_BATCH_BYTES,
+    SKIP_TIER_RISK_SCORE_MAX,
+    TARGET_TRIAGE_QUESTIONS,
+    build_claim_triage_state,
+    build_cross_assignment_state,
+)
+from daydream.system1 import (
+    DecisionOutcome,
+    DecisionQuestion,
+    System1Client,
+    injection_detected,
+    path_is_hard_denied,
+)
+
+# --- Shared review-triage question sets --------------------------------------
+# TARGET_TRIAGE_QUESTIONS, CLAIM_TRIAGE_QUESTIONS, and CROSS_ASSIGNMENT_QUESTIONS
+# live in daydream.review_system1 so live triage and shadow calibration share one rubric.
+
+TARGET_SKIP_THRESHOLDS: tuple[float, ...] = (0.70, 0.80, 0.85, 0.90, 0.95, 0.98, 0.99)
+CLAIM_REJECT_THRESHOLDS: tuple[float, ...] = (0.70, 0.80, 0.85, 0.90, 0.95, 0.98, 0.99)
+CROSS_NOOP_THRESHOLDS: tuple[float, ...] = (0.02, 0.05, 0.10, 0.15, 0.20, 0.30, 0.50)
+_ECE_BINS = 10
+
+
+# --- Shadow dataset models & loaders -----------------------------------------
+
+
+@dataclass(frozen=True)
+class TargetShadowCase:
+    run_id: str
+    path: str
+    diff: str
+    has_confirmed_finding: bool
+    hard_denied: bool
+
+
+@dataclass(frozen=True)
+class ClaimShadowCase:
+    run_id: str
+    uid: str
+    file: str
+    line: int | None
+    severity: str
+    claim: dict[str, Any]
+    file_diff: str
+    confirmed: bool
+
+
+@dataclass(frozen=True)
+class CrossAssignmentShadowCase:
+    run_id: str
+    changed_files: tuple[str, ...]
+    batch_summary: dict[str, Any]
+    has_cross_finding: bool
+    unfinished_targets: int = 0
+    cross_batch_edges: int = 0
+
+
+@dataclass(frozen=True)
+class ShadowDataset:
+    run_ids: tuple[str, ...]
+    targets: tuple[TargetShadowCase, ...]
+    claims: tuple[ClaimShadowCase, ...]
+    cross_assignments: tuple[CrossAssignmentShadowCase, ...]
+
+    @classmethod
+    def merge(cls, datasets: Sequence[ShadowDataset]) -> ShadowDataset:
+        return cls(
+            run_ids=tuple(r for ds in datasets for r in ds.run_ids),
+            targets=tuple(t for ds in datasets for t in ds.targets),
+            claims=tuple(c for ds in datasets for c in ds.claims),
+            cross_assignments=tuple(x for ds in datasets for x in ds.cross_assignments),
+        )
+
+
+def _is_binary_block(block: str) -> bool:
+    lines = block.splitlines()
+    return any(line.startswith("Binary files ") for line in lines) and not any(
+        line.startswith("@@ ") for line in lines
+    )
+
+
+def _target_cases(
+    run_id: str,
+    diff_by_file: Mapping[str, str],
+    confirmed_files: set[str],
+) -> list[TargetShadowCase]:
+    return [
+        TargetShadowCase(
+            run_id=run_id,
+            path=path,
+            diff=block,
+            has_confirmed_finding=path in confirmed_files,
+            hard_denied=path_is_hard_denied(path),
+        )
+        for path, block in sorted(diff_by_file.items())
+        if not _is_binary_block(block)
+    ]
+
+
+def _find_committed_review(run_dir: Path) -> Path | None:
+    for candidate in (run_dir / "deep" / "committed-review.json", run_dir / "committed-review.json"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _find_diff_patch(run_dir: Path) -> Path | None:
+    for candidate in (run_dir / "diff.patch", run_dir / "committed" / "diff.patch"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def discover_run_dirs(paths: Sequence[Path]) -> list[Path]:
+    """Resolve explicit run directories or archive roots into sorted, unique run directories."""
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for root in paths:
+        resolved = root.expanduser().resolve()
+        if not resolved.is_dir():
+            continue
+        if _find_committed_review(resolved) is not None:
+            if resolved not in seen:
+                seen.add(resolved)
+                found.append(resolved)
+            continue
+        for match in sorted(resolved.rglob("committed-review.json")):
+            run_dir = match.parent.parent if match.parent.name == "deep" else match.parent
+            if run_dir not in seen:
+                seen.add(run_dir)
+                found.append(run_dir)
+    return found
+
+
+def _diff_blocks_by_file(diff_text: str) -> dict[str, str]:
+    blocks: dict[str, list[str]] = {}
+    for path, block in iter_diff_blocks(diff_text):
+        blocks.setdefault(path, []).append(block)
+    return {path: "".join(parts) for path, parts in blocks.items()}
+
+
+def load_shadow_cases_from_runs(paths: Sequence[Path]) -> ShadowDataset:
+    """Extract target, claim, and cross-assignment calibration cases from archived review runs."""
+    run_ids: list[str] = []
+    targets: list[TargetShadowCase] = []
+    claims: list[ClaimShadowCase] = []
+    cross_assignments: list[CrossAssignmentShadowCase] = []
+
+    for run_dir in discover_run_dirs(paths):
+        review_path = _find_committed_review(run_dir)
+        if review_path is None:
+            continue
+        sealed = json.loads(review_path.read_text(encoding="utf-8"))
+        run_id = str(sealed.get("run_id") or run_dir.name)
+        run_ids.append(run_id)
+
+        diff_path = _find_diff_patch(run_dir)
+        diff_by_file = _diff_blocks_by_file(diff_path.read_text(encoding="utf-8")) if diff_path is not None else {}
+
+        sealed_findings = sealed.get("findings") or []
+        confirmed_files = {
+            item["payload"]["file"]
+            for item in sealed_findings
+            if isinstance(item, Mapping) and isinstance(item.get("payload"), Mapping) and item["payload"].get("file")
+        }
+
+        targets.extend(_target_cases(run_id, diff_by_file, confirmed_files))
+
+        for claim in sealed.get("claims") or []:
+            disposition = claim.get("disposition")
+            if disposition not in ("confirmed", "rejected"):
+                continue
+            payload = claim.get("payload") or {}
+            file_path = str(payload.get("file") or "")
+            claims.append(ClaimShadowCase(
+                run_id=run_id,
+                uid=str(claim.get("uid") or ""),
+                file=file_path,
+                line=payload.get("line"),
+                severity=str(payload.get("severity") or ""),
+                claim={
+                    "title": claim.get("title"),
+                    "claim": payload.get("claim"),
+                    "trigger": payload.get("trigger"),
+                    "consequence": payload.get("consequence"),
+                    "grounds": payload.get("grounds"),
+                    "file": file_path,
+                    "line": payload.get("line"),
+                    "severity": payload.get("severity"),
+                },
+                file_diff=diff_by_file.get(file_path, ""),
+                confirmed=disposition == "confirmed",
+            ))
+
+        policy = (sealed.get("settings") or {}).get("assignment_policy") or {}
+        if policy.get("decomposed"):
+            work_items = sealed.get("work") or []
+            work_kind = {str(w.get("work_id")): str(w.get("kind")) for w in work_items if isinstance(w, Mapping)}
+            target_file = {
+                str(part["target_id"]): str(part["file"])
+                for part in (sealed.get("assignments") or [])
+                if isinstance(part, Mapping) and part.get("target_id") and part.get("file")
+            }
+            batch_files: list[list[str]] = []
+            batch_excerpts: list[str] = []
+            for w in work_items:
+                if not isinstance(w, Mapping) or w.get("kind") != "discovery":
+                    continue
+                files_in_batch = list(dict.fromkeys(
+                    target_file.get(str(tid), str(tid)) for tid in (w.get("targets") or [])
+                ))
+                batch_files.append(files_in_batch)
+                combined_diff = "\n".join(diff_by_file[f] for f in files_in_batch if f in diff_by_file)
+                batch_excerpts.append(truncate_utf8_to_budget(combined_diff, CROSS_SUMMARY_DIFF_PER_BATCH_BYTES))
+            local_claims = [
+                c
+                for c in (sealed.get("claims") or [])
+                if isinstance(c, Mapping) and work_kind.get(str(c.get("work_id"))) != "cross_assignment"
+            ]
+            has_cross = any(
+                work_kind.get(str(item.get("work_id"))) == "cross_assignment"
+                for item in sealed_findings
+                if isinstance(item, Mapping)
+            )
+            stack_outcomes = (sealed.get("terminal_result") or {}).get("stack_outcomes") or []
+            unfinished_targets = sum(
+                1
+                for outcome in stack_outcomes
+                if isinstance(outcome, Mapping)
+                for decision in (outcome.get("target_decisions") or [])
+                if isinstance(decision, Mapping) and decision.get("status") != "reviewed"
+            )
+            cross_meta = (sealed.get("settings") or {}).get("system1_cross_assignment")
+            raw_edges = cross_meta.get("cross_batch_edges") if isinstance(cross_meta, Mapping) else None
+            cross_batch_edges = raw_edges if type(raw_edges) is int and raw_edges >= 0 else 0
+            cross_assignments.append(CrossAssignmentShadowCase(
+                run_id=run_id,
+                changed_files=tuple(sorted(diff_by_file)),
+                batch_summary=build_cross_assignment_state(batch_files, batch_excerpts, {}, local_claims),
+                has_cross_finding=has_cross,
+                unfinished_targets=unfinished_targets,
+                cross_batch_edges=cross_batch_edges,
+            ))
+
+    return ShadowDataset(
+        run_ids=tuple(run_ids),
+        targets=tuple(targets),
+        claims=tuple(claims),
+        cross_assignments=tuple(cross_assignments),
+    )
+
+
+def load_shadow_cases_from_store(store_dir: Path, snapshot_id: str) -> ShadowDataset:
+    """Extract target shadow cases from a frozen ``LocalRecordStore`` snapshot."""
+    snapshot = LocalRecordStore(store_dir).read_snapshot(snapshot_id)
+    run_ids: list[str] = []
+    targets: list[TargetShadowCase] = []
+    for run in snapshot.runs:
+        task_ev = run.get("original_task") or {}
+        findings_ev = run.get("findings") or {}
+        if task_ev.get("status") != "available" or findings_ev.get("status") != "available":
+            continue
+        diff_text = (task_ev.get("value") or {}).get("diff")
+        items = (findings_ev.get("value") or {}).get("items") or []
+        if not isinstance(diff_text, str) or not diff_text.strip():
+            continue
+        run_id = str(run["run_id"])
+        run_ids.append(run_id)
+        confirmed_files = {str(item["file"]) for item in items if isinstance(item, Mapping) and item.get("file")}
+        targets.extend(_target_cases(run_id, _diff_blocks_by_file(diff_text), confirmed_files))
+    return ShadowDataset(run_ids=tuple(run_ids), targets=tuple(targets), claims=(), cross_assignments=())
+
+
+# --- Calibration metrics & shadow runner -------------------------------------
+
+
+@dataclass(frozen=True)
+class CalibrationPoint:
+    threshold: float
+    gated_count: int
+    total_evaluated: int
+    gated_fraction: float
+    missed_positives: int
+    total_positives: int
+    recall: float | None
+    gate_precision: float | None
+
+
+@dataclass(frozen=True)
+class GateCalibration:
+    name: str
+    total_cases: int
+    evaluated_cases: int
+    hard_denied_cases: int
+    injection_flagged_cases: int
+    fallback_cases: int
+    total_positives: int
+    brier_score: float | None
+    ece: float | None
+    recall_floor: float
+    recommended_threshold: float | None
+    recommended_gated_fraction: float | None
+    sweep: tuple[CalibrationPoint, ...]
+
+
+@dataclass(frozen=True)
+class CalibrationReport:
+    model: str
+    runs_scanned: int
+    total_calls: int
+    fallback_calls: int
+    total_input_tokens: int
+    total_output_tokens: int
+    total_cost_usd: float | None
+    p50_latency_ms: float | None
+    p95_latency_ms: float | None
+    target_skip: GateCalibration
+    claim_fast_reject: GateCalibration
+    cross_assignment_noop: GateCalibration
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def compute_brier_and_ece(samples: Sequence[tuple[float, bool]]) -> tuple[float | None, float | None]:
+    """Compute Brier score and 10-bin Expected Calibration Error over (p_positive, is_positive) pairs."""
+    n = len(samples)
+    if n == 0:
+        return None, None
+    brier = sum((prob - float(actual)) ** 2 for prob, actual in samples) / n
+    bins: list[list[tuple[float, float]]] = [[] for _ in range(_ECE_BINS)]
+    for prob, actual in samples:
+        index = min(_ECE_BINS - 1, max(0, int(prob * _ECE_BINS)))
+        bins[index].append((prob, float(actual)))
+    ece = 0.0
+    for bucket in bins:
+        if not bucket:
+            continue
+        avg_conf = sum(p for p, _ in bucket) / len(bucket)
+        avg_acc = sum(y for _, y in bucket) / len(bucket)
+        ece += (len(bucket) / n) * abs(avg_acc - avg_conf)
+    return round(brier, 6), round(ece, 6)
+
+
+def _percentile_ms(latencies_s: Sequence[float], quantile: float) -> float | None:
+    if not latencies_s:
+        return None
+    ordered = sorted(latencies_s)
+    index = min(len(ordered) - 1, max(0, math.ceil(quantile * len(ordered)) - 1))
+    return round(ordered[index] * 1000.0, 2)
+
+
+def _accumulate_usage(outcomes: Sequence[DecisionOutcome]) -> tuple[int, int, int, float | None, list[float]]:
+    fallbacks = 0
+    input_tokens = 0
+    output_tokens = 0
+    cost_total: float | None = None
+    latencies: list[float] = []
+    for outcome in outcomes:
+        if not outcome.ok or outcome.response is None:
+            fallbacks += 1
+            continue
+        usage = outcome.response.usage
+        input_tokens += usage.input_tokens
+        output_tokens += usage.output_tokens
+        if usage.cost_usd is not None:
+            cost_total = (cost_total or 0.0) + usage.cost_usd
+        latencies.append(outcome.latency_s)
+    return fallbacks, input_tokens, output_tokens, (None if cost_total is None else round(cost_total, 8)), latencies
+
+
+def _calibrate_gate[T](
+    *,
+    name: str,
+    cases: Sequence[T],
+    outcomes: Sequence[DecisionOutcome],
+    extract: Callable[[T, DecisionOutcome], tuple[float, float, bool] | None],
+    is_positive: Callable[[T], bool],
+    hard_denied_cases: int,
+    thresholds: Sequence[float],
+    gate_when_below: bool,
+    recall_floor: float,
+) -> GateCalibration:
+    """Collect valid outcomes through *extract* → ``(gate_prob, positive_prob, eligible)`` and sweep thresholds."""
+    injections = 0
+    fallbacks = 0
+    scored: list[tuple[float, bool, bool]] = []
+    brier_samples: list[tuple[float, bool]] = []
+    for case, outcome in zip(cases, outcomes, strict=True):
+        if not outcome.ok:
+            fallbacks += 1
+            continue
+        extracted = extract(case, outcome)
+        if extracted is None:
+            fallbacks += 1
+            continue
+        gate_prob, pos_prob, pre_eligible = extracted
+        positive = is_positive(case)
+        injected = injection_detected(outcome)
+        if injected:
+            injections += 1
+        scored.append((gate_prob, positive, pre_eligible and not injected))
+        brier_samples.append((pos_prob, positive))
+
+    total_cases = len(cases)
+    total_positives = sum(is_positive(case) for case in cases)
+    brier, ece = compute_brier_and_ece(brier_samples)
+    evaluated = len(scored)
+    evaluated_positives = sum(positive for _, positive, _ in scored)
+    sufficient_coverage = evaluated > 0 and evaluated * 2 >= total_cases and evaluated_positives > 0
+    sweep: list[CalibrationPoint] = []
+    for threshold in thresholds:
+        gated_count = 0
+        missed = 0
+        for value, positive, eligible in scored:
+            if eligible and (value < threshold if gate_when_below else value >= threshold):
+                gated_count += 1
+                if positive:
+                    missed += 1
+        sweep.append(CalibrationPoint(
+            threshold=threshold,
+            gated_count=gated_count,
+            total_evaluated=evaluated,
+            gated_fraction=round(gated_count / total_cases, 6) if total_cases > 0 else 0.0,
+            missed_positives=missed,
+            total_positives=evaluated_positives,
+            recall=None if evaluated_positives == 0 else round((evaluated_positives - missed) / evaluated_positives, 6),
+            gate_precision=None if gated_count == 0 else round((gated_count - missed) / gated_count, 6),
+        ))
+    eligible_points = (
+        [
+            point for point in sweep
+            if point.recall is not None and point.recall >= recall_floor and point.gated_count > 0
+        ]
+        if sufficient_coverage
+        else []
+    )
+    # Break ties toward the more conservative threshold (higher for >= gates, lower for < gates).
+    best = max(
+        eligible_points,
+        key=lambda p: (p.gated_fraction, p.recall or 0.0, -p.threshold if gate_when_below else p.threshold),
+        default=None,
+    )
+    return GateCalibration(
+        name=name,
+        total_cases=total_cases,
+        evaluated_cases=evaluated,
+        hard_denied_cases=hard_denied_cases,
+        injection_flagged_cases=injections,
+        fallback_cases=fallbacks,
+        total_positives=total_positives,
+        brier_score=brier,
+        ece=ece,
+        recall_floor=recall_floor,
+        recommended_threshold=None if best is None else best.threshold,
+        recommended_gated_fraction=None if best is None else best.gated_fraction,
+        sweep=tuple(sweep),
+    )
+
+
+async def _evaluate_chunked(
+    client: System1Client,
+    items: Sequence[tuple[Any, Mapping[str, DecisionQuestion]]],
+) -> list[DecisionOutcome]:
+    """Replay *items* in bounded chunks so large corpora do not share one batch deadline."""
+    if not items:
+        return []
+    chunk_size = max(1, client.config.max_concurrency * 2)
+    outcomes: list[DecisionOutcome] = []
+    for start in range(0, len(items), chunk_size):
+        outcomes.extend(await client.evaluate_many(items[start : start + chunk_size], record_usage=False))
+    return outcomes
+
+
+async def run_shadow_calibration(
+    dataset: ShadowDataset,
+    client: System1Client,
+    *,
+    target_recall_floor: float = 0.99,
+    claim_recall_floor: float = 0.98,
+    cross_recall_floor: float = 0.99,
+) -> CalibrationReport:
+    """Replay *dataset* through *client* in shadow mode and compute calibrated gate recommendations."""
+    target_outcomes = await _evaluate_chunked(
+        client,
+        [({"path": case.path, "diff": case.diff}, TARGET_TRIAGE_QUESTIONS) for case in dataset.targets],
+    )
+    claim_outcomes = await _evaluate_chunked(
+        client,
+        [
+            (build_claim_triage_state(case.claim, cited_diff=case.file_diff), CLAIM_TRIAGE_QUESTIONS)
+            for case in dataset.claims
+        ],
+    )
+    cross_outcomes = await _evaluate_chunked(
+        client,
+        [(case.batch_summary, CROSS_ASSIGNMENT_QUESTIONS) for case in dataset.cross_assignments],
+    )
+
+    def _extract_target(case: TargetShadowCase, outcome: DecisionOutcome) -> tuple[float, float, bool] | None:
+        p_no_risk = outcome.noul("non_behavioral")
+        p_cross = outcome.noul("cross_file_contract")
+        if p_no_risk is None or p_cross is None:
+            return None
+        tier = outcome.choice("risk_tier")
+        risk_ans = outcome.score("defect_risk")
+        risk_score = risk_ans.score if risk_ans is not None else (1.0 - p_no_risk) * 4.0
+        eligible = (
+            (not case.hard_denied)
+            and p_cross <= client.config.cross_file_max
+            and tier is not None
+            and tier.choice == "mechanical"
+            and risk_score <= SKIP_TIER_RISK_SCORE_MAX
+        )
+        return (p_no_risk, 1.0 - p_no_risk, eligible)
+
+    def _extract_claim(_case: ClaimShadowCase, outcome: DecisionOutcome) -> tuple[float, float, bool] | None:
+        p_invalid = outcome.noul("obviously_invalid")
+        if p_invalid is None:
+            return None
+        p_search = outcome.noul("needs_repo_search")
+        return (
+            p_invalid,
+            1.0 - p_invalid,
+            p_search is not None and p_search <= client.config.local_challenge_search_max,
+        )
+
+    def _extract_cross(case: CrossAssignmentShadowCase, outcome: DecisionOutcome) -> tuple[float, float, bool] | None:
+        p_needed = outcome.noul("cross_boundary_needed")
+        if p_needed is None:
+            return None
+        eligible = case.unfinished_targets == 0 and case.cross_batch_edges == 0
+        return (p_needed, p_needed, eligible)
+
+    target_gate = _calibrate_gate(
+        name="target_skip",
+        cases=dataset.targets,
+        outcomes=target_outcomes,
+        extract=_extract_target,
+        is_positive=lambda case: case.has_confirmed_finding,
+        hard_denied_cases=sum(case.hard_denied for case in dataset.targets),
+        thresholds=TARGET_SKIP_THRESHOLDS,
+        gate_when_below=False,
+        recall_floor=target_recall_floor,
+    )
+    claim_gate = _calibrate_gate(
+        name="claim_fast_reject",
+        cases=dataset.claims,
+        outcomes=claim_outcomes,
+        extract=_extract_claim,
+        is_positive=lambda case: case.confirmed,
+        hard_denied_cases=0,
+        thresholds=CLAIM_REJECT_THRESHOLDS,
+        gate_when_below=False,
+        recall_floor=claim_recall_floor,
+    )
+    cross_gate = _calibrate_gate(
+        name="cross_assignment_noop",
+        cases=dataset.cross_assignments,
+        outcomes=cross_outcomes,
+        extract=_extract_cross,
+        is_positive=lambda case: case.has_cross_finding,
+        hard_denied_cases=0,
+        thresholds=CROSS_NOOP_THRESHOLDS,
+        gate_when_below=True,
+        recall_floor=cross_recall_floor,
+    )
+
+    all_outcomes = [*target_outcomes, *claim_outcomes, *cross_outcomes]
+    fallbacks, in_tok, out_tok, total_cost, latencies = _accumulate_usage(all_outcomes)
+    return CalibrationReport(
+        model=client.config.model,
+        runs_scanned=len(dataset.run_ids),
+        total_calls=len(all_outcomes),
+        fallback_calls=fallbacks,
+        total_input_tokens=in_tok,
+        total_output_tokens=out_tok,
+        total_cost_usd=total_cost,
+        p50_latency_ms=_percentile_ms(latencies, 0.50),
+        p95_latency_ms=_percentile_ms(latencies, 0.95),
+        target_skip=target_gate,
+        claim_fast_reject=claim_gate,
+        cross_assignment_noop=cross_gate,
+    )

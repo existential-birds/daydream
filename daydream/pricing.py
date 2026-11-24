@@ -14,7 +14,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from daydream.config import DEFAULT_PI_MODEL
+from daydream.config import DEFAULT_PI_MODEL, DEFAULT_SYSTEM1_MODEL
 from daydream.config_file import load_toml_or_empty
 
 logger = logging.getLogger(__name__)
@@ -89,6 +89,8 @@ MODEL_PRICES: dict[str, ModelPrice] = {
     # Nous-hosted DeepSeek V4 Flash — the Pi backend default (DEFAULT_PI_MODEL).
     # Keyed by the constant so the default model and its price entry cannot drift apart.
     DEFAULT_PI_MODEL: ModelPrice(input=0.28, cached_input=0.028, output=0.42),
+    # OpenRouter Decisions API — TypeSafe Jev (DEFAULT_SYSTEM1_MODEL): $0.042/1M input, $0 output.
+    DEFAULT_SYSTEM1_MODEL: ModelPrice(input=0.042, cached_input=0.042, output=0.0),
 }
 
 _GPT56_LONG_CONTEXT_THRESHOLD = 272_000

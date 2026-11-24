@@ -71,6 +71,9 @@ with contextlib.redirect_stdout(io.StringIO()):
     else:
         raise AssertionError("--help returned")
 assert loaded() == set(), loaded()
+assert "daydream.system1" not in sys.modules
+assert "daydream.review_system1" not in sys.modules
+assert "daydream.eval.system1_calibration" not in sys.modules
 
 from daydream.backends import ResultEvent, TextEvent
 from daydream.prompt_budget import uses_diff_reference

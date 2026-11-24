@@ -22,6 +22,7 @@ def test_accessors_preserve_missing_key_semantics_and_documented_defaults() -> N
     assert state.diff_truncated is False
     assert state.diagrams is None
     assert state.import_graph == {}
+    assert state.import_graph_complete is False
     assert state.iteration is None
     assert state.fix_outcomes == {}
     assert state.fix_round_snapshot is None

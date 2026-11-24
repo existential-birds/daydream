@@ -38,22 +38,6 @@ class _Part:
     diff: str
 
 
-def _bounded_groups[T](values: list[T], fits: Callable[[list[T]], bool], error: str) -> list[list[T]]:
-    """Pack whole values in order, rejecting any value that cannot fit alone."""
-    groups: list[list[T]] = []
-    current: list[T] = []
-    for value in values:
-        if not fits([value]):
-            raise inputs.SanctionedInputUnavailable(error)
-        if current and not fits([*current, value]):
-            groups.append(current)
-            current = []
-        current.append(value)
-    if current:
-        groups.append(current)
-    return groups
-
-
 def _capture_canonical(label: str, path: Path) -> inputs.PreparedSanctionedInput:
     return inputs._capture_input(label, path, inputs.SanctionedInputTransport.EXACT_PATHS, 0, pointer_only=True)
 
@@ -134,10 +118,16 @@ class StageInputFactory:
     """Project scoped first-pass assignments with required-work priority; see the assignment limits in this module."""
 
     def __init__(self, backend: Backend, work: WorkContext, stack: StackAssignment, *,
-        change: CanonicalChange, revision: dict[str, Any], read_only: bool) -> None:
+        change: CanonicalChange, revision: dict[str, Any], read_only: bool,
+        import_graph: Mapping[str, set[str]] | None = None,
+        import_graph_complete: bool = False) -> None:
         self.backend, self.work, self.stack = backend, work, stack
         self.captured_source = work.captured_source
         self.revision = revision
+        self.import_graph: dict[str, set[str]] = (
+            {src: set(dsts) for src, dsts in import_graph.items()} if import_graph else {}
+        )
+        self.import_graph_complete: bool = import_graph_complete
         self.transport = inputs.sanctioned_transport_for(backend, work.repo, read_only=read_only)
         self.change = change
         # Identities stay host-only on both transports.
@@ -345,9 +335,84 @@ class StageInputFactory:
             part.assignment['segment_count'] = len(chunks)
         return chunks
 
+    def _coupling_components(self, eligible: list[_Part]) -> list[list[_Part]]:
+        """Group eligible parts into deterministic import-coupled file components."""
+        if not self.import_graph:
+            return [[part] for part in eligible]
+        by_file: dict[str, list[_Part]] = {}
+        for part in eligible:
+            by_file.setdefault(part.assignment["file"], []).append(part)
+        adjacency: dict[str, set[str]] = {}
+        for src, dsts in self.import_graph.items():
+            if src not in by_file:
+                continue
+            for dst in dsts:
+                if dst in by_file and dst != src:
+                    adjacency.setdefault(src, set()).add(dst)
+                    adjacency.setdefault(dst, set()).add(src)
+        if not adjacency:
+            return [[part] for part in eligible]
+        index_of = {path: idx for idx, path in enumerate(by_file)}
+        visited: set[str] = set()
+        units: list[list[_Part]] = []
+        for root in by_file:
+            if root in visited:
+                continue
+            if root not in adjacency:
+                visited.add(root)
+                units.extend([part] for part in by_file[root])
+                continue
+            # Deterministic BFS over connected component so direct neighbors stay adjacent.
+            component_files = [root]
+            visited.add(root)
+            for current in component_files:
+                for neighbor in sorted(adjacency[current], key=index_of.__getitem__):
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        component_files.append(neighbor)
+            units.append([part for path in component_files for part in by_file[path]])
+        return units
+
     def _batches(self) -> list[list[dict[str, Any]]]:
-        batches = _bounded_groups([part for part in self.parts if not part.assignment.get("binary")],
-            lambda parts: len({p.assignment['file'] for p in parts}) <= 4
-            and self._remaining_bytes(self._render(parts), dispatch=True) >= 0,
-            "required assignment exceeds the assignment allowance")
-        return [[part.assignment for part in batch] for batch in batches]
+        def _is_host_excluded(part: _Part) -> bool:
+            if part.assignment.get("binary"):
+                return True
+            meta = part.assignment.get("system1_triaged")
+            if meta is None:
+                return False
+            from daydream.committed_review_model import is_valid_system1_triaged
+
+            return is_valid_system1_triaged(meta, file_path=part.assignment["file"])
+
+        eligible = [part for part in self.parts if not _is_host_excluded(part)]
+
+        def fits(parts: list[_Part]) -> bool:
+            return (
+                len({p.assignment["file"] for p in parts}) <= 4
+                and self._remaining_bytes(self._render(parts), dispatch=True) >= 0
+            )
+
+        batches: list[list[_Part]] = []
+        current: list[_Part] = []
+        for unit in self._coupling_components(eligible):
+            if len(unit) > 1 and not fits(unit):
+                # Oversized coupled component: fall back to part-by-part packing in BFS neighbor order.
+                chunks: list[list[_Part]] = [[part] for part in unit]
+                unit_verified = False
+            else:
+                chunks = [unit]
+                unit_verified = len(unit) > 1
+            for chunk in chunks:
+                if not unit_verified and not fits(chunk):
+                    raise inputs.SanctionedInputUnavailable("required assignment exceeds the assignment allowance")
+                if current and not fits([*current, *chunk]):
+                    batches.append(current)
+                    current = []
+                current.extend(chunk)
+        if current:
+            batches.append(current)
+        part_index = {id(part): idx for idx, part in enumerate(self.parts)}
+        return [
+            [part.assignment for part in sorted(batch, key=lambda p: part_index[id(p)])]
+            for batch in batches
+        ]

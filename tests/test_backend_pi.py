@@ -759,7 +759,7 @@ async def test_pi_truncated_streams_and_exits_classify_without_misattributing_re
 
         async def spawn(*args: str, env: dict[str, str], **kwargs: Any) -> Any:
             if args[1:] == ("--version",):
-                return make_mock_process(["1.4.0"])
+                return make_mock_process(["1.6.0"])
             submitted = submits[len(conversations)]
             conversations.append((submitted, run_context.outage_circuit.state()))
             packet = json.loads(Path(env["DAYDREAM_PI_HOST_PACKET"]).read_text())

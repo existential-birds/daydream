@@ -2560,7 +2560,8 @@ _SPLIT_FILES = {"a.py": "def ratio(total, count):\n    return total / count\n",
 
 
 def _split_repo(tmp_path: Path, files: int = 6, lines: int = 1) -> tuple[Path, str]:
-    """Changed files: the ratio change in a.py and its caller f.py land in different assignments.
+    """Changed files: a.py and its importer f.py pack together under import-graph batching while
+    leaving later assignments separated for cross-assignment verification.
 
     Files beyond the six named ones follow them in inventory order; the first changes ``lines`` lines.
     Of twenty, the second holds bytes that are not UTF-8 and the third lies at a path over 512
@@ -2629,8 +2630,8 @@ async def test_split_review_transfers_unfinished_work_and_investigates_across_as
     Journeys that never split work missed: unfinished targets lost or
     double-credited on supersession, a closed parent's late callback admitting work,
     one sibling's install between another's validation and installation closing it,
-    renewed sibling allocations, and empty local results skipping the spanning defect
-    between a.py (ratio) and f.py (its caller) in different assignments. Revision rows
+    renewed sibling allocations, and empty local results skipping cross-assignment
+    verification over the full catalog. Revision rows
     prove the scheduler dispatches a new challenge only for a semantic revision. A local
     assignment that ended on a rejected final batch lost the valid decision in it. A binary change
     the model left unreviewed kept the review incomplete, a path over 512 characters stopped it
@@ -2920,7 +2921,8 @@ async def test_split_review_transfers_unfinished_work_and_investigates_across_as
     assert value["settings"]["assignment_policy"] == {"name": "broad", "decomposed": True,
                                                      "planned_assignments": batches, "cross_assignment": "required"}
     first = next(d for d in dispatches if d["work_id"] == "work:1")
-    assert first["targets"]["ids"] == ["a.py", "b.py", "c.py", "d.py"]
+    # Coupling-aware batching co-locates a.py with its direct importer f.py, keeping inventory order inside the batch.
+    assert first["targets"]["ids"] == ["a.py", "b.py", "c.py", "f.py"]
     assert "+    return total / (count - 1)\n" in first["prompt"] and '"basis":"supplied_diff"' in first["prompt"]
     assert any(_FORGED in returned["content"] for d in dispatches for returned in d["returned"])
     if scenario in _SCALED:

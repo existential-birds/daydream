@@ -40,7 +40,7 @@ _CLEANUP_TIMEOUT_S = 2.0
 NATIVE_SUBMIT = "structured_output"
 # Conservative byte/token ratio for preflight only; providers tokenize differently.
 BYTES_PER_TOKEN_ESTIMATE = 3
-# Pi 1.4.0 compaction defaults (dist/core/compaction) when native settings omit them.
+# Pi 1.6.0 compaction defaults (dist/core/compaction) when native settings omit them.
 PI_DEFAULT_COMPACTION = {"reserve_tokens": 16384, "keep_recent_tokens": 20000}
 # Correctable denials and rejected submissions of the protected start before the binding fails closed.
 PROTECTED_DENIAL_LIMIT = 32
@@ -528,7 +528,7 @@ class HostToolBinding:
         for key, default in PI_DEFAULT_COMPACTION.items():
             value = positive(settings.get(key)) if isinstance(settings, dict) else None
             evidence[key] = value if value is not None else default
-            evidence[f"{key}_source"] = "native_settings" if value is not None else "pi_1.4.0_default"
+            evidence[f"{key}_source"] = "native_settings" if value is not None else "pi_1.6.0_default"
         self.native_limits = evidence
         requirement = self.native_requirement
         if requirement is not None:

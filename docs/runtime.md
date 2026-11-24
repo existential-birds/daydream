@@ -200,7 +200,8 @@ evidence; models cite source IDs only to locate claims or add evidence. Every
 state; a target's complete inventory stays in `assignments[].source_refs`.
 At sealing every planned target has exactly one typed decision: an admitted model
 decision, a host-authored `not_reviewed` decision whose reason starts with
-`unsubmitted:`, or the host's `reviewed` decision for a binary change (below). Coverage
+`unsubmitted:`, or a host `reviewed` decision for a binary or opt-in System 1
+non-behavioral change (below). Coverage
 shards targets in inventory order into scopes of 12 (`committed:NNNNN`, `shard` =
 index); a full shard of worst-case decisions (four references, 1024-character reasons,
 target ids that are paths of up to 4096 bytes without control characters) fits the
@@ -212,7 +213,7 @@ canonical fragment identity is unchanged.
 
 Before provider work the native
 extension reports the selected model's `contextWindow`/`maxTokens` and compaction
-settings (Pi 1.4.0 defaults when unset, labelled as such). The host requires the
+settings (Pi 1.6.0 defaults when unset, labelled as such). The host requires the
 instructions and prompt, the largest single tool result (64 KiB), one recommended
 32 KiB batch, the compaction reserve and kept context to fit, estimated at three
 bytes per token, and requires output for that batch; otherwise it fails with an
@@ -223,10 +224,11 @@ remain admissible; an oversized `review_admit` is a correctable rejection. Daydr
 Review alone owns planned targets, semantic claim revisions, mandatory challenge
 and derived coverage. Every publication claim receives counterevidence-seeking
 challenge in a distinct native conversation against captured source. Changes to
-claim, trigger, consequence, location, severity or grounds renew that obligation; titles do
-not. Each claim carries a required `severity` (`high`, `medium` or `low`, defined by
-consequence in the host instructions); the challenge judges it with the claim and corrects
-it only by revising the claim. Confirmed findings carry it to every consumer of the
+claim, trigger, consequence, location, severity or grounds renew that obligation (except
+when a confirming challenge adjusts only `severity`/`title` to the host System 1 calibrated
+severity, below); titles do not. Each claim carries a required `severity` (`high`, `medium`
+or `low`, defined by consequence in the host instructions); the challenge judges it with the
+claim and otherwise corrects it by revising the claim. Confirmed findings carry it to every consumer of the
 canonical items. Retain confirmed, substantively rejected and unresolved concerns separately.
 A confirmed claim that names predecessors in `source_uids` is delivered in their place: the sealed
 `findings`, which the report, the outcome line, the findings export, posting, approval and severity
@@ -310,7 +312,10 @@ leaves the adapter's native default, as Pi's does. `daydream.run_config` names t
 ### Assignment policy and work
 
 The inventory is partitioned with `StageInputFactory.assignment_batches` (whole parts,
-at most four files within the transport's assignment byte allowance, inventory order).
+at most four files within the transport's assignment byte allowance): directly importing
+changed files (`build_import_graph`) pack together deterministically inside ≤4-file batches
+and each batch retains canonical inventory order, keeping `assignments` and
+`planned_work_id` invariant.
 One conversation holds at most four batches, the batches one base allowance covers
 (`REVIEWER_BATCHES_PER_ALLOWANCE`), so the review splits into one local discovery work
 per batch when:
@@ -319,10 +324,11 @@ per batch when:
 split  <=>  B > 4  and  I - X >= 2 * B
 ```
 
-`B` is the number of batches, which hold every target but binary changes (see below);
+`B` is the number of batches, which hold every target not host-decided (binary or opt-in
+System 1 non-behavioral fast-path, below);
 `I` and `X` are the discovery and cross-assignment allowances defined below. Otherwise
 one discovery work covers every target: a change of at most four batches, or one whose
-profile is too small to leave every batch two starts. A change of only binary files has
+profile is too small to leave every batch two starts. A change of only host-decided targets has
 no batch and plans no assignment. No setting selects another rule. The
 `[pipeline] assignment_policy` profile key is removed, and a profile that still sets it is refused before any review work with a
 message naming the key. Split work runs concurrently under
@@ -350,9 +356,10 @@ the assignment was dispatched and that a `decided` state in them can be stale on
 
 After the split, follow-up work inherits a closed local work's unfinished targets
 only when that work admitted progress; work that failed native-capacity preflight
-without progress is split in two instead. The host then always dispatches one
-`cross_assignment` work over the original captured source and full catalog, even when
-local work found nothing. It inherits every unfinished target and searches for defects
+without progress is split in two instead. The host then dispatches one
+`cross_assignment` work over the original captured source and full catalog even when
+local work found nothing (unless opt-in System 1 cross-assignment gating records a
+validated host no-op below). It inherits every unfinished target and searches for defects
 spanning assignments. Its `retained_conclusions` are one bounded page: a summary of each
 claim (uid, revision, title, file, line, disposition and originating work) for as many
 claims as fit 16 KiB, as the catalog page is bounded, and a row for each of the first 256
@@ -441,7 +448,7 @@ example, a change of 134 batches under the default profile (120 calls, 2,400 s, 
 12 starts, 510 kept for cross-assignment, 2,040 for challenge and a 40,380 s window.
 
 When split, each batch's work receives an equal share of `I - X` (earlier work takes
-the remainder) and runs until 3/8 of the review window, cross-assignment until 1/2 and
+the remainder; or a risk-weighted share when System 1 target triage is enabled, below) and runs until 3/8 of the review window, cross-assignment until 1/2 and
 challenge for the rest. Otherwise discovery receives `I` and runs until 1/2. Work the
 local deadline cuts short or finds expired closes with `host_wall_budget_exhaustion`
 and keeps what it admitted; the cross-assignment inherits the rest. Earlier work cannot
@@ -502,6 +509,42 @@ the catalog as decided, and no batch or work holds it. Its sealed decision is
 and the report names these files. A claim may still name or cite a binary file. A
 change of only binary files completes without a model. A host decision is not partial
 evidence, so a review whose model admitted nothing still fails.
+
+When host-owned System 1 target triage is explicitly enabled with the non-behavioral
+fast-path (`DAYDREAM_SYSTEM1_ENABLED=1` and `DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL=1`),
+a non-binary target that passes the calibrated non-behavioral, low cross-file-contract,
+prompt-injection, and security hard-deny path guards follows the same host-decision
+contract: its assignment records `system1_triaged` (`model`, `p_non_behavioral`,
+`p_cross_file`, `threshold`), it is excluded from model batches before scale and
+decomposition are computed, its sealed decision is `reviewed` with reason
+`system1_triaged: non-behavioral change (p=..., model=...)` and its assigned source,
+the report names these files, and `validate_committed_result` rejects malformed
+metadata or hard-denied security paths. Without `DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL`,
+System 1 never skips any target and uses Mode 1 only (risk-weighted call budgets and
+optional `discovery_fast` routing for mechanical/low-risk batches).
+
+Before System 2 `challenge` work is planned, enabled System 1 pre-challenge triage evaluates
+pending claims with bounded host-extracted diff and enclosing source excerpts:
+- **Never confirms**: System 1 cannot confirm a finding; `validate_committed_result` rejects
+  any `host:system1` challenge verdict whose verdict is not `rejected`.
+- **Opt-in asymmetric fast-rejection** (`DAYDREAM_SYSTEM1_FAST_REJECT_CLAIMS=1`): clearly
+  invalid self-contained claims above `DAYDREAM_SYSTEM1_CLAIM_REJECT_THRESHOLD` with clean
+  injection checks are rejected with an auditable `host:system1` verdict.
+- **2-tier arbiter escalation & duplicate clustering**: high-confidence same-file duplicate
+  claims are kept in the same challenge context; self-contained local claims route to an
+  optional `challenge_fast` tier (`DAYDREAM_SYSTEM1_FAST_ARBITER_*` / `[phases.arbiter_fast]`)
+  with tight call caps and pre-inlined untrusted context, while cross-file, uncertain, or
+  injection-flagged claims escalate to full `[phases.arbiter]`.
+- **Single-round calibrated severity normalization**: when a confirming challenge verdict
+  adjusts only `severity` (and optionally `title`) to match the host System 1 calibrated
+  severity, it applies in place without forcing a second challenge round.
+
+On decomposed reviews with System 1 enabled, opt-in `DAYDREAM_SYSTEM1_GATE_CROSS_ASSIGNMENT=1`
+may record `cross_assignment` as `complete (noop=True)` ONLY when zero local targets remain
+unfinished, a complete import-graph scan finds zero cross-batch import edges, injection checks
+are clean, and `p_cross_needed < threshold` (validated by `validate_committed_result`); when
+`cross_assignment` runs, top-K coupled batch pairs and bounded untrusted excerpts are supplied
+to focus investigation.
 
 ### Captured local source
 
@@ -656,7 +699,7 @@ environment cannot supply hosted authority.
 |---|---|
 | Backend | Native Pi |
 | Provider / model | Operator-selected nonblank strings supported by the isolated native configuration |
-| Native baseline | Official Pi 1.4.0 / Node 24.18.1 |
+| Native baseline | Official Pi 1.6.0 / Node 24.18.1 |
 | Model tools | Stock `read`, `find`, `ls`, `grep`; charged host `review_source` lookup and `review_admit` batches; bounded `structured_output` admission (policy `pi-read-only-v2`) |
 | Source preparation | Explicit `trusted_prepared_source=True` operator attestation |
 

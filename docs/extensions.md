@@ -135,14 +135,14 @@ method discards an accepted result. The binding charges the invocation's
 
 | Backend | Verified versions | Transport | Readiness before provider work | Terminal submission | Capacity preflight |
 |---|---|---|---|---|---|
-| Pi | 1.4.0 | Packaged extension, authenticated loopback HTTP | `/ready` exact schemas and model limits | Sole call in a completed generation | `contextWindow`, `maxTokens`, compaction |
+| Pi | 1.6.0 | Packaged extension, authenticated loopback HTTP | `/ready` exact schemas and model limits | Sole call in a completed generation | `contextWindow`, `maxTokens`, compaction |
 | Claude | SDK 0.2.174, bundled CLI 2.1.310 | In-process SDK MCP server, PreToolUse admission | This server's `tools/list` served; `get_mcp_status()` connected with the exact tool names | Acceptance closes authority; later starts are overshoot | Unavailable; terminal limits recorded |
 | Codex | CLI 0.163.0, 0.169.0, 0.171.0 | Invocation-local MCP server on authenticated loopback HTTP | Codex's required-server startup; this server's `tools/list` served before the first turn | Acceptance closes authority; later host calls are overshoot and Codex-owned starts stay charged | Unavailable |
 | Antigravity | `agy` 1.5.15 | Per-run MCP configuration, invocation-local server on authenticated loopback HTTP | This server's `tools/list` served and `init.agent` naming the Daydream agent, before the first model step | `call_mcp_tool` to `structured_output`; acceptance closes authority and `agy`-owned starts stay charged | Unavailable |
 | Osprey | Not supported ([#1648](https://github.com/existential-birds/daydream/issues/1648), [#1649](https://github.com/existential-birds/daydream/issues/1649)) | — | — | — | — |
 
 An unsupported required guarantee rejects the workflow; it never switches harness.
-Pi's packaged native extensions require Pi 1.4.0 for the verified completion/tool
+Pi's packaged native extensions require Pi 1.6.0 for the verified completion/tool
 APIs and confirm the active terminal tool/schema and intended endpoint before
 provider work. [Claude host tools](runtime.md#claude-host-tools),
 [Codex host tools](runtime.md#codex-host-tools) and

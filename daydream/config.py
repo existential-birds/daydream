@@ -13,6 +13,7 @@ from dataclasses import dataclass
 DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
 DEFAULT_CODEX_MODEL = "gpt-6.1-sol"
 DEFAULT_PI_MODEL = "deepseek/deepseek-v4-flash-0731"
+DEFAULT_SYSTEM1_MODEL = "typesafe/jev-1.13"
 
 # Caps the 1.5–5h time tail from a single unbounded run_agent turn (issue #169).
 DEFAULT_WALL_BUDGET_S = 1800.0

@@ -56,6 +56,9 @@ HOST_OWNED_KEYS: frozenset[str] = frozenset(
         "scoring",
         "verifier",
         "judge",
+        "system1",
+        "decision_model",
+        "jev",
     }
 )
 

@@ -48,6 +48,9 @@ def render_committed_review(payload: Mapping[str, Any]) -> str:
     if binary := dict.fromkeys(part['file'] for part in payload['assignments'] if part.get('binary')):
         lines.append('Decided by the host as binary changes with no text content: '
                      + ', '.join(map(_code, binary)) + '.')
+    if triaged := dict.fromkeys(part['file'] for part in payload['assignments'] if part.get('system1_triaged')):
+        lines.append('Triaged by host System 1 as non-behavioral changes: '
+                     + ', '.join(map(_code, triaged)) + '.')
     if terminal['reason_codes']:
         lines.append('Unfinished work: ' + ', '.join(_code(reason) for reason in terminal['reason_codes']) + '.')
     if sentence := allowance_sentence(terminal['reason_codes']):

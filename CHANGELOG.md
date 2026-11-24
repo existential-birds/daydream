@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Host-owned OpenRouter Decisions (`POST /api/alpha/decisions`) client for Jev / System 1
+  (`typesafe/jev-1.13`, opt-in via `DAYDREAM_SYSTEM1_ENABLED=1`) with `noul`/`choice`/`score`
+  primitives, context-ceiling preflight, prompt-injection and security hard-deny path guards,
+  fail-open fallback, trajectory billing, and the offline `daydream corpus calibrate-system1`
+  shadow-calibration harness ([#1969](https://github.com/existential-birds/daydream/issues/1969)).
+- System 1 pre-dispatch ranking for committed reviews: orders discovery targets and batches
+  highest-risk first and attaches bounded advisory hints for `historical_context` and confined
+  import/test supporting files without exposing raw author prose
+  ([#1970](https://github.com/existential-birds/daydream/issues/1970)).
+- System 1 target triage for committed reviews: risk-weighted tool-call budget allocation,
+  optional `discovery_fast` routing (`DAYDREAM_SYSTEM1_FAST_REVIEW_*` / `[phases.review_fast]`),
+  and opt-in non-behavioral fast-path skipping (`DAYDREAM_SYSTEM1_SKIP_NON_BEHAVIORAL=1`) with
+  validated host attribution ([#1971](https://github.com/existential-birds/daydream/issues/1971)).
+- System 1 pre-challenge claim triage for committed reviews: opt-in asymmetric fast-rejection
+  (`DAYDREAM_SYSTEM1_FAST_REJECT_CLAIMS=1`, never confirming findings), same-file duplicate
+  clustering, 2-tier `challenge_fast` arbiter routing (`DAYDREAM_SYSTEM1_FAST_ARBITER_*` /
+  `[phases.arbiter_fast]`) with pre-inlined local context, and single-round calibrated severity
+  normalization on confirmation ([#1972](https://github.com/existential-birds/daydream/issues/1972)).
+- Deterministic import-graph coupling-aware batch packing for committed reviews (keeping
+  target inventory and `planned_work_id` invariant), plus System 1 cross-assignment gating
+  (`DAYDREAM_SYSTEM1_GATE_CROSS_ASSIGNMENT=1`) and ranked coupled batch-pair focus
+  ([#1973](https://github.com/existential-birds/daydream/issues/1973)).
+- System 1 semantic pre-checks for `--diagram auto` (bypassing explicit forced modes and
+  recording explicit skip reasons) and Improve `vet` pre-triage (signal-ordered batching and
+  opt-in `DAYDREAM_SYSTEM1_IMPROVE_PREFILTER=1` noise filtering retained in
+  `vet-system1-prefilter.json`) ([#1974](https://github.com/existential-birds/daydream/issues/1974)).
+
+### Changed
+
+- Updated the verified Pi host-tools baseline from Pi `1.4.0` to Pi `1.6.0` (retaining Node `24.18.1`
+  and compaction defaults `reserveTokens=16384`, `keepRecentTokens=20000`).
+
 ## [0.38.1] - 2026-11-24
 
 ### Fixed
