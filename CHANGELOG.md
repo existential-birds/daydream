@@ -43,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Repeated `SIGINT`/`SIGTERM` deliveries during shutdown (such as `uv run` forwarding `SIGINT` 200 ms
+  after a process-group interrupt, or pressing Ctrl-C twice) no longer abort `asyncio.Runner.close()`
+  mid-teardown and hang interpreter shutdown waiting on AnyIO worker threads
+  ([#1975](https://github.com/existential-birds/daydream/issues/1975)).
 - The Pi backend retries a turn when the provider closes the connection mid-request, as Node's fetch
   reports it (`Connection error.: other side closed (UND_ERR_SOCKET)`). It was classed as an unknown,
   permanent failure and ended the review; OpenRouter does this about once in 80 requests.
